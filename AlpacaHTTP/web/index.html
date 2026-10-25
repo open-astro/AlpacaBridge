@@ -95,29 +95,29 @@
                 </div>
 
                 <!-- Astroasis Oasis Focuser Configuration -->
-                <div id="astroasis-config" class="vendor-config" style="display: none;">
+                <div id="astroasis-config" data-vendor="astroasis" data-device-type="focuser" class="vendor-config" style="display: none;">
                     <h3>Astroasis Configuration</h3>
 
                     <div class="form-group">
                         <label for="astroasis-focuser-index">Focuser Index:</label>
-                        <input type="number" id="astroasis-focuser-index" name="astroasisFocuserIndex" value="0" min="0">
+                        <input type="number" id="astroasis-focuser-index" name="astroasisFocuserIndex" data-config-key="focuserIndex" value="0" min="0">
                         <small>0-based index among enumerated Oasis focusers. Ignored if a HID device path is given below.</small>
                     </div>
                     <div class="form-group">
                         <label for="astroasis-hid-path">HID Device Path (optional):</label>
-                        <input type="text" id="astroasis-hid-path" name="astroasisHidPath" placeholder="(leave blank to use index)">
+                        <input type="text" id="astroasis-hid-path" name="astroasisHidPath" data-config-key="hidPath" placeholder="(leave blank to use index)">
                     </div>
                 </div>
 
                 <!-- iOptron Telescope Configuration -->
-                <div id="ioptron-config" class="vendor-config" style="display: none;">
+                <div id="ioptron-config" data-vendor="ioptron" class="vendor-config" style="display: none;">
                   <!-- Mount (telescope) configuration -->
-                  <div id="ioptron-telescope-config">
+                  <div id="ioptron-telescope-config" data-device-type="telescope">
                     <h3>iOptron Telescope Configuration</h3>
 
                     <div class="form-group">
                         <label for="ioptron-connection-type">Connection Type:</label>
-                        <select id="ioptron-connection-type" name="ioptronConnectionType" required>
+                        <select id="ioptron-connection-type" name="ioptronConnectionType" data-config-key="connectionType" required>
                             <option value="auto">Auto-Detect</option>
                             <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
@@ -128,12 +128,12 @@
                     <div id="ioptron-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="ioptron-port-path">Serial Port:</label>
-                            <input type="text" id="ioptron-port-path" name="ioptronPortPath" placeholder="/dev/ttyUSB0">
+                            <input type="text" id="ioptron-port-path" name="ioptronPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                             <small>Linux: /dev/ttyUSB0</small>
                         </div>
                         <div class="form-group">
                             <label for="ioptron-baud-rate">Baud Rate:</label>
-                            <input type="number" id="ioptron-baud-rate" name="ioptronBaudRate" value="115200" min="1200" max="115200">
+                            <input type="number" id="ioptron-baud-rate" name="ioptronBaudRate" data-config-key="baudRate" value="115200" min="1200" max="115200">
                         </div>
                     </div>
 
@@ -141,12 +141,12 @@
                     <div id="ioptron-network-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="ioptron-host">IP Address:</label>
-                            <input type="text" id="ioptron-host" name="ioptronHost" placeholder="Leave blank to auto-discover">
+                            <input type="text" id="ioptron-host" name="ioptronHost" data-config-key="host" placeholder="Leave blank to auto-discover">
                             <small>Leave blank to scan the local network automatically</small>
                         </div>
                         <div class="form-group">
                             <label for="ioptron-tcp-port">TCP Port:</label>
-                            <input type="number" id="ioptron-tcp-port" name="ioptronTcpPort" value="4030" min="1" max="65535">
+                            <input type="number" id="ioptron-tcp-port" name="ioptronTcpPort" data-config-key="tcpPort" value="4030" min="1" max="65535">
                             <small>Default: 4030 (CEM60-EC), 8899 (HEM27). Ignored during auto-discovery.</small>
                         </div>
                     </div>
@@ -154,7 +154,7 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="aperture-diameter" name="apertureDiameter" min="0" step="1" placeholder="100">
+                        <input type="number" id="aperture-diameter" name="apertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="100">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
@@ -164,13 +164,13 @@
                     </div>
                     <div class="form-group">
                         <label for="focal-length">Focal Length (mm):</label>
-                        <input type="number" id="focal-length" name="focalLength" min="0" step="1" placeholder="800">
+                        <input type="number" id="focal-length" name="focalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="800">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                   </div>
 
                   <!-- iMate PowerBox (switch) configuration -->
-                  <div id="ioptron-switch-config" style="display: none;">
+                  <div id="ioptron-switch-config" data-device-type="switch" style="display: none;">
                     <h3>iOptron iMate PowerBox Configuration</h3>
                     <p class="hint">
                         Controls the iMate's on-board DC power ports over local GPIO.
@@ -181,12 +181,12 @@
                     </p>
                     <div class="form-group">
                         <label for="ioptron-powerbox-gpio-chip">GPIO Chip:</label>
-                        <input type="text" id="ioptron-powerbox-gpio-chip" name="ioptronPowerboxGpioChip" placeholder="/dev/gpiochip1">
+                        <input type="text" id="ioptron-powerbox-gpio-chip" name="ioptronPowerboxGpioChip" data-config-key="gpioChip" placeholder="/dev/gpiochip1">
                         <small>Optional. Defaults to <code>/dev/gpiochip1</code> (the iMate's main GPIO bank on the OpenAstro mainline kernel).</small>
                     </div>
                     <div class="form-group">
                         <label for="ioptron-powerbox-pwm-frequency">PWM Frequency (Hz):</label>
-                        <input type="number" id="ioptron-powerbox-pwm-frequency" name="ioptronPowerboxPwmFrequency" value="50" min="1" max="100000">
+                        <input type="number" id="ioptron-powerbox-pwm-frequency" name="ioptronPowerboxPwmFrequency" data-config-key="pwmFrequencyHz" value="50" min="1" max="100000">
                         <small>Software PWM frequency for any DC port marked PWM below. <strong>50 Hz</strong> dims flat panels (their LED driver cycles fully each period); ~1 kHz is smoothed into on/off by a panel but is fine for dew heaters.</small>
                     </div>
                     <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
@@ -203,12 +203,12 @@
                             <tr>
                                 <td style="padding: 4px;">DC1</td>
                                 <td style="padding: 4px;">118 (PD22)</td>
-                                <td style="padding: 4px;"><input type="checkbox" id="ioptron-port-pwm-1" name="ioptronPortPwm1"></td>
+                                <td style="padding: 4px;"><input type="checkbox" id="ioptron-port-pwm-1" name="ioptronPortPwm1" data-config-key="ports"></td>
                             </tr>
                             <tr>
                                 <td style="padding: 4px;">DC2</td>
                                 <td style="padding: 4px;">114 (PD18)</td>
-                                <td style="padding: 4px;"><input type="checkbox" id="ioptron-port-pwm-2" name="ioptronPortPwm2"></td>
+                                <td style="padding: 4px;"><input type="checkbox" id="ioptron-port-pwm-2" name="ioptronPortPwm2" data-config-key="ports"></td>
                             </tr>
                             <tr>
                                 <td style="padding: 4px;">DC3</td>
@@ -219,23 +219,23 @@
                     </table>
                   </div>
 
-                  <div id="ioptron-camera-config" style="display: none;">
+                  <div id="ioptron-camera-config" data-device-type="camera" style="display: none;">
                     <h3>iOptron iCAM Camera Configuration</h3>
                     <small style="color: #666;">For iCAM imaging cameras (e.g. iCAM178M), which are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system. For the iGuider guide camera, choose the vendor "iOptron iGuider" instead.</small>
                     <div class="form-group">
                         <label for="ioptron-camera-index">Camera Index:</label>
-                        <input type="number" id="ioptron-camera-index" name="ioptronCameraIndex" value="0" min="0">
+                        <input type="number" id="ioptron-camera-index" name="ioptronCameraIndex" data-config-key="cameraIndex" value="0" min="0">
                         <small>0-based index in the Player One SDK enumeration (includes Player One-branded cameras)</small>
                     </div>
                   </div>
 
-                  <div id="ioptron-focuser-config" style="display: none;">
+                  <div id="ioptron-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>iOptron iEAF / iAFS2/3 Focuser Configuration</h3>
                     <small style="color: #666;">USB-serial connection at a fixed 115200 baud. Covers the iEAF and the iAFS2/3 (same protocol). Auto-detect scans for the focuser's Prolific USB-serial adapter and verifies it with the device handshake.</small>
 
                     <div class="form-group">
                         <label for="ioptron-ieaf-model">Model:</label>
-                        <select id="ioptron-ieaf-model" name="ioptronIeafModel">
+                        <select id="ioptron-ieaf-model" name="ioptronIeafModel" data-config-key="model">
                             <option value="ieaf">iEAF Electronic Focuser</option>
                             <option value="iafs2">iAFS2/3 Automatic Focuser (2" or 3")</option>
                         </select>
@@ -244,7 +244,7 @@
 
                     <div class="form-group">
                         <label for="ioptron-ieaf-connection-type">Connection Type:</label>
-                        <select id="ioptron-ieaf-connection-type" name="ioptronIeafConnectionType">
+                        <select id="ioptron-ieaf-connection-type" name="ioptronIeafConnectionType" data-config-key="connectionType">
                             <option value="auto">Auto-Detect (Recommended)</option>
                             <option value="serial">Serial Port</option>
                         </select>
@@ -253,7 +253,7 @@
                     <div id="ioptron-ieaf-auto-config" class="connection-config">
                         <div class="form-group">
                             <label for="ioptron-ieaf-focuser-index">Focuser Index:</label>
-                            <input type="number" id="ioptron-ieaf-focuser-index" name="ioptronIeafFocuserIndex" value="0" min="0">
+                            <input type="number" id="ioptron-ieaf-focuser-index" name="ioptronIeafFocuserIndex" data-config-key="focuserIndex" value="0" min="0">
                             <small>0-based index when more than one iEAF / iAFS2/3 is detected</small>
                         </div>
                     </div>
@@ -261,19 +261,19 @@
                     <div id="ioptron-ieaf-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="ioptron-ieaf-port-path">Serial Port:</label>
-                            <input type="text" id="ioptron-ieaf-port-path" name="ioptronIeafPortPath" placeholder="/dev/ttyUSB0">
+                            <input type="text" id="ioptron-ieaf-port-path" name="ioptronIeafPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                             <small>Leave blank to auto-detect</small>
                         </div>
                     </div>
                   </div>
 
-                  <div id="ioptron-filterwheel-config" style="display: none;">
+                  <div id="ioptron-filterwheel-config" data-device-type="filterwheel" style="display: none;">
                     <h3>iOptron iEFW Filter Wheel Configuration</h3>
                     <small style="color: #666;">iEFW-15 (5 slots) and iEFW-18 (8 slots). USB-serial connection at a fixed 115200 baud. Auto-detect scans for the wheel's Prolific USB-serial adapter and verifies it with the device handshake.</small>
 
                     <div class="form-group">
                         <label for="ioptron-filterwheel-model">Model:</label>
-                        <select id="ioptron-filterwheel-model" name="ioptronFilterwheelModel">
+                        <select id="ioptron-filterwheel-model" name="ioptronFilterwheelModel" data-config-key="model">
                             <option value="iefw15">iEFW-15 (5 slots)</option>
                             <option value="iefw18">iEFW-18 (8 slots, two stacked 5-slot wheels)</option>
                         </select>
@@ -282,7 +282,7 @@
 
                     <div class="form-group">
                         <label for="ioptron-filterwheel-connection-type">Connection Type:</label>
-                        <select id="ioptron-filterwheel-connection-type" name="ioptronFilterwheelConnectionType">
+                        <select id="ioptron-filterwheel-connection-type" name="ioptronFilterwheelConnectionType" data-config-key="connectionType">
                             <option value="auto">Auto-Detect (Recommended)</option>
                             <option value="serial">Serial Port</option>
                         </select>
@@ -291,7 +291,7 @@
                     <div id="ioptron-filterwheel-auto-config" class="connection-config">
                         <div class="form-group">
                             <label for="ioptron-filterwheel-index">Filter Wheel Index:</label>
-                            <input type="number" id="ioptron-filterwheel-index" name="ioptronFilterwheelIndex" value="0" min="0">
+                            <input type="number" id="ioptron-filterwheel-index" name="ioptronFilterwheelIndex" data-config-key="filterwheelIndex" value="0" min="0">
                             <small>0-based index when more than one iEFW is detected</small>
                         </div>
                     </div>
@@ -299,7 +299,7 @@
                     <div id="ioptron-filterwheel-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="ioptron-filterwheel-port-path">Serial Port:</label>
-                            <input type="text" id="ioptron-filterwheel-port-path" name="ioptronFilterwheelPortPath" placeholder="/dev/ttyUSB0">
+                            <input type="text" id="ioptron-filterwheel-port-path" name="ioptronFilterwheelPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                         </div>
                     </div>
 
@@ -321,7 +321,7 @@
                         <summary>Advanced: edit filter names as lines</summary>
                         <div class="form-group">
                             <label for="ioptron-filter-names">Filter Names (optional):</label>
-                            <textarea id="ioptron-filter-names" name="ioptronFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                            <textarea id="ioptron-filter-names" name="ioptronFilterNames" data-config-key="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
                             <small>One name per line. Leave blank for default names (Filter 1..N).</small>
                         </div>
                     </details>
@@ -329,12 +329,12 @@
                 </div>
 
                 <!-- Sky-Watcher via SynScan (hand controller) Configuration -->
-                <div id="synscan-config" class="vendor-config" style="display: none;">
+                <div id="synscan-config" data-vendor="synscan" data-device-type="telescope" class="vendor-config" style="display: none;">
                     <h3>Sky-Watcher Mount via SynScan (Hand Controller) Configuration</h3>
 
                     <div class="form-group">
                         <label for="synscan-version">Handset Version:</label>
-                        <select id="synscan-version" name="synscanVersion">
+                        <select id="synscan-version" name="synscanVersion" data-config-key="synscanVersion">
                             <option value="auto">Auto (Recommended)</option>
                             <option value="v3">V3</option>
                             <option value="v4">V4</option>
@@ -344,7 +344,7 @@
 
                     <div class="form-group">
                         <label for="synscan-alignment-mode">Alignment Mode:</label>
-                        <select id="synscan-alignment-mode" name="synscanAlignmentMode">
+                        <select id="synscan-alignment-mode" name="synscanAlignmentMode" data-config-key="alignmentMode" data-config-fill="manual">
                             <option value="auto">Auto (from the handset)</option>
                             <option value="altaz">Alt-Az</option>
                             <option value="equatorial">Equatorial</option>
@@ -354,7 +354,7 @@
 
                     <div class="form-group">
                         <label for="synscan-connection-type">Connection Type:</label>
-                        <select id="synscan-connection-type" name="synscanConnectionType" required>
+                        <select id="synscan-connection-type" name="synscanConnectionType" data-config-key="connectionType" required>
                             <option value="auto">Auto-Detect</option>
                             <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
@@ -365,12 +365,12 @@
                     <div id="synscan-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="synscan-port-path">Serial Port:</label>
-                            <input type="text" id="synscan-port-path" name="synscanPortPath" placeholder="/dev/ttyUSB0">
+                            <input type="text" id="synscan-port-path" name="synscanPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                             <small>Linux: /dev/ttyUSB0</small>
                         </div>
                         <div class="form-group">
                             <label for="synscan-baud-rate">Baud Rate:</label>
-                            <input type="number" id="synscan-baud-rate" name="synscanBaudRate" value="9600" min="1200" max="115200">
+                            <input type="number" id="synscan-baud-rate" name="synscanBaudRate" data-config-key="baudRate" value="9600" min="1200" max="115200">
                         </div>
                     </div>
 
@@ -378,11 +378,11 @@
                     <div id="synscan-network-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="synscan-host">IP Address:</label>
-                            <input type="text" id="synscan-host" name="synscanHost" placeholder="192.168.1.100">
+                            <input type="text" id="synscan-host" name="synscanHost" data-config-key="host" placeholder="192.168.1.100">
                         </div>
                         <div class="form-group">
                             <label for="synscan-tcp-port">TCP Port:</label>
-                            <input type="number" id="synscan-tcp-port" name="synscanTcpPort" value="11880" min="1" max="65535">
+                            <input type="number" id="synscan-tcp-port" name="synscanTcpPort" data-config-key="tcpPort" value="11880" min="1" max="65535">
                             <small>Common WiFi adapters use port 11880.</small>
                         </div>
                     </div>
@@ -390,7 +390,7 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="synscan-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="synscan-aperture-diameter" name="synscanApertureDiameter" min="0" step="1" placeholder="100">
+                        <input type="number" id="synscan-aperture-diameter" name="synscanApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="100">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
@@ -400,19 +400,19 @@
                     </div>
                     <div class="form-group">
                         <label for="synscan-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="synscan-focal-length" name="synscanFocalLength" min="0" step="1" placeholder="800">
+                        <input type="number" id="synscan-focal-length" name="synscanFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="800">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                 </div>
 
                 <!-- Sky-Watcher via EQMOD (direct motor controller) Configuration -->
-                <div id="skywatcher-config" class="vendor-config" style="display: none;">
+                <div id="skywatcher-config" data-vendor="skywatcher" data-device-type="telescope" class="vendor-config" style="display: none;">
                     <h3>Sky-Watcher Mount via EQMOD (Direct) Configuration</h3>
                     <p><small>Talks straight to the mount's motor controller, the path the ecosystem calls EQMOD. Speaks the protocol used by the Wave series, Synta EQ boards and AZ-GTi class mounts, over an EQDIRECT cable, the mount's own USB port, a handset in PC Direct Mode, or built-in WiFi. No hand controller or SynScan app required. See SUPPORTED-DRIVERS.md for the models that are validated.</small></p>
 
                     <div class="form-group">
                         <label for="skywatcher-connection-type">Connection Type:</label>
-                        <select id="skywatcher-connection-type" name="skywatcherConnectionType" required>
+                        <select id="skywatcher-connection-type" name="skywatcherConnectionType" data-config-key="connectionType" required>
                             <option value="auto">Auto-Detect</option>
                             <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
@@ -424,12 +424,12 @@
                     <div id="skywatcher-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="skywatcher-port-path">Serial Port:</label>
-                            <input type="text" id="skywatcher-port-path" name="skywatcherPortPath" placeholder="/dev/ttyACM0">
+                            <input type="text" id="skywatcher-port-path" name="skywatcherPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
                             <small>Linux: /dev/ttyACM0 (Wave USB port) or /dev/ttyUSB0 (mount USB port / EQDIRECT cable)</small>
                         </div>
                         <div class="form-group">
                             <label for="skywatcher-baud-rate">Baud Rate:</label>
-                            <select id="skywatcher-baud-rate" name="skywatcherBaudRate">
+                            <select id="skywatcher-baud-rate" name="skywatcherBaudRate" data-config-key="baudRate">
                                 <option value="9600">9600 (Wave series, EQDIRECT cable)</option>
                                 <option value="115200">115200 (mount built-in USB port, e.g. EQM-35 Pro)</option>
                             </select>
@@ -441,12 +441,12 @@
                     <div id="skywatcher-network-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="skywatcher-host">IP Address:</label>
-                            <input type="text" id="skywatcher-host" name="skywatcherHost" placeholder="192.168.4.1">
+                            <input type="text" id="skywatcher-host" name="skywatcherHost" data-config-key="host" placeholder="192.168.4.1">
                             <small>The mount's access point address is 192.168.4.1.</small>
                         </div>
                         <div class="form-group">
                             <label for="skywatcher-udp-port">UDP Port:</label>
-                            <input type="number" id="skywatcher-udp-port" name="skywatcherUdpPort" value="11880" min="1" max="65535">
+                            <input type="number" id="skywatcher-udp-port" name="skywatcherUdpPort" data-config-key="udpPort" value="11880" min="1" max="65535">
                             <small>The built-in WiFi module listens on UDP port 11880.</small>
                         </div>
                     </div>
@@ -454,7 +454,7 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="skywatcher-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="skywatcher-aperture-diameter" name="skywatcherApertureDiameter" min="0" step="1" placeholder="100">
+                        <input type="number" id="skywatcher-aperture-diameter" name="skywatcherApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="100">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
@@ -464,7 +464,7 @@
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="skywatcher-focal-length" name="skywatcherFocalLength" min="0" step="1" placeholder="800">
+                        <input type="number" id="skywatcher-focal-length" name="skywatcherFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="800">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
 
@@ -472,39 +472,39 @@
                     <p><small>The motor controller stores no site information, so the observing site must be set here (or by the client at connect time).</small></p>
                     <div class="form-group">
                         <label for="skywatcher-site-latitude">Site Latitude (deg):</label>
-                        <input type="number" id="skywatcher-site-latitude" name="skywatcherSiteLatitude" min="-90" max="90" step="any" placeholder="51.477833">
+                        <input type="number" id="skywatcher-site-latitude" name="skywatcherSiteLatitude" data-config-key="siteLatitude" min="-90" max="90" step="any" placeholder="51.477833">
                         <small>Required. Tracking direction, guide sign and pier side are all hemisphere-dependent.</small>
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-site-longitude">Site Longitude (deg):</label>
-                        <input type="number" id="skywatcher-site-longitude" name="skywatcherSiteLongitude" min="-180" max="180" step="any" placeholder="-0.001500">
+                        <input type="number" id="skywatcher-site-longitude" name="skywatcherSiteLongitude" data-config-key="siteLongitude" min="-180" max="180" step="any" placeholder="-0.001500">
                         <small>Required. Use Alpaca convention: west negative, east positive.</small>
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-site-elevation">Site Elevation (m):</label>
-                        <input type="number" id="skywatcher-site-elevation" name="skywatcherSiteElevation" min="-300" max="10000" step="any" placeholder="42">
+                        <input type="number" id="skywatcher-site-elevation" name="skywatcherSiteElevation" data-config-key="siteElevation" min="-300" max="10000" step="any" placeholder="42">
                         <small>Optional.</small>
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-learn-site-from-client">
-                            <input type="checkbox" id="skywatcher-learn-site-from-client" name="skywatcherLearnSiteFromClient" checked>
+                            <input type="checkbox" id="skywatcher-learn-site-from-client" name="skywatcherLearnSiteFromClient" data-config-key="learnSiteFromClient" data-config-fill="manual" checked>
                             Learn site from clients
                         </label>
                         <small>Keep a site latitude, longitude or elevation written by a client (an app with GPS, a planetarium program) as this device's saved site, so it survives a restart. Untick to protect a surveyed position.</small>
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-min-altitude">Minimum altitude limit (deg):</label>
-                        <input type="number" id="skywatcher-min-altitude" name="skywatcherMinAltitudeDeg" min="-90" max="90" step="any" placeholder="off">
+                        <input type="number" id="skywatcher-min-altitude" name="skywatcherMinAltitudeDeg" data-config-key="minAltitudeDeg" min="-90" max="90" step="any" placeholder="off">
                         <small>Optional. Clear the field to switch the limit off. A goto to a target below this altitude is refused, and MoveAxis or tracking that carries the tube below it is stopped. Motion that starts below the limit is not stopped, so you can move back up; Park and FindHome are not limited. It is a soft limit: set it at least 3 degrees above the real clearance of your tube and tripod.</small>
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-meridian-limit">Meridian limit (minutes past the meridian):</label>
-                        <input type="number" id="skywatcher-meridian-limit" name="skywatcherMeridianLimitMinutes" min="0" max="360" step="any" placeholder="off">
+                        <input type="number" id="skywatcher-meridian-limit" name="skywatcherMeridianLimitMinutes" data-config-key="meridianLimitMinutes" min="0" max="360" step="any" placeholder="off">
                         <small>Optional. Clear the field to switch the limit off. MoveAxis or tracking that carries the counterweight past this limit is stopped. Motion that starts past it is not stopped, and gotos are not refused at this limit.</small>
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-dec-axis-sense">Dec axis sense:</label>
-                        <select id="skywatcher-dec-axis-sense" name="skywatcherDecAxisSense">
+                        <select id="skywatcher-dec-axis-sense" name="skywatcherDecAxisSense" data-config-key="decAxisSense">
                             <option value="auto" selected>Auto (measured for known mounts)</option>
                             <option value="normal">Normal</option>
                             <option value="reversed">Reversed</option>
@@ -513,30 +513,30 @@
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-backlash-enabled-ra">
-                            <input type="checkbox" id="skywatcher-backlash-enabled-ra" name="skywatcherBacklashEnabledRA">
+                            <input type="checkbox" id="skywatcher-backlash-enabled-ra" name="skywatcherBacklashEnabledRA" data-config-key="backlashEnabledRA">
                             RA backlash compensation
                         </label>
                         <label for="skywatcher-backlash-steps-ra">RA backlash (microsteps):</label>
-                        <input type="number" id="skywatcher-backlash-steps-ra" name="skywatcherBacklashStepsRA" min="0" max="100000" step="1" value="0">
+                        <input type="number" id="skywatcher-backlash-steps-ra" name="skywatcherBacklashStepsRA" data-config-key="backlashStepsRA" min="0" max="100000" step="1" value="0">
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-backlash-enabled-dec">
-                            <input type="checkbox" id="skywatcher-backlash-enabled-dec" name="skywatcherBacklashEnabledDec">
+                            <input type="checkbox" id="skywatcher-backlash-enabled-dec" name="skywatcherBacklashEnabledDec" data-config-key="backlashEnabledDec">
                             Dec backlash compensation
                         </label>
                         <label for="skywatcher-backlash-steps-dec">Dec backlash (microsteps):</label>
-                        <input type="number" id="skywatcher-backlash-steps-dec" name="skywatcherBacklashStepsDec" min="0" max="100000" step="1" value="0">
+                        <input type="number" id="skywatcher-backlash-steps-dec" name="skywatcherBacklashStepsDec" data-config-key="backlashStepsDec" min="0" max="100000" step="1" value="0">
                         <small>Off and 0 by default. When on, every goto finishes from the same side: RA in the tracking direction, Dec upward in counts. A goto that would arrive from the other side goes this many microsteps past the target, then comes back onto it at a slow speed derived from the mount. Only gotos are compensated: guide pulses, MoveAxis and the rate properties are not, because autoguiders measure and correct backlash themselves. A board that does not report its worm step count is left uncompensated.</small>
                     </div>
                 </div>
 
                 <!-- OnStep Telescope Configuration -->
-                <div id="onstep-config" class="vendor-config" style="display: none;">
+                <div id="onstep-config" data-vendor="onstep" data-device-type="telescope" class="vendor-config" style="display: none;">
                     <h3>OnStep Telescope Configuration</h3>
 
                     <div class="form-group">
                         <label for="onstep-connection-type">Connection Type:</label>
-                        <select id="onstep-connection-type" name="onstepConnectionType" required>
+                        <select id="onstep-connection-type" name="onstepConnectionType" data-config-key="connectionType" required>
                             <option value="auto">Auto-Detect</option>
                             <option value="serial">Serial/USB (Manual)</option>
                         </select>
@@ -547,19 +547,19 @@
                     <div id="onstep-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="onstep-port-path">Serial Port:</label>
-                            <input type="text" id="onstep-port-path" name="onstepPortPath" placeholder="/dev/ttyACM0">
+                            <input type="text" id="onstep-port-path" name="onstepPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
                             <small>Linux: /dev/ttyACM0 or /dev/ttyUSB0</small>
                         </div>
                         <div class="form-group">
                             <label for="onstep-baud-rate">Baud Rate:</label>
-                            <input type="number" id="onstep-baud-rate" name="onstepBaudRate" value="9600" min="1200" max="230400">
+                            <input type="number" id="onstep-baud-rate" name="onstepBaudRate" data-config-key="baudRate" value="9600" min="1200" max="230400">
                         </div>
                     </div>
 
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="onstep-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="onstep-aperture-diameter" name="onstepApertureDiameter" min="0" step="1" placeholder="200">
+                        <input type="number" id="onstep-aperture-diameter" name="onstepApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="200">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
@@ -569,29 +569,29 @@
                     </div>
                     <div class="form-group">
                         <label for="onstep-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="onstep-focal-length" name="onstepFocalLength" min="0" step="1" placeholder="1000">
+                        <input type="number" id="onstep-focal-length" name="onstepFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="1000">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                 </div>
 
                 <!-- Celestron NexStar Telescope Configuration -->
-                <div id="celestron-config" class="vendor-config" style="display: none;">
-                  <div id="celestron-focuser-config" style="display: none;">
+                <div id="celestron-config" data-vendor="celestron" class="vendor-config" style="display: none;">
+                  <div id="celestron-focuser-config" data-device-type="focuser" style="display: none;">
                     <h3>Celestron Focus Motor Configuration</h3>
                     <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you press Calibrate on its device card (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
                     <div class="form-group">
                         <label for="celestron-focuser-port-path">Serial Port:</label>
-                        <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" placeholder="/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00">
+                        <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" data-config-key="portPath" placeholder="/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00">
                         <small>Required. A /dev/serial/by-id/ path keeps working when other USB devices are plugged in.</small>
                     </div>
                   </div>
 
-                  <div id="celestron-telescope-config">
+                  <div id="celestron-telescope-config" data-device-type="telescope">
                     <h3>Celestron Telescope Configuration</h3>
 
                     <div class="form-group">
                         <label for="celestron-protocol">Mount Connection:</label>
-                        <select id="celestron-protocol" name="celestronProtocol" required>
+                        <select id="celestron-protocol" name="celestronProtocol" data-config-key="protocol" required>
                             <option value="nexstar">NexStar hand controller</option>
                             <option value="cgx-aux">CGX / CGX-L direct USB (no hand controller)</option>
                         </select>
@@ -600,7 +600,7 @@
                     <div id="celestron-nexstar-only">
                     <div class="form-group">
                         <label for="celestron-alignment-mode">Alignment Mode:</label>
-                        <select id="celestron-alignment-mode" name="celestronAlignmentMode">
+                        <select id="celestron-alignment-mode" name="celestronAlignmentMode" data-config-key="alignmentMode" data-config-fill="manual">
                             <option value="auto">Auto (from the handset)</option>
                             <option value="altaz">Alt-Az</option>
                             <option value="equatorial">Equatorial</option>
@@ -610,7 +610,7 @@
 
                     <div class="form-group">
                         <label for="celestron-connection-type">Connection Type:</label>
-                        <select id="celestron-connection-type" name="celestronConnectionType" required>
+                        <select id="celestron-connection-type" name="celestronConnectionType" data-config-key="connectionType" data-config-fill="manual" required>
                             <option value="auto">Auto-Detect</option>
                             <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
@@ -622,12 +622,12 @@
                     <div id="celestron-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="celestron-port-path">Serial Port:</label>
-                            <input type="text" id="celestron-port-path" name="celestronPortPath" placeholder="/dev/ttyUSB0">
+                            <input type="text" id="celestron-port-path" name="celestronPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                             <small id="celestron-port-help">Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.</small>
                         </div>
                         <div class="form-group" id="celestron-baud-group">
                             <label for="celestron-baud-rate">Baud Rate:</label>
-                            <input type="number" id="celestron-baud-rate" name="celestronBaudRate" value="9600" min="1200" max="115200">
+                            <input type="number" id="celestron-baud-rate" name="celestronBaudRate" data-config-key="baudRate" value="9600" min="1200" max="115200">
                         </div>
                     </div>
 
@@ -635,17 +635,17 @@
                         <h4>Direct USB Site</h4>
                         <div class="form-group">
                             <label for="celestron-cgx-site-latitude">Site Latitude (degrees):</label>
-                            <input type="number" id="celestron-cgx-site-latitude" name="celestronSiteLatitude"
+                            <input type="number" id="celestron-cgx-site-latitude" name="celestronSiteLatitude" data-config-key="siteLatitude"
                                    min="-90" max="90" step="any" placeholder="45.0">
                         </div>
                         <div class="form-group">
                             <label for="celestron-cgx-site-longitude">Site Longitude (degrees east):</label>
-                            <input type="number" id="celestron-cgx-site-longitude" name="celestronSiteLongitude"
+                            <input type="number" id="celestron-cgx-site-longitude" name="celestronSiteLongitude" data-config-key="siteLongitude"
                                    min="-180" max="180" step="any" placeholder="-75.0">
                         </div>
                         <div class="form-group">
                             <label for="celestron-cgx-site-elevation">Site Elevation (meters, optional):</label>
-                            <input type="number" id="celestron-cgx-site-elevation" name="celestronSiteElevation"
+                            <input type="number" id="celestron-cgx-site-elevation" name="celestronSiteElevation" data-config-key="siteElevation"
                                    min="-300" max="10000" step="any">
                         </div>
                     </div>
@@ -654,11 +654,11 @@
                     <div id="celestron-network-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="celestron-host">IP Address:</label>
-                            <input type="text" id="celestron-host" name="celestronHost" placeholder="192.168.1.100">
+                            <input type="text" id="celestron-host" name="celestronHost" data-config-key="host" placeholder="192.168.1.100">
                         </div>
                         <div class="form-group">
                             <label for="celestron-tcp-port">TCP Port:</label>
-                            <input type="number" id="celestron-tcp-port" name="celestronTcpPort" value="2000" min="1" max="65535">
+                            <input type="number" id="celestron-tcp-port" name="celestronTcpPort" data-config-key="tcpPort" value="2000" min="1" max="65535">
                             <small>Default port for NexStar WiFi bridges.</small>
                         </div>
                     </div>
@@ -666,54 +666,54 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="celestron-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="celestron-aperture-diameter" name="celestronApertureDiameter" min="0" step="1" placeholder="203">
+                        <input type="number" id="celestron-aperture-diameter" name="celestronApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="203">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
                         <label for="celestron-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="celestron-focal-length" name="celestronFocalLength" min="0" step="1" placeholder="2032">
+                        <input type="number" id="celestron-focal-length" name="celestronFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="2032">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                   </div>
                 </div>
 
                 <!-- Bisque (Paramount / TheSkyX) Telescope Configuration -->
-                <div id="bisque-config" class="vendor-config" style="display: none;">
+                <div id="bisque-config" data-vendor="bisque" data-device-type="telescope" class="vendor-config" style="display: none;">
                     <h3>Bisque / Paramount (TheSkyX) Configuration</h3>
 
                     <div class="form-group">
                         <label for="bisque-host">TheSkyX Host:</label>
-                        <input type="text" id="bisque-host" name="bisqueHost" value="localhost" placeholder="localhost">
+                        <input type="text" id="bisque-host" name="bisqueHost" data-config-key="host" value="localhost" placeholder="localhost">
                         <small>IP address or hostname of the computer running TheSkyX Pro.</small>
                     </div>
                     <div class="form-group">
                         <label for="bisque-tcp-port">TCP Port:</label>
-                        <input type="number" id="bisque-tcp-port" name="bisqueTcpPort" value="3040" min="1" max="65535">
+                        <input type="number" id="bisque-tcp-port" name="bisqueTcpPort" data-config-key="tcpPort" value="3040" min="1" max="65535">
                         <small>Default: 3040 (TheSkyX TCP server port)</small>
                     </div>
 
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="bisque-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="bisque-aperture-diameter" name="bisqueApertureDiameter" min="0" step="1" placeholder="356">
+                        <input type="number" id="bisque-aperture-diameter" name="bisqueApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="356">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
                         <label for="bisque-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="bisque-focal-length" name="bisqueFocalLength" min="0" step="1" placeholder="3454">
+                        <input type="number" id="bisque-focal-length" name="bisqueFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="3454">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                 </div>
 
                 <!-- ZWO Configuration -->
-                <div id="zwo-config" class="vendor-config" style="display: none;">
+                <div id="zwo-config" data-vendor="zwo" class="vendor-config" style="display: none;">
                     <h3>ZWO Configuration</h3>
 
-                    <div id="zwo-telescope-fields" style="display: none;">
+                    <div id="zwo-telescope-fields" data-device-type="telescope" style="display: none;">
                         <h4>ZWO Mount (Telescope)</h4>
                         <div class="form-group">
                             <label for="zwo-mount-connection-type">Connection Type:</label>
-                            <select id="zwo-mount-connection-type" name="zwoMountConnectionType">
+                            <select id="zwo-mount-connection-type" name="zwoMountConnectionType" data-config-key="connectionType">
                                 <option value="auto">Auto-detect (USB + WiFi)</option>
                                 <option value="serial">Serial/USB</option>
                                 <option value="network">Network/WiFi</option>
@@ -723,23 +723,23 @@
                         <div id="zwo-mount-serial-config" class="connection-config">
                             <div class="form-group">
                                 <label for="zwo-mount-port-path">Serial Port:</label>
-                            <input type="text" id="zwo-mount-port-path" name="zwoMountPortPath" placeholder="/dev/ttyACM0">
+                            <input type="text" id="zwo-mount-port-path" name="zwoMountPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
                             <small>Linux: /dev/ttyACM0</small>
                             </div>
                             <div class="form-group">
                                 <label for="zwo-mount-baud-rate">Baud Rate:</label>
-                                <input type="number" id="zwo-mount-baud-rate" name="zwoMountBaudRate" value="9600" min="1200" max="115200">
+                                <input type="number" id="zwo-mount-baud-rate" name="zwoMountBaudRate" data-config-key="baudRate" value="9600" min="1200" max="115200">
                             </div>
                         </div>
 
                         <div id="zwo-mount-network-config" class="connection-config" style="display: none;">
                             <div class="form-group">
                                 <label for="zwo-mount-host">IP Address:</label>
-                                <input type="text" id="zwo-mount-host" name="zwoMountHost" placeholder="192.168.4.1">
+                                <input type="text" id="zwo-mount-host" name="zwoMountHost" data-config-key="host" placeholder="192.168.4.1">
                             </div>
                             <div class="form-group">
                                 <label for="zwo-mount-tcp-port">TCP Port:</label>
-                                <input type="number" id="zwo-mount-tcp-port" name="zwoMountTcpPort" value="4030" min="1" max="65535">
+                                <input type="number" id="zwo-mount-tcp-port" name="zwoMountTcpPort" data-config-key="tcpPort" value="4030" min="1" max="65535">
                                 <small>Default hand-controller WiFi endpoint: 192.168.4.1:4030.</small>
                             </div>
                         </div>
@@ -747,7 +747,7 @@
                         <h4>Optics</h4>
                         <div class="form-group">
                             <label for="zwo-mount-aperture-diameter">Aperture Diameter (mm):</label>
-                            <input type="number" id="zwo-mount-aperture-diameter" name="zwoMountApertureDiameter" min="0" step="1" placeholder="100">
+                            <input type="number" id="zwo-mount-aperture-diameter" name="zwoMountApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="100">
                             <small>Optional. Some clients may ignore this value.</small>
                         </div>
                         <div class="form-group">
@@ -757,35 +757,35 @@
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-focal-length">Focal Length (mm):</label>
-                            <input type="number" id="zwo-mount-focal-length" name="zwoMountFocalLength" min="0" step="1" placeholder="800">
+                            <input type="number" id="zwo-mount-focal-length" name="zwoMountFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="800">
                             <small>Optional. Some clients may ignore this value.</small>
                         </div>
 
                         <h4>Site and Time</h4>
                         <div class="form-group">
                             <label for="zwo-mount-site-latitude">Site Latitude (deg):</label>
-                            <input type="number" id="zwo-mount-site-latitude" name="zwoMountSiteLatitude" min="-90" max="90" step="any" placeholder="51.477833">
+                            <input type="number" id="zwo-mount-site-latitude" name="zwoMountSiteLatitude" data-config-key="siteLatitude" min="-90" max="90" step="any" placeholder="51.477833">
                             <small>Recommended. Set your observing latitude to avoid horizon test failures in Conform.</small>
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-site-longitude">Site Longitude (deg):</label>
-                            <input type="number" id="zwo-mount-site-longitude" name="zwoMountSiteLongitude" min="-180" max="180" step="any" placeholder="-0.001500">
+                            <input type="number" id="zwo-mount-site-longitude" name="zwoMountSiteLongitude" data-config-key="siteLongitude" min="-180" max="180" step="any" placeholder="-0.001500">
                             <small>Use Alpaca convention: west negative, east positive.</small>
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-site-elevation">Site Elevation (m):</label>
-                            <input type="number" id="zwo-mount-site-elevation" name="zwoMountSiteElevation" min="-300" max="10000" step="any" placeholder="42">
+                            <input type="number" id="zwo-mount-site-elevation" name="zwoMountSiteElevation" data-config-key="siteElevation" min="-300" max="10000" step="any" placeholder="42">
                             <small>Optional.</small>
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-sync-time-on-connect">
-                                <input type="checkbox" id="zwo-mount-sync-time-on-connect" name="zwoMountSyncTimeOnConnect" checked>
+                                <input type="checkbox" id="zwo-mount-sync-time-on-connect" name="zwoMountSyncTimeOnConnect" data-config-key="syncTimeOnConnect" checked>
                                 Sync mount time on connect
                             </label>
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-learn-site-from-client">
-                                <input type="checkbox" id="zwo-mount-learn-site-from-client" name="zwoMountLearnSiteFromClient" checked>
+                                <input type="checkbox" id="zwo-mount-learn-site-from-client" name="zwoMountLearnSiteFromClient" data-config-key="learnSiteFromClient" data-config-fill="manual" checked>
                                 Learn site from clients
                             </label>
                             <small>Keep a site latitude, longitude or elevation written by a client as this device's saved site, so it survives a restart. Untick to protect a surveyed position.</small>
@@ -795,7 +795,7 @@
 
                     <div id="zwo-switch-type-group" class="form-group" style="display: none;">
                         <label for="zwo-switch-type">Switch Type:</label>
-                        <select id="zwo-switch-type" name="switchType">
+                        <select id="zwo-switch-type" name="switchType" data-device-type="switch" data-config-key="switchType">
                             <option value="dewheater">Dew Heater (Camera-attached)</option>
                             <option value="asiair">ASIAIR Pro 12V Power Switch</option>
                             <option value="asiair-plus-picm4">ASIAIR Plus 12V Power Switch (Pi CM4)</option>
@@ -804,15 +804,15 @@
                         <small>Dew Heater uses a ZWO camera's built-in anti-dew heater. ASIAIR Pro and ASIAIR Plus (Pi CM4) both control the four 12V DC ports via on-board libgpiod (Raspberry Pi hardware, GPIO 12/13/26/18) &mdash; pick either; they share the same driver and defaults. ASIAIR Plus (RK3568) controls them via ZWO's pwm_gpio kernel module (Rockchip hardware).</small>
                     </div>
 
-                    <div id="zwo-asiair-fields" style="display: none;">
+                    <div id="zwo-asiair-fields" data-device-type="switch" style="display: none;">
                         <div class="form-group">
                             <label for="asiair-gpio-chip">GPIO Chip Device:</label>
-                            <input type="text" id="asiair-gpio-chip" name="asiairGpioChip" value="/dev/gpiochip0" readonly>
+                            <input type="text" id="asiair-gpio-chip" name="asiairGpioChip" data-config-key="gpioChip" value="/dev/gpiochip0" readonly>
                             <small>Path to the libgpiod character device. Default <code>/dev/gpiochip0</code> matches the Pi 4 ASIAIR Pro.</small>
                         </div>
                         <div class="form-group">
                             <label for="asiair-pwm-frequency">PWM Frequency (Hz):</label>
-                            <input type="number" id="asiair-pwm-frequency" name="asiairPwmFrequency" value="1000" min="1" max="100000">
+                            <input type="number" id="asiair-pwm-frequency" name="asiairPwmFrequency" data-config-key="pwmFrequencyHz" value="1000" min="1" max="100000">
                             <small>Software PWM frequency for any port marked PWM below. 1000 Hz is fine for dew heaters and flat panels.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
@@ -827,33 +827,33 @@
                             </thead>
                             <tbody>
                                 <tr>
-                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-0" name="asiairPortName0" value="Port 1" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><select id="asiair-port-gpio-0" name="asiairPortGpio0" style="width: 60px;"><option value="12" selected>12</option><option value="13">13</option><option value="26">26</option><option value="18">18</option></select></td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-0" name="asiairPortPwm0"></td>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-0" name="asiairPortName0" data-config-key="ports" value="Port 1" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-0" name="asiairPortGpio0" data-config-key="ports" style="width: 60px;"><option value="12" selected>12</option><option value="13">13</option><option value="26">26</option><option value="18">18</option></select></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-0" name="asiairPortPwm0" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
-                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-1" name="asiairPortName1" value="Port 2" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><select id="asiair-port-gpio-1" name="asiairPortGpio1" style="width: 60px;"><option value="12">12</option><option value="13" selected>13</option><option value="26">26</option><option value="18">18</option></select></td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-1" name="asiairPortPwm1"></td>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-1" name="asiairPortName1" data-config-key="ports" value="Port 2" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-1" name="asiairPortGpio1" data-config-key="ports" style="width: 60px;"><option value="12">12</option><option value="13" selected>13</option><option value="26">26</option><option value="18">18</option></select></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-1" name="asiairPortPwm1" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
-                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-2" name="asiairPortName2" value="Port 3" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><select id="asiair-port-gpio-2" name="asiairPortGpio2" style="width: 60px;"><option value="12">12</option><option value="13">13</option><option value="26" selected>26</option><option value="18">18</option></select></td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-2" name="asiairPortPwm2"></td>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-2" name="asiairPortName2" data-config-key="ports" value="Port 3" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-2" name="asiairPortGpio2" data-config-key="ports" style="width: 60px;"><option value="12">12</option><option value="13">13</option><option value="26" selected>26</option><option value="18">18</option></select></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-2" name="asiairPortPwm2" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
-                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-3" name="asiairPortName3" value="Port 4" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><select id="asiair-port-gpio-3" name="asiairPortGpio3" style="width: 60px;"><option value="12">12</option><option value="13">13</option><option value="26">26</option><option value="18" selected>18</option></select></td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-3" name="asiairPortPwm3"></td>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-3" name="asiairPortName3" data-config-key="ports" value="Port 4" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-3" name="asiairPortGpio3" data-config-key="ports" style="width: 60px;"><option value="12">12</option><option value="13">13</option><option value="26">26</option><option value="18" selected>18</option></select></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-3" name="asiairPortPwm3" data-config-key="ports"></td>
                                 </tr>
                             </tbody>
                         </table>
                     </div>
 
-                    <div id="zwo-asiair-plus-fields" style="display: none;">
+                    <div id="zwo-asiair-plus-fields" data-device-type="switch" style="display: none;">
                         <div class="form-group">
                             <label for="asiair-plus-device-path">Power Control Device:</label>
-                            <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" value="/dev/pwm-gpio-misc" readonly>
+                            <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" data-config-key="devicePath" value="/dev/pwm-gpio-misc" readonly>
                             <small>Path to the ZWO <code>pwm_gpio.ko</code> kernel module's character device. Default <code>/dev/pwm-gpio-misc</code> is correct for stock ASIAIR Plus (RK3568) hardware.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
@@ -867,27 +867,27 @@
                             </thead>
                             <tbody>
                                 <tr>
-                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-0" name="asiairPlusPortName0" value="Port 1" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-0" name="asiairPlusPortPwm0"></td>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-0" name="asiairPlusPortName0" data-config-key="ports" value="Port 1" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-0" name="asiairPlusPortPwm0" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
-                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-1" name="asiairPlusPortName1" value="Port 2" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-1" name="asiairPlusPortPwm1"></td>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-1" name="asiairPlusPortName1" data-config-key="ports" value="Port 2" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-1" name="asiairPlusPortPwm1" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
-                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-2" name="asiairPlusPortName2" value="Port 3" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-2" name="asiairPlusPortPwm2"></td>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-2" name="asiairPlusPortName2" data-config-key="ports" value="Port 3" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-2" name="asiairPlusPortPwm2" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
-                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-3" name="asiairPlusPortName3" value="Port 4" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-3" name="asiairPlusPortPwm3"></td>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-3" name="asiairPlusPortName3" data-config-key="ports" value="Port 4" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-3" name="asiairPlusPortPwm3" data-config-key="ports"></td>
                                 </tr>
                             </tbody>
                         </table>
                     </div>
 
                     <!-- Dew heater: which ZWO camera's anti-dew heater this switch drives. -->
-                    <div id="zwo-dewheater-fields" style="display: none;">
+                    <div id="zwo-dewheater-fields" data-device-type="switch" style="display: none;">
                         <div class="form-group">
                             <label for="zwo-dewheater-camera">Camera:</label>
                             <div style="display: flex; gap: 8px; align-items: center;">
@@ -899,34 +899,34 @@
                         </div>
                     </div>
 
-                    <div id="zwo-camera-fields">
+                    <div id="zwo-camera-fields" data-device-type="camera">
                         <div class="form-group">
                             <label for="camera-index">Camera Index:</label>
-                            <input type="number" id="camera-index" name="cameraIndex" value="0" min="0">
+                            <input type="number" id="camera-index" name="cameraIndex" data-config-key="cameraIndex" value="0" min="0">
                             <small>0-based index from the ZWO SDK enumeration.</small>
                         </div>
                         <div class="form-group">
                             <label for="camera-id">Camera ID (optional):</label>
-                            <input type="number" id="camera-id" name="cameraId" min="0">
+                            <input type="number" id="camera-id" name="cameraId" data-config-key="cameraId" min="0">
                             <small>If set, overrides the camera index.</small>
                         </div>
                         <!-- Identity the server learned (#914). Carried through an edit,
                              which removes and re-adds the entry; see zwoCameraIdentityFields(). -->
-                        <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial">
-                        <input type="hidden" id="zwo-camera-name" name="zwoCameraName">
+                        <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial" data-config-key="serialNumber" data-config-fill="manual">
+                        <input type="hidden" id="zwo-camera-name" name="zwoCameraName" data-config-key="cameraName" data-config-fill="manual">
                         <input type="hidden" id="zwo-camera-loaded-index">
                         <input type="hidden" id="zwo-camera-loaded-id">
                     </div>
 
-                    <div id="zwo-filterwheel-fields" style="display: none;">
+                    <div id="zwo-filterwheel-fields" data-device-type="filterwheel" style="display: none;">
                         <div class="form-group">
                             <label for="filterwheel-index">Filter Wheel Index:</label>
-                            <input type="number" id="filterwheel-index" name="filterwheelIndex" value="0" min="0">
+                            <input type="number" id="filterwheel-index" name="filterwheelIndex" data-config-key="filterwheelIndex" value="0" min="0">
                             <small>0-based index from the ZWO EFW SDK enumeration.</small>
                         </div>
                         <div class="form-group">
                             <label for="filterwheel-id">Filter Wheel ID (optional):</label>
-                            <input type="number" id="filterwheel-id" name="filterwheelId" min="0">
+                            <input type="number" id="filterwheel-id" name="filterwheelId" data-config-key="filterwheelId" min="0">
                             <small>If set, overrides the filter wheel index.</small>
                         </div>
                         <div class="form-group">
@@ -948,57 +948,57 @@
                             <summary>Advanced: edit filter names as lines</summary>
                             <div class="form-group">
                                 <label for="filterwheel-names">Filter Names (optional):</label>
-                                <textarea id="filterwheel-names" name="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <textarea id="filterwheel-names" name="filterNames" data-config-key="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
                                 <small>One name per line. Provide the same number of names as filter slots. Tip: a single all-caps run with no spaces (e.g. <code>LRGB</code>) expands to one letter per slot &mdash; so a word like <code>DARK</code> on a 4-slot wheel becomes D, A, R, K; add a trailing comma (<code>DARK,</code>) to keep it as one name.</small>
                             </div>
                         </details>
                     </div>
 
-                    <div id="zwo-focuser-fields" style="display: none;">
+                    <div id="zwo-focuser-fields" data-device-type="focuser" style="display: none;">
                         <div class="form-group">
                             <label for="focuser-index">Focuser Index:</label>
-                            <input type="number" id="focuser-index" name="focuserIndex" value="0" min="0">
+                            <input type="number" id="focuser-index" name="focuserIndex" data-config-key="focuserIndex" value="0" min="0">
                             <small>0-based index from the ZWO EAF SDK enumeration.</small>
                         </div>
                         <div class="form-group">
                             <label for="focuser-id">Focuser ID (optional):</label>
-                            <input type="number" id="focuser-id" name="focuserId" min="0">
+                            <input type="number" id="focuser-id" name="focuserId" data-config-key="focuserId" min="0">
                             <small>If set, overrides the focuser index.</small>
                         </div>
                         <div class="form-group">
                             <label for="zwo-focuser-max-step">Max Step (optional):</label>
-                            <input type="number" id="zwo-focuser-max-step" name="zwoFocuserMaxStep" min="1" max="2000000">
+                            <input type="number" id="zwo-focuser-max-step" name="zwoFocuserMaxStep" data-config-key="maxStep" min="1" max="2000000">
                             <small>Upper travel limit written to the EAF at connect. Leave blank to keep the value stored in the focuser. It cannot exceed the EAF's own step range.</small>
                         </div>
                     </div>
 
-                    <div id="zwo-rotator-fields" style="display: none;">
+                    <div id="zwo-rotator-fields" data-device-type="rotator" style="display: none;">
                         <div class="form-group">
                             <label for="rotator-index">Rotator Index:</label>
-                            <input type="number" id="rotator-index" name="rotatorIndex" value="0" min="0">
+                            <input type="number" id="rotator-index" name="rotatorIndex" data-config-key="rotatorIndex" value="0" min="0">
                             <small>0-based index from the ZWO CAA SDK enumeration.</small>
                         </div>
                         <div class="form-group">
                             <label for="rotator-id">Rotator ID (optional):</label>
-                            <input type="number" id="rotator-id" name="rotatorId" min="0">
+                            <input type="number" id="rotator-id" name="rotatorId" data-config-key="rotatorId" min="0">
                             <small>If set, overrides the rotator index.</small>
                         </div>
                     </div>
                 </div>
 
                 <!-- Player One Configuration -->
-                <div id="playerone-config" class="vendor-config" style="display: none;">
+                <div id="playerone-config" data-vendor="playerone" class="vendor-config" style="display: none;">
                     <h3>Player One Configuration</h3>
 
-                    <div id="playerone-camera-fields">
+                    <div id="playerone-camera-fields" data-device-type="camera">
                         <div class="form-group">
                             <label for="playerone-camera-index">Camera Index:</label>
-                            <input type="number" id="playerone-camera-index" name="playerOneCameraIndex" value="0" min="0">
+                            <input type="number" id="playerone-camera-index" name="playerOneCameraIndex" data-config-key="cameraIndex" value="0" min="0">
                             <small>0-based index from the Player One SDK enumeration.</small>
                         </div>
                     </div>
 
-                    <div id="playerone-switch-fields" style="display: none;">
+                    <div id="playerone-switch-fields" data-device-type="switch" style="display: none;">
                         <div class="form-group">
                             <label for="playerone-switch-camera">Camera:</label>
                             <div style="display: flex; gap: 8px; align-items: center;">
@@ -1010,10 +1010,10 @@
                         </div>
                     </div>
 
-                    <div id="playerone-filterwheel-fields" style="display: none;">
+                    <div id="playerone-filterwheel-fields" data-device-type="filterwheel" style="display: none;">
                         <div class="form-group">
                             <label for="playerone-filterwheel-index">Filter Wheel Index:</label>
-                            <input type="number" id="playerone-filterwheel-index" name="playerOneFilterwheelIndex" value="0" min="0">
+                            <input type="number" id="playerone-filterwheel-index" name="playerOneFilterwheelIndex" data-config-key="filterwheelIndex" value="0" min="0">
                             <small>0-based index from the Player One PW SDK enumeration.</small>
                         </div>
                         <div class="form-group">
@@ -1035,7 +1035,7 @@
                             <summary>Advanced: edit filter names as lines</summary>
                             <div class="form-group">
                                 <label for="playerone-filter-names">Filter Names (optional):</label>
-                                <textarea id="playerone-filter-names" name="playerOneFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <textarea id="playerone-filter-names" name="playerOneFilterNames" data-config-key="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
                                 <small>One name per line. Leave blank to use the filter aliases stored on the wheel.</small>
                             </div>
                         </details>
@@ -1044,13 +1044,13 @@
                 </div>
 
                 <!-- QHY Configuration -->
-                <div id="qhy-config" class="vendor-config" style="display: none;">
+                <div id="qhy-config" data-vendor="qhy" class="vendor-config" style="display: none;">
                     <h3>QHY Configuration</h3>
 
-                    <div id="qhy-camera-fields">
+                    <div id="qhy-camera-fields" data-device-type="camera">
                         <div class="form-group">
                             <label for="qhy-camera-index">Camera Index:</label>
-                            <input type="number" id="qhy-camera-index" name="qhyCameraIndex" value="0" min="0">
+                            <input type="number" id="qhy-camera-index" name="qhyCameraIndex" data-config-key="cameraIndex" value="0" min="0">
                             <small>0-based index from the QHY SDK enumeration.</small>
                         </div>
                     </div>
@@ -1058,10 +1058,10 @@
                     <!-- Integrated CFW (e.g. miniCam8M): controlled through the SAME
                          physical handle as its paired camera, so this device points at
                          the camera's own index/id rather than a separate wheel enumeration. -->
-                    <div id="qhy-filterwheel-fields" style="display: none;">
+                    <div id="qhy-filterwheel-fields" data-device-type="filterwheel" style="display: none;">
                         <div class="form-group">
                             <label for="qhy-cfw-wheel-type">Wheel Connection:</label>
-                            <select id="qhy-cfw-wheel-type" name="qhyCfwWheelType">
+                            <select id="qhy-cfw-wheel-type" name="qhyCfwWheelType" data-config-key="wheelType">
                                 <option value="integrated">Camera 4-pin port (integrated CFW)</option>
                                 <option value="cfw3-usb">QHYCFW3 over its own USB cable</option>
                             </select>
@@ -1071,19 +1071,19 @@
                         <div id="qhy-cfw-integrated-config">
                             <div class="form-group">
                                 <label for="qhy-cfw-camera-index">Camera Index:</label>
-                                <input type="number" id="qhy-cfw-camera-index" name="qhyCfwCameraIndex" value="0" min="0">
+                                <input type="number" id="qhy-cfw-camera-index" name="qhyCfwCameraIndex" data-config-key="cameraIndex" value="0" min="0">
                                 <small>0-based index of the QHY camera this CFW is built into (same index as the paired camera device).</small>
                             </div>
                             <div class="form-group">
                                 <label for="qhy-cfw-camera-id">Camera ID (optional):</label>
-                                <input type="text" id="qhy-cfw-camera-id" name="qhyCfwCameraId" placeholder="(leave blank to use index)">
+                                <input type="text" id="qhy-cfw-camera-id" name="qhyCfwCameraId" data-config-key="cameraId" placeholder="(leave blank to use index)">
                             </div>
                         </div>
 
                         <div id="qhy-cfw3-config" style="display: none;">
                             <div class="form-group">
                                 <label for="qhy-cfw3-connection-type">Connection Type:</label>
-                                <select id="qhy-cfw3-connection-type" name="qhyCfw3ConnectionType">
+                                <select id="qhy-cfw3-connection-type" name="qhyCfw3ConnectionType" data-config-key="connectionType">
                                     <option value="auto">Auto-Detect (USB serial)</option>
                                     <option value="serial">Serial Port</option>
                                 </select>
@@ -1091,14 +1091,14 @@
                             <div id="qhy-cfw3-auto-config" class="connection-config">
                                 <div class="form-group">
                                     <label for="qhy-cfw3-index">Filter Wheel Index:</label>
-                                    <input type="number" id="qhy-cfw3-index" name="qhyCfw3FilterwheelIndex" value="0" min="0">
+                                    <input type="number" id="qhy-cfw3-index" name="qhyCfw3FilterwheelIndex" data-config-key="filterwheelIndex" value="0" min="0">
                                     <small>0-based index among detected wheels. Auto-detect opens every Silicon Labs CP210x serial adapter on the machine, which resets the device behind it, and a wheel takes about 17 seconds to home after that. Prefer an explicit serial port when other CP210x adapters are attached.</small>
                                 </div>
                             </div>
                             <div id="qhy-cfw3-serial-config" class="connection-config" style="display: none;">
                                 <div class="form-group">
                                     <label for="qhy-cfw3-port-path">Serial Port:</label>
-                                    <input type="text" id="qhy-cfw3-port-path" name="qhyCfw3PortPath" placeholder="/dev/ttyUSB0">
+                                    <input type="text" id="qhy-cfw3-port-path" name="qhyCfw3PortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                     <small>Use the /dev/serial/by-id/usb-Silicon_Labs_CP2102_... path when available. The first connect takes about 17 seconds while the wheel homes; the port then stays open, and reserved for this device, until the device is removed.</small>
                                 </div>
                             </div>
@@ -1123,18 +1123,18 @@
                             <summary>Advanced: edit filter names as lines</summary>
                             <div class="form-group">
                                 <label for="qhy-filter-names">Filter Names (optional):</label>
-                                <textarea id="qhy-filter-names" name="qhyFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <textarea id="qhy-filter-names" name="qhyFilterNames" data-config-key="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
                             </div>
                         </details>
                     </div>
 
                     <!-- Q-Focuser: USB CDC-ACM serial JSON protocol, no SDK. -->
-                    <div id="qhy-focuser-fields" style="display: none;">
+                    <div id="qhy-focuser-fields" data-device-type="focuser" style="display: none;">
                         <small style="color: #666;">Q-Focuser (High Precision and standard). USB serial at a fixed 9600 baud. Auto-detect scans for the focuser's GigaDevice USB interface and verifies it with the device handshake.</small>
 
                         <div class="form-group">
                             <label for="qhy-focuser-connection-type">Connection Type:</label>
-                            <select id="qhy-focuser-connection-type" name="qhyFocuserConnectionType">
+                            <select id="qhy-focuser-connection-type" name="qhyFocuserConnectionType" data-config-key="connectionType">
                                 <option value="auto">Auto-Detect (Recommended)</option>
                                 <option value="serial">Serial Port</option>
                             </select>
@@ -1143,7 +1143,7 @@
                         <div id="qhy-focuser-auto-config" class="connection-config">
                             <div class="form-group">
                                 <label for="qhy-focuser-index">Focuser Index:</label>
-                                <input type="number" id="qhy-focuser-index" name="qhyFocuserIndex" value="0" min="0">
+                                <input type="number" id="qhy-focuser-index" name="qhyFocuserIndex" data-config-key="focuserIndex" value="0" min="0">
                                 <small>0-based index when more than one Q-Focuser is detected</small>
                             </div>
                         </div>
@@ -1151,20 +1151,20 @@
                         <div id="qhy-focuser-serial-config" class="connection-config" style="display: none;">
                             <div class="form-group">
                                 <label for="qhy-focuser-port-path">Serial Port:</label>
-                                <input type="text" id="qhy-focuser-port-path" name="qhyFocuserPortPath" placeholder="/dev/ttyACM0">
+                                <input type="text" id="qhy-focuser-port-path" name="qhyFocuserPortPath" data-config-key="portPath" placeholder="/dev/ttyACM0">
                                 <small>Leave blank to auto-detect</small>
                             </div>
                         </div>
 
                         <div class="form-group">
                             <label for="qhy-focuser-max-step">Max Step:</label>
-                            <input type="number" id="qhy-focuser-max-step" name="qhyFocuserMaxStep" value="64000" min="1" max="2000000">
+                            <input type="number" id="qhy-focuser-max-step" name="qhyFocuserMaxStep" data-config-key="maxStep" value="64000" min="1" max="2000000">
                             <small>Upper travel limit reported to clients (MaxStep). The firmware itself allows up to 64000 by default.</small>
                         </div>
 
                         <div class="form-group">
                             <label for="qhy-focuser-speed">Motor Speed:</label>
-                            <select id="qhy-focuser-speed" name="qhyFocuserSpeed">
+                            <select id="qhy-focuser-speed" name="qhyFocuserSpeed" data-config-key="speed">
                                 <option value="1">1 (fastest)</option>
                                 <option value="2">2</option>
                                 <option value="3">3</option>
@@ -1177,12 +1177,12 @@
                         </div>
 
                         <div class="form-group">
-                            <label><input type="checkbox" id="qhy-focuser-reverse" name="qhyFocuserReverse"> Reverse motor direction</label>
+                            <label><input type="checkbox" id="qhy-focuser-reverse" name="qhyFocuserReverse" data-config-key="reverse"> Reverse motor direction</label>
                         </div>
 
                         <div class="form-group">
                             <label for="qhy-focuser-temperature-source">Temperature Source:</label>
-                            <select id="qhy-focuser-temperature-source" name="qhyFocuserTemperatureSource">
+                            <select id="qhy-focuser-temperature-source" name="qhyFocuserTemperatureSource" data-config-key="temperatureSource">
                                 <option value="external">External probe</option>
                                 <option value="chip">Controller board sensor</option>
                             </select>
@@ -1193,15 +1193,15 @@
                             <summary>Advanced: 12 V hold torque</summary>
                             <small style="color: #666;">Only applied when the focuser reports a supply above 11.5 V. USB-powered units ignore these.</small>
                             <div class="form-group">
-                                <label><input type="checkbox" id="qhy-focuser-hold-force" name="qhyFocuserHoldForce"> Enable hold force</label>
+                                <label><input type="checkbox" id="qhy-focuser-hold-force" name="qhyFocuserHoldForce" data-config-key="holdForce"> Enable hold force</label>
                             </div>
                             <div class="form-group">
                                 <label for="qhy-focuser-hold-ihold">Hold current (IHOLD, 0-16):</label>
-                                <input type="number" id="qhy-focuser-hold-ihold" name="qhyFocuserHoldIhold" value="4" min="0" max="16">
+                                <input type="number" id="qhy-focuser-hold-ihold" name="qhyFocuserHoldIhold" data-config-key="holdIhold" value="4" min="0" max="16">
                             </div>
                             <div class="form-group">
                                 <label for="qhy-focuser-hold-irun">Run current (IRUN, 0-30):</label>
-                                <input type="number" id="qhy-focuser-hold-irun" name="qhyFocuserHoldIrun" value="8" min="0" max="30">
+                                <input type="number" id="qhy-focuser-hold-irun" name="qhyFocuserHoldIrun" data-config-key="holdIrun" value="8" min="0" max="30">
                             </div>
                         </details>
                     </div>
@@ -1209,24 +1209,24 @@
                 </div>
 
                 <!-- SVBONY Camera Configuration -->
-                <div id="svbony-config" class="vendor-config" style="display: none;">
+                <div id="svbony-config" data-vendor="svbony" data-device-type="camera" class="vendor-config" style="display: none;">
                     <h3>SVBONY Camera Configuration</h3>
 
                     <div class="form-group">
                         <label for="svbony-camera-index">Camera Index:</label>
-                        <input type="number" id="svbony-camera-index" name="svbonyCameraIndex" value="0" min="0">
+                        <input type="number" id="svbony-camera-index" name="svbonyCameraIndex" data-config-key="cameraIndex" value="0" min="0">
                         <small>0-based index from the SVBONY SDK enumeration.</small>
                     </div>
 
                 </div>
 
                 <!-- Altair Camera Configuration -->
-                <div id="altair-config" class="vendor-config" style="display: none;">
+                <div id="altair-config" data-vendor="altair" data-device-type="camera" class="vendor-config" style="display: none;">
                     <h3>Altair Camera Configuration</h3>
 
                     <div class="form-group">
                         <label for="altair-camera-index">Camera Index:</label>
-                        <input type="number" id="altair-camera-index" name="altairCameraIndex" value="0" min="0">
+                        <input type="number" id="altair-camera-index" name="altairCameraIndex" data-config-key="cameraIndex" value="0" min="0">
                         <small>0-based index from the Altair SDK enumeration. Configure an Altair
                         camera here, not under ToupTek: each camera belongs to one vendor.</small>
                     </div>
@@ -1234,38 +1234,38 @@
                 </div>
 
                 <!-- iOptron iGuider Guide Camera Configuration -->
-                <div id="iguider-config" class="vendor-config" style="display: none;">
+                <div id="iguider-config" data-vendor="iguider" data-device-type="camera" class="vendor-config" style="display: none;">
                     <h3>iOptron iGuider Guide Camera Configuration</h3>
                     <small style="color: #666;">The iGuider is a 1280x960 mono guide camera for PHD2 and other guiding software. It has no ST-4 port, so guide pulses go to the mount. Exposures run from 0.01 to 3.5 seconds in the camera's fixed steps.</small>
 
                     <div class="form-group">
                         <label for="iguider-device-path">Device Path (optional):</label>
-                        <input type="text" id="iguider-device-path" name="iguiderDevicePath" placeholder="Leave blank to auto-detect" maxlength="256">
+                        <input type="text" id="iguider-device-path" name="iguiderDevicePath" data-config-key="devicePath" placeholder="Leave blank to auto-detect" maxlength="256">
                         <small>Leave blank to use the first iGuider found. To pin one, enter its /dev/v4l/by-id/... link (survives a replug) or /dev/videoN.</small>
                     </div>
 
                 </div>
 
                 <!-- libgphoto2 DSLR/Mirrorless Camera Configuration -->
-                <div id="gphoto-config" class="vendor-config" style="display: none;">
+                <div id="gphoto-config" data-vendor="gphoto" data-device-type="camera" class="vendor-config" style="display: none;">
                     <h3>DSLR / Mirrorless Configuration</h3>
 
                     <div class="form-group">
                         <label for="gphoto-camera-index">Camera Index:</label>
-                        <input type="number" id="gphoto-camera-index" name="gphotoCameraIndex" value="0" min="0">
+                        <input type="number" id="gphoto-camera-index" name="gphotoCameraIndex" data-config-key="cameraIndex" value="0" min="0">
                         <small>0-based index from the USB autodetect list. Connect the camera over
                         USB and power it on before saving.</small>
                     </div>
 
                     <div class="form-group">
                         <label for="gphoto-mirror-lockup-settle-ms">Mirror lock-up settle (ms):</label>
-                        <input type="number" id="gphoto-mirror-lockup-settle-ms" name="gphotoMirrorLockupSettleMs" value="2000" min="500" max="10000" step="1">
+                        <input type="number" id="gphoto-mirror-lockup-settle-ms" name="gphotoMirrorLockupSettleMs" data-config-key="mirrorLockupSettleMs" value="2000" min="500" max="10000" step="1">
                         <small>Wait between the two shutter presses when mirror lock-up is on in the camera menu.</small>
                     </div>
 
                     <div class="form-group">
                         <label for="gphoto-long-exposure-nr">Long-exposure NR:</label>
-                        <select id="gphoto-long-exposure-nr" name="gphotoLongExposureNR">
+                        <select id="gphoto-long-exposure-nr" name="gphotoLongExposureNR" data-config-key="longExposureNR">
                             <option value="camera" selected>Camera setting</option>
                             <option value="off">Off</option>
                             <option value="on">On</option>
@@ -1276,35 +1276,35 @@
                 </div>
 
                 <!-- ToupTek Configuration -->
-                <div id="touptek-config" class="vendor-config" style="display: none;">
+                <div id="touptek-config" data-vendor="touptek" class="vendor-config" style="display: none;">
                     <h3>ToupTek Configuration</h3>
 
-                    <div id="touptek-camera-fields">
+                    <div id="touptek-camera-fields" data-device-type="camera">
                         <div class="form-group">
                             <label for="touptek-camera-index">Camera Index:</label>
-                            <input type="number" id="touptek-camera-index" name="touptekCameraIndex" value="0" min="0">
+                            <input type="number" id="touptek-camera-index" name="touptekCameraIndex" data-config-key="cameraIndex" value="0" min="0">
                             <small>0-based index from the ToupTek SDK enumeration.</small>
                         </div>
                     </div>
 
-                    <div id="touptek-focuser-fields" style="display: none;">
+                    <div id="touptek-focuser-fields" data-device-type="focuser" style="display: none;">
                         <div class="form-group">
                             <label for="touptek-focuser-index">Focuser Index:</label>
-                            <input type="number" id="touptek-focuser-index" name="touptekFocuserIndex" value="0" min="0">
+                            <input type="number" id="touptek-focuser-index" name="touptekFocuserIndex" data-config-key="focuserIndex" value="0" min="0">
                             <small>0-based index among ToupTek AAF (Astro Auto Focuser) devices.</small>
                         </div>
                         <div class="form-group">
                             <label for="touptek-focuser-id">Focuser ID (optional):</label>
-                            <input type="text" id="touptek-focuser-id" name="touptekFocuserId" placeholder="(leave blank to use index)">
+                            <input type="text" id="touptek-focuser-id" name="touptekFocuserId" data-config-key="focuserId" placeholder="(leave blank to use index)">
                             <small>SDK device id from Toupcam_EnumV2. Overrides the index when set.</small>
                         </div>
                     </div>
 
                     <!-- ToupTek switch configuration (camera thermal / StellaVita PowerBox) -->
-                    <div id="touptek-switch-fields" style="display: none;">
+                    <div id="touptek-switch-fields" data-device-type="switch" style="display: none;">
                         <div class="form-group">
                             <label for="touptek-switch-type">Switch Type:</label>
-                            <select id="touptek-switch-type" name="touptekSwitchType">
+                            <select id="touptek-switch-type" name="touptekSwitchType" data-config-key="switchType">
                                 <option value="thermal">Camera Thermal (Dew Heater + Fan)</option>
                                 <option value="stellavita">StellaVita PowerBox (12V GPIO ports)</option>
                             </select>
@@ -1342,12 +1342,12 @@
                         </p>
                         <div class="form-group">
                             <label for="touptek-powerbox-gpio-chip">GPIO Chip:</label>
-                            <input type="text" id="touptek-powerbox-gpio-chip" name="touptekPowerboxGpioChip" placeholder="/dev/gpiochip0">
+                            <input type="text" id="touptek-powerbox-gpio-chip" name="touptekPowerboxGpioChip" data-config-key="gpioChip" placeholder="/dev/gpiochip0">
                             <small>Optional. Defaults to <code>/dev/gpiochip0</code> (the CM4's main BCM2711 GPIO bank, where the line offset equals the BCM GPIO number).</small>
                         </div>
                         <div class="form-group">
                             <label for="touptek-powerbox-pwm-frequency">PWM Frequency (Hz):</label>
-                            <input type="number" id="touptek-powerbox-pwm-frequency" name="touptekPowerboxPwmFrequency" value="100" min="1" max="100000">
+                            <input type="number" id="touptek-powerbox-pwm-frequency" name="touptekPowerboxPwmFrequency" data-config-key="pwmFrequencyHz" value="100" min="1" max="100000">
                             <small>Software PWM frequency for any port marked PWM below. <strong>100 Hz</strong> dims flat panels smoothly (their LED driver cycles fully each period); ~1 kHz is smoothed into on/off by a panel but is fine for dew heaters.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
@@ -1364,22 +1364,22 @@
                                 <tr>
                                     <td style="padding: 4px;">Port 1</td>
                                     <td style="padding: 4px;">18</td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="touptek-port-pwm-0" name="touptekPortPwm0"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="touptek-port-pwm-0" name="touptekPortPwm0" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;">Port 2</td>
                                     <td style="padding: 4px;">10</td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="touptek-port-pwm-1" name="touptekPortPwm1"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="touptek-port-pwm-1" name="touptekPortPwm1" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;">Port 3</td>
                                     <td style="padding: 4px;">17</td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="touptek-port-pwm-2" name="touptekPortPwm2"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="touptek-port-pwm-2" name="touptekPortPwm2" data-config-key="ports"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;">Port 4</td>
                                     <td style="padding: 4px;">4</td>
-                                    <td style="padding: 4px;"><input type="checkbox" id="touptek-port-pwm-3" name="touptekPortPwm3"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="touptek-port-pwm-3" name="touptekPortPwm3" data-config-key="ports"></td>
                                 </tr>
                             </tbody>
                         </table>
@@ -1387,15 +1387,15 @@
                     </div>
 
                     <!-- AFW (Astro Filter Wheel) configuration -->
-                    <div id="touptek-filterwheel-fields" style="display: none;">
+                    <div id="touptek-filterwheel-fields" data-device-type="filterwheel" style="display: none;">
                         <div class="form-group">
                             <label for="touptek-filterwheel-index">Filter Wheel Index:</label>
-                            <input type="number" id="touptek-filterwheel-index" name="touptekFilterwheelIndex" value="0" min="0">
+                            <input type="number" id="touptek-filterwheel-index" name="touptekFilterwheelIndex" data-config-key="filterwheelIndex" value="0" min="0">
                             <small>0-based index among ToupTek AFW (Astro Filter Wheel) devices.</small>
                         </div>
                         <div class="form-group">
                             <label for="touptek-filterwheel-id">Filter Wheel ID (optional):</label>
-                            <input type="text" id="touptek-filterwheel-id" name="touptekFilterwheelId" placeholder="(leave blank to use index)">
+                            <input type="text" id="touptek-filterwheel-id" name="touptekFilterwheelId" data-config-key="filterwheelId" placeholder="(leave blank to use index)">
                             <small>Bind to a specific wheel by its SDK id string instead of the index (survives re-enumeration if multiple wheels are attached).</small>
                         </div>
                         <div class="form-group">
@@ -1416,7 +1416,7 @@
                             <summary>Advanced: edit filter names as lines</summary>
                             <div class="form-group">
                                 <label for="touptek-filter-names">Filter Names (optional):</label>
-                                <textarea id="touptek-filter-names" name="touptekFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <textarea id="touptek-filter-names" name="touptekFilterNames" data-config-key="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
                                 <small>One name per line. Leave blank to use default Filter N names. Tip: a single all-caps run with no spaces (e.g. <code>LRGB</code>) expands to one letter per slot &mdash; so a word like <code>DARK</code> on a 4-slot wheel becomes D, A, R, K; add a trailing comma (<code>DARK,</code>) to keep it as one name.</small>
                             </div>
                         </details>
@@ -1425,22 +1425,22 @@
                 </div>
 
                 <!-- WeeWX ObservingConditions Configuration -->
-                <div id="weewx-config" class="vendor-config" style="display: none;">
+                <div id="weewx-config" data-vendor="weewx" data-device-type="observingconditions" class="vendor-config" style="display: none;">
                     <h3>WeeWX Observing Conditions</h3>
 
                     <div class="form-group">
                         <label for="weewx-url">WeeWX JSON URL:</label>
-                        <input type="text" id="weewx-url" name="weewxUrl" placeholder="https://example.com/conditions_dataset.json">
+                        <input type="text" id="weewx-url" name="weewxUrl" data-config-key="weewxUrl" placeholder="https://example.com/conditions_dataset.json">
                         <small>Must be a JSON feed containing lcd_datasheet.current values.</small>
                     </div>
                     <div class="form-group">
                         <label for="weewx-poll-interval">Poll Interval (seconds):</label>
-                        <input type="number" id="weewx-poll-interval" name="pollIntervalSeconds" value="900" min="5">
+                        <input type="number" id="weewx-poll-interval" name="pollIntervalSeconds" data-config-key="pollIntervalSeconds" value="900" min="5">
                         <small>WeeWX updates every 15 minutes by default (900 seconds).</small>
                     </div>
                     <div class="form-group">
                         <label for="weewx-timeout">HTTP Timeout (ms):</label>
-                        <input type="number" id="weewx-timeout" name="timeoutMs" value="5000" min="1000">
+                        <input type="number" id="weewx-timeout" name="timeoutMs" data-config-key="timeoutMs" value="5000" min="1000">
                     </div>
                 </div>
 
@@ -1449,13 +1449,13 @@
                      Advanced 3) share one vendor block,
                      with the relevant sub-section shown based on Device Type
                      (same pattern as the iOptron mount/switch config). -->
-                <div id="gemini-config" class="vendor-config" style="display: none;">
-                    <div id="gemini-focuser-fields">
+                <div id="gemini-config" data-vendor="gemini" class="vendor-config" style="display: none;">
+                    <div id="gemini-focuser-fields" data-device-type="focuser">
                         <h3>Gemini Automatic Astro Focuser Pro</h3>
 
                         <div class="form-group">
                             <label for="gemini-connection-type">Connection Type:</label>
-                            <select id="gemini-connection-type" name="connectionType">
+                            <select id="gemini-connection-type" name="connectionType" data-config-key="connectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
                                 <option value="serial">Serial (USB) - manual port</option>
                             </select>
@@ -1465,7 +1465,7 @@
                         <div id="gemini-auto-fields">
                             <div class="form-group">
                                 <label for="gemini-focuser-index">Focuser Index:</label>
-                                <input type="number" id="gemini-focuser-index" name="geminiFocuserIndex" value="0" min="0">
+                                <input type="number" id="gemini-focuser-index" name="geminiFocuserIndex" data-config-key="focuserIndex" value="0" min="0">
                                 <small>0-based index if multiple focusers are detected. Usually 0.</small>
                             </div>
                         </div>
@@ -1473,12 +1473,12 @@
                         <div id="gemini-serial-fields" style="display: none;">
                             <div class="form-group">
                                 <label for="gemini-port-path">Serial Port:</label>
-                                <input type="text" id="gemini-port-path" name="portPath" placeholder="/dev/ttyUSB0">
+                                <input type="text" id="gemini-port-path" name="portPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                 <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                             </div>
                             <div class="form-group">
                                 <label for="gemini-baud-rate">Baud Rate:</label>
-                                <select id="gemini-baud-rate" name="baudRate">
+                                <select id="gemini-baud-rate" name="baudRate" data-config-key="baudRate">
                                     <option value="9600" selected>9600</option>
                                     <option value="19200">19200</option>
                                     <option value="38400">38400</option>
@@ -1489,10 +1489,10 @@
                         </div>
                     </div>
 
-                    <div id="gemini-flatpanel-fields" style="display: none;">
+                    <div id="gemini-flatpanel-fields" data-device-type="covercalibrator" style="display: none;">
                         <div class="form-group">
                             <label for="gemini-flatpanel-model">Flat Panel Model:</label>
-                            <select id="gemini-flatpanel-model" name="flatPanelModel">
+                            <select id="gemini-flatpanel-model" name="flatPanelModel" data-config-key="flatPanelModel">
                                 <option value="lite" selected>Astro Flat Panel Cover Lite (light-only)</option>
                                 <option value="v2">Astro Automatic FlatPanel v2 (motorized cover)</option>
                                 <option value="pro">Motorized Flat Panel V3 (Pro firmware)</option>
@@ -1508,7 +1508,7 @@
 
                             <div class="form-group">
                                 <label for="gemini-flatpanel-connection-type">Connection Type:</label>
-                                <select id="gemini-flatpanel-connection-type" name="geminiFlatPanelConnectionType">
+                                <select id="gemini-flatpanel-connection-type" name="geminiFlatPanelConnectionType" data-config-key="connectionType">
                                     <option value="auto" selected>Auto-detect (recommended)</option>
                                     <option value="serial">Serial (USB) - manual port</option>
                                 </select>
@@ -1518,7 +1518,7 @@
                             <div id="gemini-flatpanel-auto-fields">
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-index">Panel Index:</label>
-                                    <input type="number" id="gemini-flatpanel-index" name="geminiFlatPanelIndex" value="0" min="0">
+                                    <input type="number" id="gemini-flatpanel-index" name="geminiFlatPanelIndex" data-config-key="panelIndex" value="0" min="0">
                                     <small>0-based index if multiple flat panels are detected. Usually 0.</small>
                                 </div>
                             </div>
@@ -1526,12 +1526,12 @@
                             <div id="gemini-flatpanel-serial-fields" style="display: none;">
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-port-path">Serial Port:</label>
-                                    <input type="text" id="gemini-flatpanel-port-path" name="geminiFlatPanelPortPath" placeholder="/dev/ttyUSB0">
+                                    <input type="text" id="gemini-flatpanel-port-path" name="geminiFlatPanelPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                     <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                                 </div>
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-baud-rate">Baud Rate:</label>
-                                    <select id="gemini-flatpanel-baud-rate" name="geminiFlatPanelBaudRate">
+                                    <select id="gemini-flatpanel-baud-rate" name="geminiFlatPanelBaudRate" data-config-key="baudRate">
                                         <option value="9600" selected>9600</option>
                                         <option value="19200">19200</option>
                                         <option value="38400">38400</option>
@@ -1553,7 +1553,7 @@
 
                             <div class="form-group">
                                 <label for="gemini-flatpanel-v2-connection-type">Connection Type:</label>
-                                <select id="gemini-flatpanel-v2-connection-type" name="geminiFlatPanelV2ConnectionType">
+                                <select id="gemini-flatpanel-v2-connection-type" name="geminiFlatPanelV2ConnectionType" data-config-key="connectionType">
                                     <option value="auto" selected>Auto-detect (recommended)</option>
                                     <option value="serial">Serial (USB) - manual port</option>
                                 </select>
@@ -1563,7 +1563,7 @@
                             <div id="gemini-flatpanel-v2-auto-fields">
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-v2-index">Panel Index:</label>
-                                    <input type="number" id="gemini-flatpanel-v2-index" name="geminiFlatPanelV2Index" value="0" min="0">
+                                    <input type="number" id="gemini-flatpanel-v2-index" name="geminiFlatPanelV2Index" data-config-key="panelIndex" value="0" min="0">
                                     <small>0-based index if multiple flat panels are detected. Usually 0.</small>
                                 </div>
                             </div>
@@ -1571,12 +1571,12 @@
                             <div id="gemini-flatpanel-v2-serial-fields" style="display: none;">
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-v2-port-path">Serial Port:</label>
-                                    <input type="text" id="gemini-flatpanel-v2-port-path" name="geminiFlatPanelV2PortPath" placeholder="/dev/ttyUSB0">
+                                    <input type="text" id="gemini-flatpanel-v2-port-path" name="geminiFlatPanelV2PortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                     <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                                 </div>
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-v2-baud-rate">Baud Rate:</label>
-                                    <select id="gemini-flatpanel-v2-baud-rate" name="geminiFlatPanelV2BaudRate">
+                                    <select id="gemini-flatpanel-v2-baud-rate" name="geminiFlatPanelV2BaudRate" data-config-key="baudRate">
                                         <option value="9600" selected>9600</option>
                                         <option value="19200">19200</option>
                                         <option value="38400">38400</option>
@@ -1596,7 +1596,7 @@
 
                             <div class="form-group">
                                 <label for="gemini-flatpanel-pro-connection-type">Connection Type:</label>
-                                <select id="gemini-flatpanel-pro-connection-type" name="geminiFlatPanelProConnectionType">
+                                <select id="gemini-flatpanel-pro-connection-type" name="geminiFlatPanelProConnectionType" data-config-key="connectionType">
                                     <option value="auto" selected>Auto-detect (recommended)</option>
                                     <option value="serial">Serial (USB) - manual port</option>
                                 </select>
@@ -1606,7 +1606,7 @@
                             <div id="gemini-flatpanel-pro-auto-fields">
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-pro-index">Panel Index:</label>
-                                    <input type="number" id="gemini-flatpanel-pro-index" name="geminiFlatPanelProIndex" value="0" min="0">
+                                    <input type="number" id="gemini-flatpanel-pro-index" name="geminiFlatPanelProIndex" data-config-key="panelIndex" value="0" min="0">
                                     <small>0-based index if multiple flat panels are detected. Usually 0.</small>
                                 </div>
                             </div>
@@ -1614,12 +1614,12 @@
                             <div id="gemini-flatpanel-pro-serial-fields" style="display: none;">
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-pro-port-path">Serial Port:</label>
-                                    <input type="text" id="gemini-flatpanel-pro-port-path" name="geminiFlatPanelProPortPath" placeholder="/dev/ttyUSB0">
+                                    <input type="text" id="gemini-flatpanel-pro-port-path" name="geminiFlatPanelProPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                     <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                                 </div>
                                 <div class="form-group">
                                     <label for="gemini-flatpanel-pro-baud-rate">Baud Rate:</label>
-                                    <select id="gemini-flatpanel-pro-baud-rate" name="geminiFlatPanelProBaudRate">
+                                    <select id="gemini-flatpanel-pro-baud-rate" name="geminiFlatPanelProBaudRate" data-config-key="baudRate">
                                         <option value="9600" selected>9600</option>
                                         <option value="19200">19200</option>
                                         <option value="38400">38400</option>
@@ -1631,7 +1631,7 @@
                         </div>
                     </div>
 
-                    <div id="gemini-pdh-fields" style="display: none;">
+                    <div id="gemini-pdh-fields" data-device-type="switch" style="display: none;">
                         <h3>Gemini Power &amp; Data Hubs Advanced 3</h3>
                         <p><small>Power and USB hub with four switched 12&nbsp;V outputs, six switchable USB ports,
                            two PWM dew heater channels with Auto (PID), Manual and Switch modes, an AHT20
@@ -1640,7 +1640,7 @@
 
                         <div class="form-group">
                             <label for="gemini-pdh-connection-type">Connection Type:</label>
-                            <select id="gemini-pdh-connection-type" name="geminiPdhConnectionType">
+                            <select id="gemini-pdh-connection-type" name="geminiPdhConnectionType" data-config-key="connectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
                                 <option value="serial">Serial (USB) - manual port</option>
                             </select>
@@ -1650,7 +1650,7 @@
                         <div id="gemini-pdh-auto-fields">
                             <div class="form-group">
                                 <label for="gemini-pdh-index">Power Hub Index:</label>
-                                <input type="number" id="gemini-pdh-index" name="geminiPdhIndex" value="0" min="0">
+                                <input type="number" id="gemini-pdh-index" name="geminiPdhIndex" data-config-key="hubIndex" value="0" min="0">
                                 <small>0-based index if multiple hubs are detected. Usually 0.</small>
                             </div>
                         </div>
@@ -1658,12 +1658,12 @@
                         <div id="gemini-pdh-serial-fields" style="display: none;">
                             <div class="form-group">
                                 <label for="gemini-pdh-port-path">Serial Port:</label>
-                                <input type="text" id="gemini-pdh-port-path" name="geminiPdhPortPath" placeholder="/dev/ttyUSB0">
+                                <input type="text" id="gemini-pdh-port-path" name="geminiPdhPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                 <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                             </div>
                             <div class="form-group">
                                 <label for="gemini-pdh-baud-rate">Baud Rate:</label>
-                                <select id="gemini-pdh-baud-rate" name="geminiPdhBaudRate">
+                                <select id="gemini-pdh-baud-rate" name="geminiPdhBaudRate" data-config-key="baudRate">
                                     <option value="19200" selected>19200</option>
                                 </select>
                                 <small>The Power &amp; Data Hub protocol is fixed at 19200 baud.</small>
@@ -1676,13 +1676,13 @@
                      WandererRotator Mini (Rotator) share one vendor block, with the
                      relevant sub-section shown based on Device Type (same pattern as
                      the Gemini focuser/flat-panel config). -->
-                <div id="wandererastro-config" class="vendor-config" style="display: none;">
-                    <div id="wandererastro-cover-fields">
+                <div id="wandererastro-config" data-vendor="wandererastro" class="vendor-config" style="display: none;">
+                    <div id="wandererastro-cover-fields" data-device-type="covercalibrator">
                         <h3>WandererAstro WandererCover V4</h3>
 
                         <div class="form-group">
                             <label for="wandererastro-connection-type">Connection Type:</label>
-                            <select id="wandererastro-connection-type" name="wandererastroConnectionType">
+                            <select id="wandererastro-connection-type" name="wandererastroConnectionType" data-config-key="connectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
                                 <option value="serial">Serial (USB) - manual port</option>
                             </select>
@@ -1692,7 +1692,7 @@
                         <div id="wandererastro-auto-fields">
                             <div class="form-group">
                                 <label for="wandererastro-cover-index">Cover Index:</label>
-                                <input type="number" id="wandererastro-cover-index" name="wandererastroCoverIndex" value="0" min="0">
+                                <input type="number" id="wandererastro-cover-index" name="wandererastroCoverIndex" data-config-key="coverIndex" value="0" min="0">
                                 <small>0-based index if multiple covers are detected. Usually 0.</small>
                             </div>
                         </div>
@@ -1700,12 +1700,12 @@
                         <div id="wandererastro-serial-fields" style="display: none;">
                             <div class="form-group">
                                 <label for="wandererastro-port-path">Serial Port:</label>
-                                <input type="text" id="wandererastro-port-path" name="wandererastroPortPath" placeholder="/dev/ttyUSB0">
+                                <input type="text" id="wandererastro-port-path" name="wandererastroPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                 <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                             </div>
                             <div class="form-group">
                                 <label for="wandererastro-baud-rate">Baud Rate:</label>
-                                <select id="wandererastro-baud-rate" name="wandererastroBaudRate">
+                                <select id="wandererastro-baud-rate" name="wandererastroBaudRate" data-config-key="baudRate">
                                     <option value="19200" selected>19200</option>
                                 </select>
                                 <small>The WandererCover V4 protocol is fixed at 19200 baud.</small>
@@ -1713,14 +1713,14 @@
                         </div>
                     </div>
 
-                    <div id="wandererastro-rotator-fields" style="display: none;">
+                    <div id="wandererastro-rotator-fields" data-device-type="rotator" style="display: none;">
                         <h3>WandererAstro WandererRotator Mini</h3>
                         <p><small>Worm-drive camera rotator (Mini V1/V2). USB serial for control; the motor
                            needs the separate DC power input connected.</small></p>
 
                         <div class="form-group">
                             <label for="wandererastro-rotator-connection-type">Connection Type:</label>
-                            <select id="wandererastro-rotator-connection-type" name="wandererastroRotatorConnectionType">
+                            <select id="wandererastro-rotator-connection-type" name="wandererastroRotatorConnectionType" data-config-key="connectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
                                 <option value="serial">Serial (USB) - manual port</option>
                             </select>
@@ -1730,7 +1730,7 @@
                         <div id="wandererastro-rotator-auto-fields">
                             <div class="form-group">
                                 <label for="wandererastro-rotator-index">Rotator Index:</label>
-                                <input type="number" id="wandererastro-rotator-index" name="wandererastroRotatorIndex" value="0" min="0">
+                                <input type="number" id="wandererastro-rotator-index" name="wandererastroRotatorIndex" data-config-key="rotatorIndex" value="0" min="0">
                                 <small>0-based index if multiple rotators are detected. Usually 0.</small>
                             </div>
                         </div>
@@ -1738,12 +1738,12 @@
                         <div id="wandererastro-rotator-serial-fields" style="display: none;">
                             <div class="form-group">
                                 <label for="wandererastro-rotator-port-path">Serial Port:</label>
-                                <input type="text" id="wandererastro-rotator-port-path" name="wandererastroRotatorPortPath" placeholder="/dev/ttyUSB0">
+                                <input type="text" id="wandererastro-rotator-port-path" name="wandererastroRotatorPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                 <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                             </div>
                             <div class="form-group">
                                 <label for="wandererastro-rotator-baud-rate">Baud Rate:</label>
-                                <select id="wandererastro-rotator-baud-rate" name="wandererastroRotatorBaudRate">
+                                <select id="wandererastro-rotator-baud-rate" name="wandererastroRotatorBaudRate" data-config-key="baudRate">
                                     <option value="19200" selected>19200</option>
                                 </select>
                                 <small>The WandererRotator protocol is fixed at 19200 baud.</small>
@@ -1751,14 +1751,14 @@
                         </div>
                     </div>
 
-                    <div id="wandererastro-filterwheel-fields" style="display: none;">
+                    <div id="wandererastro-filterwheel-fields" data-device-type="filterwheel" style="display: none;">
                         <h3>WandererAstro SFW Filter Wheel</h3>
                         <p><small>8-slot filter wheel (SFW50 / SFW50S / SFW36S). USB serial for control; the motor
                            needs the separate 12&nbsp;V DC power input connected.</small></p>
 
                         <div class="form-group">
                             <label for="wandererastro-filterwheel-connection-type">Connection Type:</label>
-                            <select id="wandererastro-filterwheel-connection-type" name="wandererastroFilterwheelConnectionType">
+                            <select id="wandererastro-filterwheel-connection-type" name="wandererastroFilterwheelConnectionType" data-config-key="connectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
                                 <option value="serial">Serial (USB) - manual port</option>
                             </select>
@@ -1768,7 +1768,7 @@
                         <div id="wandererastro-filterwheel-auto-fields">
                             <div class="form-group">
                                 <label for="wandererastro-filterwheel-index">Filter Wheel Index:</label>
-                                <input type="number" id="wandererastro-filterwheel-index" name="wandererastroFilterwheelIndex" value="0" min="0">
+                                <input type="number" id="wandererastro-filterwheel-index" name="wandererastroFilterwheelIndex" data-config-key="wandererFilterwheelIndex" value="0" min="0">
                                 <small>0-based index if multiple Wanderer filter wheels are detected. Usually 0.</small>
                             </div>
                         </div>
@@ -1776,12 +1776,12 @@
                         <div id="wandererastro-filterwheel-serial-fields" style="display: none;">
                             <div class="form-group">
                                 <label for="wandererastro-filterwheel-port-path">Serial Port:</label>
-                                <input type="text" id="wandererastro-filterwheel-port-path" name="wandererastroFilterwheelPortPath" placeholder="/dev/ttyUSB0">
+                                <input type="text" id="wandererastro-filterwheel-port-path" name="wandererastroFilterwheelPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                 <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                             </div>
                             <div class="form-group">
                                 <label for="wandererastro-filterwheel-baud-rate">Baud Rate:</label>
-                                <select id="wandererastro-filterwheel-baud-rate" name="wandererastroFilterwheelBaudRate">
+                                <select id="wandererastro-filterwheel-baud-rate" name="wandererastroFilterwheelBaudRate" data-config-key="baudRate">
                                     <option value="19200" selected>19200</option>
                                 </select>
                                 <small>The Wanderer filter wheel protocol is fixed at 19200 baud.</small>
@@ -1805,13 +1805,13 @@
                             <summary>Advanced: edit filter names as lines</summary>
                             <div class="form-group">
                                 <label for="wandererastro-filter-names">Filter Names (optional):</label>
-                                <textarea id="wandererastro-filter-names" name="wandererastroFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <textarea id="wandererastro-filter-names" name="wandererastroFilterNames" data-config-key="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
                                 <small>One name per line. Leave blank for default names (Filter 1..8).</small>
                             </div>
                         </details>
                     </div>
 
-                    <div id="wandererastro-box-fields" style="display: none;">
+                    <div id="wandererastro-box-fields" data-device-type="switch" style="display: none;">
                         <h3>WandererAstro WandererBox Pro V3</h3>
                         <p><small>11-port power box with USB hub control, three PWM dew heater channels, an
                            adjustable 0&ndash;13.2&nbsp;V regulated output, and environment/power sensors. All ports and
@@ -1819,7 +1819,7 @@
 
                         <div class="form-group">
                             <label for="wandererastro-box-connection-type">Connection Type:</label>
-                            <select id="wandererastro-box-connection-type" name="wandererastroBoxConnectionType">
+                            <select id="wandererastro-box-connection-type" name="wandererastroBoxConnectionType" data-config-key="connectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
                                 <option value="serial">Serial (USB) - manual port</option>
                             </select>
@@ -1829,7 +1829,7 @@
                         <div id="wandererastro-box-auto-fields">
                             <div class="form-group">
                                 <label for="wandererastro-box-index">Power Box Index:</label>
-                                <input type="number" id="wandererastro-box-index" name="wandererastroBoxIndex" value="0" min="0">
+                                <input type="number" id="wandererastro-box-index" name="wandererastroBoxIndex" data-config-key="boxIndex" value="0" min="0">
                                 <small>0-based index if multiple WandererBoxes are detected. Usually 0.</small>
                             </div>
                         </div>
@@ -1837,12 +1837,12 @@
                         <div id="wandererastro-box-serial-fields" style="display: none;">
                             <div class="form-group">
                                 <label for="wandererastro-box-port-path">Serial Port:</label>
-                                <input type="text" id="wandererastro-box-port-path" name="wandererastroBoxPortPath" placeholder="/dev/ttyUSB0">
+                                <input type="text" id="wandererastro-box-port-path" name="wandererastroBoxPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
                                 <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
                             </div>
                             <div class="form-group">
                                 <label for="wandererastro-box-baud-rate">Baud Rate:</label>
-                                <select id="wandererastro-box-baud-rate" name="wandererastroBoxBaudRate">
+                                <select id="wandererastro-box-baud-rate" name="wandererastroBoxBaudRate" data-config-key="baudRate">
                                     <option value="19200" selected>19200</option>
                                 </select>
                                 <small>The WandererBox protocol is fixed at 19200 baud.</small>
@@ -2043,6 +2043,7 @@
     </div>
 
     <script src="/web/format.js?v=15"></script>
-    <script src="/web/app.js?v=46"></script>
+    <script src="/web/catalog_schema.js?v=2"></script>
+    <script src="/web/app.js?v=48"></script>
 </body>
 </html>

@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <iterator>
 #include <span>
 #include <string>
@@ -38,7 +39,7 @@ void wait_until_ready(alpacacore::CameraDriver& camera) {
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     while (std::chrono::steady_clock::now() < deadline) {
         if (camera.get_image_ready()) return;
-        std::this_thread::sleep_for(1ms);
+        std::this_thread::yield();
     }
     FAIL("SVBONY exposure did not become ready");
 }
@@ -53,7 +54,7 @@ void wait_for_driver_exception(alpacacore::CameraDriver& camera, std::string_vie
             CHECK(std::string(ex.what()).find(expected_message) != std::string::npos);
             return;
         }
-        std::this_thread::sleep_for(1ms);
+        std::this_thread::yield();
     }
     FAIL("SVBONY exposure failure was not published");
 }
@@ -113,7 +114,212 @@ struct ReleaseVideoDataOnExit {
     ~ReleaseVideoDataOnExit() { sdk.release_video_data(); }
 };
 
+void require_metadata_unset(alpacacore::CameraDriver& camera, int error = alpacacore::AlpacaError::InvalidOperation) {
+    require_alpaca_error([&] { static_cast<void>(camera.get_last_exposure_duration()); }, error);
+    require_alpaca_error([&] { static_cast<void>(camera.get_last_exposure_start_time()); }, error);
+}
+
+// Release before the driver joins its worker, even if an assertion fails.
+struct ReleaseSetupOnExit {
+    std::promise<void>& release;
+    bool released{false};
+    void release_now() {
+        release.set_value();
+        released = true;
+    }
+    ~ReleaseSetupOnExit() {
+        if (!released) release.set_value();
+    }
+};
+
 }  // namespace
+
+TEST_CASE("FakeSVBSDK - idle stop preserves next capture read hold", "[svbony][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    sdk.open_camera(17);
+    std::vector<std::uint8_t> buffer(16 * 8 * 2);
+    sdk.start_video_capture(17);
+    REQUIRE(sdk.get_video_data(17, buffer.data(), static_cast<long>(buffer.size()), 500) ==
+            alpacacore::vendor::svbony::SVBVideoDataResult::Frame);
+    sdk.stop_video_capture(17);
+
+    sdk.set_max_read_wait(5s);
+    sdk.block_video_data();
+    sdk.stop_video_capture(17);  // StartExposure reaps the previous, already stopped capture's worker.
+    sdk.start_video_capture(17);
+    auto read = std::async(std::launch::async, [&] {
+        return sdk.get_video_data(17, buffer.data(), static_cast<long>(buffer.size()), 500);
+    });
+    ReleaseVideoDataOnExit release{sdk};
+    REQUIRE(sdk.wait_for_video_data(2s));
+    CHECK(read.wait_for(0s) == std::future_status::timeout);
+    sdk.release_video_data();
+    REQUIRE(read.wait_for(2s) == std::future_status::ready);
+    CHECK(read.get() == alpacacore::vendor::svbony::SVBVideoDataResult::Frame);
+    sdk.stop_video_capture(17);
+    sdk.close_camera(17);
+}
+
+TEST_CASE("SVBONY Camera - metadata stays unset until the first accepted frame", "[svbony][camera][unit][metadata]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk, clock);
+    require_metadata_unset(*camera, alpacacore::AlpacaError::NotConnected);
+    camera->set_connected(true);
+    require_metadata_unset(*camera);
+
+    SECTION("first frame pending then cancelled or timed out") {
+        sdk.set_max_read_wait(5s);
+        sdk.block_video_data();
+        ReleaseVideoDataOnExit release{sdk};
+        camera->start_exposure(0.01, true);
+        REQUIRE(sdk.wait_for_video_data(2s));
+        require_metadata_unset(*camera);
+        CHECK_FALSE(camera->get_image_ready());
+        SECTION("watchdog rejects the late frame") {
+            clock.advance(16s);
+            wait_for_driver_exception(*camera, "completion deadline");
+            require_metadata_unset(*camera);
+        }
+        SECTION("abort while the read is held") {
+            CHECK(camera->get_camera_state() == alpacacore::CameraState::Exposing);
+        }
+        camera->abort_exposure();
+        require_metadata_unset(*camera);
+    }
+    SECTION("capture start failed") {
+        sdk.fail_next_capture_start();
+        camera->start_exposure(0.01, true);
+        wait_for_driver_exception(*camera, "start_video_capture");
+        require_metadata_unset(*camera);
+    }
+    SECTION("invalid frame metadata") {
+        sdk.return_roi({0, 0, 0, 8, 1});
+        camera->start_exposure(0.01, true);
+        wait_for_driver_exception(*camera, "invalid ROI metadata");
+        require_metadata_unset(*camera);
+    }
+    SECTION("successful bias uses the programmed minimum") {
+        camera->start_exposure(0.0, false);
+        wait_until_ready(*camera);
+        CHECK(camera->get_last_exposure_duration() == 0.000001);
+    }
+}
+
+TEST_CASE("SVBONY Camera - pending failed and cancelled frames preserve successful metadata",
+          "[svbony][camera][unit][metadata]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = connected_camera_on_clock(sdk, clock);
+    camera->start_exposure(0.0010004, true);
+    wait_until_ready(*camera);
+    const auto start_a = camera->get_last_exposure_start_time();
+    const auto require_a = [&] {
+        CHECK(camera->get_last_exposure_duration() == 0.001);
+        CHECK(camera->get_last_exposure_start_time() == start_a);
+    };
+    require_a();
+    camera->set_connected(true);
+    require_a();
+
+    sdk.set_max_read_wait(5s);
+    sdk.block_video_data();
+    ReleaseVideoDataOnExit release{sdk};
+    const auto before_b = std::chrono::system_clock::now();
+    camera->start_exposure(0.02, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+    require_a();
+    CHECK_FALSE(camera->get_image_ready());
+    require_alpaca_error([&] { camera->get_image_array(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->start_exposure(-1, true); }, alpacacore::AlpacaError::InvalidValue);
+    require_a();
+
+    SECTION("B succeeds and replaces both fields") {
+        const auto before_release = std::chrono::system_clock::now();
+        sdk.release_video_data();
+        wait_until_ready(*camera);
+        CHECK(camera->get_last_exposure_duration() == 0.02);
+        CHECK(camera->get_last_exposure_start_time() >= before_b);
+        CHECK(camera->get_last_exposure_start_time() <= before_release);
+    }
+    SECTION("B fails without returning A pixels") {
+        sdk.fail_next_held_read();
+        sdk.release_video_data();
+        wait_for_driver_exception(*camera, "late SVBONY read failure");
+        require_a();
+        require_array_failure(*camera);
+    }
+    SECTION("B is aborted") {
+        camera->abort_exposure();
+        require_a();
+        CHECK_FALSE(camera->get_image_ready());
+        require_alpaca_error([&] { camera->get_image_array(); }, alpacacore::AlpacaError::InvalidOperation);
+    }
+    SECTION("late B cannot publish after the watchdog") {
+        clock.advance(16s);
+        wait_for_driver_exception(*camera, "completion deadline");
+        camera->abort_exposure();  // Abort releases the held read; a finished worker makes abort a no-op.
+        require_a();
+        CHECK_FALSE(camera->get_image_ready());
+    }
+    SECTION("disconnect joins B and clears the session") {
+        camera->set_connected(false);
+        require_metadata_unset(*camera, alpacacore::AlpacaError::NotConnected);
+        camera->set_connected(true);
+        require_metadata_unset(*camera);
+        CHECK_FALSE(camera->get_image_ready());
+    }
+    SECTION("a replacement joins B before publishing C") {
+        camera->start_exposure(0.03, true);
+        wait_until_ready(*camera);
+        CHECK(camera->get_last_exposure_duration() == 0.03);
+        CHECK(camera->get_last_exposure_start_time() >= before_b);
+    }
+}
+
+TEST_CASE("SVBONY Camera - deferred setup is excluded from acquisition timing",
+          "[svbony][camera][unit][metadata][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    std::promise<void> setup_entered;
+    std::promise<void> release_setup;
+    auto entered = setup_entered.get_future();
+    auto released = release_setup.get_future();
+    auto camera = connected_camera_on_clock(sdk, clock);
+    camera->set_fast_readout(true);
+    camera->set_num_x(8);
+    std::chrono::system_clock::time_point start_call;
+    sdk.before_call = [&](const std::string& method) {
+        if (method == "set_control_value.FrameSpeedMode") {
+            setup_entered.set_value();
+            if (released.wait_for(5s) != std::future_status::ready)
+                throw alpacacore::AlpacaException("setup gate timed out", alpacacore::AlpacaError::DriverException);
+        }
+        if (method == "start_video_capture") start_call = std::chrono::system_clock::now();
+    };
+    ReleaseSetupOnExit release{release_setup};
+    sdk.set_max_read_wait(5s);
+    sdk.block_video_data();
+    ReleaseVideoDataOnExit release_read{sdk};
+    camera->start_exposure(1.0000004, true);
+    REQUIRE(entered.wait_for(2s) == std::future_status::ready);
+    clock.advance(2s);
+    CHECK(camera->get_percent_completed() == 0.0);
+    require_metadata_unset(*camera);
+    const auto setup_release_time = std::chrono::system_clock::now();
+    release.release_now();
+    REQUIRE(sdk.wait_for_video_data(2s));
+    CHECK(camera->get_percent_completed() == 0.0);
+    clock.advance(500ms);
+    CHECK(camera->get_percent_completed() == 50.0);
+    require_metadata_unset(*camera);
+    sdk.release_video_data();
+    wait_until_ready(*camera);
+    CHECK(camera->get_last_exposure_duration() == 1.0);
+    CHECK(camera->get_last_exposure_start_time() >= setup_release_time);
+    CHECK(camera->get_last_exposure_start_time() <= start_call);
+    CHECK(camera->get_image_array().width == 8);
+}
 
 TEST_CASE("SVBONY Camera - ImageArray while the frame is read is asked too early", "[svbony][camera][unit]") {
     using namespace std::chrono_literals;
@@ -633,7 +839,7 @@ TEST_CASE("SVBONY Camera - close and reopen clears an unconfirmed capture stop",
     camera->set_connected(true);
     CHECK_FALSE(camera->get_image_ready());
     require_alpaca_error([&] { static_cast<void>(camera->get_last_exposure_duration()); },
-                         alpacacore::AlpacaError::ValueNotSet);
+                         alpacacore::AlpacaError::InvalidOperation);
     camera->start_exposure(0.001, true);
     wait_until_ready(*camera);
     CHECK(camera->get_image_array().data.size() == 128);

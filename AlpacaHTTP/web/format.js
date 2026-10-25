@@ -733,7 +733,8 @@ function calibrationHint(state) {
 
 function calibrationConfirmText() {
     return 'Calibrate the focus motor? It drives from one end of its travel to the other and back, ' +
-        'which takes about 5 minutes. Remove anything that could be hit by the focuser or its load first.';
+        'which takes about 5 minutes. Check first that the motor is firmly seated on the focuser: ' +
+        'a loose fit can make it bind during the run.';
 }
 
 // Body for PUT /api/v1/focuser/{n}/action (Alpaca form fields).

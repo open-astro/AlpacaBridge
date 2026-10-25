@@ -88,6 +88,7 @@ public:
                 break;
             case 0x32:
                 ++state_->status_reads;
+                hold_gate(lock, cmd);
                 if (state_->fail_status) break;
                 resp.push_back(14);
                 be32(2048);        // internal ADC

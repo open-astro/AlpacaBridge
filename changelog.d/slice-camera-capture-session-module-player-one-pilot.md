@@ -1,0 +1,2 @@
+### Changed (internal)
+- **Camera capture session module** (AlpacaCore, issue #1605): adds `util::CaptureSession`, a header-only module that holds one camera's exposure state, timestamps, watchdog and kept failure over one `util::AsyncOperation` slot on the injected task clock. No camera driver uses it yet, so no device behaviour changes; 25 test cases in `test_capture_session.cpp` cover it, including a lock-order stress case.

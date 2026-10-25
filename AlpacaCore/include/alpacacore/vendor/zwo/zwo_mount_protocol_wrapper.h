@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,6 +60,9 @@ struct ConnectionInfo {
 // (192.168.4.1:4030 per the protocol docs). Returns the found devices with
 // their model names. Used by ConnectionType::Auto.
 std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms = 1500);
+// Candidate-input seam: runs the production probes without scanning real ports or the mount AP.
+std::vector<ZWODeviceInfo> enumerate_zwo_mounts(const std::vector<ZWODeviceInfo>& candidates,
+                                                int probe_timeout_ms = 1500);
 
 enum class MountMode {
     Unknown,
@@ -115,7 +119,8 @@ enum class ParkStatus {
 class ZWOMountProtocolWrapper {
 public:
     // Driver links require identity admission under the I/O lock; raw transport users keep the default mode.
-    explicit ZWOMountProtocolWrapper(bool require_identity = false);
+    explicit ZWOMountProtocolWrapper(bool require_identity = false,
+                                     std::optional<std::vector<ZWODeviceInfo>> discovery_candidates = std::nullopt);
     ~ZWOMountProtocolWrapper();
     ZWOMountProtocolWrapper(const ZWOMountProtocolWrapper&) = delete;
     ZWOMountProtocolWrapper& operator=(const ZWOMountProtocolWrapper&) = delete;

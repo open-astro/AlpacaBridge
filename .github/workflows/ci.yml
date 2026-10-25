@@ -1040,11 +1040,10 @@ jobs:
         # Literal fixtures, one per rule (ADR 0003), independent of repo state.
         run: python3 scripts/check_contract_sweep.py --self-test
 
-      - name: Check every router-constructed driver is in the contract sweep
+      - name: Check every catalog-constructed driver is in the contract sweep
         # Issue #571: AlpacaCore/tests/contract_sweep.h must hold an entry for
-        # every (vendor, deviceType) pair Router::register_device_from_config()
-        # constructs, or ALLOWLIST it with a reason. Also checks the guard
-        # macros reach alpacacore_tests, so the registry cannot compile empty.
+        # every (vendor, deviceType) pair the device catalog constructs, or ALLOWLIST it with a reason.
+        # Also checks the guard macros reach alpacacore_tests, so the registry cannot compile empty.
         run: python3 scripts/check_contract_sweep.py
 
   conformu-reports:
@@ -1078,6 +1077,76 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin "$GITHUB_BASE_REF"
           python3 scripts/check_conformu_reports.py "origin/$GITHUB_BASE_REF"
+
+  conformu-fake:
+    # Hardware-free ConformU: the Sky-Watcher driver over FakeSkyWatcherMount,
+    # served by the test-only fake_skywatcher_server (not installed or packaged).
+    # The report is a CI artifact (Fake-Linux-arm64.txt, "FAKE REPORT:" first line)
+    # and a copy is committed under AlpacaCore/conformu/SkyWatcher/Fake/. It is never
+    # hardware validation.
+    name: ConformU against the fake Sky-Watcher mount (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            g++ \
+            pkg-config \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            libsystemd-dev \
+            nlohmann-json3-dev \
+            zlib1g-dev \
+            libcurl4-openssl-dev
+
+      - name: Build the fake server (core + HTTP, Sky-Watcher only)
+        run: |
+          set -euo pipefail
+          cmake -S AlpacaHTTP -B AlpacaHTTP/build \
+            -DALPACAHTTP_BUILD_TESTS=ON \
+            -DALPACACORE_ENABLE_ALL_VENDORS=OFF \
+            -DALPACACORE_ENABLE_SKYWATCHER=ON
+          cmake --build AlpacaHTTP/build --target fake_skywatcher_server --parallel "$(nproc)"
+
+      - name: Install ConformU 4.5.3 (pinned release, sha256-checked)
+        # The standard in .github/instructions/testing.instructions.md; the same
+        # asset and checksum as /conformu step 2g.
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/conformu"
+          cd "$RUNNER_TEMP/conformu"
+          curl -sSfL -o cu.tar.gz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.5.3/conformu.4.5.3.linux-arm64.tar.gz'
+          echo '8c01fce9447f78e7f076c2279d6f38c7b8f78ef8d3c9f92e78566a61fb778bbc  cu.tar.gz' | sha256sum -c -
+          tar xzf cu.tar.gz
+          rm cu.tar.gz
+          chmod +x conformu
+          ./conformu --version | tail -1
+
+      - name: Run ConformU against the fake telescope
+        # Fails when ConformU exits non-zero or its log lacks the clean-pass line
+        # or shows a response-time finding (the checker's own rules).
+        run: |
+          scripts/run_fake_conformu.sh \
+            AlpacaHTTP/build/fake_skywatcher_server \
+            "$RUNNER_TEMP/conformu/conformu" \
+            "$RUNNER_TEMP/fake-conformu"
+
+      - name: Upload the ConformU log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: conformu-fake-skywatcher
+          path: ${{ runner.temp }}/fake-conformu/
+          if-no-files-found: warn
 
   shellcheck:
     name: ShellCheck

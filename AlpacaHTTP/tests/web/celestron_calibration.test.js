@@ -70,6 +70,15 @@ test('the confirm text warns about end-to-end travel', () => {
     assert.match(f.calibrationConfirmText(), /one end of its travel to the other/);
 });
 
+// The motor sits inside the focuser housing, so there is nothing for it to
+// hit; what goes wrong is a loose fit that makes it bind (issue #896).
+test('the confirm text asks for a seated motor, not a clear path', () => {
+    const text = f.calibrationConfirmText();
+    assert.doesNotMatch(text, /hit/);
+    assert.match(text, /firmly seated/);
+    assert.match(text, /bind/);
+});
+
 test('controls show only on Celestron focuser devices', () => {
     assert.equal(f.showsCalibrationControls({ Vendor: 'celestron', DeviceType: 'Focuser' }), true);
     assert.equal(f.showsCalibrationControls({ DeviceType: 'focuser', Config: { vendor: 'celestron' } }), true);

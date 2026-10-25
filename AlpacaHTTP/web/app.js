@@ -258,6 +258,7 @@ function resetDeviceForm() {
     }
     // Re-run the vendor option/sub-section toggles against the reset values so
     // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
+    keepVendor = '';
     updateVendorOptions();
     zwoFilterwheelSlotUI.syncSlotsFromTextarea();
     playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
@@ -267,6 +268,7 @@ function resetDeviceForm() {
     if (messageDiv) {
         messageDiv.style.display = 'none';
     }
+    ensureCatalog();
 }
 
 let currentDevices = [];
@@ -320,51 +322,119 @@ function getNextDeviceNumberForType(deviceType) {
     return getNextAvailableNumber(used);
 }
 
-// Index-addressed config fields that auto-increment per (vendor, deviceType).
-//
-// The Alpaca device *number* (handled above, vendor-agnostic per type) is how a
-// client addresses a device. A vendor *index* is different: it selects which
-// physical unit a vendor SDK enumerates on the bus (camera 0, 1, 2 ...). Each
-// SDK counts from 0 independently, so the index is scoped per (vendor,
-// deviceType) - a ZWO camera and a Player One camera can both be index 0.
-// Vendors that connect by serial port or network (iOptron, SynScan, Celestron,
-// Bisque) identify the device by path/host and have no index field, so they
-// aren't listed here. `idFieldId`, when present, is a serial/ID input that pins
-// a specific unit; if the user filled it, we don't impose an auto index.
-const INDEX_FIELDS = [
-    { fieldId: 'camera-index', vendor: 'zwo', deviceType: 'camera', configKey: 'cameraIndex', idFieldId: 'camera-id' },
-    { fieldId: 'filterwheel-index', vendor: 'zwo', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'filterwheel-id' },
-    { fieldId: 'focuser-index', vendor: 'zwo', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'focuser-id' },
-    { fieldId: 'rotator-index', vendor: 'zwo', deviceType: 'rotator', configKey: 'rotatorIndex', idFieldId: 'rotator-id' },
-    { fieldId: 'qhy-camera-index', vendor: 'qhy', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'qhy-cfw-camera-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'cameraIndex', idFieldId: 'qhy-cfw-camera-id' },
-    { fieldId: 'qhy-cfw3-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
-    { fieldId: 'qhy-focuser-index', vendor: 'qhy', deviceType: 'focuser', configKey: 'focuserIndex' },
-    { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'altair-camera-index', vendor: 'altair', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'gphoto-camera-index', vendor: 'gphoto', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
-    { fieldId: 'touptek-filterwheel-index', vendor: 'touptek', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'touptek-filterwheel-id' },
-    { fieldId: 'playerone-camera-index', vendor: 'playerone', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
-    { fieldId: 'astroasis-focuser-index', vendor: 'astroasis', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'astroasis-hid-path' },
-    { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
-    { fieldId: 'ioptron-ieaf-focuser-index', vendor: 'ioptron', deviceType: 'focuser', configKey: 'focuserIndex' },
-    { fieldId: 'ioptron-camera-index', vendor: 'ioptron', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'ioptron-filterwheel-index', vendor: 'ioptron', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
-    { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
-    // Same configKey as the Lite field above: panelIndex is an index into
-    // enumerate_gemini_flatpanel_ports(), a scan shared by both models, so
-    // devices of either model correctly compete for the same index namespace.
-    { fieldId: 'gemini-flatpanel-v2-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
-    { fieldId: 'gemini-flatpanel-pro-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
-    { fieldId: 'gemini-pdh-index', vendor: 'gemini', deviceType: 'switch', configKey: 'hubIndex' },
-    { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
-    { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
-    { fieldId: 'wandererastro-filterwheel-index', vendor: 'wandererastro', deviceType: 'filterwheel', configKey: 'wandererFilterwheelIndex' },
-    { fieldId: 'wandererastro-box-index', vendor: 'wandererastro', deviceType: 'switch', configKey: 'boxIndex' },
-];
+// Index-addressed config fields that auto-increment per (vendor, deviceType),
+// derived from the device catalog and the annotated form by ensureCatalog().
+// See deriveIndexFields() in catalog_schema.js for what counts as one and how
+// its `idFieldId` (the serial/ID input that pins a specific unit) is chosen.
+let indexFields = [];
+
+// The device catalog (GET /management/v1/devicecatalog), fetched once per page
+// load through loadCatalog(); null until it has loaded, so no vendor is offered
+// and #vendor stays disabled (fail closed). keepVendor is the vendor of the
+// device being edited: it stays offered even if this build lacks it.
+let catalogData = null;
+let keepVendor = '';
+const loadCatalog = catalogLoader(() => fetch('/management/v1/devicecatalog').then(response => {
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+    return response.json();
+}));
+
+// The device form's catalog-mapped inputs, as catalog_schema.js reads them:
+// { id, vendor, deviceType, configKey, control, manual, readOnly, path } from
+// the data-vendor, data-device-type, data-config-key and data-config-fill
+// attributes and the readonly attribute in index.html. path lists the ids of
+// the enclosing <div>s, outermost first.
+function readFormFields() {
+    return Array.from(document.querySelectorAll('#device-form [data-config-key]')).map(element => {
+        const path = [];
+        for (let node = element.parentElement; node && node.id !== 'device-form'; node = node.parentElement) {
+            if (node.tagName === 'DIV' && node.id) {
+                path.unshift(node.id);
+            }
+        }
+        const vendorScope = element.closest('[data-vendor]');
+        const typeScope = element.closest('[data-device-type]');
+        return {
+            id: element.id,
+            vendor: vendorScope ? vendorScope.dataset.vendor : null,
+            deviceType: typeScope ? typeScope.dataset.deviceType : null,
+            configKey: element.dataset.configKey,
+            control: element.tagName === 'INPUT' ? (element.getAttribute('type') || 'text') : element.tagName.toLowerCase(),
+            manual: element.dataset.configFill === 'manual',
+            readOnly: element.hasAttribute('readonly'),
+            path
+        };
+    });
+}
+
+// Puts an element back to what index.html gives it.
+function restoreMarkupDefault(element) {
+    if (element.tagName === 'SELECT') {
+        Array.from(element.options).forEach(option => {
+            option.selected = option.defaultSelected;
+        });
+        if (element.selectedIndex === -1) {
+            element.selectedIndex = 0;
+        }
+    } else if (element.type === 'checkbox') {
+        element.checked = element.defaultChecked;
+    } else {
+        element.value = element.defaultValue;
+    }
+}
+
+// Hides the form group of every mapped field whose catalog appliesWhen names a
+// Discriminator holding another value. A group shared by several fields hides
+// only when none of them applies. Runs on every change in the device form.
+function updateFieldApplicability() {
+    const vendor = document.getElementById('vendor').value;
+    const deviceType = normalizeDeviceType(document.getElementById('device-type').value);
+    const formFields = readFormFields();
+    const descriptor = Array.isArray(catalogData)
+        ? catalogData.find(d => d.vendor === vendor && d.deviceType === deviceType) : undefined;
+    const values = {};
+    formFields.forEach(field => {
+        const element = document.getElementById(field.id);
+        values[field.id] = element.type === 'checkbox' ? element.checked : element.value;
+    });
+    const applies = applicability(descriptor, formFields, values);
+    const groupApplies = new Map();
+    Object.keys(applies).forEach(id => {
+        const group = document.getElementById(id).closest('.form-group');
+        if (group) {
+            groupApplies.set(group, groupApplies.get(group) === true || applies[id]);
+        }
+    });
+    groupApplies.forEach((shown, group) => {
+        group.hidden = !shown;
+    });
+}
+
+// Waits for the catalog and applies it: the index fields, the vendor list.
+// A failed load is shown as text (never markup) and the next form open tries
+// again. Returns the catalog, or null when there is none.
+async function ensureCatalog() {
+    const messageDiv = document.getElementById('form-message');
+    try {
+        catalogData = await loadCatalog();
+        indexFields = deriveIndexFields(catalogData, readFormFields());
+        if (messageDiv && messageDiv.dataset.catalogError === 'true') {
+            delete messageDiv.dataset.catalogError;
+            messageDiv.style.display = 'none';
+        }
+    } catch (error) {
+        if (messageDiv) {
+            messageDiv.dataset.catalogError = 'true';
+            messageDiv.style.display = 'block';
+            messageDiv.className = 'message error';
+            messageDiv.textContent = `Could not load the device list: ${error.message}`;
+        }
+    }
+    updateVendorOptions();
+    return catalogData;
+}
 
 // Lowest unused value of field.configKey across already-configured devices that
 // match this field's (vendor, deviceType). Each SDK enumerates from 0, so the
@@ -423,7 +493,7 @@ function maybeAutoFillIndexFields() {
     }
     const vendor = vendorSelect.value;
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
-    INDEX_FIELDS.forEach(field => {
+    indexFields.forEach(field => {
         if (field.vendor !== vendor || field.deviceType !== deviceType) {
             return;
         }
@@ -815,7 +885,7 @@ async function handleEditDeviceClick(event) {
     if (!device) {
         return;
     }
-    startEditDevice(device);
+    await startEditDevice(device);
 }
 
 function handleDeleteDeviceClick(event) {
@@ -993,7 +1063,7 @@ function setEditMode(isEditing) {
             // Clear the manual-edit flag on every vendor index field so the next
             // fresh "Add Device" re-derives them instead of treating a prior
             // edit's value as user-pinned.
-            INDEX_FIELDS.forEach(field => {
+            indexFields.forEach(field => {
                 const input = document.getElementById(field.fieldId);
                 if (input) {
                     delete input.dataset.userModified;
@@ -1067,7 +1137,14 @@ function updateApertureAreaFromDiameter(diameterId, areaId) {
     areaEl.value = area.toFixed(6);
 }
 
-function startEditDevice(device) {
+async function startEditDevice(device) {
+    // Open the Configure tab first, without resetting the form we are about to
+    // populate, so a failed catalog load shows its message where the user is.
+    showTab('configure', { preserveForm: true });
+    const catalog = await ensureCatalog();
+    if (!catalog) {
+        return;
+    }
     const config = device.Config || device.config || {};
     const vendor = device.Vendor || config.vendor || '';
     const deviceType = normalizeDeviceType(device.DeviceType || device.deviceType);
@@ -1075,6 +1152,7 @@ function startEditDevice(device) {
     setEditMode(true);
     setFormValue('device-type', deviceType);
     setFormValue('device-number', device.DeviceNumber);
+    keepVendor = vendor;
     setFormValue('vendor', vendor);
     updateVendorOptions();
 
@@ -1085,478 +1163,109 @@ function startEditDevice(device) {
     // dispatch - no explicit toggler calls are needed here.
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
-    if (vendor === 'ioptron' && deviceType === 'switch') {
-        // iMate PowerBox: optional GPIO chip override plus PWM frequency and
-        // per-port PWM flags (positional: index 1 = DC1, index 2 = DC2).
-        if (config.gpioChip !== undefined && config.gpioChip !== null) {
-            setFormValue('ioptron-powerbox-gpio-chip', config.gpioChip);
+    // Generic fill: every mapped, non-manual, writable field of this vendor and type
+    // takes its saved value from the catalog descriptor (catalog_schema.js).
+    // An absent value shows the markup default. A Discriminator takes its
+    // catalog default instead, and gets a change event in descriptor order so
+    // the per-vendor togglers show the saved branch.
+    const formFields = readFormFields();
+    const descriptor = catalog.find(d => d.vendor === vendor && d.deviceType === deviceType);
+    const discriminators = [];
+    editAssignments(descriptor, config, formFields).forEach(assignment => {
+        const element = document.getElementById(assignment.id);
+        if (!element) {
+            return;
         }
-        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
-            setFormValue('ioptron-powerbox-pwm-frequency', config.pwmFrequencyHz);
+        if (assignment.value === null) {
+            restoreMarkupDefault(element);
+        } else if (element.type === 'checkbox') {
+            element.checked = assignment.value;
+        } else {
+            element.value = assignment.value;
         }
-        if (Array.isArray(config.ports)) {
-            [1, 2].forEach(function(i) {
-                const pwmCheckbox = document.getElementById('ioptron-port-pwm-' + i);
-                if (pwmCheckbox && config.ports[i]) {
-                    pwmCheckbox.checked = config.ports[i].pwm === true;
-                }
-            });
+        if (assignment.discriminator) {
+            discriminators.push(element);
         }
-        updateIoptronConfigFields();
-    } else if (vendor === 'ioptron' && deviceType === 'filterwheel') {
-        // iEFW: USB-serial only, fixed 115200 baud.
-        const iefwConnectionType = config.connectionType || 'auto';
-        setFormValue('ioptron-filterwheel-model', config.model || 'iefw15');
-        setFormValue('ioptron-filterwheel-connection-type', iefwConnectionType);
-        if (iefwConnectionType === 'serial') {
-            setFormValue('ioptron-filterwheel-port-path', config.portPath);
-        } else if (config.filterwheelIndex !== undefined && config.filterwheelIndex !== null) {
-            setFormValue('ioptron-filterwheel-index', config.filterwheelIndex);
-        }
-        const iefwConnectionTypeEl = document.getElementById('ioptron-filterwheel-connection-type');
-        if (iefwConnectionTypeEl) {
-            iefwConnectionTypeEl.dispatchEvent(new Event('change'));
-        }
-        const ioptronFilterNamesField = document.getElementById('ioptron-filter-names');
-        if (ioptronFilterNamesField) {
-            ioptronFilterNamesField.value = Array.isArray(config.filterNames)
-                ? config.filterNames.join('\n')
-                : '';
-            ioptronFilterwheelSlotUI.syncSlotsFromTextarea();
-        }
-        updateIoptronConfigFields();
-    } else if (vendor === 'ioptron' && deviceType === 'focuser') {
-        // iEAF: USB-serial only, fixed 115200 baud.
-        const ieafConnectionType = config.connectionType || 'auto';
-        setFormValue('ioptron-ieaf-model', config.model || 'ieaf');
-        setFormValue('ioptron-ieaf-connection-type', ieafConnectionType);
-        if (ieafConnectionType === 'serial') {
-            setFormValue('ioptron-ieaf-port-path', config.portPath);
-        } else if (config.focuserIndex !== undefined && config.focuserIndex !== null) {
-            setFormValue('ioptron-ieaf-focuser-index', config.focuserIndex);
-        }
-        const ieafConnectionTypeEl = document.getElementById('ioptron-ieaf-connection-type');
-        if (ieafConnectionTypeEl) {
-            ieafConnectionTypeEl.dispatchEvent(new Event('change'));
-        }
-        updateIoptronConfigFields();
-    } else if (vendor === 'ioptron' && deviceType === 'camera') {
-        // iCAM (Player One SDK): enumeration index only.
-        setFormValue('ioptron-camera-index', config.cameraIndex);
-        updateIoptronConfigFields();
-    } else if (vendor === 'ioptron') {
-        const ioptronConnectionType = config.connectionType || 'auto';
-        setFormValue('ioptron-connection-type', ioptronConnectionType);
-        if (ioptronConnectionType === 'serial') {
-            setFormValue('ioptron-port-path', config.portPath);
-            setFormValue('ioptron-baud-rate', config.baudRate);
-        } else if (ioptronConnectionType === 'network') {
-            setFormValue('ioptron-host', config.host);
-            setFormValue('ioptron-tcp-port', config.tcpPort);
-        }
-        setFormValue('aperture-diameter', opticsMetersToMm(config.apertureDiameter));
-        setFormValue('focal-length', opticsMetersToMm(config.focalLength));
+    });
+
+    // Hand-written residue: the fields marked data-config-fill="manual" (the
+    // catalog cannot express them), the pickers, the port tables and the
+    // filter-slot UIs. Optics are saved in metres and shown in millimetres.
+    const apertureMm = opticsMetersToMm(config.apertureDiameter);
+    const focalLengthMm = opticsMetersToMm(config.focalLength);
+    if (vendor === 'ioptron') {
+        setFormValue('aperture-diameter', apertureMm);
+        setFormValue('focal-length', focalLengthMm);
         updateApertureAreaFromDiameter('aperture-diameter', 'aperture-area');
-        const ioptronConnectionTypeEl = document.getElementById('ioptron-connection-type');
-        if (ioptronConnectionTypeEl) {
-            ioptronConnectionTypeEl.dispatchEvent(new Event('change'));
-        }
     } else if (vendor === 'synscan') {
-        setFormValue('synscan-version', config.synscanVersion || 'auto');
-        setFormValue('synscan-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
-        const synscanConnectionType = config.connectionType || 'auto';
-        setFormValue('synscan-connection-type', synscanConnectionType);
-        if (synscanConnectionType === 'serial') {
-            setFormValue('synscan-port-path', config.portPath);
-            setFormValue('synscan-baud-rate', config.baudRate);
-        } else if (synscanConnectionType === 'network') {
-            setFormValue('synscan-host', config.host);
-            setFormValue('synscan-tcp-port', config.tcpPort);
-        }
-        setFormValue('synscan-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
-        setFormValue('synscan-focal-length', opticsMetersToMm(config.focalLength));
+        setFormValue('synscan-aperture-diameter', apertureMm);
+        setFormValue('synscan-focal-length', focalLengthMm);
         updateApertureAreaFromDiameter('synscan-aperture-diameter', 'synscan-aperture-area');
-        const synscanConnectionTypeEl = document.getElementById('synscan-connection-type');
-        if (synscanConnectionTypeEl) {
-            synscanConnectionTypeEl.dispatchEvent(new Event('change'));
-        }
     } else if (vendor === 'skywatcher') {
-        const skywatcherConnectionType = config.connectionType || 'auto';
-        setFormValue('skywatcher-connection-type', skywatcherConnectionType);
-        if (skywatcherConnectionType === 'serial') {
-            setFormValue('skywatcher-port-path', config.portPath);
-            setFormValue('skywatcher-baud-rate', config.baudRate);
-        } else if (skywatcherConnectionType === 'network') {
-            setFormValue('skywatcher-host', config.host);
-            setFormValue('skywatcher-udp-port', config.udpPort);
-        }
-        setFormValue('skywatcher-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
-        setFormValue('skywatcher-focal-length', opticsMetersToMm(config.focalLength));
-        setFormValue('skywatcher-site-latitude', config.siteLatitude);
-        setFormValue('skywatcher-site-longitude', config.siteLongitude);
-        setFormValue('skywatcher-site-elevation', config.siteElevation);
-        // open-astro#436: absent or null = limit off = blank field.
-        setFormValue('skywatcher-min-altitude', config.minAltitudeDeg ?? '');
-        setFormValue('skywatcher-meridian-limit', config.meridianLimitMinutes ?? '');
-        // open-astro#582: absent = auto.
-        setFormValue('skywatcher-dec-axis-sense', config.decAxisSense || 'auto');
-        // open-astro#437: absent = 0 steps, off.
-        setFormValue('skywatcher-backlash-steps-ra', config.backlashStepsRA ?? 0);
-        setFormValue('skywatcher-backlash-steps-dec', config.backlashStepsDec ?? 0);
-        document.getElementById('skywatcher-backlash-enabled-ra').checked = config.backlashEnabledRA === true;
-        document.getElementById('skywatcher-backlash-enabled-dec').checked = config.backlashEnabledDec === true;
-        const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
-        if (skywatcherLearnSite) {
-            skywatcherLearnSite.checked = config.learnSiteFromClient !== false;
-        }
+        setFormValue('skywatcher-aperture-diameter', apertureMm);
+        setFormValue('skywatcher-focal-length', focalLengthMm);
         updateApertureAreaFromDiameter('skywatcher-aperture-diameter', 'skywatcher-aperture-area');
-        const skywatcherConnectionTypeEl = document.getElementById('skywatcher-connection-type');
-        if (skywatcherConnectionTypeEl) {
-            skywatcherConnectionTypeEl.dispatchEvent(new Event('change'));
-        }
     } else if (vendor === 'onstep') {
-        const onstepConnectionType = config.connectionType || 'auto';
-        setFormValue('onstep-connection-type', onstepConnectionType);
-        if (onstepConnectionType === 'serial') {
-            setFormValue('onstep-port-path', config.portPath);
-            setFormValue('onstep-baud-rate', config.baudRate);
-        }
-        setFormValue('onstep-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
-        setFormValue('onstep-focal-length', opticsMetersToMm(config.focalLength));
+        setFormValue('onstep-aperture-diameter', apertureMm);
+        setFormValue('onstep-focal-length', focalLengthMm);
         updateApertureAreaFromDiameter('onstep-aperture-diameter', 'onstep-aperture-area');
-        const onstepConnectionTypeEl = document.getElementById('onstep-connection-type');
-        if (onstepConnectionTypeEl) {
-            onstepConnectionTypeEl.dispatchEvent(new Event('change'));
-        }
-    } else if (vendor === 'celestron' && deviceType === 'focuser') {
-        setFormValue('celestron-focuser-port-path', config.portPath);
-        updateCelestronDeviceFields();
-    } else if (vendor === 'celestron') {
-        const protocol = config.protocol || 'nexstar';
-        setFormValue('celestron-protocol', protocol);
-        setFormValue('celestron-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
-        const celestronConnectionType = protocol === 'cgx-aux' ? 'serial' : (config.connectionType || 'auto');
-        setFormValue('celestron-connection-type', celestronConnectionType);
-        if (celestronConnectionType === 'serial') {
-            setFormValue('celestron-port-path', config.portPath);
-            if (protocol !== 'cgx-aux') {
-                setFormValue('celestron-baud-rate', config.baudRate);
-            }
-        } else {
-            setFormValue('celestron-host', config.host);
-            setFormValue('celestron-tcp-port', config.tcpPort);
-        }
-        setFormValue('celestron-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
-        setFormValue('celestron-focal-length', opticsMetersToMm(config.focalLength));
-        setFormValue('celestron-cgx-site-latitude', config.siteLatitude);
-        setFormValue('celestron-cgx-site-longitude', config.siteLongitude);
-        setFormValue('celestron-cgx-site-elevation', config.siteElevation);
-        const celestronProtocolEl = document.getElementById('celestron-protocol');
-        if (celestronProtocolEl) {
-            celestronProtocolEl.dispatchEvent(new Event('change'));
-        }
+    } else if (vendor === 'celestron' && deviceType === 'telescope') {
+        setFormValue('celestron-aperture-diameter', apertureMm);
+        setFormValue('celestron-focal-length', focalLengthMm);
     } else if (vendor === 'bisque') {
-        setFormValue('bisque-host', config.host || 'localhost');
-        setFormValue('bisque-tcp-port', config.tcpPort || 3040);
-        setFormValue('bisque-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
-        setFormValue('bisque-focal-length', opticsMetersToMm(config.focalLength));
+        setFormValue('bisque-aperture-diameter', apertureMm);
+        setFormValue('bisque-focal-length', focalLengthMm);
     } else if (vendor === 'zwo' && deviceType === 'telescope') {
-        const zwoMountConnectionType = config.connectionType || 'auto';
-        setFormValue('zwo-mount-connection-type', zwoMountConnectionType);
-        if (zwoMountConnectionType === 'serial') {
-            setFormValue('zwo-mount-port-path', config.portPath);
-            setFormValue('zwo-mount-baud-rate', config.baudRate);
-        } else {
-            setFormValue('zwo-mount-host', config.host);
-            setFormValue('zwo-mount-tcp-port', config.tcpPort);
-        }
-        setFormValue('zwo-mount-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
-        setFormValue('zwo-mount-focal-length', opticsMetersToMm(config.focalLength));
-        setFormValue('zwo-mount-site-latitude', config.siteLatitude);
-        setFormValue('zwo-mount-site-longitude', config.siteLongitude);
-        setFormValue('zwo-mount-site-elevation', config.siteElevation);
-        const zwoMountSyncTimeCheckbox = document.getElementById('zwo-mount-sync-time-on-connect');
-        if (zwoMountSyncTimeCheckbox) {
-            zwoMountSyncTimeCheckbox.checked = config.syncTimeOnConnect !== false;
-        }
-        const zwoMountLearnSite = document.getElementById('zwo-mount-learn-site-from-client');
-        if (zwoMountLearnSite) {
-            zwoMountLearnSite.checked = config.learnSiteFromClient !== false;
-        }
+        setFormValue('zwo-mount-aperture-diameter', apertureMm);
+        setFormValue('zwo-mount-focal-length', focalLengthMm);
         updateApertureAreaFromDiameter('zwo-mount-aperture-diameter', 'zwo-mount-aperture-area');
-        const zwoMountConnectionTypeEl = document.getElementById('zwo-mount-connection-type');
-        if (zwoMountConnectionTypeEl) {
-            zwoMountConnectionTypeEl.dispatchEvent(new Event('change'));
-        }
-    } else if (vendor === 'qhy' && deviceType === 'focuser') {
-        // Q-Focuser: USB-serial only, fixed 9600 baud.
-        const qfConnectionType = config.connectionType || 'auto';
-        setFormValue('qhy-focuser-connection-type', qfConnectionType);
-        if (qfConnectionType === 'serial') {
-            setFormValue('qhy-focuser-port-path', config.portPath);
-        } else if (config.focuserIndex !== undefined && config.focuserIndex !== null) {
-            setFormValue('qhy-focuser-index', config.focuserIndex);
-        }
-        setFormValue('qhy-focuser-max-step', config.maxStep !== undefined ? config.maxStep : 64000);
-        setFormValue('qhy-focuser-speed', config.speed !== undefined ? String(config.speed) : '1');
-        setFormValue('qhy-focuser-temperature-source', config.temperatureSource || 'external');
-        setFormValue('qhy-focuser-hold-ihold', config.holdIhold !== undefined ? config.holdIhold : 4);
-        setFormValue('qhy-focuser-hold-irun', config.holdIrun !== undefined ? config.holdIrun : 8);
-        const qfReverse = document.getElementById('qhy-focuser-reverse');
-        if (qfReverse) qfReverse.checked = config.reverse === true;
-        const qfHoldForce = document.getElementById('qhy-focuser-hold-force');
-        if (qfHoldForce) qfHoldForce.checked = config.holdForce === true;
-        const qfConnectionTypeEl = document.getElementById('qhy-focuser-connection-type');
-        if (qfConnectionTypeEl) {
-            qfConnectionTypeEl.dispatchEvent(new Event('change'));
-        }
-        updateQhyConfigFields();
-    } else if (vendor === 'qhy' && deviceType === 'filterwheel') {
-        // Two backends: the integrated CFW (bound to the paired camera's
-        // index/id, stored under its own field names) and the standalone
-        // CFW3 on its own serial port. A config saved before wheelType
-        // existed is an integrated wheel.
-        const qhyWheelType = config.wheelType || 'integrated';
-        setFormValue('qhy-cfw-wheel-type', qhyWheelType);
-        if (qhyWheelType === 'cfw3-usb') {
-            const cfw3ConnectionType = config.connectionType || 'auto';
-            setFormValue('qhy-cfw3-connection-type', cfw3ConnectionType);
-            if (cfw3ConnectionType === 'serial') {
-                setFormValue('qhy-cfw3-port-path', config.portPath);
-            } else if (config.filterwheelIndex !== undefined && config.filterwheelIndex !== null) {
-                setFormValue('qhy-cfw3-index', config.filterwheelIndex);
+    }
+    setFormValue('celestron-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
+    setFormValue('synscan-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
+    // A direct CGX USB mount (cgx-aux) is serial only.
+    const celestronConnection = document.getElementById('celestron-connection-type');
+    if (celestronConnection && vendor === 'celestron' && deviceType === 'telescope') {
+        celestronConnection.value = config.protocol === 'cgx-aux' ? 'serial' : (config.connectionType || 'auto');
+        discriminators.unshift(celestronConnection);
+    }
+    // learnSiteFromClient is a key the router keeps for every device; absent means on.
+    const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
+    if (skywatcherLearnSite) {
+        skywatcherLearnSite.checked = config.learnSiteFromClient !== false;
+    }
+    const zwoMountLearnSite = document.getElementById('zwo-mount-learn-site-from-client');
+    if (zwoMountLearnSite) {
+        zwoMountLearnSite.checked = config.learnSiteFromClient !== false;
+    }
+    if (vendor === 'ioptron' && deviceType === 'switch' && Array.isArray(config.ports)) {
+        // positional: index 1 = DC1, index 2 = DC2
+        [1, 2].forEach(i => {
+            const pwmCheckbox = document.getElementById('ioptron-port-pwm-' + i);
+            if (pwmCheckbox && config.ports[i]) {
+                pwmCheckbox.checked = config.ports[i].pwm === true;
             }
-        } else {
-            setFormValue('qhy-cfw-camera-index', config.cameraIndex);
-            setFormValue('qhy-cfw-camera-id', config.cameraId);
-        }
-        const qhyWheelTypeEl = document.getElementById('qhy-cfw-wheel-type');
-        if (qhyWheelTypeEl) qhyWheelTypeEl.dispatchEvent(new Event('change'));
-        const cfw3ConnectionTypeEl = document.getElementById('qhy-cfw3-connection-type');
-        if (cfw3ConnectionTypeEl) cfw3ConnectionTypeEl.dispatchEvent(new Event('change'));
-        const qhyFilterNamesField = document.getElementById('qhy-filter-names');
-        if (qhyFilterNamesField) {
-            qhyFilterNamesField.value = Array.isArray(config.filterNames)
-                ? config.filterNames.join('\n')
-                : '';
-            qhyFilterwheelSlotUI.syncSlotsFromTextarea();
-        }
-    } else if (vendor === 'qhy') {
-        setFormValue('qhy-camera-index', config.cameraIndex);
-        setFormValue('qhy-camera-id', config.cameraId);
-    } else if (vendor === 'astroasis') {
-        setFormValue('astroasis-focuser-index', config.focuserIndex);
-        setFormValue('astroasis-hid-path', config.hidPath);
-    } else if (vendor === 'svbony') {
-        setFormValue('svbony-camera-index', config.cameraIndex);
-    } else if (vendor === 'altair') {
-        setFormValue('altair-camera-index', config.cameraIndex);
-    } else if (vendor === 'iguider') {
-        setFormValue('iguider-device-path', config.devicePath);
-    } else if (vendor === 'gphoto') {
-        setFormValue('gphoto-camera-index', config.cameraIndex);
-        setFormValue('gphoto-mirror-lockup-settle-ms', config.mirrorLockupSettleMs !== undefined ? config.mirrorLockupSettleMs : 2000);
-        setFormValue('gphoto-long-exposure-nr', config.longExposureNR || 'camera');
-    } else if (vendor === 'touptek' && deviceType === 'switch') {
-        // switchType selects the backend: 'thermal' (camera dew heater + fan) or
-        // 'stellavita' (GPIO PowerBox, the default for legacy configs).
-        const touptekSwitchType = config.switchType || 'stellavita';
-        setFormValue('touptek-switch-type', touptekSwitchType);
-        if (touptekSwitchType === 'thermal') {
+        });
+    }
+    if (vendor === 'touptek' && deviceType === 'switch') {
+        if ((config.switchType || 'stellavita') === 'thermal') {
             touptekThermalPicker.reset(config);
         }
-        // Re-run the sub-block toggle now that switchType is set, so the thermal
-        // vs StellaVita fields match the loaded config (mirrors ZWO's pattern).
-        const touptekSwitchTypeEl = document.getElementById('touptek-switch-type');
-        if (touptekSwitchTypeEl) {
-            touptekSwitchTypeEl.dispatchEvent(new Event('change'));
-        }
-        // StellaVita PowerBox: optional GPIO chip override plus PWM frequency
-        // and per-port PWM flags (positional: index 0 = Port 1 .. 3 = Port 4).
-        if (config.gpioChip !== undefined && config.gpioChip !== null) {
-            setFormValue('touptek-powerbox-gpio-chip', config.gpioChip);
-        }
-        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
-            setFormValue('touptek-powerbox-pwm-frequency', config.pwmFrequencyHz);
-        }
         if (Array.isArray(config.ports)) {
-            [0, 1, 2, 3].forEach(function(i) {
+            // positional: index 0 = Port 1 .. 3 = Port 4
+            [0, 1, 2, 3].forEach(i => {
                 const pwmCheckbox = document.getElementById('touptek-port-pwm-' + i);
                 if (pwmCheckbox && config.ports[i]) {
                     pwmCheckbox.checked = config.ports[i].pwm === true;
                 }
             });
         }
-    } else if (vendor === 'touptek') {
-        setFormValue('touptek-camera-index', config.cameraIndex);
-        setFormValue('touptek-focuser-index', config.focuserIndex);
-        setFormValue('touptek-focuser-id', config.focuserId);
-        setFormValue('touptek-filterwheel-index', config.filterwheelIndex);
-        setFormValue('touptek-filterwheel-id', config.filterwheelId);
-        // Only touch the filter-name/slot UI when editing a filter wheel;
-        // otherwise editing a ToupTek camera/focuser would blank the slot list.
-        if (deviceType === 'filterwheel') {
-            const touptekFilterNamesField = document.getElementById('touptek-filter-names');
-            if (touptekFilterNamesField) {
-                touptekFilterNamesField.value = Array.isArray(config.filterNames)
-                    ? config.filterNames.join('\n')
-                    : '';
-                touptekFilterwheelSlotUI.syncSlotsFromTextarea();
-            }
-        }
-    } else if (vendor === 'playerone') {
-        setFormValue('playerone-camera-index', config.cameraIndex);
-        if (deviceType === 'switch') {
-            playerOneThermalPicker.reset(config);
-        }
-        setFormValue('playerone-filterwheel-index', config.filterwheelIndex);
-        // Only touch the filter-name/slot UI when editing a filter wheel;
-        // otherwise editing a Player One camera/switch would blank the slot list.
-        if (deviceType === 'filterwheel') {
-            const playerOneFilterNamesField = document.getElementById('playerone-filter-names');
-            if (playerOneFilterNamesField) {
-                playerOneFilterNamesField.value = Array.isArray(config.filterNames)
-                    ? config.filterNames.join('\n')
-                    : '';
-                playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
-            }
-        }
-    } else if (vendor === 'weewx') {
-        setFormValue('weewx-url', config.weewxUrl);
-        setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
-        setFormValue('weewx-timeout', config.timeoutMs);
-    } else if (vendor === 'gemini' && deviceType === 'switch') {
-        const connType = config.connectionType || 'auto';
-        setFormValue('gemini-pdh-connection-type', connType);
-        if (connType === 'auto') {
-            setFormValue('gemini-pdh-index', config.hubIndex);
-        } else if (connType === 'serial') {
-            setFormValue('gemini-pdh-port-path', config.portPath);
-            setFormValue('gemini-pdh-baud-rate', config.baudRate);
-        }
-        const geminiPdhConnTypeEl = document.getElementById('gemini-pdh-connection-type');
-        if (geminiPdhConnTypeEl) {
-            geminiPdhConnTypeEl.dispatchEvent(new Event('change'));
-        }
-    } else if (vendor === 'gemini' && deviceType === 'covercalibrator') {
-        const model = (config.flatPanelModel === 'v2' || config.flatPanelModel === 'pro') ? config.flatPanelModel : 'lite';
-        setFormValue('gemini-flatpanel-model', model);
-        const connType = config.connectionType || 'auto';
-        if (model === 'pro') {
-            setFormValue('gemini-flatpanel-pro-connection-type', connType);
-            if (connType === 'auto') {
-                setFormValue('gemini-flatpanel-pro-index', config.panelIndex);
-            } else if (connType === 'serial') {
-                setFormValue('gemini-flatpanel-pro-port-path', config.portPath);
-                setFormValue('gemini-flatpanel-pro-baud-rate', config.baudRate);
-            }
-            const geminiFlatPanelProConnTypeEl = document.getElementById('gemini-flatpanel-pro-connection-type');
-            if (geminiFlatPanelProConnTypeEl) {
-                geminiFlatPanelProConnTypeEl.dispatchEvent(new Event('change'));
-            }
-        } else if (model === 'v2') {
-            setFormValue('gemini-flatpanel-v2-connection-type', connType);
-            if (connType === 'auto') {
-                setFormValue('gemini-flatpanel-v2-index', config.panelIndex);
-            } else if (connType === 'serial') {
-                setFormValue('gemini-flatpanel-v2-port-path', config.portPath);
-                setFormValue('gemini-flatpanel-v2-baud-rate', config.baudRate);
-            }
-            const geminiFlatPanelV2ConnTypeEl = document.getElementById('gemini-flatpanel-v2-connection-type');
-            if (geminiFlatPanelV2ConnTypeEl) {
-                geminiFlatPanelV2ConnTypeEl.dispatchEvent(new Event('change'));
-            }
-        } else {
-            setFormValue('gemini-flatpanel-connection-type', connType);
-            if (connType === 'auto') {
-                setFormValue('gemini-flatpanel-index', config.panelIndex);
-            } else if (connType === 'serial') {
-                setFormValue('gemini-flatpanel-port-path', config.portPath);
-                setFormValue('gemini-flatpanel-baud-rate', config.baudRate);
-            }
-            const geminiFlatPanelConnTypeEl = document.getElementById('gemini-flatpanel-connection-type');
-            if (geminiFlatPanelConnTypeEl) {
-                geminiFlatPanelConnTypeEl.dispatchEvent(new Event('change'));
-            }
-        }
-        const geminiFlatPanelModelEl = document.getElementById('gemini-flatpanel-model');
-        if (geminiFlatPanelModelEl) {
-            geminiFlatPanelModelEl.dispatchEvent(new Event('change'));
-        }
-    } else if (vendor === 'gemini') {
-        const connType = config.connectionType || 'auto';
-        setFormValue('gemini-connection-type', connType);
-        if (connType === 'auto') {
-            setFormValue('gemini-focuser-index', config.focuserIndex);
-        } else if (connType === 'serial') {
-            setFormValue('gemini-port-path', config.portPath);
-            setFormValue('gemini-baud-rate', config.baudRate);
-        }
-        const geminiConnTypeEl = document.getElementById('gemini-connection-type');
-        if (geminiConnTypeEl) {
-            geminiConnTypeEl.dispatchEvent(new Event('change'));
-        }
-    } else if (vendor === 'wandererastro') {
-        const connType = config.connectionType || 'auto';
-        if (normalizeDeviceType(config.deviceType) === 'filterwheel') {
-            setFormValue('wandererastro-filterwheel-connection-type', connType);
-            if (connType === 'auto') {
-                setFormValue('wandererastro-filterwheel-index', config.wandererFilterwheelIndex);
-            } else if (connType === 'serial') {
-                setFormValue('wandererastro-filterwheel-port-path', config.portPath);
-                setFormValue('wandererastro-filterwheel-baud-rate', config.baudRate);
-            }
-            const wandererFwConnTypeEl = document.getElementById('wandererastro-filterwheel-connection-type');
-            if (wandererFwConnTypeEl) {
-                wandererFwConnTypeEl.dispatchEvent(new Event('change'));
-            }
-            const wandererFilterNamesField = document.getElementById('wandererastro-filter-names');
-            if (wandererFilterNamesField) {
-                wandererFilterNamesField.value = Array.isArray(config.filterNames)
-                    ? config.filterNames.join('\n')
-                    : '';
-                wandererFilterwheelSlotUI.syncSlotsFromTextarea();
-            }
-        } else if (normalizeDeviceType(config.deviceType) === 'rotator') {
-            setFormValue('wandererastro-rotator-connection-type', connType);
-            if (connType === 'auto') {
-                setFormValue('wandererastro-rotator-index', config.rotatorIndex);
-            } else if (connType === 'serial') {
-                setFormValue('wandererastro-rotator-port-path', config.portPath);
-                setFormValue('wandererastro-rotator-baud-rate', config.baudRate);
-            }
-            const wandererRotatorConnTypeEl = document.getElementById('wandererastro-rotator-connection-type');
-            if (wandererRotatorConnTypeEl) {
-                wandererRotatorConnTypeEl.dispatchEvent(new Event('change'));
-            }
-        } else if (normalizeDeviceType(config.deviceType) === 'switch') {
-            setFormValue('wandererastro-box-connection-type', connType);
-            if (connType === 'auto') {
-                setFormValue('wandererastro-box-index', config.boxIndex);
-            } else if (connType === 'serial') {
-                setFormValue('wandererastro-box-port-path', config.portPath);
-                setFormValue('wandererastro-box-baud-rate', config.baudRate);
-            }
-            const wandererBoxConnTypeEl = document.getElementById('wandererastro-box-connection-type');
-            if (wandererBoxConnTypeEl) {
-                wandererBoxConnTypeEl.dispatchEvent(new Event('change'));
-            }
-        } else {
-            setFormValue('wandererastro-connection-type', connType);
-            if (connType === 'auto') {
-                setFormValue('wandererastro-cover-index', config.coverIndex);
-            } else if (connType === 'serial') {
-                setFormValue('wandererastro-port-path', config.portPath);
-                setFormValue('wandererastro-baud-rate', config.baudRate);
-            }
-            const wandererConnTypeEl = document.getElementById('wandererastro-connection-type');
-            if (wandererConnTypeEl) {
-                wandererConnTypeEl.dispatchEvent(new Event('change'));
-            }
-        }
     }
-    setFormValue('camera-index', config.cameraIndex);
-    setFormValue('camera-id', config.cameraId);
+    if (vendor === 'playerone' && deviceType === 'switch') {
+        playerOneThermalPicker.reset(config);
+    }
+    if (vendor === 'zwo' && deviceType === 'switch' && (config.switchType || 'dewheater') === 'dewheater') {
+        zwoDewHeaterPicker.reset(config);
+    }
     // #914: remember the identity the server learned for a ZWO camera, and the
     // index/id the form loaded it with, so the submit can resend it unchanged.
     const keepZwoIdentity = vendor === 'zwo' && deviceType === 'camera';
@@ -1564,28 +1273,6 @@ function startEditDevice(device) {
     setFormValue('zwo-camera-name', keepZwoIdentity ? config.cameraName : '');
     setFormValue('zwo-camera-loaded-index', keepZwoIdentity ? config.cameraIndex : '');
     setFormValue('zwo-camera-loaded-id', keepZwoIdentity ? config.cameraId : '');
-    setFormValue('filterwheel-index', config.filterwheelIndex);
-    setFormValue('filterwheel-id', config.filterwheelId);
-    const filterNamesField = document.getElementById('filterwheel-names');
-    if (filterNamesField) {
-        if (Array.isArray(config.filterNames)) {
-            filterNamesField.value = config.filterNames.join('\n');
-        } else {
-            filterNamesField.value = '';
-        }
-        zwoFilterwheelSlotUI.syncSlotsFromTextarea();
-    }
-
-    setFormValue('focuser-index', config.focuserIndex);
-    setFormValue('focuser-id', config.focuserId);
-    // Another vendor's focuser also saves maxStep (QHY): only a ZWO focuser fills this input, blank = not set.
-    setFormValue('zwo-focuser-max-step', vendor === 'zwo' && deviceType === 'focuser' ? config.maxStep : '');
-    setFormValue('rotator-index', config.rotatorIndex);
-    setFormValue('rotator-id', config.rotatorId);
-    setFormValue('zwo-switch-type', config.switchType);
-    if (vendor === 'zwo' && deviceType === 'switch' && (config.switchType || 'dewheater') === 'dewheater') {
-        zwoDewHeaterPicker.reset(config);
-    }
 
     // Populate the ASIAIR Pro Switch per-port table from the saved config.
     // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
@@ -1595,9 +1282,6 @@ function startEditDevice(device) {
     // save instead of being refused with a field the user cannot edit.
     if (vendor === 'zwo' &&
         (config.switchType === 'asiair' || config.switchType === 'asiair-plus-picm4')) {
-        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
-            setFormValue('asiair-pwm-frequency', config.pwmFrequencyHz);
-        }
         if (Array.isArray(config.ports)) {
             for (let i = 0; i < 4; i += 1) {
                 const port = config.ports[i];
@@ -1624,15 +1308,9 @@ function startEditDevice(device) {
     // Populate the ASIAIR Plus (RK3568) per-port table from the saved config.
     // The kernel module fixes the per-port hardware mapping, so only the
     // channel names and per-port PWM flags are configurable here. devicePath
-    // is not loaded, for the same reason as gpioChip above.
+    // is not loaded, for the same reason as gpioChip above. pwmFrequencyHz is
+    // auto-managed by the wrapper and not shown.
     if (vendor === 'zwo' && config.switchType === 'asiair-plus-rk3568') {
-        // pwmFrequencyHz was previously surfaced here as a user-editable
-        // field. It's now auto-managed by the wrapper (defaults to 50 Hz,
-        // matching what ZWO's stock zwoair_imager daemon actually uses -
-        // see the comment block in default_asiair_plus_rk3568_config())
-        // and intentionally not shown in the UI. The persisted value, if
-        // any, is still passed through by the router so power users can
-        // set it via direct JSON edits.
         if (Array.isArray(config.ports)) {
             for (let i = 0; i < 4; i += 1) {
                 const port = config.ports[i];
@@ -1647,12 +1325,19 @@ function startEditDevice(device) {
             }
         }
     }
-    // Trigger the visibility update so the ASIAIR section actually appears
-    // when editing an asiair-typed switch (vs. dewheater).
-    const zwoSwitchTypeEl = document.getElementById('zwo-switch-type');
-    if (zwoSwitchTypeEl) {
-        zwoSwitchTypeEl.dispatchEvent(new Event('change'));
-    }
+
+    // Each Discriminator change shows its branch, outer branch last (descriptor order).
+    discriminators.forEach(element => element.dispatchEvent(new Event('change')));
+    // The filter-name textareas were filled above; rebuild each slot list from its text.
+    [[ioptronFilterwheelSlotUI, 'ioptron', 'filterwheel'], [qhyFilterwheelSlotUI, 'qhy', 'filterwheel'],
+        [touptekFilterwheelSlotUI, 'touptek', 'filterwheel'], [playerOneFilterwheelSlotUI, 'playerone', 'filterwheel'],
+        [wandererFilterwheelSlotUI, 'wandererastro', 'filterwheel'], [zwoFilterwheelSlotUI, 'zwo', 'filterwheel']
+    ].forEach(([slotUI, slotVendor, slotType]) => {
+        if (vendor === slotVendor && deviceType === slotType) {
+            slotUI.syncSlotsFromTextarea();
+        }
+    });
+    updateFieldApplicability();
 
     const messageDiv = document.getElementById('form-message');
     if (messageDiv) {
@@ -1668,9 +1353,6 @@ function startEditDevice(device) {
         // the device's stored ID back to keep its UniqueID (and a rotator's offset).
         form.dataset.originalUniqueId = typeof config.uniqueId === 'string' ? config.uniqueId : '';
     }
-
-    // Switch to the Configure tab without resetting the form we just populated.
-    showTab('configure', { preserveForm: true });
 }
 
 // Light poll of the Devices listing: updates only the status dots in place, so
@@ -3161,186 +2843,17 @@ function updateVendorOptions() {
     }
 
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
-    const isTelescope = deviceType === 'telescope';
-    const isCamera = deviceType === 'camera';
-    const isSwitch = deviceType === 'switch';
-    const isFilterWheel = deviceType === 'filterwheel';
-    const isFocuser = deviceType === 'focuser';
-    const isRotator = deviceType === 'rotator';
-    const isObservingConditions = deviceType === 'observingconditions';
-    const isCoverCalibrator = deviceType === 'covercalibrator';
-    const astroasisOption = vendorSelect.querySelector('option[value="astroasis"]');
-    if (astroasisOption) {
-        // Astroasis provides only the Oasis Focuser.
-        astroasisOption.disabled = !isFocuser;
-        astroasisOption.hidden = !isFocuser;
-    }
-    const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
-    if (ioptronOption) {
-        // iOptron provides the mount (telescope), the iMate PowerBox (switch),
-        // the iEAF / iAFS2/3 focusers, the iEFW filter wheel and the iCAM
-        // cameras (Player One SDK).
-        const ioptronAllowed = isTelescope || isSwitch || isFocuser || isFilterWheel || isCamera;
-        ioptronOption.disabled = !ioptronAllowed;
-        ioptronOption.hidden = !ioptronAllowed;
-    }
-    const synscanOption = vendorSelect.querySelector('option[value="synscan"]');
-    if (synscanOption) {
-        synscanOption.disabled = !isTelescope;
-        synscanOption.hidden = !isTelescope;
-    }
-    const skywatcherOption = vendorSelect.querySelector('option[value="skywatcher"]');
-    if (skywatcherOption) {
-        skywatcherOption.disabled = !isTelescope;
-        skywatcherOption.hidden = !isTelescope;
-    }
-    const celestronOption = vendorSelect.querySelector('option[value="celestron"]');
-    if (celestronOption) {
-        // Celestron provides the mount (telescope) and the focus motor (issue #896).
-        const celestronAllowed = isTelescope || isFocuser;
-        celestronOption.disabled = !celestronAllowed;
-        celestronOption.hidden = !celestronAllowed;
-    }
-    const onstepOption = vendorSelect.querySelector('option[value="onstep"]');
-    if (onstepOption) {
-        onstepOption.disabled = !isTelescope;
-        onstepOption.hidden = !isTelescope;
-    }
-    const bisqueOption = vendorSelect.querySelector('option[value="bisque"]');
-    if (bisqueOption) {
-        bisqueOption.disabled = !isTelescope;
-        bisqueOption.hidden = !isTelescope;
-    }
-    const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
-    if (zwoOption) {
-        const zwoAllowed = isTelescope || isCamera || isSwitch || isFilterWheel || isFocuser || isRotator;
-        zwoOption.disabled = !zwoAllowed;
-        zwoOption.hidden = !zwoAllowed;
-    }
-    const qhyOption = vendorSelect.querySelector('option[value="qhy"]');
-    if (qhyOption) {
-        // QHY provides cameras, filter wheels (the integrated CFW on models
-        // like the miniCam8M, and the standalone CFW3 over USB serial), and
-        // the Q-Focuser (serial, no SDK).
-        const qhyAllowed = isCamera || isFilterWheel || isFocuser;
-        qhyOption.disabled = !qhyAllowed;
-        qhyOption.hidden = !qhyAllowed;
-    }
-    const svbonyOption = vendorSelect.querySelector('option[value="svbony"]');
-    if (svbonyOption) {
-        svbonyOption.disabled = !isCamera;
-        svbonyOption.hidden = !isCamera;
-    }
-    const altairOption = vendorSelect.querySelector('option[value="altair"]');
-    if (altairOption) {
-        altairOption.disabled = !isCamera;
-        altairOption.hidden = !isCamera;
-    }
-    const iguiderOption = vendorSelect.querySelector('option[value="iguider"]');
-    if (iguiderOption) {
-        iguiderOption.disabled = !isCamera;
-        iguiderOption.hidden = !isCamera;
-    }
-    const gphotoOption = vendorSelect.querySelector('option[value="gphoto"]');
-    if (gphotoOption) {
-        gphotoOption.disabled = !isCamera;
-        gphotoOption.hidden = !isCamera;
-    }
-    const touptekOption = vendorSelect.querySelector('option[value="touptek"]');
-    if (touptekOption) {
-        // ToupTek provides cameras, the AAF focuser, the AFW filter wheel, and
-        // the StellaVita PowerBox (switch).
-        const allowTouptek = isCamera || isFocuser || isFilterWheel || isSwitch;
-        touptekOption.disabled = !allowTouptek;
-        touptekOption.hidden = !allowTouptek;
-    }
-    const playerOneOption = vendorSelect.querySelector('option[value="playerone"]');
-    if (playerOneOption) {
-        // Player One provides cameras, the Phoenix filter wheel, and the
-        // thermal switch (cooled-camera dew heater / fan).
-        const playerOneAllowed = isCamera || isFilterWheel || isSwitch;
-        playerOneOption.disabled = !playerOneAllowed;
-        playerOneOption.hidden = !playerOneAllowed;
-    }
-    const weewxOption = vendorSelect.querySelector('option[value="weewx"]');
-    if (weewxOption) {
-        weewxOption.disabled = !isObservingConditions;
-        weewxOption.hidden = !isObservingConditions;
-    }
-    const geminiOption = vendorSelect.querySelector('option[value="gemini"]');
-    if (geminiOption) {
-        // Gemini provides the Automatic Astro Focuser Pro (focuser), the
-        // flat panels (CoverCalibrator) and the Power & Data Hubs Advanced 3
-        // power box (Switch).
-        const geminiAllowed = isFocuser || isCoverCalibrator || isSwitch;
-        geminiOption.disabled = !geminiAllowed;
-        geminiOption.hidden = !geminiAllowed;
-    }
-    const wandererastroOption = vendorSelect.querySelector('option[value="wandererastro"]');
-    if (wandererastroOption) {
-        // WandererAstro provides the WandererCover V4 (CoverCalibrator), the
-        // WandererRotator Mini (Rotator), the SFW filter wheels (FilterWheel)
-        // and the WandererBox Pro V3 power box (Switch).
-        const wandererastroAllowed = isCoverCalibrator || isRotator || isFilterWheel || isSwitch;
-        wandererastroOption.disabled = !wandererastroAllowed;
-        wandererastroOption.hidden = !wandererastroAllowed;
-    }
-
-    if (!isFocuser && vendorSelect.value === 'astroasis') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && !isSwitch && !isFocuser && !isFilterWheel && !isCamera && vendorSelect.value === 'ioptron') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && vendorSelect.value === 'synscan') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && vendorSelect.value === 'skywatcher') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && !isFocuser && vendorSelect.value === 'celestron') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && vendorSelect.value === 'onstep') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && vendorSelect.value === 'bisque') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && !isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator &&
-        vendorSelect.value === 'zwo') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && !isFilterWheel && !isFocuser && vendorSelect.value === 'qhy') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && vendorSelect.value === 'svbony') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && vendorSelect.value === 'altair') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && vendorSelect.value === 'iguider') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && vendorSelect.value === 'gphoto') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && !isFocuser && !isFilterWheel && !isSwitch && vendorSelect.value === 'touptek') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && !isFilterWheel && !isSwitch && vendorSelect.value === 'playerone') {
-        vendorSelect.value = '';
-    }
-    if (!isObservingConditions && vendorSelect.value === 'weewx') {
-        vendorSelect.value = '';
-    }
-    if (!isFocuser && !isCoverCalibrator && vendorSelect.value === 'gemini') {
-        vendorSelect.value = '';
-    }
-    if (!isCoverCalibrator && !isRotator && !isFilterWheel && !isSwitch && vendorSelect.value === 'wandererastro') {
-        vendorSelect.value = '';
-    }
+    const state = vendorSelectState(catalogData, deviceType, vendorSelect.value, keepVendor);
+    vendorSelect.querySelectorAll('option').forEach(option => {
+        if (option.value === '') {
+            return;
+        }
+        const offered = state.offered.includes(option.value);
+        option.hidden = !offered;
+        option.disabled = !offered;
+    });
+    vendorSelect.disabled = state.disabled;
+    vendorSelect.value = state.value;
 
     vendorSelect.dispatchEvent(new Event('change'));
 }
@@ -3763,16 +3276,14 @@ if (deviceNumberInput) {
 }
 
 // Mark any vendor index field as user-modified once edited, so auto-numbering
-// leaves it alone. Driven off INDEX_FIELDS so every vendor's index field
-// (not just ZWO's) is covered.
-INDEX_FIELDS.forEach(field => {
-    const input = document.getElementById(field.fieldId);
-    if (input) {
-        input.addEventListener('input', () => {
-            input.dataset.userModified = 'true';
-        });
+// leaves it alone. One delegated listener, so it covers every field in
+// indexFields whenever the catalog arrives.
+document.getElementById('device-form').addEventListener('input', event => {
+    if (indexFields.some(field => field.fieldId === event.target.id)) {
+        event.target.dataset.userModified = 'true';
     }
 });
+document.getElementById('device-form').addEventListener('change', updateFieldApplicability);
 
 // Slot-count + per-slot filter name pickers. Every filterwheel vendor config
 // gets an instance (see http-integration.instructions.md "FilterWheel vendors — required web UI"); the factory
@@ -5306,6 +4817,7 @@ function escapeHtml(text) {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    ensureCatalog();
     loadDevices();
     startDeviceStatusPoll();
     loadServerInfo();

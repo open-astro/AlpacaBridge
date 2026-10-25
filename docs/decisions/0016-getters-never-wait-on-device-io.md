@@ -20,10 +20,10 @@ The how-to and its history stay in the [driver lifecycle instructions](../../.gi
 
 ## Rules
 
-1. A getter that needs no device access takes no lock that is held across a device transaction, and the driver `mutex_` is not held across an SDK call, serial exchange, connect handshake or move, except the short camera SDK calls Rule 4 allows; a driver that does is a defect with an issue until its family converts. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
-2. Lock order in a converted driver is `transition_mutex_`, then the I/O lock, then the state `mutex_` (leaf), then the SDK-wrapper mutex; one driver class never mixes it with the old order, and the `AsyncOperation` slot mutex and the `StateSnapshot` mutex may nest under `mutex_` (decisions 0006 and 0010) as leaves that take no other lock and do no I/O. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review.
+1. A getter that needs no device access takes no lock that is held across a device transaction, and the driver `mutex_` is not held across an SDK call, serial exchange, connect handshake or move, except the short camera SDK calls Rule 4 allows; a driver that does is a defect with an issue until its family converts. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review. <!-- allowed -->
+2. Lock order in a converted driver is `transition_mutex_`, then the I/O lock, then the state `mutex_` (leaf), then the SDK-wrapper mutex; one driver class never mixes it with the old order, and the `AsyncOperation` slot mutex, the `StateSnapshot` mutex and the `util::PolledState` mutexes (its snapshot and its health mutex) may nest under `mutex_` (decisions 0006 and 0010) as leaves that take no other lock and do no I/O. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review.
 3. `Connected` is lock-free, and identity and limits are published at the end of connect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
-4. The camera drivers keep `with_camera` and `with_handle` over short SDK calls until a measurement shows a getter stall. Scope: `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: review.
+4. The camera drivers keep `with_camera` and `with_handle` over short SDK calls until a measurement shows a getter stall. Scope: `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: review. <!-- allowed -->
 5. `AGENTS.md` and the driver lifecycle instructions state this rule and link this record. Scope: `AGENTS.md`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review.
 
 ## Alternatives rejected

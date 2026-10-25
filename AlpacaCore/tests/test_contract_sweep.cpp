@@ -45,6 +45,7 @@
 #include <variant>
 #include <vector>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "contract_sweep.h"
 #include "fake_task_clock.h"
@@ -266,10 +267,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_slewing", [&] { (void)t.get_slewing(); }});
             p.push_back({"get_at_park", [&] { (void)t.get_at_park(); }});
             p.push_back({"get_at_home", [&] { (void)t.get_at_home(); }});
-            if (entry.rate_getters_disconnected == alpacacore::test::contract::DisconnectedRead::NotConnected) {
-                p.push_back({"get_right_ascension_rate", [&] { (void)t.get_right_ascension_rate(); }});
-                p.push_back({"get_declination_rate", [&] { (void)t.get_declination_rate(); }});
-            }
+            p.push_back({"get_right_ascension_rate", [&] { (void)t.get_right_ascension_rate(); }});
+            p.push_back({"get_declination_rate", [&] { (void)t.get_declination_rate(); }});
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
             break;
@@ -330,6 +329,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
             p.push_back({"get_gain", [&] { (void)c.get_gain(); }});
             p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
+            p.push_back({"get_last_exposure_duration", [&] { (void)c.get_last_exposure_duration(); }});
+            p.push_back({"get_last_exposure_start_time", [&] { (void)c.get_last_exposure_start_time(); }});
             p.push_back({"get_camera_state", [&] { (void)c.get_camera_state(); }});
             p.push_back({"get_percent_completed", [&] { (void)c.get_percent_completed(); }});
             p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
@@ -427,15 +428,6 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
-    }
-    if (e.type == DeviceType::Telescope &&
-        e.rate_getters_disconnected == alpacacore::test::contract::DisconnectedRead::Static) {
-        // A stated exemption: pinned so that the driver that is fixed flips this case (see ContractEntry).
-        auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*d);
-        INFO(e.id << " rate_getters_reason: " << e.rate_getters_reason);
-        REQUIRE(std::string(e.rate_getters_reason).size() > 0);
-        CHECK(thrown_code([&] { (void)t.get_right_ascension_rate(); }) == -1);
-        CHECK(thrown_code([&] { (void)t.get_declination_rate(); }) == -1);
     }
     if (e.type == DeviceType::Switch) {
         auto& s = dynamic_cast<alpacacore::SwitchDriver&>(*d);
@@ -670,8 +662,8 @@ ConnectObservation connect_and_observe(AlpacaDriver& d, std::chrono::millisecond
         const bool connected = d.get_connected();
         if (first) {
             o.first_sample_in_flight = connecting || connected;
-            // Connected is not part of this: on the drivers whose get_connected() blocks behind the connect
-            // (async_connectable.h), that read only returns once the connect has finished.
+            // Connected is not part of this: a get_connected() that blocked behind the connect
+            // (async_connectable.h; no driver does today) would only return once the connect has finished.
             o.first_sample_connecting = connecting;
         }
         first = false;
@@ -723,9 +715,9 @@ Hosted connected_host(const Tier2Host& h) {
             CHECK(o.connect_call < kConnectCallBound);
             CHECK(o.first_sample_connecting);
             CHECK(o.saw_connecting);
-            // On rows whose get_connected() blocks behind the connect (async_connectable.h) this check cannot fail:
-            // that read only returns after the hold. It is load-bearing on the rows whose get_connected() does
-            // not block (red with the holds set to 0), OnStep among them since #910.
+            // On a row whose get_connected() blocked behind the connect (async_connectable.h; none does today) this
+            // check could not fail: that read would only return after the hold. It is load-bearing on every
+            // row since the getters are lock-free (red with the holds set to 0).
             CHECK_FALSE(o.connected_early);
         }
         CHECK(Clock::now() - t0 < std::chrono::seconds(30));
@@ -1003,6 +995,24 @@ const std::map<std::string, StateType>* ascom_device_state_types(DeviceType type
         CHECK(e.is_asked_too_early());
     }
     CHECK(thrown);
+}
+
+// Case 6, camera rows only. LastExposureDuration and LastExposureStartTime before any successful image are the
+// ICameraV4 InvalidOperation, not ValueNotSet (issue #1477); while disconnected they raise NotConnected.
+[[maybe_unused]] void case_t2_last_exposure_before_image(const Tier2Host& h) {
+    REQUIRE(h.type == DeviceType::Camera);
+    {
+        // Disconnected: NotConnected wins over the no-image InvalidOperation.
+        Hosted down = h.connectable(false);
+        REQUIRE(down.driver != nullptr);
+        auto& cam = dynamic_cast<alpacacore::CameraDriver&>(*down.driver);
+        INFO(h.id << " LastExposure* while disconnected");
+        alpacacore::test::require_error_code([&] { (void)cam.get_last_exposure_duration(); }, err::NotConnected);
+        alpacacore::test::require_error_code([&] { (void)cam.get_last_exposure_start_time(); }, err::NotConnected);
+    }
+    Hosted hosted = connected_host(h);
+    INFO(h.id << " LastExposure* before any exposure");
+    alpacacore::test::require_last_exposure_unset(dynamic_cast<alpacacore::CameraDriver&>(*hosted.driver));
 }
 
 template <class Fake, class Make>
@@ -2229,6 +2239,23 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
 #define CS2_IMAGE_TEL(id)
 #define CS2_IMAGE_PRB(id)
 #define CS2_IMAGE_NPR(id)
+// LastExposure* before any image: cameras only. Every camera id is named here, so a new camera host fails to
+// compile until it says whether it takes the case. The #1397 hold still applies to ToupTek/Altair cooler work.
+#define CS2_LASTEXP(id, kind) CS2_LASTEXP_##kind(id)
+#define CS2_LASTEXP_TEL(id)
+#define CS2_LASTEXP_PRB(id)
+#define CS2_LASTEXP_NPR(id)
+#define CS2_LASTEXP_CAM(id) CS2_LASTEXP_##id(id)
+#define CS2_LASTEXP_RUN(id) \
+    CS2_CASE(id, "LastExposure before any image is InvalidOperation", case_t2_last_exposure_before_image)
+#define CS2_LASTEXP_zwo_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_qhy_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_iguider_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_svbony_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_playerone_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_gphoto_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_touptek_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_altair_camera(id) CS2_LASTEXP_RUN(id)
 
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_CONNECTING)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_TARGETS)
@@ -2236,6 +2263,7 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_INVALID)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE_TYPES)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_IMAGE)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_LASTEXP)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_HOOKS)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_INITIATORS)
 #endif

@@ -19,7 +19,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
 - **HTTP status codes:**
   - `200` — request was interpreted and reached the driver. Driver exceptions (NotImplemented, InvalidValue, NotConnected, etc.) ride in the JSON `ErrorNumber`/`ErrorMessage` fields with a `200`. `apply_error_status` exists to keep these at 200 — never downgrade a driver error to 4xx/5xx.
     A value that parses but is out of range for the device (the driver's or the router's range check) is answered the same way: HTTP 200 with `InvalidValue` (0x401). A parameter that is missing, or whose value does not parse as the required type, is not: see `400` below.
-  - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, a known method on a verb it does not accept (after the cross-origin 403), a device number outside 0..4294967295, and unregistered device number. Also 400: a required parameter that is missing, or a value that cannot be parsed as the required type (`Position=abc`, `TempComp=maybe`, a JSON field of the wrong type, a non-whole or out-of-`int` integer); the Device API 400 text says "insufficient information" and Alpaca API Reference s2.5 sends it before the driver. The router's parse helpers (`parse_int_value`, `parse_bool_value`, `parse_double_value`, `json_int_value` and the per-device `parse_*` lambdas in `router.cpp`) throw `RequestNotInterpretable`, which every dispatcher turns into 400, never reaching the driver. Every Device API 400 body is `text/plain` with a short message, no JSON envelope (`set_bad_request_text`); the 400s of the AlpacaBridge-only management requests (`description` write, `configuredevice`, `update/channel`) keep the JSON envelope ([ADR 0007](../../docs/decisions/0007-lan-surface-threat-model.md)). Decided 2026-10-21 on issue #1476; `test_routing.cpp` and `test_route_table.cpp` pin both. A genuinely unroutable URL (no device/management match) stays 404.
+  - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, a known method on a verb it does not accept (after the cross-origin 403), a device number outside 0..4294967295, and unregistered device number. Also 400: a required parameter that is missing, or a value that cannot be parsed as the required type (`Position=abc`, `TempComp=maybe`, a JSON field of the wrong type, a non-whole or out-of-`int` integer); the Device API 400 text says "insufficient information" and Alpaca API Reference s2.5 sends it before the driver. The parse helpers (`parse_int_value`, `parse_bool_value`, `parse_double_value`, `json_int_value`, behind `DeviceCall::get_*`/`find_*` in `device_call.cpp`) throw `RequestNotInterpretable`, which `DeviceCall::run` turns into 400, never reaching the driver. Every Device API 400 body is `text/plain` with a short message, no JSON envelope (built by `DeviceCall::run` for a dispatcher arm and by `set_bad_request_text` for the routing-level 400s); the 400s of the AlpacaBridge-only management requests (`description` write, `configuredevice`, `update/channel`) keep the JSON envelope ([ADR 0007](../../docs/decisions/0007-lan-surface-threat-model.md)). Decided 2026-10-21 on issue #1476; `test_routing.cpp` and `test_route_table.cpp` pin both. A genuinely unroutable URL (no device/management match) stays 404.
+    `DeviceCall::run` (`AlpacaHTTP/src/http/device_call.cpp`) is the one place that decides 400 text versus an Alpaca error for a device call: a `RequestNotInterpretable` becomes the 400, an `AlpacaException` the mapped error number with a `200`, and any other `std::exception` `DriverError` (0x500) with its `what()`. A dispatcher arm reads scalar parameters through `DeviceCall::get_*`/`find_*` and answers through `ok()`/`ok_void()`; the arms that take a structured or raw field (action, command*, filter wheel names/focusoffsets, ObservingConditions) read it through `DeviceCall::json_field`/`form_field`. No arm parses the body with `parse_json`, catches these exceptions or copies the transaction ids itself.
   - `403` — a `Host` header that is not allowed, only when `http.host_check_enabled` is true (off by default; issue #392, checked in `Router::route()` before static files and routing: IP literals, `localhost`, this machine's hostname, `*.local`/`*.home.arpa`/`*.internal` and `http.allowed_hosts`; a missing `Host` passes), or a cross-origin state-changing request. Both carry the Alpaca envelope with `InvalidValue` and echo `ClientTransactionID`; a test that sends another `Host` gets the 403 only with the check enabled (`Router::set_host_check_enabled(true)`).
   - `500` — unexpected internal error only.
 - **The Alpaca `Value` is structured JSON, never a re-parsed string.** `AlpacaResponse::value` is `std::optional<nlohmann::json>` and `to_json` emits it verbatim. Handlers assign the real type directly — scalar, string, array, or object (e.g. `alpaca_response.value = actions;` for `SupportedActions`, **not** `actions.dump()`; `make_success_response(..., gains)` where `gains` is a `nlohmann::json` array). Do NOT serialize a structured payload to a string and rely on it being re-parsed downstream. The old `to_json` ran `json::parse()` on every string `Value` and substituted the result if it parsed — which (a) corrupted scalar string properties whose text is valid JSON (`"12345"` → number, `"true"` → bool, wrong ASCOM type on the wire) and (b) forced every array/object endpoint to round-trip through `.dump()`. That heuristic bit `SupportedActions`/`DeviceState` (every device) plus camera `Gains`/`Offsets`/`ReadoutModes`, telescope `AxisRates`, and filter `Names`/`FocusOffsets` — ConformU rejected the stringified arrays ("could not be converted to IList`<String>`"). The web UI mirror (`web/app.js parseResponseValue`) only parses a string that begins with `{`/`[`, never a bare scalar. The large camera image payload uses its own `build_image_*_payload` path and never goes through `Value`.
@@ -46,11 +47,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the wrong flag.
 - **The router must never call `get_connected()` while `get_connecting()` is
   true — the connect side of the rule above** (SynScan hand controller,
-  2026-09, issue #130). The telescope drivers named in
-  `async_connectable.h`'s blocking list -- **that comment is the list; this
-  paragraph deliberately does not repeat it, because a second copy is what
-  went stale for SynScan** -- answer `get_connected()` under the state mutex that their
-  `set_connected(true)` holds for the entire handshake, so a
+  2026-09, issue #130). A driver that answered `get_connected()` under the
+  state mutex that its `set_connected(true)` holds for the entire handshake
+  would make a
   `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's deadline (8 s then)
   never fired (25 s on a silent handset: five 5 s query timeouts). The
@@ -59,17 +58,19 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   each wrapper publishes its open state as an atomic written only inside its
   own `open()`/`close()` critical sections, `is_open()` is a lock-free read,
   and `check_docs_drift.py` classifies those drivers as lock-free only while
-  that stays true. The rule applies to every driver; only the mutex-holding
-  telescopes make it urgent. Every router
+  that stays true. The rule applies to every driver; it would turn urgent for any
+  driver whose getter took the mutex again (the blocking list is empty
+  today). Every router
   site now reads `get_connecting()` first and short-circuits; while a task
   is in flight `Connected` reports false. A connect request that arrives
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (every driver does except the ones `async_connectable.h` names --
-  SynScan is among those that DO have a lock-free getter, since the #130 fix) —
-  the telescopes it lists still take the mutex and rely on the router rule; the
-  wrapper-backed switch list is empty since #382 and the gate keeps it so.
+  getter (every driver does; `async_connectable.h`'s blocking telescope list is
+  empty today, as the Bisque and iOptron getters became lock-free in #910, and
+  the drift gate keeps it empty; a driver that took the mutex again would
+  rely on the router rule). The wrapper-backed switch list is empty since #382
+  and the gate keeps it so.
   **`async_connectable.h`'s comment is the single source for both lists, it is
   gated, and no count is stated anywhere** (issue #381):
   `scripts/check_docs_drift.py` classifies every `get_connected()` override
@@ -96,7 +97,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
-  can still block on a mutex-holding driver's handshake for the telescopes above.
+  could still block on a mutex-holding driver's handshake (none today; the list is empty).
   Far narrower than the bug this rule fixes (needs a second request to land
   in a specific few-instruction window, not just a slow connect), and not
   worth a structural fix here: closing it means every driver exposing one

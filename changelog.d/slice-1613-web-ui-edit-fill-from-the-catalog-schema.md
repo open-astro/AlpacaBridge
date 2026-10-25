@@ -1,0 +1,3 @@
+### Changed
+
+- **Editing a device fills the form from the device catalog**, web UI, issue #1613. Every form field the catalog names takes its saved value from the device's config, with no per-vendor code in `app.js`; a saved `false` or `0` is shown as saved, and an absent value shows the form's markup default, and an absent option that selects a branch shows the catalog default (a ToupTek switch saved without `switchType` opens as StellaVita). A field whose `appliesWhen` option holds another value is now hidden. A failed catalog load shows its message on the Configure tab. Covered by `AlpacaHTTP/tests/web/catalog_edit_fill.test.js` and `AlpacaHTTP/tests/web/catalog_schema.test.js`.

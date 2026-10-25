@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <ctime>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <numbers>
 #include <optional>
@@ -70,6 +71,8 @@ constexpr auto kInMotionRetryWindow = std::chrono::seconds(3);
 constexpr auto kInMotionRetryPoll = std::chrono::milliseconds(200);
 // OnStepX :GE# codes (docs/COMMAND_REFERENCE.md, "Command Error Codes").
 constexpr int kCeNone = 0;
+// The longest PulseGuide the :Mg[nsew]#### command can carry (#1478).
+constexpr int kMaxPulseGuideMs = 9999;
 constexpr int kCeSlewInMotion = 22;
 constexpr int kCeTrue = 25;
 
@@ -210,7 +213,7 @@ public:
           connection_info_(connection_info),
           connection_resolver_(std::move(connection_resolver)),
           connected_(false),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_elevation_m_(site_elevation_m.value_or(std::numeric_limits<double>::quiet_NaN())),
           pending_site_latitude_(site_latitude_deg),
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
@@ -281,6 +284,13 @@ public:
     bool get_connected() const override {
         // A removed or re-enumerated adapter reads as not connected (#1241).
         return published_connected_.load() && OnStepProtocolWrapper::instance().link_alive();
+    }
+
+    // NotConnected exactly when Connected reads false, without mutex_.
+    void check_connected_lock_free() const {
+        if (!get_connected()) {
+            throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
+        }
     }
 
     // Why the serial link was lost, kept until the next Connect or Disconnect
@@ -358,6 +368,7 @@ public:
             altaz_cache_valid_ = false;
             site_info_valid_ = false;
             utc_offset_.clear();
+            mount_clock_unreadable_.reset();
             client_disagreement_warned_ = false;
             firmware_reports_guide_move_ = false;
             link_health_.reset();
@@ -445,6 +456,11 @@ public:
                     set_utc_date_locked(std::chrono::system_clock::now());
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                 }
+            }
+            // The mount clock is read here, once, so UTCDate (and so DeviceState)
+            // never waits on a serial exchange (#1478); a written UTCDate needs none.
+            if (!utc_offset_.valid()) {
+                seed_utc_from_mount_locked();
             }
             try {
                 // Continuous-motion (:Mn#/:Ms#/:Me#/:Mw#) commands run at
@@ -619,7 +635,13 @@ public:
         return cached_dec_degrees_;
     }
 
-    double get_declination_rate() const override { return 0.0; }
+    // Rates are not supported (always 0), but an ASCOM read still throws
+    // NotConnected while disconnected (#1478). Read lock-free, as Connected
+    // is, so the getter never waits behind serial I/O under mutex_ (#1449).
+    double get_declination_rate() const override {
+        check_connected_lock_free();
+        return 0.0;
+    }
 
     void set_declination_rate(double rate) override {
         (void)rate;
@@ -679,7 +701,10 @@ public:
         return cached_ra_hours_;
     }
 
-    double get_right_ascension_rate() const override { return 0.0; }
+    double get_right_ascension_rate() const override {
+        check_connected_lock_free();  // see get_declination_rate()
+        return 0.0;
+    }
 
     void set_right_ascension_rate(double rate) override {
         (void)rate;
@@ -732,7 +757,11 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        (void)dec;
+        // Arguments first, even while disconnected (#1478).
+        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0 || !std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
+            throw AlpacaException("DestinationSideOfPier needs RA 0 to <24 hours and Dec -90 to 90 degrees",
+                                  AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         ensure_site_info_cached_locked();
@@ -783,7 +812,16 @@ public:
         return compute_local_sidereal_time_hours(current_utc_time_locked(), site_longitude_cached_);
     }
 
-    double get_site_elevation() const override { return site_elevation_m_; }
+    // Unset (NaN) until the device config or a client sets it: 0 m is a real
+    // place (decision 0019, #1478). Lock-free: the protocol has no elevation
+    // command, so this never waits on the mount.
+    double get_site_elevation() const override {
+        const double elevation = site_elevation_m_.load();
+        if (std::isnan(elevation)) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return elevation;
+    }
 
     void set_site_elevation(double elevation) override {
         if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
@@ -896,24 +934,35 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (!utc_offset_.valid()) {
-            std::chrono::system_clock::time_point seeded;
-            try {
-                TimeInfo info = OnStepProtocolWrapper::instance().get_time();
-                using namespace std::chrono;
-                int year = 2000 + info.year;
-                sys_days date =
-                    sys_days{std::chrono::year{year} / std::chrono::month{static_cast<unsigned>(info.month)} /
-                             std::chrono::day{static_cast<unsigned>(info.day)}};
-                auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
-                auto offset = duration_cast<system_clock::duration>(
-                    std::chrono::duration<double, std::ratio<3600>>(info.utc_offset_hours));
-                seeded = local_time - offset;
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-                seeded = std::chrono::system_clock::now();
-            }
-            utc_offset_.set(seeded, clock_.now());
+            // The host clock is not the mount's (ITelescopeV4 UTCDate, #1478). The
+            // mount clock is read once at connect, so a getter never waits on it.
+            throw AlpacaException("The mount clock could not be read at connect" +
+                                      (mount_clock_unreadable_ ? ": " + *mount_clock_unreadable_ : std::string()) +
+                                      "; write UTCDate to set it",
+                                  AlpacaError::InvalidOperation);
         }
         return current_utc_time_locked();
+    }
+
+    // At connect (#1478): seeds utc_offset_ from :GL#/:GC#/:GG#, or keeps why it
+    // could not, for UTCDate to report until a UTCDate write or the next connect.
+    void seed_utc_from_mount_locked() {
+        try {
+            TimeInfo info = OnStepProtocolWrapper::instance().get_time();
+            using namespace std::chrono;
+            int year = 2000 + info.year;
+            sys_days date = sys_days{std::chrono::year{year} / std::chrono::month{static_cast<unsigned>(info.month)} /
+                                     std::chrono::day{static_cast<unsigned>(info.day)}};
+            auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
+            auto offset = duration_cast<system_clock::duration>(
+                std::chrono::duration<double, std::ratio<3600>>(info.utc_offset_hours));
+            utc_offset_.set(local_time - offset, clock_.now());
+            mount_clock_unreadable_.reset();
+        } catch (const std::exception& ex) {
+            mount_clock_unreadable_ = ex.what();
+        } catch (...) {
+            mount_clock_unreadable_ = "unknown error";
+        }
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -959,29 +1008,28 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
+        // Arguments before the connected, fault and parked checks (#1478).
+        if (direction < 0 || direction > 3) {
+            throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+        }
+        // The wire command's duration field is 4 digits (:Mgn####), so a
+        // longer pulse cannot be sent: refuse it instead of pulsing for less
+        // than asked (#1478).
+        if (duration < 0 || duration > kMaxPulseGuideMs) {
+            throw AlpacaException("PulseGuide duration must be 0 to " + std::to_string(kMaxPulseGuideMs) + " ms",
+                                  AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refuse_while_faulted_locked("PulseGuide");
         check_not_parked_locked("PulseGuide");
-        if (direction < 0 || direction > 3) {
-            throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-        }
-        if (duration < 0) {
-            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
-        }
         // Hardware pulse guide: the mount times the pulse internally
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
         // implementation there is no background stop thread to manage here —
         // is_pulse_guiding() just compares against the known end time.
-        // OnStepProtocolWrapper::pulse_guide() silently clamps duration_ms to
-        // [0, 9999] to fit the wire command's fixed 4-digit field; clamp the
-        // same way here so the cached end time matches what the mount
-        // actually pulses for, rather than IsPulseGuiding over-reporting for
-        // whatever a caller-supplied duration beyond 9999ms overshot by.
-        const int clamped_duration = std::clamp(duration, 0, 9999);
         OnStepProtocolWrapper::instance().pulse_guide(direction, duration);
         pulse_guiding_active_ = true;
-        pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(clamped_duration);
+        pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(duration);
         equatorial_cache_valid_ = false;
     }
 
@@ -1032,11 +1080,13 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        // Arguments before the connected, fault and parked checks, as the
+        // slews do (#1478).
+        validate_ra_dec(ra, dec, "SyncToCoordinates");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refuse_while_faulted_locked("SyncToCoordinates");
         check_not_parked_locked("SyncToCoordinates");
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
         auto& protocol = OnStepProtocolWrapper::instance();
         // Use the mount's own sync command — do NOT maintain a driver-level
         // offset, which would cause coordinate divergence during subsequent
@@ -1823,6 +1873,7 @@ private:
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         pulse_guiding_active_ = false;
         utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
+        mount_clock_unreadable_.reset();
     }
 
     // open-astro#521: OnStepX keeps running a GOTO while the serial link is
@@ -2223,21 +2274,20 @@ private:
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         OnStepProtocolWrapper::instance().set_time(info);
         utc_offset_.set(utc, clock_.now());
+        mount_clock_unreadable_.reset();
         // The mount now runs on the client's clock and so does the LST above;
         // on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("OnStep", client_minus_host, client_disagreement_warned_);
     }
 
-    // The lazy re-seed below can now also follow a disconnect, which clears
-    // utc_offset_. That is harmless: every caller is guarded by NotConnected.
+    // The UTC the LST computations use: a written or mount-read UTCDate, else
+    // the host clock. The host clock is not stored in utc_offset_, so UTCDate
+    // never reports it as the mount's (#1478).
     std::chrono::system_clock::time_point current_utc_time_locked() const {
-        const auto now = clock_.now();
-        if (const auto utc = utc_offset_.current(now)) {
+        if (const auto utc = utc_offset_.current(clock_.now())) {
             return *utc;
         }
-        const auto seeded = std::chrono::system_clock::now();
-        utc_offset_.set(seeded, now);
-        return seeded;
+        return std::chrono::system_clock::now();
     }
 
     // Decision 0005: every wait, sleep and deadline of this driver (#1378),
@@ -2293,11 +2343,14 @@ private:
     mutable double site_longitude_cached_ = 0.0;
     mutable bool site_info_valid_ = false;
     mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
-    double site_elevation_m_;
+    std::atomic<double> site_elevation_m_;  // NaN until set or configured
 
     // Decision 0014: the UTCDate a client wrote (or the seed) and the task-clock
     // time since. Cleared on connect and disconnect. Under mutex_.
     mutable util::UtcOffset utc_offset_;
+    // Why the connect could not read the mount clock (#1478); under mutex_,
+    // cleared on connect, disconnect and a UTCDate write.
+    std::optional<std::string> mount_clock_unreadable_;
 
     mutable bool slewing_cached_ = false;
     mutable std::chrono::steady_clock::time_point slew_force_until_;

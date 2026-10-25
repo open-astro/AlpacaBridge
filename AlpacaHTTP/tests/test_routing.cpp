@@ -613,8 +613,9 @@ private:
     bool connected_ = false;
 };
 
-// Mirrors the Celestron / OnStep / Bisque / iOptron / Sky-Watcher telescopes:
-// an AsyncConnectable driver whose get_connected() takes the state mutex that
+// Mirrors the shape the blocking-driver list in async_connectable.h guards
+// against (that list is empty today; no real driver has it): an
+// AsyncConnectable driver whose get_connected() takes the state mutex that
 // set_connected() holds for the whole (slow) connect. The router must never
 // read it while a connection task is in flight, or its own connect-wait
 // deadline cannot fire and a polling GET connected stalls for the entire
@@ -1199,6 +1200,98 @@ int main() {
         EXPECT(resp.status_code() == 200);
         const auto body = nlohmann::json::parse(resp.body());
         EXPECT(body.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
+        // case: LastExposure getters map disconnected and fresh-session errors to HTTP 200 (#1477)
+        constexpr int kCameraNumber = 8984;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        EXPECT(registry.register_device(camera));
+        for (bool connected : {false, true}) {
+            camera->set_connected(connected);
+            for (const std::string method : {"lastexposureduration", "lastexposurestarttime"}) {
+                const auto response = route_request(
+                    router, "GET",
+                    "/api/v1/camera/" + std::to_string(kCameraNumber) + "/" + method + "?ClientTransactionID=1477");
+                EXPECT(response.status_code() == 200);
+                const auto body = nlohmann::json::parse(response.body());
+                EXPECT(body.at("ErrorNumber") == (connected ? 0x40B : 0x407));
+                EXPECT(!body.at("ErrorMessage").get<std::string>().empty());
+                EXPECT(body.at("ClientTransactionID") == 1477);
+                EXPECT(body.at("ServerTransactionID") == 1);
+                EXPECT(!body.contains("Value"));
+            }
+        }
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
+        // case: LastExposure success serializes a double duration and whole-second UTC ISO time (#1477)
+        struct TimezoneRestore {
+            std::optional<std::string> previous;
+            TimezoneRestore() {
+                if (const char* tz = std::getenv("TZ")) previous = tz;
+                EXPECT(setenv("TZ", "EST5", 1) == 0);
+                tzset();
+            }
+            ~TimezoneRestore() {
+                if (previous) {
+                    EXPECT(setenv("TZ", previous->c_str(), 1) == 0);
+                } else {
+                    EXPECT(unsetenv("TZ") == 0);
+                }
+                tzset();
+            }
+        } timezone_restore;
+        constexpr int kCameraNumber = 8984;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        camera->set_connected(true);
+        const auto start = std::chrono::sys_days{std::chrono::year{2026} / 10 / 24} + std::chrono::hours{12} +
+                           std::chrono::minutes{34} + std::chrono::seconds{56} + std::chrono::milliseconds{789};
+        camera->set_last_exposure(1.25, start);
+        EXPECT(registry.register_device(camera));
+
+        const auto duration_response =
+            route_request(router, "GET", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/lastexposureduration");
+        EXPECT(duration_response.status_code() == 200);
+        const auto duration = nlohmann::json::parse(duration_response.body());
+        EXPECT(duration.at("ErrorNumber") == 0);
+        EXPECT(duration.at("Value").is_number_float());
+        EXPECT(duration.at("Value").get<double>() == 1.25);
+
+        const auto start_response =
+            route_request(router, "GET", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/lastexposurestarttime");
+        EXPECT(start_response.status_code() == 200);
+        const auto timestamp = nlohmann::json::parse(start_response.body());
+        EXPECT(timestamp.at("ErrorNumber") == 0);
+        EXPECT(timestamp.at("Value").is_string());
+        // format_utc currently emits seconds, without fractional digits or a timezone suffix.
+        EXPECT(timestamp.at("Value") == "2026-10-24T12:34:56");
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
+        // case: LastExposure driver failures preserve exact Alpaca codes and messages at HTTP 200 (#1477)
+        constexpr int kCameraNumber = 8984;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        camera->set_connected(true);
+        EXPECT(registry.register_device(camera));
+        for (int error : {alpacacore::AlpacaError::PropertyNotImplemented, alpacacore::AlpacaError::DriverException}) {
+            camera->set_last_exposure_error(alpacacore::AlpacaException("Metadata read failed", error));
+            for (const std::string method : {"lastexposureduration", "lastexposurestarttime"}) {
+                const auto response =
+                    route_request(router, "GET", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/" + method);
+                EXPECT(response.status_code() == 200);
+                const auto body = nlohmann::json::parse(response.body());
+                EXPECT(body.at("ErrorNumber") == error);
+                EXPECT(body.at("ErrorMessage") == "Metadata read failed");
+                EXPECT(!body.contains("Value"));
+            }
+        }
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
     }
 
@@ -5429,35 +5522,27 @@ int main() {
             const char* vendor;
             const char* bad_type_message;  // the arm's own literal, they differ
             const char* site;              // mandatory from the API for this vendor (#274)
-            // open-astro#744: registered through the device catalog rather than
-            // a router arm. Two observable differences, pinned per case below:
-            // sanitize keeps every declared field (ADR 0004: portPath / host
-            // survive whatever the connection type), and a saved config's
-            // cross-field refusal is logged through the catalog's "config
-            // normalized" wrapper, not the deleted reject_invalid_config()'s
-            // "will refuse to connect" text.
-            bool catalog;
         };
         std::vector<Mount> mounts;
         const char* const kSite = R"("siteLatitude":51.477833,"siteLongitude":-0.0015)";
         const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
-        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true});
+        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite});
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true});
+        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", ""});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", true});
+        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", ""});
 #endif
         for (const auto& m : mounts) {
             const std::string site = m.site;
@@ -5474,9 +5559,7 @@ int main() {
             // open-astro#744): sanitize no longer tests == "serial".
             pin("connectionType \"carrier-pigeon\" (#380/#353)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site}), m.bad_type_message, "{}",
-                true,
-                m.catalog ? obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site})
-                          : obj({R"("connectionType":"carrier-pigeon")", site}),
+                true, obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site}),
                 {"has connectionType \"carrier-pigeon\"", warned_serial}, {"Skipping persisted device"});
 
             // #508 item 2: connectionType is folded to lower case once, on the
@@ -5509,10 +5592,8 @@ int main() {
             pin("serial with empty portPath (#508 item 1, mount arm)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"serial","portPath":"")", site}), "Serial port path is required", "{}", true,
                 obj({R"("connectionType":"serial","portPath":"")", site}),
-                m.catalog ? std::vector<std::string>{"config normalized: Serial port path is required"}
-                          : std::vector<std::string>{"will refuse to connect: Serial port path is required"},
-                m.catalog ? std::vector<std::string>{"Skipping persisted device", "will refuse to connect"}
-                          : std::vector<std::string>{"Skipping persisted device"});
+                std::vector<std::string>{"config normalized: Serial port path is required"},
+                std::vector<std::string>{"Skipping persisted device", "will refuse to connect"});
 
             // #508 item 3: an empty connectionType is "auto" for every mount,
             // zwo included. Its normalize reads "" as auto for both sources, so
@@ -7119,9 +7200,9 @@ int main() {
     }
 
     // Issue #130: a driver whose get_connected() blocks behind an in-flight
-    // connect -- the telescopes listed in async_connectable.h. SynScan
-    // produced #130 and is deliberately NOT one of them any more: that fix
-    // made its getter a bare atomic load. The router must poll
+    // connect (async_connectable.h's blocking list is empty today; no real
+    // driver has this shape). SynScan produced #130 and its getter has been a
+    // bare atomic load since that fix. The router must poll
     // get_connecting(), the non-blocking signal, so GET connected/connecting
     // answer at once mid-connect and the PUT connected wait honours its
     // deadline instead of stalling for the whole handshake.
@@ -7407,7 +7488,7 @@ int main() {
 
         // The utcdate setter is the third caller (added by #401, because a
         // UTCDate write can step the host clock), and it is the one whose
-        // ClientTransactionID comes from dispatch_telescope_method far above
+        // ClientTransactionID comes from the DeviceCall built in handle_device
         // rather than from a line or two up -- so it is the easiest of the
         // three to leave on the hardcoded 0. It needs a registered telescope
         // to reach the setter at all.
@@ -7512,6 +7593,12 @@ int main() {
                             R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":4294967299})",
                             "deviceNumber"},
                  std::tuple{"/management/v1/configuredevice",
+                            R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":true})",
+                            "'deviceNumber' has the wrong type (got boolean)"},
+                 std::tuple{"/management/v1/removedevice",
+                            R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":true})",
+                            "'deviceNumber' has the wrong type (got boolean)"},
+                 std::tuple{"/management/v1/configuredevice",
                             R"({"vendor":"nosuchvendor","deviceType":5,"deviceNumber":1})", "deviceType"},
                  std::tuple{"/management/v1/removedevice",
                             R"({"vendor":"nosuchvendor","deviceType":5,"deviceNumber":1})", "deviceType"},
@@ -7579,13 +7666,13 @@ int main() {
         // Issue #388, the other half: a config field of a genuinely wrong TYPE
         // is still an error -- silently falling back would accept a typo'd
         // config and register a device with defaults nobody asked for -- but
-        // config_get() reports it as an AlpacaException naming the field
-        // rather than letting nlohmann's type_error reach the outer catch.
+        // config_from_json() (the catalog bridge) reports it as an AlpacaException naming
+        // the field rather than letting nlohmann's type_error reach the outer catch.
         //
         // The null case above does NOT cover this: it asserts only the absence
         // of "json.exception" text, and passes with or without the try/catch,
-        // because a null never reaches get<T>() at all. Deleting the catch in
-        // config_get() must fail HERE.
+        // because a null never reaches get<T>() at all. Deleting the wrong-type
+        // check in config_from_json() (the Double arm) must fail HERE.
         alpacahttp::Router router;
         nlohmann::json config = {{"vendor", "skywatcher"},  {"deviceType", "telescope"},
                                  {"deviceNumber", 50},      {"connectionType", "serial"},
@@ -7658,7 +7745,7 @@ int main() {
     // open-astro#744: an Int field takes an integer or a whole-number float
     // (9600 or 9600.0); a fractional value is a wrong-type refusal naming the
     // field, as for every catalog vendor (catalog_json.cpp whole_number()).
-    // The arm's config_get<int>() read 9600.5 as 9600 without a word. The
+    // The deleted arm's get<int>() read 9600.5 as 9600 without a word. The
     // catalog rule wins; the PR body quotes the change.
     {
         alpacahttp::Router router;
@@ -8686,7 +8773,7 @@ int main() {
         remove_device(router, "zzz", "focuser", 9255);
 
         // API, wrong type: the bridge's InvalidValue is reported as a
-        // config_get() failure is today, and nothing registers.
+        // wrong-type refusal, and nothing registers.
         const auto wrong = api_attempt(
             router,
             nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":"seven"})"),
@@ -8743,8 +8830,8 @@ int main() {
     }
     {
         // Persisted, wrong JSON type: the bridge's InvalidValue is thrown before
-        // normalize() runs, so the entry fails to load as a config_get() failure
-        // did through the deleted arm. It is not normalized to the default.
+        // normalize() runs, so the entry fails to load as a wrong-type refusal.
+        // It is not normalized to the default.
         const auto persisted = persisted_attempt(
             nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9258,"count":"seven"})"),
             "Focuser", alpacahttp::test_catalog::add_schema_and_factory);
@@ -9578,7 +9665,7 @@ int main() {
     }
 
 #ifdef ALPACACORE_ENABLE_SVBONY
-    // The catalog's Int field refuses what the deleted arm's config_get<int>()
+    // The catalog's Int field refuses what the deleted arm's get<int>()
     // truncated (1.5) or coerced (true): not registered, InvalidValue.
     {
         const char* const kBadIndexes[] = {"1.5", "true"};

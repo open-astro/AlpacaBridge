@@ -40,6 +40,7 @@ public:
             return {};
         }
         std::vector<DeviceState> state;
+        state.reserve(2);  // GCC 13 -O3 stringop-overflow false positive on vector growth (#1595)
         try {
             state.push_back({"Position", DeviceStateValue{static_cast<std::int32_t>(get_position())}});
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)

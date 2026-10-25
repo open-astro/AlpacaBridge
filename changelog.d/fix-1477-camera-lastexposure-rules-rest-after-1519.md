@@ -1,0 +1,3 @@
+### Fixed
+
+- **Camera `LastExposureDuration` and `LastExposureStartTime`** (AlpacaCore, issue #1477): before the first successful image, both raise `InvalidOperation` rather than `ValueNotSet`; disconnected reads raise `NotConnected`. Supported metadata is published only for accepted acquisitions and survives later pending or failed acquisitions. GPhoto reports the applied native shutter speed or measured monotonic bulb-open duration, excluding download and decode. iGuider publishes duration but raises `PropertyNotImplemented` for start UTC after success because its stream has no verified photon-start timestamp. ToupTek/Altair metadata corrections and remaining hardware-timing limitations are described in the accompanying camera metadata fragment.

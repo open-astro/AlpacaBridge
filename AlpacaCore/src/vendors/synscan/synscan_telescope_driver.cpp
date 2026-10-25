@@ -22,6 +22,7 @@
 #include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -270,10 +271,6 @@ public:
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
-          last_utc_set_{},
-          // Pointing time stays on the host's steady clock, not the task clock (decision 0005).
-          last_utc_set_monotonic_(std::chrono::steady_clock::now()),
-          last_utc_valid_(false),
           tracking_mode_cached_(0),
           tracking_mode_valid_(false),
           parked_(false),
@@ -483,7 +480,7 @@ public:
             position_override_until_ = util::TaskClock::clock::time_point::min();
             invalidate_readback_tick_locked();
             guide_position_valid_ = false;
-            last_utc_valid_ = false;
+            utc_offset_.clear();
             client_disagreement_warned_ = false;
             snapshot_.reset();
             position_link_health_.reset();
@@ -1065,9 +1062,7 @@ private:
         timezone_offset_minutes_ = tz_info.offset_minutes;
         timezone_offset_valid_ = true;
         dst_observed_ = tz_info.dst;
-        last_utc_set_ = utc;
-        last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-        last_utc_valid_ = true;
+        utc_offset_.set(utc, clock_.now());
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("SynScan", client_minus_host, client_disagreement_warned_);
@@ -2028,7 +2023,8 @@ private:
 
     // Reads the handset clock once per session (the connect seeds it), so UTCDate in DeviceState costs no transaction.
     void ensure_utc_cached_locked() const {
-        if (!last_utc_valid_) {
+        if (!utc_offset_.valid()) {
+            std::chrono::system_clock::time_point mount_utc;
             try {
                 TimeInfo info = SynScanProtocolWrapper::instance().get_time();
                 timezone_offset_minutes_ = info.timezone_offset_minutes;
@@ -2042,12 +2038,11 @@ private:
                              std::chrono::day{static_cast<unsigned>(info.day)}};
                 auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
                 int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
-                last_utc_set_ = local_time - minutes{total_offset};
+                mount_utc = local_time - minutes{total_offset};
             } catch (...) {
-                last_utc_set_ = std::chrono::system_clock::now();
+                mount_utc = std::chrono::system_clock::now();
             }
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+            utc_offset_.set(mount_utc, clock_.now());
         }
     }
 
@@ -2078,6 +2073,7 @@ private:
         position_link_health_.reset();
         publish_link_fault_locked();
         snapshot_.reset();
+        utc_offset_.clear();  // decision 0014: cleared on disconnect as well as connect
         link_lost_ = false;
     }
 
@@ -3643,14 +3639,11 @@ private:
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
-        if (!last_utc_valid_) {
-            last_utc_set_ = std::chrono::system_clock::now();
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+        const auto task_now = clock_.now();
+        if (!utc_offset_.valid()) {
+            utc_offset_.set(std::chrono::system_clock::now(), task_now);
         }
-        // Pointing time (UTC extrapolation), not a task wait: real steady clock on purpose.
-        auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
-        return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+        return utc_offset_.current(task_now).value_or(std::chrono::system_clock::now());
     }
 
     static double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
@@ -3742,9 +3735,7 @@ private:
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
     mutable bool dst_observed_;
-    mutable std::chrono::system_clock::time_point last_utc_set_;
-    mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
-    mutable bool last_utc_valid_;
+    mutable util::UtcOffset utc_offset_;
     mutable int tracking_mode_cached_;
     mutable bool tracking_mode_valid_;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM

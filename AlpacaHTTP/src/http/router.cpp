@@ -67,10 +67,15 @@
 #include <vector>
 
 #include "../core/catalog_json.h"
+#include "device_call.h"
+#include "image_payload.h"
 
 namespace {
 
 using alpacacore::logging::LogLevel;
+using alpacahttp::find_json_value;
+using alpacahttp::get_form_value;
+using alpacahttp::to_lower_copy;
 
 const std::filesystem::path kPersistedDevicesFile = std::filesystem::path("config") / "registered_devices.json";
 
@@ -380,12 +385,6 @@ std::optional<LogLevel> parse_log_level_string(const std::string& input) {
     return std::nullopt;
 }
 
-std::string to_lower_copy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
-
 // The (vendor, deviceType, deviceNumber) key of a persisted-list entry, read
 // through typed guards rather than value() (#388): a hand-edited file can
 // carry "deviceNumber": "3", and that entry stays in persisted_devices_ (only
@@ -420,31 +419,7 @@ std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::st
     return value;
 }
 
-// A JSON number as an int: a JSON integer inside int, or a finite float with
-// no fraction (a hand-written 3.0) inside int. nullopt for anything else, so
-// no caller narrows with get<int>(), which wraps 2^32 to 0 and cuts 3.5 to 3
-// (ADR 0007 rule 4).
-std::optional<int> whole_json_int(const nlohmann::json& value) {
-    if (value.is_number_unsigned()) {
-        const auto v = value.get<std::uint64_t>();
-        if (!std::in_range<int>(v)) return std::nullopt;
-        return static_cast<int>(v);
-    }
-    if (value.is_number_integer()) {
-        const auto v = value.get<std::int64_t>();
-        if (!std::in_range<int>(v)) return std::nullopt;
-        return static_cast<int>(v);
-    }
-    if (value.is_number_float()) {
-        const double d = value.get<double>();
-        if (!std::isfinite(d) || d != std::trunc(d) || d < static_cast<double>(std::numeric_limits<int>::min()) ||
-            d > static_cast<double>(std::numeric_limits<int>::max())) {
-            return std::nullopt;
-        }
-        return static_cast<int>(d);
-    }
-    return std::nullopt;
-}
+using alpacahttp::catalog_json::whole_json_int;
 
 std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     if (!entry.is_object()) {
@@ -452,7 +427,7 @@ std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     }
     const auto type_it = entry.find("deviceType");
     const auto number_it = entry.find("deviceNumber");
-    // The numbers config_get<int>() accepts at registration (whole_json_int):
+    // The numbers catalog_json::get_int() accepts at registration (whole_json_int):
     // a hand-written 3.0 registers as device 3, so the walks over the
     // persisted list must find that same entry or removedevice would drop it
     // from the registry and leave it in the file. A number registration
@@ -482,39 +457,6 @@ std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     throw alpacacore::AlpacaException(message, alpacacore::AlpacaError::InvalidValue);
 }
 
-// A Device API request the server cannot interpret: a required parameter is
-// missing, or its value does not parse as the required type. The router answers
-// HTTP 400 text/plain (Alpaca API Reference s2.5), never reaching the driver. It
-// is an AlpacaException with InvalidValue so a caller that only wants the old
-// error (the description write) still sees one. A value that parses but is out
-// of range is not this: it stays throw_invalid_value() -> HTTP 200 + 0x401.
-class RequestNotInterpretable : public alpacacore::AlpacaException {
-public:
-    using alpacacore::AlpacaException::AlpacaException;
-};
-
-[[noreturn]] void throw_bad_request(const std::string& message) {
-    throw RequestNotInterpretable(message, alpacacore::AlpacaError::InvalidValue);
-}
-
-std::string url_decode(const std::string& value) {
-    std::string result;
-    result.reserve(value.size());
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        if (value[i] == '%' && i + 2 < value.size()) {
-            std::string hex = value.substr(i + 1, 2);
-            char decoded = static_cast<char>(std::strtol(hex.c_str(), nullptr, 16));
-            result.push_back(decoded);
-            i += 2;
-        } else if (value[i] == '+') {
-            result.push_back(' ');
-        } else {
-            result.push_back(value[i]);
-        }
-    }
-    return result;
-}
-
 bool is_lowercase_ascii(const std::string& value) {
     for (unsigned char c : value) {
         if (c >= 'A' && c <= 'Z') {
@@ -522,90 +464,6 @@ bool is_lowercase_ascii(const std::string& value) {
         }
     }
     return true;
-}
-
-std::uint32_t parse_client_transaction_id(const std::string& value) {
-    if (value.empty()) {
-        return 0;
-    }
-    try {
-        std::size_t pos = 0;
-        long long parsed = std::stoll(value, &pos);
-        if (pos != value.size()) {
-            return 0;
-        }
-        if (parsed < 0 || parsed > static_cast<long long>(std::numeric_limits<std::uint32_t>::max())) {
-            return 0;
-        }
-        return static_cast<std::uint32_t>(parsed);
-    } catch (...) {
-        return 0;
-    }
-}
-
-double parse_double_value(const std::string& raw, const std::string& param_name) {
-    try {
-        // #574: std::stod (libc strtod) accepts "nan", "inf", "-infinity" and
-        // hex-float notation ("0x1p3", finite but not an Alpaca decimal
-        // number); reject hex before parsing, and require the parsed result
-        // to be finite. Both fall into the catch below via
-        // std::invalid_argument, same as any other malformed value.
-        if (raw.find_first_of("xX") != std::string::npos) {
-            throw std::invalid_argument("hex float notation is not a valid Alpaca number");
-        }
-        std::size_t pos = 0;
-        double value = std::stod(raw, &pos);
-        if (pos != raw.size() || !std::isfinite(value)) {
-            throw std::invalid_argument("trailing characters or non-finite value");
-        }
-        return value;
-    } catch (const std::exception&) {
-        throw_bad_request("Invalid value for parameter: " + param_name);
-    }
-}
-
-int parse_int_value(const std::string& raw, const std::string& param_name) {
-    try {
-        std::size_t pos = 0;
-        long long value = std::stoll(raw, &pos);
-        if (pos != raw.size()) {
-            throw std::invalid_argument("trailing characters");
-        }
-        if (value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
-            throw std::out_of_range("int range");
-        }
-        return static_cast<int>(value);
-    } catch (const std::exception&) {
-        throw_bad_request("Invalid value for parameter: " + param_name);
-    }
-}
-
-// A JSON-body integer parameter (#1476): accepted only as a whole number
-// inside int, given as a JSON integer, a JSON number with no fraction (0.0),
-// or a string parse_int_value() accepts. Anything else is a request the
-// server cannot interpret (throw_bad_request, HTTP 400). The query and form paths already
-// refuse "0.5" and values outside int; before this, the JSON path truncated
-// 0.5 to 0 and wrapped 2^32 to 0 in all six device dispatchers.
-int json_int_value(const nlohmann::json& value, const std::string& param_name) {
-    if (value.is_number()) {
-        if (const auto v = whole_json_int(value)) return *v;
-        throw_bad_request("Invalid value for parameter: " + param_name);
-    }
-    if (value.is_string()) {
-        return parse_int_value(value.get<std::string>(), param_name);
-    }
-    throw_bad_request("Invalid JSON value for parameter: " + param_name);
-}
-
-bool parse_bool_value(const std::string& raw, const std::string& param_name) {
-    std::string lowered = to_lower_copy(raw);
-    if (lowered == "true" || lowered == "1") {
-        return true;
-    }
-    if (lowered == "false" || lowered == "0") {
-        return false;
-    }
-    throw_bad_request("Invalid value for parameter: " + param_name);
 }
 
 // The verb masks below mirror the GET/PUT branches of each dispatch_*_method,
@@ -917,17 +775,6 @@ void apply_error_status(alpacahttp::Response& response, std::int32_t error_code)
     }
 }
 
-const nlohmann::json* find_json_value(const nlohmann::json& json_obj, const std::string& key) {
-    if (!json_obj.is_object()) {
-        return nullptr;
-    }
-    auto it = json_obj.find(key);
-    if (it != json_obj.end()) {
-        return &it.value();
-    }
-    return nullptr;
-}
-
 std::optional<std::string> get_query_param_case_insensitive(const alpacahttp::Request& request, const std::string& key) {
     if (request.has_query_param(key)) {
         return request.get_query_param(key);
@@ -936,29 +783,6 @@ std::optional<std::string> get_query_param_case_insensitive(const alpacahttp::Re
     for (const auto& entry : request.query_params()) {
         if (to_lower_copy(entry.first) == target) {
             return entry.second;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::string> get_form_value(std::string_view body, const std::string& key) {
-    // Alpaca spec: "Parameter names are not case sensitive, so clients and
-    // drivers should be prepared for parameter names to be supplied ... with
-    // any casing." Match PUT form-body parameter names case-insensitively.
-    if (body.empty()) {
-        return std::nullopt;
-    }
-    const std::string target = to_lower_copy(key);
-    std::istringstream iss{std::string(body)};
-    std::string pair;
-    while (std::getline(iss, pair, '&')) {
-        auto eq_pos = pair.find('=');
-        if (eq_pos != std::string::npos) {
-            std::string form_key = url_decode(pair.substr(0, eq_pos));
-            std::string value = url_decode(pair.substr(eq_pos + 1));
-            if (to_lower_copy(form_key) == target) {
-                return value;
-            }
         }
     }
     return std::nullopt;
@@ -1033,361 +857,6 @@ nlohmann::json make_log_level_payload() {
     payload["Level"] = log_level_to_string(alpacacore::logging::get_log_level());
     payload["SupportedLevels"] = {"TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"};
     return payload;
-}
-
-void append_int(std::string& out, std::int64_t value) {
-    out.append(std::to_string(value));
-}
-
-// image.data is stored Y-major/X-minor (row-major, one scanline at a time --
-// see the decode paths that fill it), but ASCOM's ImageArray wire format
-// (both the imagebytes binary payload and the JSON [x][y] nesting below) is
-// X-major/Y-minor. Reading it out with x as the outer loop variable directly
-// against that row-major layout strides by a full row (width * 4 bytes --
-// tens of KB for a real sensor) on every single element: a cache miss on
-// nearly every pixel, and a page fault on many, across a multi-hundred-MB
-// buffer.
-//
-// Both JSON and ImageBytes use the same blocked X-major traversal. Blocking
-// changes only when a value is read relative to when it is written, never
-// which output offset it ends up at.
-//
-// Measured 5.2x faster overall (5.4s -> 1.0s for a 6016x4016 Int32 frame) on
-// an RK3568-class ARM SBC with AlpacaCore's libgphoto2 driver. Larger sensors
-// and other cameras still need their own timing validation.
-template <typename Visitor>
-void for_each_xy_blocked(std::size_t width, std::size_t height, Visitor&& visit) {
-    constexpr std::size_t kBlock = 64;
-    for (std::size_t by = 0; by < height; by += kBlock) {
-        const auto by_end = std::min(by + kBlock, height);
-        for (std::size_t bx = 0; bx < width; bx += kBlock) {
-            const auto bx_end = std::min(bx + kBlock, width);
-            for (std::size_t y = by; y < by_end; ++y) {
-                for (std::size_t x = bx; x < bx_end; ++x) {
-                    visit(x, y);
-                }
-            }
-        }
-    }
-}
-
-using ImageShape = alpacacore::util::ImageShape;
-using alpacacore::util::throw_invalid_camera_image;
-using alpacacore::util::validate_image_data_length;
-using alpacacore::util::validate_image_shape;
-
-std::vector<std::int32_t> transpose_xy(const std::vector<std::int32_t>& data, std::size_t width, std::size_t height,
-                                       std::size_t channels) {
-    std::vector<std::int32_t> out(data.size());
-    for_each_xy_blocked(width, height, [&](std::size_t x, std::size_t y) {
-        const std::size_t src_base = (y * width + x) * channels;
-        const std::size_t dst_base = (x * height + y) * channels;
-        for (std::size_t c = 0; c < channels; ++c) {
-            out[dst_base + c] = data[src_base + c];
-        }
-    });
-    return out;
-}
-
-std::string build_image_array_payload(const alpacacore::ImageArray& image,
-                                      int type,
-                                      std::uint32_t client_tx_id,
-                                      std::uint32_t server_tx_id) {
-    const ImageShape shape = validate_image_shape(image);
-    validate_image_data_length(image, shape);
-    constexpr std::size_t kBaseJsonSize = 256;
-    constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
-    const auto [min_value, max_value] = std::minmax_element(image.data.begin(), image.data.end());
-    const std::size_t max_value_chars = std::max(std::to_string(*min_value).size(), std::to_string(*max_value).size());
-    const std::size_t bytes_per_value = max_value_chars + 1;  // one delimiter per value
-    const std::size_t pixels = shape.element_count / shape.channels;
-    std::size_t bracket_groups = shape.width + 1;
-    if (image.rank == 3) {
-        if (pixels > kMaxSize - bracket_groups) {
-            throw_invalid_camera_image("JSON payload size overflows addressable memory");
-        }
-        bracket_groups += pixels;
-    }
-    if (bracket_groups > (kMaxSize - kBaseJsonSize) / 2) {
-        throw_invalid_camera_image("JSON payload size overflows addressable memory");
-    }
-    const std::size_t fixed_json_size = kBaseJsonSize + bracket_groups * 2;
-    if (shape.element_count > (kMaxSize - fixed_json_size) / bytes_per_value) {
-        throw_invalid_camera_image("JSON payload size overflows addressable memory");
-    }
-    const std::size_t estimate = fixed_json_size + shape.element_count * bytes_per_value;
-
-    std::string body;
-    body.reserve(estimate);
-    body.append("{\"ClientTransactionID\":");
-    append_int(body, client_tx_id);
-    body.append(",\"ServerTransactionID\":");
-    append_int(body, server_tx_id);
-    body.append(",\"ErrorNumber\":0,\"ErrorMessage\":\"\",\"Type\":");
-    append_int(body, type);
-    body.append(",\"Rank\":");
-    append_int(body, image.rank);
-    body.append(",\"Value\":");
-
-    if (image.rank == 2) {
-        const auto width = static_cast<std::uint32_t>(shape.width);
-        const auto height = static_cast<std::uint32_t>(shape.height);
-        std::vector<std::int32_t> transposed = transpose_xy(image.data, shape.width, shape.height, shape.channels);
-        body.push_back('[');
-        for (std::uint32_t x = 0; x < width; ++x) {
-            if (x > 0) {
-                body.push_back(',');
-            }
-            body.push_back('[');
-            for (std::uint32_t y = 0; y < height; ++y) {
-                if (y > 0) {
-                    body.push_back(',');
-                }
-                append_int(body, transposed[static_cast<std::size_t>(x) * height + y]);
-            }
-            body.push_back(']');
-        }
-        body.push_back(']');
-    } else {
-        const auto width = static_cast<std::uint32_t>(shape.width);
-        const auto height = static_cast<std::uint32_t>(shape.height);
-        std::vector<std::int32_t> transposed = transpose_xy(image.data, shape.width, shape.height, shape.channels);
-        body.push_back('[');
-        for (std::uint32_t x = 0; x < width; ++x) {
-            if (x > 0) {
-                body.push_back(',');
-            }
-            body.push_back('[');
-            for (std::uint32_t y = 0; y < height; ++y) {
-                if (y > 0) {
-                    body.push_back(',');
-                }
-                body.push_back('[');
-                std::size_t base = (static_cast<std::size_t>(x) * height + y) * 3;
-                for (int c = 0; c < 3; ++c) {
-                    if (c > 0) {
-                        body.push_back(',');
-                    }
-                    append_int(body, transposed[base + static_cast<std::size_t>(c)]);
-                }
-                body.push_back(']');
-            }
-            body.push_back(']');
-        }
-        body.push_back(']');
-    }
-
-    body.push_back('}');
-    return body;
-}
-
-constexpr std::uint32_t kImageTypeInt16 = 1;
-constexpr std::uint32_t kImageTypeInt32 = 2;
-constexpr std::uint32_t kImageTypeByte = 6;
-constexpr std::uint32_t kImageTypeUInt16 = 8;
-
-constexpr std::uint32_t kImageBytesMetadataVersion = 1;
-constexpr std::size_t kImageBytesMetadataSize = 11 * sizeof(std::uint32_t);
-
-struct ImageBytesFormat {
-    std::uint32_t image_element_type = kImageTypeInt32;
-    std::uint32_t transmission_element_type = kImageTypeUInt16;
-    std::size_t bytes_per_element = sizeof(std::uint16_t);
-};
-
-bool is_expected_not_implemented(const alpacacore::AlpacaException& e) {
-    const int error_code = e.error_code();
-    // NotImplemented, PropertyNotImplemented and MethodNotImplemented all map to
-    // the same ASCOM code (0x400); ActionNotImplemented (0x40C) is distinct.
-    return error_code == alpacacore::AlpacaError::NotImplemented ||
-           error_code == alpacacore::AlpacaError::ActionNotImplemented;
-}
-
-bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
-    const int error_code = e.error_code();
-    return error_code == alpacacore::AlpacaError::InvalidValue ||
-        error_code == alpacacore::AlpacaError::ValueNotSet;
-}
-
-// A client reading a disconnected device gets NotConnected (1031) on every poll;
-// the reply is correct, so the line is client input, not a server fault.
-bool is_expected_not_connected(const alpacacore::AlpacaException& e) {
-    return e.error_code() == alpacacore::AlpacaError::NotConnected;
-}
-
-void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
-    std::string message = context + ": " + alpacahttp::util::escape_for_log(e.what(), 4096);
-    if (is_expected_not_implemented(e) || is_expected_validation_error(e) || is_expected_not_connected(e) ||
-        e.is_asked_too_early()) {
-        alpacahttp::util::log_debug(message);
-    } else {
-        alpacahttp::util::log_error(message);
-    }
-}
-
-bool accepts_imagebytes(const alpacahttp::Request& request) {
-    if (!request.has_header("accept")) {
-        return false;
-    }
-    std::string accept = to_lower_copy(request.get_header("accept"));
-    return accept.find("application/imagebytes") != std::string::npos;
-}
-
-ImageBytesFormat choose_image_bytes_format(const alpacacore::ImageArray& image,
-                                           std::uint32_t image_element_type) {
-    ImageBytesFormat format;
-    format.image_element_type = image_element_type;
-
-    if (image_element_type == kImageTypeByte) {
-        format.transmission_element_type = kImageTypeByte;
-        format.bytes_per_element = sizeof(std::uint8_t);
-        return format;
-    }
-    if (image_element_type == kImageTypeUInt16) {
-        format.transmission_element_type = kImageTypeUInt16;
-        format.bytes_per_element = sizeof(std::uint16_t);
-        return format;
-    }
-    if (image_element_type == kImageTypeInt16) {
-        format.transmission_element_type = kImageTypeInt16;
-        format.bytes_per_element = sizeof(std::int16_t);
-        return format;
-    }
-
-    if (image.data.empty()) {
-        format.transmission_element_type = kImageTypeUInt16;
-        format.bytes_per_element = sizeof(std::uint16_t);
-        return format;
-    }
-
-    auto minmax = std::minmax_element(image.data.begin(), image.data.end());
-    std::int64_t min_val = static_cast<std::int64_t>(*minmax.first);
-    std::int64_t max_val = static_cast<std::int64_t>(*minmax.second);
-
-    if (min_val >= 0 && max_val <= std::numeric_limits<std::uint8_t>::max()) {
-        format.transmission_element_type = kImageTypeByte;
-        format.bytes_per_element = sizeof(std::uint8_t);
-    } else if (min_val >= 0 && max_val <= std::numeric_limits<std::uint16_t>::max()) {
-        format.transmission_element_type = kImageTypeUInt16;
-        format.bytes_per_element = sizeof(std::uint16_t);
-    } else if (min_val >= std::numeric_limits<std::int16_t>::min() &&
-               max_val <= std::numeric_limits<std::int16_t>::max()) {
-        format.transmission_element_type = kImageTypeInt16;
-        format.bytes_per_element = sizeof(std::int16_t);
-    } else {
-        format.transmission_element_type = kImageTypeInt32;
-        format.bytes_per_element = sizeof(std::int32_t);
-    }
-
-    return format;
-}
-
-void append_uint32_le(std::string& out, std::uint32_t value) {
-    char bytes[4];
-    bytes[0] = static_cast<char>(value & 0xFF);
-    bytes[1] = static_cast<char>((value >> 8) & 0xFF);
-    bytes[2] = static_cast<char>((value >> 16) & 0xFF);
-    bytes[3] = static_cast<char>((value >> 24) & 0xFF);
-    out.append(bytes, sizeof(bytes));
-}
-
-std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
-                                      const ImageBytesFormat& format,
-                                      std::uint32_t client_tx_id,
-                                      std::uint32_t server_tx_id) {
-    const ImageShape shape = validate_image_shape(image);
-    constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
-    std::size_t expected_bytes_per_element = 0;
-    switch (format.transmission_element_type) {
-        case kImageTypeByte:
-            expected_bytes_per_element = sizeof(std::uint8_t);
-            break;
-        case kImageTypeUInt16:
-            expected_bytes_per_element = sizeof(std::uint16_t);
-            break;
-        case kImageTypeInt16:
-            expected_bytes_per_element = sizeof(std::int16_t);
-            break;
-        case kImageTypeInt32:
-            expected_bytes_per_element = sizeof(std::int32_t);
-            break;
-        default:
-            throw_invalid_camera_image("unsupported transmission element type");
-    }
-    if (format.bytes_per_element != expected_bytes_per_element) {
-        throw_invalid_camera_image("transmission element size does not match its type");
-    }
-    if (shape.element_count > (kMaxSize - kImageBytesMetadataSize) / expected_bytes_per_element) {
-        throw_invalid_camera_image("payload size overflows addressable memory");
-    }
-    validate_image_data_length(image, shape);
-    const std::size_t data_bytes = shape.element_count * expected_bytes_per_element;
-    const std::size_t payload_size = kImageBytesMetadataSize + data_bytes;
-
-    std::string body;
-    body.reserve(payload_size);
-
-    append_uint32_le(body, kImageBytesMetadataVersion);
-    append_uint32_le(body, 0);
-    append_uint32_le(body, client_tx_id);
-    append_uint32_le(body, server_tx_id);
-    append_uint32_le(body, static_cast<std::uint32_t>(kImageBytesMetadataSize));
-    append_uint32_le(body, format.image_element_type);
-    append_uint32_le(body, format.transmission_element_type);
-    // validate_image_shape() above restricts rank to 2 or 3 before this narrowing.
-    append_uint32_le(body, static_cast<std::uint32_t>(image.rank));
-    append_uint32_le(body, static_cast<std::uint32_t>(shape.width));
-    append_uint32_le(body, static_cast<std::uint32_t>(shape.height));
-    append_uint32_le(body, image.rank == 3 ? 3 : 0);
-    body.resize(payload_size);
-
-    const auto pack_pixels = [&](auto write_element) {
-        auto* output = body.data() + kImageBytesMetadataSize;
-        for_each_xy_blocked(shape.width, shape.height, [&](std::size_t x, std::size_t y) {
-            const std::size_t src = (y * shape.width + x) * shape.channels;
-            const std::size_t dst = (x * shape.height + y) * shape.channels;
-            for (std::size_t channel = 0; channel < shape.channels; ++channel) {
-                write_element(output + (dst + channel) * format.bytes_per_element, image.data[src + channel]);
-            }
-        });
-    };
-
-    switch (format.transmission_element_type) {
-        case kImageTypeByte:
-            pack_pixels([](char* output, std::int32_t value) {
-                output[0] = static_cast<char>(static_cast<std::uint8_t>(
-                    std::clamp<std::int32_t>(value, 0, std::numeric_limits<std::uint8_t>::max())));
-            });
-            break;
-        case kImageTypeUInt16:
-            pack_pixels([](char* output, std::int32_t value) {
-                const auto packed = static_cast<std::uint16_t>(
-                    std::clamp<std::int32_t>(value, 0, std::numeric_limits<std::uint16_t>::max()));
-                output[0] = static_cast<char>(packed & 0xFF);
-                output[1] = static_cast<char>((packed >> 8) & 0xFF);
-            });
-            break;
-        case kImageTypeInt16:
-            pack_pixels([](char* output, std::int32_t value) {
-                const auto packed = static_cast<std::uint16_t>(std::clamp<std::int32_t>(
-                    value, std::numeric_limits<std::int16_t>::min(), std::numeric_limits<std::int16_t>::max()));
-                output[0] = static_cast<char>(packed & 0xFF);
-                output[1] = static_cast<char>((packed >> 8) & 0xFF);
-            });
-            break;
-        case kImageTypeInt32:
-            pack_pixels([](char* output, std::int32_t value) {
-                const auto packed = static_cast<std::uint32_t>(value);
-                for (unsigned shift = 0; shift < 32; shift += 8) {
-                    output[shift / 8] = static_cast<char>((packed >> shift) & 0xFF);
-                }
-            });
-            break;
-        default:
-            throw_invalid_camera_image("unsupported transmission element type");
-    }
-
-    return body;
 }
 
 } // namespace
@@ -2484,8 +1953,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         const bool type_mismatch = dynamic_cast<const nlohmann::json::type_error*>(&e) != nullptr;
         const auto error_code =
             is_write && type_mismatch ? util::ErrorCode::INVALID_VALUE : util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, error_code, util::exception_to_error_message(e));
+        AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, error_code, e.what());
         response.set_body(alpaca_response);
         // #1476: an invalid field value in a write is a request the server
         // cannot interpret, answered 400 like the AllowedHosts refusal. A valid
@@ -2632,8 +2100,8 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error getting configured devices: " + std::string(e.what()));
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
     }
 
@@ -2705,8 +2173,8 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error getting failed devices: " + std::string(e.what()));
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
     }
 
@@ -2716,23 +2184,10 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
 Response Router::handle_device(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id) {
     Response response;
 
-    // Extract client transaction ID from request
-    std::uint32_t client_tx_id = 0;
-    if (request.method() == HttpMethod::PUT && !request.body().empty()) {
-        // Try JSON first
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            client_tx_id = extract_client_transaction_id(*json_opt);
-        } else {
-            if (auto value = get_form_value(request.body(), "ClientTransactionID")) {
-                client_tx_id = parse_client_transaction_id(*value);
-            }
-        }
-    } else if (request.method() == HttpMethod::GET) {
-        if (request.has_query_param("ClientTransactionID")) {
-            client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-        }
-    }
+    // One DeviceCall per request: it reads the client transaction id and parses
+    // the body at most once for every dispatcher below.
+    const DeviceCall call(request, server_tx_id);
+    const std::uint32_t client_tx_id = call.client_tx_id();
 
     if (!is_lowercase_ascii(match.device_type) || !is_known_device_type_name(match.device_type)) {
         // Alpaca spec: HTTP 400 indicates the device could not interpret the
@@ -2839,16 +2294,12 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         } in_flight_guard(telescope);
 
         // Dispatch the method call
-        return dispatch_device_method(device, match.method_name, request, client_tx_id, server_tx_id);
-        
+        return dispatch_device_method(device, match.method_name, call);
+
     } catch (const std::exception& e) {
         util::log_error("Device error: " + std::string(e.what()));
         auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
+        AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, error_code, e.what());
         apply_error_status(response, error_code);
         response.set_body(alpaca_response);
     }
@@ -2992,55 +2443,35 @@ std::shared_ptr<std::mutex> Router::device_connection_op_mutex(
     return mutex;
 }
 
-Response Router::dispatch_device_method(
-    std::shared_ptr<alpacacore::AlpacaDriver> device,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
-    
-    try {
+Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver> device,
+                                        const std::string& method_name, const DeviceCall& call) {
+    const Request& request = call.request();
+
+    return call.run("device method", [&]() -> Response {
         // Handle common AlpacaDriver methods
         if (method_name == "name") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, device->get_name());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(device->get_name());
             }
         }
         else if (method_name == "description") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, device->get_description());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(device->get_description());
             }
         }
         else if (method_name == "driverinfo") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, device->get_driver_info());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(device->get_driver_info());
             }
         }
         else if (method_name == "driverversion") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, device->get_driver_version());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(device->get_driver_version());
             }
         }
         else if (method_name == "interfaceversion") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, static_cast<std::int32_t>(device->get_interface_version()));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(static_cast<std::int32_t>(device->get_interface_version()));
             }
         }
         else if (method_name == "connected") {
@@ -3084,52 +2515,10 @@ Response Router::dispatch_device_method(
                     // connected, not merely because another client did.
                     value = device_connected && client_connection_registered(device.get(), client.key);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, value);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(value);
             }
             else if (request.method() == HttpMethod::PUT) {
-                bool connected = false;
-                bool found = false;
-                
-                // Try parsing as JSON first
-                auto json_opt = parse_json(request.body());
-                if (json_opt) {
-                    if (const auto* val = find_json_value(*json_opt, "Connected")) {
-                        if (val->is_boolean()) {
-                            connected = val->get<bool>();
-                        } else if (val->is_string()) {
-                            connected = parse_bool_value(val->get<std::string>(), "Connected");
-                        } else {
-                            throw_bad_request("Invalid JSON value for parameter: Connected");
-                        }
-                        found = true;
-                    } else if (const auto* val = find_json_value(*json_opt, "Value")) {
-                        if (val->is_boolean()) {
-                            connected = val->get<bool>();
-                        } else if (val->is_string()) {
-                            connected = parse_bool_value(val->get<std::string>(), "Connected");
-                        } else {
-                            throw_bad_request("Invalid JSON value for parameter: Connected");
-                        }
-                        found = true;
-                    }
-                }
-                
-                // If JSON parsing failed or didn't contain Connected/Value, try form-encoded
-                if (!found) {
-                    if (auto value = get_form_value(request.body(), "Connected")) {
-                        connected = parse_bool_value(*value, "Connected");
-                        found = true;
-                    } else if (auto value = get_form_value(request.body(), "Value")) {
-                        connected = parse_bool_value(*value, "Connected");
-                        found = true;
-                    }
-                }
-                
-                if (!found) {
-                    throw_bad_request("Missing parameter: Connected");
-                }
+                const bool connected = call.get_bool("Connected");
 
                 // Per-client Connected refcounting (issue #160): the first
                 // client in powers the upstream link, the last one out turns
@@ -3260,9 +2649,7 @@ Response Router::dispatch_device_method(
                             std::chrono::milliseconds(50));
                     }
                 }
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "supportedactions") {
@@ -3271,179 +2658,145 @@ Response Router::dispatch_device_method(
                 for (const auto& action : device->get_supported_actions()) {
                     actions.push_back(action);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, actions);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(actions);
             }
         }
         else if (method_name == "action") {
             if (request.method() == HttpMethod::PUT) {
-                auto json_opt = parse_json(request.body());
                 std::string action_name;
                 std::string action_parameters = "{}";
-                
-                if (json_opt) {
-                    if (const auto* val = find_json_value(*json_opt, "Action")) {
-                        if (!val->is_string()) {
-                            throw_bad_request("Invalid JSON value for parameter: Action");
-                        }
-                        action_name = val->get<std::string>();
+
+                if (const auto* val = call.json_field("Action")) {
+                    if (!val->is_string()) {
+                        throw_bad_request("Invalid JSON value for parameter: Action");
                     }
-                    if (const auto* val = find_json_value(*json_opt, "Parameters")) {
-                        action_parameters = val->dump();
-                    }
+                    action_name = val->get<std::string>();
                 }
-                
+                if (const auto* val = call.json_field("Parameters")) {
+                    action_parameters = val->dump();
+                }
                 if (action_name.empty()) {
-                    if (auto value = get_form_value(request.body(), "Action")) {
+                    if (auto value = call.form_field("Action")) {
                         action_name = *value;
                     }
                 }
-
-                if (auto value = get_form_value(request.body(), "Parameters")) {
+                if (auto value = call.form_field("Parameters")) {
                     action_parameters = *value;
                 }
-
                 if (action_name.empty()) {
                     throw_bad_request("Missing parameter: Action");
                 }
                 
                 std::string result = device->action(action_name, action_parameters);
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, result);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(result);
             }
         }
         else if (method_name == "commandblind") {
             if (request.method() == HttpMethod::PUT) {
                 std::string command;
                 bool raw = false;
-                
-                auto json_opt = parse_json(request.body());
-                if (json_opt) {
-                    if (const auto* val = find_json_value(*json_opt, "Command")) {
-                        if (!val->is_string()) {
-                            throw_bad_request("Invalid JSON value for parameter: Command");
-                        }
-                        command = val->get<std::string>();
+
+                if (const auto* val = call.json_field("Command")) {
+                    if (!val->is_string()) {
+                        throw_bad_request("Invalid JSON value for parameter: Command");
                     }
-                    if (const auto* val = find_json_value(*json_opt, "Raw")) {
-                        if (val->is_boolean()) {
-                            raw = val->get<bool>();
-                        } else if (val->is_string()) {
-                            raw = parse_bool_value(val->get<std::string>(), "Raw");
-                        } else {
-                            throw_bad_request("Invalid JSON value for parameter: Raw");
-                        }
+                    command = val->get<std::string>();
+                }
+                if (const auto* val = call.json_field("Raw")) {
+                    if (val->is_boolean()) {
+                        raw = val->get<bool>();
+                    } else if (val->is_string()) {
+                        raw = parse_bool_value(val->get<std::string>(), "Raw");
+                    } else {
+                        throw_bad_request("Invalid JSON value for parameter: Raw");
                     }
                 }
-                
                 if (command.empty()) {
-                    if (auto value = get_form_value(request.body(), "Command")) {
+                    if (auto value = call.form_field("Command")) {
                         command = *value;
                     }
                 }
-                if (auto value = get_form_value(request.body(), "Raw")) {
+                if (auto value = call.form_field("Raw")) {
                     raw = parse_bool_value(*value, "Raw");
                 }
-
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
                 
                 device->command_blind(command, raw);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "commandbool") {
             if (request.method() == HttpMethod::PUT) {
                 std::string command;
                 bool raw = false;
-                
-                auto json_opt = parse_json(request.body());
-                if (json_opt) {
-                    if (const auto* val = find_json_value(*json_opt, "Command")) {
-                        if (!val->is_string()) {
-                            throw_bad_request("Invalid JSON value for parameter: Command");
-                        }
-                        command = val->get<std::string>();
+
+                if (const auto* val = call.json_field("Command")) {
+                    if (!val->is_string()) {
+                        throw_bad_request("Invalid JSON value for parameter: Command");
                     }
-                    if (const auto* val = find_json_value(*json_opt, "Raw")) {
-                        if (val->is_boolean()) {
-                            raw = val->get<bool>();
-                        } else if (val->is_string()) {
-                            raw = parse_bool_value(val->get<std::string>(), "Raw");
-                        } else {
-                            throw_bad_request("Invalid JSON value for parameter: Raw");
-                        }
+                    command = val->get<std::string>();
+                }
+                if (const auto* val = call.json_field("Raw")) {
+                    if (val->is_boolean()) {
+                        raw = val->get<bool>();
+                    } else if (val->is_string()) {
+                        raw = parse_bool_value(val->get<std::string>(), "Raw");
+                    } else {
+                        throw_bad_request("Invalid JSON value for parameter: Raw");
                     }
                 }
-                
                 if (command.empty()) {
-                    if (auto value = get_form_value(request.body(), "Command")) {
+                    if (auto value = call.form_field("Command")) {
                         command = *value;
                     }
                 }
-                if (auto value = get_form_value(request.body(), "Raw")) {
+                if (auto value = call.form_field("Raw")) {
                     raw = parse_bool_value(*value, "Raw");
                 }
-
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
                 
                 bool result = device->command_bool(command, raw);
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, result);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(result);
             }
         }
         else if (method_name == "commandstring") {
             if (request.method() == HttpMethod::PUT) {
                 std::string command;
                 bool raw = false;
-                
-                auto json_opt = parse_json(request.body());
-                if (json_opt) {
-                    if (const auto* val = find_json_value(*json_opt, "Command")) {
-                        if (!val->is_string()) {
-                            throw_bad_request("Invalid JSON value for parameter: Command");
-                        }
-                        command = val->get<std::string>();
+
+                if (const auto* val = call.json_field("Command")) {
+                    if (!val->is_string()) {
+                        throw_bad_request("Invalid JSON value for parameter: Command");
                     }
-                    if (const auto* val = find_json_value(*json_opt, "Raw")) {
-                        if (val->is_boolean()) {
-                            raw = val->get<bool>();
-                        } else if (val->is_string()) {
-                            raw = parse_bool_value(val->get<std::string>(), "Raw");
-                        } else {
-                            throw_bad_request("Invalid JSON value for parameter: Raw");
-                        }
+                    command = val->get<std::string>();
+                }
+                if (const auto* val = call.json_field("Raw")) {
+                    if (val->is_boolean()) {
+                        raw = val->get<bool>();
+                    } else if (val->is_string()) {
+                        raw = parse_bool_value(val->get<std::string>(), "Raw");
+                    } else {
+                        throw_bad_request("Invalid JSON value for parameter: Raw");
                     }
                 }
-                
                 if (command.empty()) {
-                    if (auto value = get_form_value(request.body(), "Command")) {
+                    if (auto value = call.form_field("Command")) {
                         command = *value;
                     }
                 }
-                if (auto value = get_form_value(request.body(), "Raw")) {
+                if (auto value = call.form_field("Raw")) {
                     raw = parse_bool_value(*value, "Raw");
                 }
-
                 if (command.empty()) {
                     throw_bad_request("Missing parameter: Command");
                 }
                 
                 std::string result = device->command_string(command, raw);
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, result);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(result);
             }
         }
         else if (method_name == "connect") {
@@ -3475,9 +2828,7 @@ Response Router::dispatch_device_method(
                     warn_if_clock_undisciplined(*device);
                     device->connect();
                 }
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "disconnect") {
@@ -3492,9 +2843,7 @@ Response Router::dispatch_device_method(
                 if (unregister_client_connection(device.get(), extract_client_key(request).key) == 0) {
                     device->disconnect();
                 }
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "connecting") {
@@ -3510,9 +2859,7 @@ Response Router::dispatch_device_method(
                         throw alpacacore::AlpacaException(failure, alpacacore::AlpacaError::DriverException);
                     }
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, connecting);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(connecting);
             }
         }
         else if (method_name == "devicestate") {
@@ -3524,9 +2871,7 @@ Response Router::dispatch_device_method(
                     std::visit([&obj](const auto& val) { obj["Value"] = val; }, entry.value);
                     values.push_back(obj);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, values);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(values);
             }
         }
         
@@ -3537,339 +2882,145 @@ Response Router::dispatch_device_method(
         if (device_type == alpacacore::DeviceType::Telescope) {
             auto telescope = std::dynamic_pointer_cast<alpacacore::TelescopeDriver>(device);
             if (telescope) {
-                return dispatch_telescope_method(telescope, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_telescope_method(telescope, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::Camera) {
             auto camera = std::dynamic_pointer_cast<alpacacore::CameraDriver>(device);
             if (camera) {
-                return dispatch_camera_method(camera, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_camera_method(camera, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::Switch) {
             auto sw = std::dynamic_pointer_cast<alpacacore::SwitchDriver>(device);
             if (sw) {
-                return dispatch_switch_method(sw, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_switch_method(sw, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::FilterWheel) {
             auto filterwheel = std::dynamic_pointer_cast<alpacacore::FilterWheelDriver>(device);
             if (filterwheel) {
-                return dispatch_filterwheel_method(filterwheel, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_filterwheel_method(filterwheel, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::Focuser) {
             auto focuser = std::dynamic_pointer_cast<alpacacore::FocuserDriver>(device);
             if (focuser) {
-                return dispatch_focuser_method(focuser, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_focuser_method(focuser, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::Rotator) {
             auto rotator = std::dynamic_pointer_cast<alpacacore::RotatorDriver>(device);
             if (rotator) {
-                return dispatch_rotator_method(rotator, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_rotator_method(rotator, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::Dome) {
             auto dome = std::dynamic_pointer_cast<alpacacore::DomeDriver>(device);
             if (dome) {
-                return dispatch_dome_method(dome, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_dome_method(dome, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::CoverCalibrator) {
             auto covercalibrator = std::dynamic_pointer_cast<alpacacore::CoverCalibratorDriver>(device);
             if (covercalibrator) {
-                return dispatch_covercalibrator_method(covercalibrator, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_covercalibrator_method(covercalibrator, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::ObservingConditions) {
             auto observingconditions = std::dynamic_pointer_cast<alpacacore::ObservingConditionsDriver>(device);
             if (observingconditions) {
-                return dispatch_observingconditions_method(observingconditions, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_observingconditions_method(observingconditions, method_name, call);
             }
         }
         if (device_type == alpacacore::DeviceType::SafetyMonitor) {
             auto safetymonitor = std::dynamic_pointer_cast<alpacacore::SafetyMonitorDriver>(device);
             if (safetymonitor) {
-                return dispatch_safetymonitor_method(safetymonitor, method_name, request, client_tx_id, server_tx_id);
+                return dispatch_safetymonitor_method(safetymonitor, method_name, call);
             }
         }
         
         // For other device types or if cast failed, return not implemented
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for device type " +
-            std::string(alpacacore::device_type_to_string(device_type))
-        );
-        response.set_body(alpaca_response);
-        return response;
-
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in device method", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in device method: " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for device type " +
+                              std::string(alpacacore::device_type_to_string(device_type)));
+    });
 }
 
-Response Router::dispatch_telescope_method(
-    std::shared_ptr<alpacacore::TelescopeDriver> telescope,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
-    
-    try {
-        // Helper function to parse double from query param, JSON body, or form-encoded body
-        auto parse_double = [&](const std::string& param_name) -> double {
-            // Try query parameter first
-            if (request.has_query_param(param_name)) {
-                return parse_double_value(request.get_query_param(param_name), param_name);
-            }
-            // Try JSON body
-            if (!request.body().empty()) {
-                auto json_opt = parse_json(request.body());
-                if (json_opt) {
-                    if (const auto* val = find_json_value(*json_opt, param_name)) {
-                        if (val->is_number()) {
-                            return val->get<double>();
-                        }
-                        if (val->is_string()) {
-                            return parse_double_value(val->get<std::string>(), param_name);
-                        }
-                        throw_bad_request("Invalid JSON value for parameter: " + param_name);
-                    }
-                }
-            }
-            // Try form-encoded
-            if (auto value = get_form_value(request.body(), param_name)) {
-                return parse_double_value(*value, param_name);
-            }
-            throw_bad_request("Missing parameter: " + param_name);
-        };
-        
-        // Helper function to parse int from query param, JSON body, or form-encoded body
-        auto parse_int = [&](const std::string& param_name) -> int {
-            // Try query parameter first
-            if (request.has_query_param(param_name)) {
-                return parse_int_value(request.get_query_param(param_name), param_name);
-            }
-            // Try JSON body
-            if (!request.body().empty()) {
-                auto json_opt = parse_json(request.body());
-                if (json_opt) {
-                    if (const auto* val = find_json_value(*json_opt, param_name)) {
-                        return json_int_value(*val, param_name);
-                    }
-                }
-            }
-            // Try form-encoded
-            if (auto value = get_form_value(request.body(), param_name)) {
-                return parse_int_value(*value, param_name);
-            }
-            throw_bad_request("Missing parameter: " + param_name);
-        };
-        
-        // Helper function to parse bool from query param, JSON body, or form-encoded body
-        auto parse_bool = [&](const std::string& param_name) -> bool {
-            // Try query parameter first
-            if (request.has_query_param(param_name)) {
-                return parse_bool_value(request.get_query_param(param_name), param_name);
-            }
-            
-            // Try JSON body
-            auto json_opt = parse_json(request.body());
-            if (json_opt) {
-                if (const auto* val = find_json_value(*json_opt, param_name)) {
-                    if (val->is_boolean()) {
-                        return val->get<bool>();
-                    }
-                    if (val->is_string()) {
-                        return parse_bool_value(val->get<std::string>(), param_name);
-                    }
-                    throw_bad_request("Invalid JSON value for parameter: " + param_name);
-                }
-                if (const auto* val = find_json_value(*json_opt, "Value")) {
-                    if (val->is_boolean()) {
-                        return val->get<bool>();
-                    }
-                    if (val->is_string()) {
-                        return parse_bool_value(val->get<std::string>(), param_name);
-                    }
-                    throw_bad_request("Invalid JSON value for parameter: " + param_name);
-                }
-            }
-            
-            // Try form-encoded body (e.g., "Tracking=true" or "Tracking=1")
-            if (auto value = get_form_value(request.body(), param_name)) {
-                return parse_bool_value(*value, param_name);
-            }
-            if (auto value = get_form_value(request.body(), "Value")) {
-                return parse_bool_value(*value, param_name);
-            }
+Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::TelescopeDriver> telescope,
+                                           const std::string& method_name, const DeviceCall& call) {
+    const Request& request = call.request();
 
-            throw_bad_request("Missing parameter: " + param_name);
-        };
-
+    return call.run("telescope method '" + method_name + "'", [&]() -> Response {
         // GET-only boolean properties
         if (request.method() == HttpMethod::GET) {
             if (method_name == "cansetrightascensionrate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_set_right_ascension_rate());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_set_right_ascension_rate());
             }
             else if (method_name == "cansetdeclinationrate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_set_declination_rate());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_set_declination_rate());
             }
             else if (method_name == "cansetguiderates") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_set_guide_rates());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_set_guide_rates());
             }
             else if (method_name == "cansettracking") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_set_tracking());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_set_tracking());
             }
             else if (method_name == "cansetpark") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_set_park());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_set_park());
             }
             else if (method_name == "cansetpierside") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_set_pier_side());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_set_pier_side());
             }
             else if (method_name == "canfindhome") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_find_home());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_find_home());
             }
             else if (method_name == "canpark") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_park());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_park());
             }
             else if (method_name == "canpulseguide") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_pulse_guide());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_pulse_guide());
             }
             else if (method_name == "canslew") {
-                AlpacaResponse alpaca_response =
-                    make_success_response(client_tx_id, server_tx_id, false);  // #775: synchronous slews are not served
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(false);  // #775: synchronous slews are not served
             }
             else if (method_name == "canslewasync") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_slew_async());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_slew_async());
             }
             else if (method_name == "cansync") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_sync());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_sync());
             }
             else if (method_name == "canunpark") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_unpark());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_unpark());
             }
             else if (method_name == "canslewaltaz") {
-                AlpacaResponse alpaca_response =
-                    make_success_response(client_tx_id, server_tx_id, false);  // #775: synchronous slews are not served
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(false);  // #775: synchronous slews are not served
             }
             else if (method_name == "canslewaltazasync") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_slew_alt_az_async());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_slew_alt_az_async());
             }
             else if (method_name == "cansyncaltaz") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_sync_alt_az());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_can_sync_alt_az());
             }
             else if (method_name == "alignmentmode") {
                 int mode = static_cast<int>(telescope->get_alignment_mode());
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, mode);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(mode);
             }
             else if (method_name == "equatorialsystem") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, static_cast<int>(telescope->get_equatorial_system()));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(static_cast<int>(telescope->get_equatorial_system()));
             }
             else if (method_name == "doesrefraction") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_does_refraction());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_does_refraction());
             }
             else if (method_name == "ispulseguiding") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_is_pulse_guiding());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_is_pulse_guiding());
             }
             else if (method_name == "slewsettletime") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_slew_settle_time());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_slew_settle_time());
             } else if (method_name == "utcdate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, alpacacore::device_state_timestamp(telescope->get_utc_date()));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(alpacacore::device_state_timestamp(telescope->get_utc_date()));
             } else if (method_name == "axisrates") {
-                int axis = parse_int("Axis");
+                int axis = call.get_int("Axis");
                 // AxisRates must return an array of rate objects, even if only one range.
                 auto ranges = telescope->get_axis_rate_ranges(axis);
                 nlohmann::json rates_array = nlohmann::json::array();
@@ -3879,16 +3030,11 @@ Response Router::dispatch_telescope_method(
                     rate_obj["Maximum"] = range.second;
                     rates_array.push_back(rate_obj);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, rates_array);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rates_array);
             } else if (method_name == "canmoveaxis") {
-                int axis = parse_int("Axis");
+                int axis = call.get_int("Axis");
                 bool can_move = telescope->get_can_move_axis(axis);
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, can_move);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(can_move);
             } else if (method_name == "destinationsideofpier") {
                 auto ra_value = get_query_param_case_insensitive(request, "RightAscension");
                 if (!ra_value) {
@@ -3901,169 +3047,85 @@ Response Router::dispatch_telescope_method(
                 double ra = parse_double_value(*ra_value, "RightAscension");
                 double dec = parse_double_value(*dec_value, "Declination");
                 int side = telescope->get_destination_side_of_pier(ra, dec);
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, side);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(side);
             } else if (method_name == "athome") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_at_home());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_at_home());
             } else if (method_name == "atpark") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_at_park());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_at_park());
             } else if (method_name == "slewing") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_slewing());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_slewing());
             } else if (method_name == "tracking") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_tracking());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_tracking());
             } else if (method_name == "altitude") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_altitude());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_altitude());
             } else if (method_name == "azimuth") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_azimuth());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_azimuth());
             } else if (method_name == "declination") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_declination());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_declination());
             } else if (method_name == "rightascension") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_right_ascension());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_right_ascension());
             } else if (method_name == "declinationrate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_declination_rate());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_declination_rate());
             } else if (method_name == "rightascensionrate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_right_ascension_rate());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_right_ascension_rate());
             } else if (method_name == "trackingrate") {
                 int rate = telescope->get_tracking_rate();
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rate);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rate);
             } else if (method_name == "trackingrates") {
                 auto rates = telescope->get_tracking_rates();
                 nlohmann::json rates_array = nlohmann::json::array();
                 for (int rate : rates) {
                     rates_array.push_back(rate);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, rates_array);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rates_array);
             } else if (method_name == "targetdeclination") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_target_declination());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_target_declination());
             } else if (method_name == "targetrightascension") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_target_right_ascension());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_target_right_ascension());
             } else if (method_name == "siderealtime") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_sidereal_time());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_sidereal_time());
             } else if (method_name == "siteelevation") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_site_elevation());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_site_elevation());
             } else if (method_name == "sitelatitude") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_site_latitude());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_site_latitude());
             } else if (method_name == "sitelongitude") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_site_longitude());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_site_longitude());
             } else if (method_name == "focallength") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_focal_length());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_focal_length());
             } else if (method_name == "aperturediameter") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_aperture_diameter());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_aperture_diameter());
             } else if (method_name == "aperturearea") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_aperture_area());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_aperture_area());
             } else if (method_name == "sideofpier") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_side_of_pier());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_side_of_pier());
             } else if (method_name == "guideratedeclination") {
                 auto guide_rate = telescope->get_guide_rate();
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, guide_rate.dec);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(guide_rate.dec);
             } else if (method_name == "guideraterightascension") {
                 auto guide_rate = telescope->get_guide_rate();
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, guide_rate.ra);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(guide_rate.ra);
             }
         }
         
         // GET/PUT properties
         if (method_name == "doesrefraction") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_does_refraction());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_does_refraction());
             }
             else if (request.method() == HttpMethod::PUT) {
-                bool value = parse_bool("DoesRefraction");
+                bool value = call.get_bool("DoesRefraction");
                 telescope->set_does_refraction(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "slewsettletime") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_slew_settle_time());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_slew_settle_time());
             }
             else if (request.method() == HttpMethod::PUT) {
-                int value = parse_int("SlewSettleTime");
+                int value = call.get_int("SlewSettleTime");
                 telescope->set_slew_settle_time(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "utcdate") {
@@ -4071,7 +3133,8 @@ Response Router::dispatch_telescope_method(
             // and latch ClockSource, the same host-level effect the synctime
             // endpoint guards. A browser page on another origin must not be
             // able to fire it; native Alpaca clients send no Origin and pass.
-            if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "UTCDate")) {
+            if (auto rejected =
+                    reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(), "UTCDate")) {
                 return *rejected;
             }
             if (request.method() == HttpMethod::GET) {
@@ -4082,35 +3145,10 @@ Response Router::dispatch_telescope_method(
                 auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     utc.time_since_epoch()) % 1000;
                 oss << "." << std::setfill('0') << std::setw(3) << ms.count() << "Z";
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, oss.str());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(oss.str());
             }
             else if (request.method() == HttpMethod::PUT) {
-                std::string date_str;
-                if (request.has_query_param("UTCDate")) {
-                    date_str = request.get_query_param("UTCDate");
-                } else if (auto json_opt = parse_json(request.body())) {
-                    if (const auto* val = find_json_value(*json_opt, "UTCDate")) {
-                        if (!val->is_string()) {
-                            throw_bad_request("Invalid JSON value for parameter: UTCDate");
-                        }
-                        date_str = val->get<std::string>();
-                    } else if (const auto* val = find_json_value(*json_opt, "Value")) {
-                        if (!val->is_string()) {
-                            throw_bad_request("Invalid JSON value for parameter: UTCDate");
-                        }
-                        date_str = val->get<std::string>();
-                    }
-                }
-                if (date_str.empty()) {
-                    if (auto value = get_form_value(request.body(), "UTCDate")) {
-                        date_str = *value;
-                    } else if (auto value = get_form_value(request.body(), "Value")) {
-                        date_str = *value;
-                    }
-                }
+                const std::string date_str = call.find_string("UTCDate").value_or("");
                 if (date_str.empty()) {
                     throw_bad_request("Missing parameter: UTCDate or Value");
                 }
@@ -4179,213 +3217,154 @@ Response Router::dispatch_telescope_method(
                     }
                 }
                 telescope->set_utc_date(time_point);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "tracking") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_tracking());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_tracking());
             }
             else if (request.method() == HttpMethod::PUT) {
-                bool value = parse_bool("Tracking");
+                bool value = call.get_bool("Tracking");
                 telescope->set_tracking(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "declinationrate") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_declination_rate());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_declination_rate());
             }
             else if (request.method() == HttpMethod::PUT) {
-                double value = parse_double("DeclinationRate");
+                double value = call.get_double("DeclinationRate");
                 telescope->set_declination_rate(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "rightascensionrate") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_right_ascension_rate());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_right_ascension_rate());
             }
             else if (request.method() == HttpMethod::PUT) {
-                double value = parse_double("RightAscensionRate");
+                double value = call.get_double("RightAscensionRate");
                 telescope->set_right_ascension_rate(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "trackingrate") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_tracking_rate());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_tracking_rate());
             }
             else if (request.method() == HttpMethod::PUT) {
-                int value = parse_int("TrackingRate");
+                int value = call.get_int("TrackingRate");
                 telescope->set_tracking_rate(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "targetdeclination") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_target_declination());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_target_declination());
             }
             else if (request.method() == HttpMethod::PUT) {
-                double value = parse_double("TargetDeclination");
+                double value = call.get_double("TargetDeclination");
                 telescope->set_target_declination(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "targetrightascension") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_target_right_ascension());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_target_right_ascension());
             }
             else if (request.method() == HttpMethod::PUT) {
-                double value = parse_double("TargetRightAscension");
+                double value = call.get_double("TargetRightAscension");
                 telescope->set_target_right_ascension(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "siteelevation") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_site_elevation());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_site_elevation());
             }
             else if (request.method() == HttpMethod::PUT) {
                 // open-astro#444: this PUT rewrites persisted device config,
                 // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteElevation")) {
+                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
+                                                                "SiteElevation")) {
                     return *rejected;
                 }
-                double value = parse_double("SiteElevation");
+                double value = call.get_double("SiteElevation");
                 telescope->set_site_elevation(value);
                 persist_client_site(*telescope, "siteElevation", value);  // open-astro#444
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "sitelatitude") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_site_latitude());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_site_latitude());
             }
             else if (request.method() == HttpMethod::PUT) {
                 // open-astro#444: this PUT rewrites persisted device config,
                 // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteLatitude")) {
+                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
+                                                                "SiteLatitude")) {
                     return *rejected;
                 }
-                double value = parse_double("SiteLatitude");
+                double value = call.get_double("SiteLatitude");
                 telescope->set_site_latitude(value);
                 persist_client_site(*telescope, "siteLatitude", value);  // open-astro#444
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "sitelongitude") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_site_longitude());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_site_longitude());
             }
             else if (request.method() == HttpMethod::PUT) {
                 // open-astro#444: this PUT rewrites persisted device config,
                 // the effect configuredevice already guards (#401 precedent).
-                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteLongitude")) {
+                if (auto rejected = reject_cross_origin_request(request, call.client_tx_id(), call.server_tx_id(),
+                                                                "SiteLongitude")) {
                     return *rejected;
                 }
-                double value = parse_double("SiteLongitude");
+                double value = call.get_double("SiteLongitude");
                 telescope->set_site_longitude(value);
                 persist_client_site(*telescope, "siteLongitude", value);  // open-astro#444
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "sideofpier") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_side_of_pier());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(telescope->get_side_of_pier());
             }
             else if (request.method() == HttpMethod::PUT) {
-                int value = parse_int("SideOfPier");
+                int value = call.get_int("SideOfPier");
                 telescope->set_side_of_pier(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "guideratedeclination") {
             if (request.method() == HttpMethod::GET) {
                 auto guide_rate = telescope->get_guide_rate();
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, guide_rate.dec);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(guide_rate.dec);
             }
             else if (request.method() == HttpMethod::PUT) {
-                double value = parse_double("GuideRateDeclination");
+                double value = call.get_double("GuideRateDeclination");
                 auto guide_rate = telescope->get_guide_rate();
                 guide_rate.dec = value;
                 telescope->set_guide_rate(guide_rate);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         else if (method_name == "guideraterightascension") {
             if (request.method() == HttpMethod::GET) {
                 auto guide_rate = telescope->get_guide_rate();
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, guide_rate.ra);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(guide_rate.ra);
             }
             else if (request.method() == HttpMethod::PUT) {
-                double value = parse_double("GuideRateRightAscension");
+                double value = call.get_double("GuideRateRightAscension");
                 auto guide_rate = telescope->get_guide_rate();
                 guide_rate.ra = value;
                 telescope->set_guide_rate(guide_rate);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         
@@ -4393,30 +3372,24 @@ Response Router::dispatch_telescope_method(
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "abortslew") {
                 telescope->abort_slew();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "moveaxis") {
                 // Debug logging
                 if (!request.body().empty()) {
                     util::log_info("moveaxis body: " + util::escape_for_log(request.body()));
                 }
-                int axis = parse_int("Axis");
-                double rate = parse_double("Rate");
+                int axis = call.get_int("Axis");
+                double rate = call.get_double("Rate");
                 util::log_info("moveaxis parsed: Axis=" + std::to_string(axis) + ", Rate=" + std::to_string(rate));
                 telescope->move_axis(axis, rate);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "slewtoaltazasync") {
-                double altitude = parse_double("Altitude");
-                double azimuth = parse_double("Azimuth");
+                double altitude = call.get_double("Altitude");
+                double azimuth = call.get_double("Azimuth");
                 telescope->slew_to_alt_az_async(altitude, azimuth);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "slewtoaltaz") {
                 // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
@@ -4425,36 +3398,26 @@ Response Router::dispatch_telescope_method(
                                                   alpacacore::AlpacaError::MethodNotImplemented);
             }
             else if (method_name == "synctoaltaz") {
-                double altitude = parse_double("Altitude");
-                double azimuth = parse_double("Azimuth");
+                double altitude = call.get_double("Altitude");
+                double azimuth = call.get_double("Azimuth");
                 telescope->sync_to_alt_az(altitude, azimuth);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "park") {
                 telescope->park();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "unpark") {
                 telescope->unpark();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "findhome") {
                 telescope->find_home();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "setpark") {
                 telescope->set_park();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "slewtotarget") {
                 // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
@@ -4464,9 +3427,7 @@ Response Router::dispatch_telescope_method(
             }
             else if (method_name == "slewtotargetasync") {
                 telescope->slew_to_target_async();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "slewtocoordinates") {
                 // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
@@ -4475,83 +3436,40 @@ Response Router::dispatch_telescope_method(
                                                   alpacacore::AlpacaError::MethodNotImplemented);
             }
             else if (method_name == "slewtocoordinatesasync") {
-                double ra = parse_double("RightAscension");
-                double dec = parse_double("Declination");
+                double ra = call.get_double("RightAscension");
+                double dec = call.get_double("Declination");
                 // slew_to_coordinates_async sets targets internally; skip
                 // redundant set_target calls to avoid extra mutex round-trips.
                 telescope->slew_to_coordinates_async(ra, dec);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "synctotarget") {
                 telescope->sync_to_target();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "synctocoordinates") {
-                double ra = parse_double("RightAscension");
-                double dec = parse_double("Declination");
+                double ra = call.get_double("RightAscension");
+                double dec = call.get_double("Declination");
                 telescope->sync_to_coordinates(ra, dec);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
             else if (method_name == "pulseguide") {
-                int direction = parse_int("Direction");
-                int duration = parse_int("Duration");
+                int direction = call.get_int("Direction");
+                int duration = call.get_int("Duration");
                 telescope->pulse_guide(direction, duration);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
         
         // Method not found
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for Telescope"
-        );
-        response.set_body(alpaca_response);
-        return response;
-
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in telescope method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in telescope method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for Telescope");
+    });
 }
 
-Response Router::dispatch_camera_method(
-    std::shared_ptr<alpacacore::CameraDriver> camera,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
+Response Router::dispatch_camera_method(std::shared_ptr<alpacacore::CameraDriver> camera,
+                                        const std::string& method_name, const DeviceCall& call) {
+    const Request& request = call.request();
 
     auto dispatch_start = std::chrono::steady_clock::now();
     alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
@@ -4567,97 +3485,6 @@ Response Router::dispatch_camera_method(
         }
     } dispatch_exit_log{method_name, dispatch_start};
 
-    Response response;
-    auto parse_double = [&](const std::string& param_name) -> double {
-        if (request.has_query_param(param_name)) {
-            return parse_double_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_double_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_double_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    auto parse_int = [&](const std::string& param_name) -> int {
-        if (request.has_query_param(param_name)) {
-            return parse_int_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                return json_int_value(*val, param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                return json_int_value(*val, param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_int_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_int_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    auto parse_bool = [&](const std::string& param_name) -> bool {
-        if (request.has_query_param(param_name)) {
-            return parse_bool_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_bool_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_bool_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
     auto format_utc = [](std::chrono::system_clock::time_point time_point) -> std::string {
         auto time_t = std::chrono::system_clock::to_time_t(time_point);
         std::ostringstream oss;
@@ -4665,172 +3492,79 @@ Response Router::dispatch_camera_method(
         return oss.str();
     };
 
-    try {
+    return call.run("camera method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "bayeroffsetx") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_bayer_offset_x());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_bayer_offset_x());
             } else if (method_name == "bayeroffsety") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_bayer_offset_y());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_bayer_offset_y());
             } else if (method_name == "binx") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_bin_x());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_bin_x());
             } else if (method_name == "biny") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_bin_y());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_bin_y());
             } else if (method_name == "camerastate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, static_cast<int>(camera->get_camera_state()));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(static_cast<int>(camera->get_camera_state()));
             } else if (method_name == "cameraxsize") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_camera_x_size());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_camera_x_size());
             } else if (method_name == "cameraysize") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_camera_y_size());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_camera_y_size());
             } else if (method_name == "canabortexposure") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_can_abort_exposure());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_can_abort_exposure());
             } else if (method_name == "canasymmetricbin") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_can_asymmetric_bin());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_can_asymmetric_bin());
             } else if (method_name == "canfastreadout") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_can_fast_readout());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_can_fast_readout());
             } else if (method_name == "cangetcoolerpower") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_can_get_cooler_power());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_can_get_cooler_power());
             } else if (method_name == "canpulseguide") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_can_pulse_guide());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_can_pulse_guide());
             } else if (method_name == "cansetccdtemperature") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_can_set_ccd_temperature());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_can_set_ccd_temperature());
             } else if (method_name == "canstopexposure") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_can_stop_exposure());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_can_stop_exposure());
             } else if (method_name == "ccdtemperature") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_ccd_temperature());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_ccd_temperature());
             } else if (method_name == "cooleron") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_cooler_on());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_cooler_on());
             } else if (method_name == "coolerpower") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_cooler_power());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_cooler_power());
             } else if (method_name == "electronsperadu") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_electrons_per_adu());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_electrons_per_adu());
             } else if (method_name == "exposuremax") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_exposure_max());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_exposure_max());
             } else if (method_name == "exposuremin") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_exposure_min());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_exposure_min());
             } else if (method_name == "exposureresolution") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_exposure_resolution());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_exposure_resolution());
             } else if (method_name == "fastreadout") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_fast_readout());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_fast_readout());
             } else if (method_name == "fullwellcapacity") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_full_well_capacity());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_full_well_capacity());
             } else if (method_name == "gain") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_gain());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_gain());
             } else if (method_name == "gainmax") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_gain_max());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_gain_max());
             } else if (method_name == "gainmin") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_gain_min());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_gain_min());
             } else if (method_name == "gains") {
                 nlohmann::json gains = nlohmann::json::array();
                 for (const auto& gain : camera->get_gains()) {
                     gains.push_back(gain);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, gains);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(gains);
             } else if (method_name == "hasshutter") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_has_shutter());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_has_shutter());
             } else if (method_name == "heatsinktemperature") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_heat_sink_temperature());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_heat_sink_temperature());
             } else if (method_name == "imagearray") {
-                util::log_debug(
-                    "Camera imagearray Accept: " +
-                    (request.has_header("accept") ? util::escape_for_log(request.get_header("accept")) : "<none>") +
-                    ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
-                if (accepts_imagebytes(request)) {
-                    auto image = camera->get_image_array();
-                    auto format = choose_image_bytes_format(image, kImageTypeInt32);
-                    response.set_content_type("application/imagebytes");
-                    response.set_body(build_image_bytes_payload(image, format, client_tx_id, server_tx_id));
-                    return response;
-                }
-
-                auto image = camera->get_image_array();
-                response.set_content_type("application/json");
-                response.set_body(build_image_array_payload(image, 2, client_tx_id, server_tx_id));
+                const bool has_accept = request.has_header("accept");
+                const std::string accept = has_accept ? request.get_header("accept") : std::string();
+                util::log_debug("Camera imagearray Accept: " + (has_accept ? util::escape_for_log(accept) : "<none>") +
+                                ", imagebytes=" + std::string(accepts_imagebytes(accept) ? "true" : "false"));
+                auto payload = build(camera->get_image_array(), accept, call);
+                Response response;
+                response.set_content_type(payload.content_type);
+                response.set_body(std::move(payload.body));
                 return response;
             } else if (method_name == "imagearrayvariant") {
                 if (camera->get_connecting() || !camera->get_connected()) {
@@ -4840,631 +3574,262 @@ Response Router::dispatch_camera_method(
                 throw alpacacore::AlpacaException("ImageArrayVariant is not supported by Alpaca; use ImageArray",
                                                   alpacacore::AlpacaError::PropertyNotImplemented);
             } else if (method_name == "imageready") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_image_ready());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_image_ready());
             } else if (method_name == "ispulseguiding") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_is_pulse_guiding());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_is_pulse_guiding());
             } else if (method_name == "lastexposureduration") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_last_exposure_duration());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_last_exposure_duration());
             } else if (method_name == "lastexposurestarttime") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, format_utc(camera->get_last_exposure_start_time()));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(format_utc(camera->get_last_exposure_start_time()));
             } else if (method_name == "maxadu") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_max_adu());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_max_adu());
             } else if (method_name == "maxbinx") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_max_bin_x());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_max_bin_x());
             } else if (method_name == "maxbiny") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_max_bin_y());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_max_bin_y());
             } else if (method_name == "numx") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_num_x());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_num_x());
             } else if (method_name == "numy") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_num_y());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_num_y());
             } else if (method_name == "offset") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_offset());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_offset());
             } else if (method_name == "offsetmax") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_offset_max());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_offset_max());
             } else if (method_name == "offsetmin") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_offset_min());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_offset_min());
             } else if (method_name == "offsets") {
                 nlohmann::json offsets = nlohmann::json::array();
                 for (const auto& offset : camera->get_offsets()) {
                     offsets.push_back(offset);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, offsets);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(offsets);
             } else if (method_name == "percentcompleted") {
                 auto percent = camera->get_percent_completed_checked();
                 auto value = static_cast<std::int32_t>(percent);
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, value);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(value);
             } else if (method_name == "pixelsizex") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_pixel_size_x());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_pixel_size_x());
             } else if (method_name == "pixelsizey") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_pixel_size_y());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_pixel_size_y());
             } else if (method_name == "readoutmode") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_readout_mode());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_readout_mode());
             } else if (method_name == "readoutmodes") {
                 nlohmann::json modes = nlohmann::json::array();
                 for (const auto& mode : camera->get_readout_modes()) {
                     modes.push_back(mode);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, modes);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(modes);
             } else if (method_name == "sensorname") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_sensor_name());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_sensor_name());
             } else if (method_name == "sensortype") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, static_cast<int>(camera->get_sensor_type()));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(static_cast<int>(camera->get_sensor_type()));
             } else if (method_name == "setccdtemperature") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_set_ccd_temperature());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_set_ccd_temperature());
             } else if (method_name == "startx") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_start_x());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_start_x());
             } else if (method_name == "starty") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_start_y());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_start_y());
             } else if (method_name == "subexposureduration") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_sub_exposure_duration());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(camera->get_sub_exposure_duration());
             }
         }
 
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "binx") {
-                int value = parse_int("BinX");
+                int value = call.get_int("BinX");
                 camera->set_bin_x(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "biny") {
-                int value = parse_int("BinY");
+                int value = call.get_int("BinY");
                 camera->set_bin_y(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "fastreadout") {
-                bool value = parse_bool("FastReadout");
+                bool value = call.get_bool("FastReadout");
                 camera->set_fast_readout(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "gain") {
-                int value = parse_int("Gain");
+                int value = call.get_int("Gain");
                 camera->set_gain(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "cooleron") {
-                bool value = parse_bool("CoolerOn");
+                bool value = call.get_bool("CoolerOn");
                 camera->set_cooler_on(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "setccdtemperature") {
-                double value = parse_double("SetCCDTemperature");
+                double value = call.get_double("SetCCDTemperature");
                 camera->set_set_ccd_temperature(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "numx") {
-                int value = parse_int("NumX");
+                int value = call.get_int("NumX");
                 camera->set_num_x(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "numy") {
-                int value = parse_int("NumY");
+                int value = call.get_int("NumY");
                 camera->set_num_y(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "offset") {
-                int value = parse_int("Offset");
+                int value = call.get_int("Offset");
                 camera->set_offset(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "readoutmode") {
-                int value = parse_int("ReadoutMode");
+                int value = call.get_int("ReadoutMode");
                 camera->set_readout_mode(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "startx") {
-                int value = parse_int("StartX");
+                int value = call.get_int("StartX");
                 camera->set_start_x(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "starty") {
-                int value = parse_int("StartY");
+                int value = call.get_int("StartY");
                 camera->set_start_y(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "subexposureduration") {
-                double value = parse_double("SubExposureDuration");
+                double value = call.get_double("SubExposureDuration");
                 camera->set_sub_exposure_duration(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "startexposure") {
-                double duration = parse_double("Duration");
-                bool light = parse_bool("Light");
+                double duration = call.get_double("Duration");
+                bool light = call.get_bool("Light");
                 camera->start_exposure(duration, light);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "pulseguide") {
-                int direction = parse_int("Direction");
-                int duration = parse_int("Duration");
+                int direction = call.get_int("Direction");
+                int duration = call.get_int("Duration");
                 camera->pulse_guide(direction, duration);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "stopexposure") {
                 camera->stop_exposure();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "abortexposure") {
                 camera->abort_exposure();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for Camera"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in camera method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in camera method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for Camera");
+    });
 }
 
-Response Router::dispatch_switch_method(
-    std::shared_ptr<alpacacore::SwitchDriver> sw,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
+Response Router::dispatch_switch_method(std::shared_ptr<alpacacore::SwitchDriver> sw, const std::string& method_name,
+                                        const DeviceCall& call) {
+    const Request& request = call.request();
 
-    auto parse_double = [&](const std::string& param_name) -> double {
-        if (request.has_query_param(param_name)) {
-            return parse_double_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_double_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_double_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    auto parse_int = [&](const std::string& param_name) -> int {
-        if (request.has_query_param(param_name)) {
-            return parse_int_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                return json_int_value(*val, param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                return json_int_value(*val, param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_int_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_int_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    auto parse_bool = [&](const std::string& param_name) -> bool {
-        if (request.has_query_param(param_name)) {
-            return parse_bool_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_bool_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_bool_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    auto parse_string = [&](const std::string& param_name) -> std::string {
-        if (request.has_query_param(param_name)) {
-            return request.get_query_param(param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (!val->is_string()) {
-                    throw_bad_request("Invalid JSON value for parameter: " + param_name);
-                }
-                return val->get<std::string>();
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (!val->is_string()) {
-                    throw_bad_request("Invalid JSON value for parameter: " + param_name);
-                }
-                return val->get<std::string>();
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return *value;
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return *value;
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    try {
+    return call.run("switch method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "maxswitch") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_max_switch());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(sw->get_max_switch());
             } else if (method_name == "cancelasync") {
                 // The switch driver has no cancel member, so succeeding here
                 // would report a cancel that never happened (#576). The Id is
                 // still validated first: an out-of-range one is InvalidValue.
-                (void)sw->get_can_async(parse_int("Id"));
+                (void)sw->get_can_async(call.get_int("Id"));
                 throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
                                                   alpacacore::AlpacaError::NotImplemented);
             } else if (method_name == "canasync") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_can_async(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_can_async(id));
             } else if (method_name == "canwrite") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_can_write(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_can_write(id));
             } else if (method_name == "getswitch") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_switch(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_switch(id));
             } else if (method_name == "getswitchvalue") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_switch_value(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_switch_value(id));
             } else if (method_name == "getswitchname") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_switch_name(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_switch_name(id));
             } else if (method_name == "getswitchdescription") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_switch_description(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_switch_description(id));
             } else if (method_name == "minswitchvalue") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_min_switch_value(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_min_switch_value(id));
             } else if (method_name == "maxswitchvalue") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_max_switch_value(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_max_switch_value(id));
             } else if (method_name == "statechangecomplete") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_state_change_complete(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_state_change_complete(id));
             } else if (method_name == "switchstep") {
-                int id = parse_int("Id");
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, sw->get_switch_step(id));
-                response.set_body(alpaca_response);
-                return response;
+                int id = call.get_int("Id");
+                return call.ok(sw->get_switch_step(id));
             }
         }
 
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "setswitch") {
-                int id = parse_int("Id");
-                bool state = parse_bool("State");
+                int id = call.get_int("Id");
+                bool state = call.get_bool("State");
                 sw->set_switch(id, state);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "cancelasync") {
                 // The switch driver has no cancel member, so succeeding here
                 // would report a cancel that never happened (#576). The Id is
                 // still validated first: an out-of-range one is InvalidValue.
-                (void)sw->get_can_async(parse_int("Id"));
+                (void)sw->get_can_async(call.get_int("Id"));
                 throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
                                                   alpacacore::AlpacaError::NotImplemented);
             } else if (method_name == "setasync") {
-                int id = parse_int("Id");
-                bool state = parse_bool("State");
+                int id = call.get_int("Id");
+                bool state = call.get_bool("State");
                 sw->set_async(id, state);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "setswitchvalue") {
-                int id = parse_int("Id");
-                double value = parse_double("Value");
+                int id = call.get_int("Id");
+                double value = call.get_double("Value");
                 sw->set_switch_value(id, value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "setasyncvalue") {
-                int id = parse_int("Id");
-                double value = parse_double("Value");
+                int id = call.get_int("Id");
+                double value = call.get_double("Value");
                 sw->set_async_value(id, value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "setswitchname") {
-                int id = parse_int("Id");
-                std::string name = parse_string("Name");
+                int id = call.get_int("Id");
+                std::string name = call.get_string("Name");
                 sw->set_switch_name(id, name);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for Switch"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in switch method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in switch method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for Switch");
+    });
 }
 
-Response Router::dispatch_filterwheel_method(
-    std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
+Response Router::dispatch_filterwheel_method(std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
+                                             const std::string& method_name, const DeviceCall& call) {
+    const Request& request = call.request();
 
-    auto parse_int = [&](const std::string& param_name) -> int {
-        if (request.has_query_param(param_name)) {
-            return parse_int_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                return json_int_value(*val, param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                return json_int_value(*val, param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_int_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_int_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    try {
+    return call.run("filter wheel method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "position") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, filterwheel->get_position());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(filterwheel->get_position());
             } else if (method_name == "names") {
                 nlohmann::json names = nlohmann::json::array();
                 for (const auto& name : filterwheel->get_names()) {
                     names.push_back(name);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, names);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(names);
             } else if (method_name == "focusoffsets") {
                 nlohmann::json offsets = nlohmann::json::array();
                 for (int offset : filterwheel->get_focus_offsets()) {
                     offsets.push_back(offset);
                 }
-                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, offsets);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(offsets);
             }
         }
 
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "position") {
-                int value = parse_int("Position");
+                int value = call.get_int("Position");
                 filterwheel->set_position(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "names") {
-                auto json_opt = parse_json(request.body());
-                const auto* names_val = json_opt ? find_json_value(*json_opt, "Names") : nullptr;
+                const auto* names_val = call.json_field("Names");
                 if (!names_val) {
                     throw_bad_request("Missing parameter: Names");
                 }
@@ -5478,12 +3843,9 @@ Response Router::dispatch_filterwheel_method(
                 }
                 std::vector<std::string> names = names_val->get<std::vector<std::string>>();
                 filterwheel->set_names(names);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "focusoffsets") {
-                auto json_opt = parse_json(request.body());
-                const auto* offsets_val = json_opt ? find_json_value(*json_opt, "FocusOffsets") : nullptr;
+                const auto* offsets_val = call.json_field("FocusOffsets");
                 if (!offsets_val) {
                     throw_bad_request("Missing parameter: FocusOffsets");
                 }
@@ -5496,843 +3858,253 @@ Response Router::dispatch_filterwheel_method(
                     offsets.push_back(json_int_value(offset, "FocusOffsets"));
                 }
                 filterwheel->set_focus_offsets(offsets);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for FilterWheel"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in filter wheel method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in filter wheel method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for FilterWheel");
+    });
 }
 
-Response Router::dispatch_focuser_method(
-    std::shared_ptr<alpacacore::FocuserDriver> focuser,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
+Response Router::dispatch_focuser_method(std::shared_ptr<alpacacore::FocuserDriver> focuser,
+                                         const std::string& method_name, const DeviceCall& call) {
+    const Request& request = call.request();
 
-    auto parse_int = [&](const std::string& param_name) -> int {
-        if (request.has_query_param(param_name)) {
-            return parse_int_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                return json_int_value(*val, param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                return json_int_value(*val, param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_int_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_int_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    auto parse_bool = [&](const std::string& param_name) -> bool {
-        if (request.has_query_param(param_name)) {
-            return parse_bool_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_bool_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_bool_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    try {
+    return call.run("focuser method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "absolute") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_absolute());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_absolute());
             } else if (method_name == "ismoving") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_is_moving());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_is_moving());
             } else if (method_name == "maxincrement") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_max_increment());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_max_increment());
             } else if (method_name == "maxstep") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_max_step());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_max_step());
             } else if (method_name == "position") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_position());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_position());
             } else if (method_name == "stepsize") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_step_size());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_step_size());
             } else if (method_name == "tempcompavailable") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_temp_comp_available());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_temp_comp_available());
             } else if (method_name == "tempcomp") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_temp_comp());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_temp_comp());
             } else if (method_name == "temperature") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, focuser->get_temperature());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(focuser->get_temperature());
             }
         }
 
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "tempcomp") {
-                bool value = parse_bool("TempComp");
+                bool value = call.get_bool("TempComp");
                 focuser->set_temp_comp(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "move") {
-                int position = parse_int("Position");
+                int position = call.get_int("Position");
                 focuser->move(position);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "halt") {
                 focuser->halt();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for Focuser"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in focuser method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in focuser method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for Focuser");
+    });
 }
 
-Response Router::dispatch_rotator_method(
-    std::shared_ptr<alpacacore::RotatorDriver> rotator,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
+Response Router::dispatch_rotator_method(std::shared_ptr<alpacacore::RotatorDriver> rotator,
+                                         const std::string& method_name, const DeviceCall& call) {
+    const Request& request = call.request();
 
-    auto parse_double = [&](const std::string& param_name) -> double {
-        if (request.has_query_param(param_name)) {
-            return parse_double_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_double_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_double_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    auto parse_bool = [&](const std::string& param_name) -> bool {
-        if (request.has_query_param(param_name)) {
-            return parse_bool_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_bool_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_bool_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    try {
+    return call.run("rotator method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "canreverse") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rotator->get_can_reverse());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rotator->get_can_reverse());
             } else if (method_name == "reverse") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rotator->get_reverse());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rotator->get_reverse());
             } else if (method_name == "ismoving") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rotator->get_is_moving());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rotator->get_is_moving());
             } else if (method_name == "mechanicalposition") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rotator->get_mechanical_position());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rotator->get_mechanical_position());
             } else if (method_name == "position") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rotator->get_position());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rotator->get_position());
             } else if (method_name == "stepsize") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rotator->get_step_size());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rotator->get_step_size());
             } else if (method_name == "targetposition") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rotator->get_target_position());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(rotator->get_target_position());
             }
         }
 
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "reverse") {
-                bool value = parse_bool("Reverse");
+                bool value = call.get_bool("Reverse");
                 rotator->set_reverse(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "move") {
-                double position = parse_double("Position");
+                double position = call.get_double("Position");
                 rotator->move(position);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "moveabsolute") {
-                double position = parse_double("Position");
+                double position = call.get_double("Position");
                 rotator->move_absolute(position);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "movemechanical") {
-                double position = parse_double("Position");
+                double position = call.get_double("Position");
                 rotator->move_mechanical(position);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "halt") {
                 rotator->halt();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "sync") {
-                double position = parse_double("Position");
+                double position = call.get_double("Position");
                 rotator->sync(position);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "targetposition") {
-                double position = parse_double("TargetPosition");
+                double position = call.get_double("TargetPosition");
                 rotator->set_target_position(position);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for Rotator"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in rotator method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in rotator method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for Rotator");
+    });
 }
 
-Response Router::dispatch_dome_method(
-    std::shared_ptr<alpacacore::DomeDriver> dome,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
+Response Router::dispatch_dome_method(std::shared_ptr<alpacacore::DomeDriver> dome, const std::string& method_name,
+                                      const DeviceCall& call) {
+    const Request& request = call.request();
 
-    auto parse_double = [&](const std::string& param_name) -> double {
-        if (request.has_query_param(param_name)) {
-            return parse_double_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_double_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_double_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    auto parse_bool = [&](const std::string& param_name) -> bool {
-        if (request.has_query_param(param_name)) {
-            return parse_bool_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_boolean()) {
-                    return val->get<bool>();
-                }
-                if (val->is_string()) {
-                    return parse_bool_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_bool_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_bool_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    try {
+    return call.run("dome method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "altitude") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_altitude());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_altitude());
             } else if (method_name == "athome") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_at_home());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_at_home());
             } else if (method_name == "atpark") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_at_park());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_at_park());
             } else if (method_name == "azimuth") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_azimuth());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_azimuth());
             } else if (method_name == "canfindhome") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_find_home());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_can_find_home());
             } else if (method_name == "canpark") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_park());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_can_park());
             } else if (method_name == "cansetaltitude") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_set_altitude());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_can_set_altitude());
             } else if (method_name == "cansetazimuth") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_set_azimuth());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_can_set_azimuth());
             } else if (method_name == "cansetpark") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_set_park());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_can_set_park());
             } else if (method_name == "cansetshutter") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_set_shutter());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_can_set_shutter());
             } else if (method_name == "cansyncazimuth") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_sync_azimuth());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_can_sync_azimuth());
             } else if (method_name == "canslave") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_slave());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_can_slave());
             } else if (method_name == "slaved") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_slaved());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_slaved());
             } else if (method_name == "slewing") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_slewing());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_slewing());
             } else if (method_name == "shutterstatus") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_shutter_status());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(dome->get_shutter_status());
             }
         }
 
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "slaved") {
-                bool value = parse_bool("Slaved");
+                bool value = call.get_bool("Slaved");
                 dome->set_slaved(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "abortslew") {
                 dome->abort_slew();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "closeshutter") {
                 dome->close_shutter();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "findhome") {
                 dome->find_home();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "openshutter") {
                 dome->open_shutter();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "park") {
                 dome->park();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "setpark") {
                 dome->set_park();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "slewtoazimuth") {
-                double azimuth = parse_double("Azimuth");
+                double azimuth = call.get_double("Azimuth");
                 dome->slew_to_azimuth(azimuth);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "slewtoaltitude") {
-                double altitude = parse_double("Altitude");
+                double altitude = call.get_double("Altitude");
                 dome->slew_to_altitude(altitude);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "synctoazimuth") {
-                double azimuth = parse_double("Azimuth");
+                double azimuth = call.get_double("Azimuth");
                 dome->sync_to_azimuth(azimuth);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for Dome"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in dome method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in dome method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for Dome");
+    });
 }
 
-Response Router::dispatch_covercalibrator_method(
-    std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
+Response Router::dispatch_covercalibrator_method(std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
+                                                 const std::string& method_name, const DeviceCall& call) {
+    const Request& request = call.request();
 
-    auto parse_int = [&](const std::string& param_name) -> int {
-        if (request.has_query_param(param_name)) {
-            return parse_int_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                return json_int_value(*val, param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                return json_int_value(*val, param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_int_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_int_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
-
-    try {
+    return call.run("cover calibrator method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "brightness") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, covercalibrator->get_brightness());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(covercalibrator->get_brightness());
             } else if (method_name == "calibratorchanging") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, covercalibrator->get_calibrator_changing());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(covercalibrator->get_calibrator_changing());
             } else if (method_name == "calibratorstate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, static_cast<int>(covercalibrator->get_calibrator_state()));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(static_cast<int>(covercalibrator->get_calibrator_state()));
             } else if (method_name == "covermoving") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, covercalibrator->get_cover_moving());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(covercalibrator->get_cover_moving());
             } else if (method_name == "coverstate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, static_cast<int>(covercalibrator->get_cover_state()));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(static_cast<int>(covercalibrator->get_cover_state()));
             } else if (method_name == "maxbrightness") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, covercalibrator->get_max_brightness());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(covercalibrator->get_max_brightness());
             }
         }
 
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "calibratoron") {
-                int brightness = parse_int("Brightness");
+                int brightness = call.get_int("Brightness");
                 covercalibrator->calibrator_on(brightness);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "calibratoroff") {
                 covercalibrator->calibrator_off();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "opencover") {
                 covercalibrator->open_cover();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "closecover") {
                 covercalibrator->close_cover();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "haltcover") {
                 covercalibrator->halt_cover();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for CoverCalibrator"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in cover calibrator method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in cover calibrator method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for CoverCalibrator");
+    });
 }
 
 Response Router::dispatch_observingconditions_method(
-    std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
-
-    auto parse_double = [&](const std::string& param_name) -> double {
-        if (request.has_query_param(param_name)) {
-            return parse_double_value(request.get_query_param(param_name), param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number()) {
-                    return val->get<double>();
-                }
-                if (val->is_string()) {
-                    return parse_double_value(val->get<std::string>(), param_name);
-                }
-                throw_bad_request("Invalid JSON value for parameter: " + param_name);
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return parse_double_value(*value, param_name);
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return parse_double_value(*value, param_name);
-        }
-        throw_bad_request("Missing parameter: " + param_name);
-    };
+    std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions, const std::string& method_name,
+    const DeviceCall& call) {
+    const Request& request = call.request();
 
     auto parse_property_name = [&]() -> std::string {
         if (auto value = get_query_param_case_insensitive(request, "PropertyName")) {
@@ -6341,223 +4113,99 @@ Response Router::dispatch_observingconditions_method(
         if (auto value = get_query_param_case_insensitive(request, "SensorName")) {
             return *value;
         }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, "PropertyName")) {
-                if (!val->is_string()) {
-                    throw_bad_request("Invalid JSON value for parameter: PropertyName");
-                }
-                return val->get<std::string>();
+        if (const auto* val = call.json_field("PropertyName")) {
+            if (!val->is_string()) {
+                throw_bad_request("Invalid JSON value for parameter: PropertyName");
             }
-            if (const auto* val = find_json_value(*json_opt, "SensorName")) {
-                if (!val->is_string()) {
-                    throw_bad_request("Invalid JSON value for parameter: SensorName");
-                }
-                return val->get<std::string>();
-            }
+            return val->get<std::string>();
         }
-        if (auto value = get_form_value(request.body(), "PropertyName")) {
+        if (const auto* val = call.json_field("SensorName")) {
+            if (!val->is_string()) {
+                throw_bad_request("Invalid JSON value for parameter: SensorName");
+            }
+            return val->get<std::string>();
+        }
+        if (auto value = call.form_field("PropertyName")) {
             return *value;
         }
-        if (auto value = get_form_value(request.body(), "SensorName")) {
+        if (auto value = call.form_field("SensorName")) {
             return *value;
         }
         throw_bad_request("Missing parameter: SensorName");
     };
 
-    try {
+    return call.run("observing conditions method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "averageperiod") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_average_period());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_average_period());
             } else if (method_name == "cloudcover") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_cloud_cover());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_cloud_cover());
             } else if (method_name == "dewpoint") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_dew_point());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_dew_point());
             } else if (method_name == "humidity") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_humidity());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_humidity());
             } else if (method_name == "pressure") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_pressure());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_pressure());
             } else if (method_name == "rainrate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_rain_rate());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_rain_rate());
             } else if (method_name == "skybrightness") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_sky_brightness());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_sky_brightness());
             } else if (method_name == "skyquality") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_sky_quality());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_sky_quality());
             } else if (method_name == "skytemperature") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_sky_temperature());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_sky_temperature());
             } else if (method_name == "starfwhm") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_star_fwhm());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_star_fwhm());
             } else if (method_name == "temperature") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_temperature());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_temperature());
             } else if (method_name == "winddirection") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_wind_direction());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_wind_direction());
             } else if (method_name == "windgust") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_wind_gust());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_wind_gust());
             } else if (method_name == "windspeed") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_wind_speed());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_wind_speed());
             } else if (method_name == "timesincelastupdate") {
                 std::string property_name = parse_property_name();
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_time_since_last_update(property_name));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_time_since_last_update(property_name));
             } else if (method_name == "sensordescription") {
                 std::string property_name = parse_property_name();
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_sensor_description(property_name));
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(observingconditions->get_sensor_description(property_name));
             }
         }
 
         if (request.method() == HttpMethod::PUT) {
             if (method_name == "averageperiod") {
-                double value = parse_double("AveragePeriod");
+                double value = call.get_double("AveragePeriod");
                 observingconditions->set_average_period(value);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             } else if (method_name == "refresh") {
                 observingconditions->refresh();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok_void();
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for ObservingConditions"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in observing conditions method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in observing conditions method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for ObservingConditions");
+    });
 }
 
-Response Router::dispatch_safetymonitor_method(
-    std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
+Response Router::dispatch_safetymonitor_method(std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
+                                               const std::string& method_name, const DeviceCall& call) {
+    const Request& request = call.request();
 
-    try {
+    // No SafetyMonitor method reads a parameter today, so the 400 text path of run()
+    // is unreachable here. Kept so a method that adds one answers 400 text like the
+    // other dispatchers.
+    return call.run("safety monitor method '" + method_name + "'", [&]() -> Response {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "issafe") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, safetymonitor->get_is_safe());
-                response.set_body(alpaca_response);
-                return response;
+                return call.ok(safetymonitor->get_is_safe());
             }
         }
 
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for SafetyMonitor"
-        );
-        response.set_body(alpaca_response);
-        return response;
-        // Unreachable today: no SafetyMonitor method reads a parameter. Kept so a
-        // method that adds one answers 400 text like the other dispatchers.
-    } catch (const RequestNotInterpretable& e) {
-        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
-        set_bad_request_text(response, e.what());
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in safety monitor method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in safety monitor method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
+        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
+                          "Method '" + method_name + "' not yet implemented for SafetyMonitor");
+    });
 }
 
 Response Router::handle_root(const Request& request, std::uint32_t server_tx_id) {
@@ -6627,11 +4275,8 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
         util::log_info("API versions response: " + versions.dump());
     } catch (const std::exception& e) {
         util::log_error("Error getting API versions: " + std::string(e.what()));
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
-            util::exception_to_error_message(e)
-        );
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
     }
 
@@ -6664,8 +4309,8 @@ Response Router::handle_build_info(const Request& request, std::uint32_t server_
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error getting build info: " + std::string(e.what()));
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
     }
 
@@ -6697,8 +4342,8 @@ Response Router::handle_device_catalog(const Request& request, std::uint32_t ser
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error getting device catalog: " + std::string(e.what()));
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
     }
 
@@ -6750,8 +4395,8 @@ Response Router::handle_thermal_cameras(const Request& request, std::uint32_t se
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error listing thermal switch cameras: " + std::string(e.what()));
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
     }
 
@@ -6915,72 +4560,12 @@ Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id
 
 namespace {
 
-// Reading an optional device-config field, with an explicit JSON `null`
-// treated as absence (issue #388).
-//
-// The old shape was `config.contains(k)` followed by `config.value(k, dflt)`.
-// `contains()` is true for an explicit null, and `nlohmann::json::value()`
-// THROWS `type_error` rather than returning the default when the stored value
-// is not convertible -- so `{"siteLatitude": null}` threw out of whichever
-// vendor branch read it, was caught by the handler's outer catch, and came
-// back as a generic nlohmann message instead of the specific one the field
-// has. Since the site fields became mandatory for Sky-Watcher (#274/#353),
-// that is the difference between "siteLatitude is required" and a JSON
-// library's type complaint on the one field that decides whether the device
-// connects at all. A null is easy to produce from any client that serialises
-// an unset value rather than omitting the key.
-
-// True when `key` is present AND carries an actual value. An explicit null
-// reads as absent, which is what a client that serialised "unset" meant.
-bool config_has(const nlohmann::json& config, const char* key) {
-    const auto it = config.find(key);
-    return it != config.end() && !it->is_null();
-}
-
-// `config[key]`, or `fallback` when the key is absent or explicitly null. A
-// value of a genuinely incompatible type is still an error -- silently
-// falling back there would accept a typo'd config and register a device with
-// defaults nobody asked for -- but it is reported as an AlpacaException
-// naming the field, which the handler's outer catch surfaces verbatim,
-// instead of an nlohmann type_error that names nothing.
-template <typename T>
-T config_get(const nlohmann::json& config, const char* key, const T& fallback) {
-    const auto it = config.find(key);
-    if (it == config.end() || it->is_null()) {
-        return fallback;
-    }
-    if constexpr (std::is_same_v<T, int>) {
-        // get<int>() would wrap 4294967299 to 3 and cut 3.5 to 3 (ADR 0007 rule 4).
-        if (it->is_number()) {
-            if (const auto v = whole_json_int(*it)) return *v;
-            throw alpacacore::AlpacaException(
-                std::string("Device config field '") + key + "' must be a whole number inside int",
-                alpacacore::AlpacaError::InvalidValue);
-        }
-    }
-    try {
-        return it->template get<T>();
-    } catch (const nlohmann::json::exception&) {
-        throw alpacacore::AlpacaException(
-            std::string("Device config field '") + key + "' has the wrong type (got " + it->type_name() + ")",
-            alpacacore::AlpacaError::InvalidValue);
-    }
-}
-
-// String-literal defaults deduce `const char*`, which nlohmann cannot `get<>`.
-// A null fallback becomes an empty string rather than std::string(nullptr),
-// which is undefined behaviour -- cppcheck's whole-program pass flags the
-// unguarded construction, and "" is what every caller means by "no default".
-std::string config_get(const nlohmann::json& config, const char* key, const char* fallback) {
-    return config_get<std::string>(config, key, fallback != nullptr ? std::string(fallback) : std::string());
-}
-
 // Issue #860: `alignmentMode` ("auto", "altaz" or "equatorial") tells the
 // SynScan and Celestron drivers the geometry of a mount whose handset does not
 // report it. Returns the value when it is one of those three, nullopt when it
 // is absent or unknown; an unknown value reads as "auto" and is not persisted.
 std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
-    if (!config_has(config, "alignmentMode") || !config.at("alignmentMode").is_string()) {
+    if (!catalog_json::has_value(config, "alignmentMode") || !config.at("alignmentMode").is_string()) {
         return std::nullopt;
     }
     std::string mode = config.at("alignmentMode").get<std::string>();
@@ -7117,8 +4702,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        std::string vendor = config_get(config, "vendor", "");
-        std::string device_type_str = config_get(config, "deviceType", "");
+        std::string vendor = catalog_json::get_string(config, "vendor");
+        std::string device_type_str = catalog_json::get_string(config, "deviceType");
 
         if (vendor.empty() || device_type_str.empty()) {
             AlpacaResponse alpaca_response = make_error_response(
@@ -7131,11 +4716,11 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         }
 
         // open-astro#444: the opt-out flag is vendor-agnostic and consumed by
-        // the router alone, so no register_device_from_config() arm types it.
+        // the router alone, so no catalog descriptor declares it.
         // Refuse a non-boolean here (the #388 rule: a wrong-typed field is
         // named to the caller, never left to throw from a later read) rather
         // than let sanitize_device_config() copy it verbatim into the file.
-        if (config_has(config, "learnSiteFromClient") && !config["learnSiteFromClient"].is_boolean()) {
+        if (catalog_json::has_value(config, "learnSiteFromClient") && !config["learnSiteFromClient"].is_boolean()) {
             AlpacaResponse alpaca_response =
                 make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
                                     std::string("Device config field 'learnSiteFromClient' must be a boolean (got ") +
@@ -7213,11 +4798,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         } else {
             util::log_error("Error configuring device: " + util::escape_for_log(e.what(), 4096));
         }
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
-            util::exception_to_error_message(e)
-        );
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
         return response;
     }
@@ -7274,9 +4856,9 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             return response;
         }
 
-        std::string device_type_str = config_get(config, "deviceType", "");
-        std::string vendor = config_get(config, "vendor", "");
-        int device_number = config_get(config, "deviceNumber", -1);
+        std::string device_type_str = catalog_json::get_string(config, "deviceType");
+        std::string vendor = catalog_json::get_string(config, "vendor");
+        int device_number = catalog_json::get_int(config, "deviceNumber", -1);
 
         if (device_type_str.empty() || device_number < 0) {
             AlpacaResponse alpaca_response = make_error_response(
@@ -7359,11 +4941,8 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         } else {
             util::log_error("Error removing device: " + util::escape_for_log(e.what(), 4096));
         }
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
-            util::exception_to_error_message(e)
-        );
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
         return response;
     }
@@ -8374,9 +5953,9 @@ nlohmann::json with_folded_connection_type(const nlohmann::json& config) {
 bool Router::register_device_from_config(const nlohmann::json& raw_config, std::string& error_message,
                                          ConfigSource source, nlohmann::json* learned_config) {
     const nlohmann::json config = with_folded_connection_type(raw_config);
-    std::string device_type_str = config_get(config, "deviceType", "");
-    std::string vendor = config_get(config, "vendor", "");
-    int device_number = config_get(config, "deviceNumber", -1);
+    std::string device_type_str = catalog_json::get_string(config, "deviceType");
+    std::string vendor = catalog_json::get_string(config, "vendor");
+    int device_number = catalog_json::get_int(config, "deviceNumber", -1);
 
     if (device_type_str.empty() || vendor.empty() || device_number < 0) {
         error_message = "Missing required fields: deviceType, vendor, and deviceNumber";
@@ -8390,7 +5969,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
     // throws) just skips the consult -- the final "not yet
     // supported" message still answers, unchanged. Only that lookup is
     // guarded: an AlpacaException out of config_from_json below must
-    // propagate like a config_get() failure does today, not be swallowed here.
+    // propagate like a catalog_json::get_string() failure does today, not be swallowed here.
     std::optional<alpacacore::DeviceType> device_type_key;
     try {
         device_type_key = string_to_device_type(device_type_str);
@@ -8582,7 +6161,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     nlohmann::json sanitized = nlohmann::json::object();
 
     auto copy_if_present = [&](const char* key) {
-        if (config_has(config, key)) {
+        if (catalog_json::has_value(config, key)) {
             sanitized[key] = config.at(key);
         }
     };
@@ -8591,8 +6170,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     copy_if_present("deviceType");
     copy_if_present("deviceNumber");
 
-    std::string vendor = config_get(config, "vendor", "");
-    std::string device_type = config_get(config, "deviceType", "");
+    std::string vendor = catalog_json::get_string(config, "vendor");
+    std::string device_type = catalog_json::get_string(config, "deviceType");
 
     // open-astro#664: a vendor/type is sanitized from its catalog descriptor's own
     // field list (every vendor is one now). The vendor-agnostic keys at the end are
@@ -8706,14 +6285,15 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
 }
 
 void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
-    if (!config_has(config, "deviceType") || !config_has(config, "vendor") || !config_has(config, "deviceNumber")) {
+    if (!catalog_json::has_value(config, "deviceType") || !catalog_json::has_value(config, "vendor") ||
+        !catalog_json::has_value(config, "deviceNumber")) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-    const std::string vendor = config_get(config, "vendor", "");
-    const std::string device_type = to_lower_copy(config_get(config, "deviceType", ""));
-    const int device_number = config_get(config, "deviceNumber", -1);
+    const std::string vendor = catalog_json::get_string(config, "vendor");
+    const std::string device_type = to_lower_copy(catalog_json::get_string(config, "deviceType"));
+    const int device_number = catalog_json::get_int(config, "deviceNumber", -1);
     for (auto& existing : persisted_devices_) {
         const auto key = persisted_key(existing);
         if (key && key->vendor == vendor && key->device_type == device_type && key->device_number == device_number) {

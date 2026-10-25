@@ -28,8 +28,13 @@ const app = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
 
 test('Celestron is offered for both Telescope and Focuser', () => {
     assert.ok(html.includes('<option value="celestron">Celestron</option>'));
-    assert.ok(app.includes('const celestronAllowed = isTelescope || isFocuser;'));
-    assert.ok(app.includes("if (!isTelescope && !isFocuser && vendorSelect.value === 'celestron') {"));
+    // Which device types offer it comes from the catalog (catalog_schema.js).
+    const { offeredVendors } = require(path.join(web, 'catalog_schema.js'));
+    const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'devicecatalog.json'), 'utf8'));
+    for (const deviceType of ['telescope', 'focuser']) {
+        assert.ok(offeredVendors(catalog, deviceType).includes('celestron'), deviceType);
+    }
+    assert.ok(!offeredVendors(catalog, 'camera').includes('celestron'));
 });
 
 test('the focus motor port input has a unique vendor-prefixed name', () => {
@@ -38,7 +43,12 @@ test('the focus motor port input has a unique vendor-prefixed name', () => {
 });
 
 test('the focus motor port is loaded on edit and sent on submit', () => {
-    assert.ok(app.includes("setFormValue('celestron-focuser-port-path', config.portPath);"));
+    const { readCatalogFixture, formFields } = require('./catalog_form_fields.js');
+    const { editAssignments } = require(path.join(web, 'catalog_schema.js'));
+    const descriptor = readCatalogFixture().find((d) => d.vendor === 'celestron' && d.deviceType === 'focuser');
+    const filled = editAssignments(descriptor, { portPath: '/dev/ttyUSB3' }, formFields(html))
+        .find((a) => a.id === 'celestron-focuser-port-path');
+    assert.deepEqual(filled && [filled.key, filled.value], ['portPath', '/dev/ttyUSB3']);
     assert.ok(app.includes("deviceData.portPath = (formData.get('celestronFocuserPortPath') || '').trim();"));
 });
 

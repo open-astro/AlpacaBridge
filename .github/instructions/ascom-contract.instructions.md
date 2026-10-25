@@ -18,7 +18,7 @@ operation slot (`util::AsyncOperation`, see Threads & shutdown in [driver-lifecy
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
 `parking_`; the body polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
-stops the axes; SynScan supersedes the body, Celestron cancels and joins it until #1406); disconnect and the destructor cancel + join through the slot. Keep any
+stops the axes; SynScan and Celestron supersede the body); disconnect and the destructor cancel + join through the slot. Keep any
 pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
 still throws instead of silently never reaching `AtPark`. Drivers with native park commands
 that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task (OnStep has one for
@@ -107,7 +107,7 @@ A camera's "no image yet" answer (`ImageArray` before any exposure, or while one
 - `DoesRefraction` throws `PropertyNotImplemented` on read and write in a driver that neither knows nor computes refraction (ITelescopeV4). Never store the flag and read it back: it would claim a correction the driver does not apply. OnStep reads it from the firmware.
 - `SiteElevation` throws `InvalidOperation` until the device config or a client sets it, never 0 m ([decision 0019](../../docs/decisions/0019-connect-without-site.md)).
 - `DestinationSideOfPier` throws `InvalidValue` for RA outside [0, 24) or Dec outside [-90, 90], before the connection check.
-- A `UTCDate` read the mount clock cannot answer throws `InvalidOperation`; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Celestron follows this; the other adopters are not converted yet.
+- A `UTCDate` read the mount clock cannot answer throws `InvalidOperation`; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Celestron and OnStep follow this; the other adopters are not converted yet.
 
 ### A failed async operation body keeps its error (all drivers)
 
@@ -159,8 +159,9 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
 
 ### Camera PercentCompleted and cooler members (all camera vendors)
 
-- **`PercentCompleted` is valid only while `CameraState` is `Exposing`** (ICameraV4: "in all other states an
-  InvalidOperationException must be raised"). The rule lives once, in `CameraDriver::get_percent_completed_checked()`;
+- **AlpacaBridge supports `PercentCompleted` only while `CameraState` is `Exposing`.** ICameraV4 optionally permits
+  Waiting, Reading and Downloading too, and requires `InvalidOperation` in every other state. The project's
+  exposing-only policy lives once, in `CameraDriver::get_percent_completed_checked()`;
   the GET route and the DeviceState builder both call it, never the virtual `get_percent_completed()` (the raw
   driver value, 0..100). It reads `CameraState` and the raw value first, so a link fault or `NotConnected` still
   surfaces before the `InvalidOperation` (ADR 0006, 0009). DeviceState therefore omits `PercentCompleted` while the
@@ -171,6 +172,26 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
   control, Player One and QHY: the camera's cooler flag, GPhoto: none). Never answer `false` or `0.0` for a
   member the camera does not have. With the cooler, `CoolerPower` is `0` when `CoolerOn` is false.
 - **An SDK failure reading `CoolerPower` is the driver's normal error, never `0.0`.**
+
+### Camera LastExposureDuration and LastExposureStartTime (all camera vendors)
+
+- **Both raise `InvalidOperation` until an image has been successfully acquired** (ICameraV4: "if no image has yet
+  been successfully acquired"), never `ValueNotSet`. A failed exposure publishes nothing and never erases the
+  values of an earlier success; only a new success replaces them. Keep the exposure in flight in pending fields
+  (`PercentCompleted` reads them) and publish under the state lock when the image is acquired
+  (`util::LastExposure`, `util/last_exposure.h`, for supported pairs); clear them on disconnect. While disconnected both raise `NotConnected` first
+  (`ensure_connected()`); a GPhoto abort during the decode re-checks `exposure_active_` under `mutex_` and publishes nothing.
+- In cameras that hold the state lock across initialization, fast-fail disconnected reads before taking that
+  lock, then recheck connection under it. The first check avoids waiting behind connect I/O; the second closes
+  the disconnect race. iGuider's connect I/O already runs outside its leaf state lock.
+- **The duration is the actual one** (ICameraV4: "may differ from the requested duration"): report the applied
+  register or shutter value after rounding/clamping, or monotonic shutter-open elapsed time for a driver-timed
+  exposure. Configuration, mirror settling, readout, download and decode do not count as integration.
+- **The start time is when the camera started to collect photons**, not the `StartExposure` request. Capture
+  candidate UTC at the acquisition boundary after deferred configuration, and refresh it for a retried attempt;
+  use `TaskClock` for elapsed time and progress, never as UTC. Host SDK-call timestamps still need rig evidence
+  for sensor-start accuracy. If no trustworthy source exists, the optional property may raise
+  `PropertyNotImplemented` rather than invent a timestamp; document that vendor's limitation.
 
 ### Camera values the SDK cannot give (all camera vendors)
 

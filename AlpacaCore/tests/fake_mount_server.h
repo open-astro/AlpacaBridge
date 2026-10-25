@@ -51,8 +51,9 @@ class FakeMountServer {
 public:
     using Responder = std::function<std::string(const std::string& chunk)>;
 
-    /// Starts listening on an ephemeral port; bind_ipv4 is in host byte order.
-    explicit FakeMountServer(Responder responder = default_responder(), std::uint32_t bind_ipv4 = INADDR_LOOPBACK)
+    /// Starts listening (port zero is ephemeral); address and port are in host byte order.
+    explicit FakeMountServer(Responder responder = default_responder(), std::uint32_t bind_ipv4 = INADDR_LOOPBACK,
+                             std::uint16_t bind_port = 0)
         : responder_(std::move(responder)) {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd_ < 0) {
@@ -63,7 +64,7 @@ public:
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(bind_ipv4);
-        addr.sin_port = 0;  // ephemeral
+        addr.sin_port = htons(bind_port);
         if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
             ::listen(listen_fd_, 16) != 0) {
             ::close(listen_fd_);
@@ -119,6 +120,9 @@ public:
 
     bool ok() const { return listen_fd_ >= 0 && port_ > 0; }
     int port() const { return port_; }
+    /// Non-empty replies written to a socket so far.
+    std::uint64_t replies_sent() const { return replies_sent_.load(); }
+    unsigned accepted_connections() const { return accepted_connections_.load(); }
 
     /// Sends bytes to every live connection unprompted (a mount that keeps talking).
     void push(const std::string& bytes) {
@@ -213,6 +217,7 @@ private:
                 continue;
             }
             int one = 1;
+            ++accepted_connections_;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
             std::lock_guard<std::mutex> lock(conn_mutex_);
             conn_fds_.push_back(fd);
@@ -230,6 +235,7 @@ private:
             const std::string reply = responder_(std::string(buf, static_cast<std::size_t>(n)));
             if (!reply.empty()) {
                 static_cast<void>(::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL));
+                replies_sent_.fetch_add(1);
             }
         }
         // Deregister and close under one lock so the destructor can never
@@ -245,6 +251,8 @@ private:
     int listen_fd_ = -1;
     int port_ = 0;
     std::atomic<bool> stop_{false};
+    std::atomic<std::uint64_t> replies_sent_{0};
+    std::atomic<unsigned> accepted_connections_{0};
     std::thread accept_thread_;
     std::mutex conn_mutex_;
     std::vector<int> conn_fds_;
