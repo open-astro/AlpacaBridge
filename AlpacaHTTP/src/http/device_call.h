@@ -102,6 +102,10 @@ public:
         return response;
     }
     Response ok_void() const;
+    // The success envelope up to, not including, its closing brace:
+    // {"ClientTransactionID":N,"ServerTransactionID":M,"ErrorNumber":0,"ErrorMessage":""
+    // For a body written element by element (the JSON ImageArray), which cannot go through ok().
+    std::string success_head() const;
     // The envelope for a refusal that is not an exception, e.g. "not yet implemented".
     Response error(std::int32_t error_number, const std::string& message) const;
 

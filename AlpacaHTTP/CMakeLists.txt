@@ -260,6 +260,7 @@ set(ALPACAHTTP_SOURCES
     src/core/catalog_json.cpp
     src/http/router.cpp
     src/http/device_call.cpp
+    src/http/image_payload.cpp
     src/http/server.cpp
     src/http/thread_join.cpp
     src/util/threading.cpp
@@ -384,6 +385,17 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_compile_definitions(test_routing PRIVATE
         ALPACAHTTP_ROUTER_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+    # Test-only server for the hardware-free ConformU job: a test catalog
+    # descriptor over FakeSkyWatcherMount. Not installed and not linked into
+    # alpacabridge or alpacahttp_server. The fake header lives under
+    # AlpacaCore/tests, so that directory is on this target's include path only.
+    if(TARGET alpacacore_skywatcher)
+        add_executable(fake_skywatcher_server tests/fake_skywatcher_server.cpp)
+        target_link_libraries(fake_skywatcher_server alpacahttp alpacacore_skywatcher)
+        target_include_directories(fake_skywatcher_server PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
+    endif()
+
     # #646: route-table snapshot, dispatch reach and rejection fixture. Own
     # working directory for the same reason as test_routing (relative
     # config/registered_devices.json), and its own process because the
@@ -402,6 +414,11 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_executable(test_device_call tests/test_device_call.cpp)
     target_link_libraries(test_device_call alpacahttp)
     add_test(NAME test_device_call COMMAND test_device_call)
+
+    # Camera imagearray payload (ImageBytes and JSON ImageArray) on synthetic images.
+    add_executable(test_image_payload tests/test_image_payload.cpp)
+    target_link_libraries(test_image_payload alpacahttp)
+    add_test(NAME test_image_payload COMMAND test_image_payload)
 
     # Threaded storm over the router's persisted_devices_ store (audit 3.0.1
     # follow-up): configure/remove/configureddevices from concurrent threads,

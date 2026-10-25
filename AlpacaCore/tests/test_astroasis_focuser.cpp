@@ -112,7 +112,7 @@ TEST_CASE("Astroasis Focuser Driver - getters between poll ticks cause no device
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:set_connected() delete the first poll_state_once() at connect.
+// Falsified by: polled_state.h:102 start() delete the first poll_once() at connect.
 TEST_CASE("Astroasis Focuser Driver - DeviceState reads the device not at all",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -144,7 +144,7 @@ TEST_CASE("Astroasis Focuser Driver - static members never touch the device", "[
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:move() delete the snapshot_.write() after move_to.
+// Falsified by: astroasis_focuser_driver.cpp:move():324 delete the state_.write() after move_to.
 TEST_CASE("Astroasis Focuser Driver - Move and Halt write through to the frame",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -200,7 +200,7 @@ void act_during_poll(const std::shared_ptr<FakeHidState>& state, alpacacore::tes
     REQUIRE(clock.wait_for_waiters(1, kBound));
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:move() delete the snapshot_.write() in move()'s catch block.
+// Falsified by: astroasis_focuser_driver.cpp:move():319 delete the state_.write() in move()'s catch block.
 TEST_CASE("Astroasis Focuser Driver - a failed move drops the poll that overlaps it",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -221,7 +221,7 @@ TEST_CASE("Astroasis Focuser Driver - a failed move drops the poll that overlaps
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:halt() delete the snapshot_.write() in halt()'s catch block.
+// Falsified by: astroasis_focuser_driver.cpp:halt():299 delete the state_.write() in halt()'s catch block.
 TEST_CASE("Astroasis Focuser Driver - a failed halt drops the poll that overlaps it",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -243,7 +243,7 @@ TEST_CASE("Astroasis Focuser Driver - a failed halt drops the poll that overlaps
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:poll_state_once() take begin_poll() after the device read instead of
+// Falsified by: polled_state.h:201 poll_once() take begin_poll() after the device read instead of
 // before.
 TEST_CASE("Astroasis Focuser Driver - a poll that overlaps a write drops its frame",
           "[astroasis][focuser][snapshot][unit]") {
@@ -285,7 +285,7 @@ TEST_CASE("Astroasis Focuser Driver - failed MaxStep read at connect closes the 
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp kFaultThreshold raised from 3 to 100 (the link never latches).
+// Falsified by: astroasis_focuser_driver.cpp:39 kFaultThreshold raised from 3 to 100 (the link never latches).
 TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link latches",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -347,7 +347,7 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:note_poll_failure() delete the link_lost_ latch past kLinkStalenessBound.
+// Falsified by: polled_state.h:233 note_failure() delete the lost_.exchange(true) latch past kLinkStalenessBound.
 TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound drops Connected",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -399,6 +399,62 @@ TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound dro
     driver->set_connected(false);
 }
 
+// Falsified by: astroasis_focuser_driver.cpp:308 move() replace served_frame() with a throw_if_faulted()-only gate
+// (a Move against a frame older than the staleness bound reaches the wire).
+TEST_CASE("Astroasis Focuser Driver - a Move against a frame older than the staleness bound is refused",
+          "[astroasis][focuser][snapshot][unit]") {
+    auto state = std::make_shared<FakeHidState>();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = connected_focuser(state, clock);
+    REQUIRE(driver->get_position() == 1234);
+
+    // Park the poll inside its status exchange, so it cannot latch the loss
+    // itself, and let the held frame age past util::kLinkStalenessBound (30 s).
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = 0x32;
+        state->gate_entered = false;
+    }
+    clock.advance(kTick);
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        REQUIRE(state->cv.wait_for(lock, kBound, [&] { return state->gate_entered; }));
+    }
+    clock.advance(std::chrono::seconds(31));
+
+    // The Move runs on its own thread: with the gate removed it would reach
+    // the wire and wait behind the held exchange.
+    std::atomic<bool> finished{false};
+    int code = 0;
+    std::thread mover([&] {
+        try {
+            driver->move(2000);
+        } catch (const alpacacore::AlpacaException& ex) {
+            code = ex.error_code();
+        }
+        finished = true;
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!finished && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = 0;
+    }
+    state->cv.notify_all();
+    mover.join();
+    CHECK(finished.load());
+    CHECK(code == alpacacore::AlpacaError::NotConnected);
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        CHECK(state->moves == 0);  // no move command was sent
+    }
+    CHECK_FALSE(driver->get_connected());  // the refused Move latched the loss
+
+    driver->set_connected(false);
+}
+
 // Falsified by: astroasis_focuser_driver.cpp:device_state_age() delete the override (the stamp is the request time).
 TEST_CASE("Astroasis Focuser Driver - DeviceState TimeStamp is when the frame was measured",
           "[astroasis][focuser][snapshot][unit]") {
@@ -429,7 +485,7 @@ TEST_CASE("Astroasis Focuser Driver - DeviceState TimeStamp is when the frame wa
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:set_connected() delete state_poll_.cancel_all_and_join() on disconnect.
+// Falsified by: astroasis_focuser_driver.cpp:set_connected():210 delete state_.stop_and_join() on disconnect.
 TEST_CASE("Astroasis Focuser Driver - disconnect stops the poll", "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
     alpacacore::test::FakeTaskClock clock;

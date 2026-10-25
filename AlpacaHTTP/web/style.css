@@ -507,6 +507,12 @@ h2 {
     box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
 }
 
+/* The vendor list is empty until the device catalog has loaded. */
+.form-group #vendor:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .form-group small {
     display: block;
     margin-top: 4px;
