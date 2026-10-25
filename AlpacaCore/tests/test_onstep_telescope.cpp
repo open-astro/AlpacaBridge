@@ -3277,6 +3277,25 @@ TEST_CASE("OnStep Telescope Driver - a Tracking write SetPark Unpark or Sync the
         REQUIRE_NOTHROW(driver->set_tracking(false));
     }
 
+    // #1379 review: firmware without :GE# answers it with no two-digit code. The
+    // driver has then just re-read :GU#, which decides where it can.
+    SECTION("a 0 with no :GE# code: :GU# decides for Unpark and Tracking, SetPark stays refused") {
+        mount->refuse(":hR", "?#");         // not a code
+        REQUIRE_NOTHROW(driver->unpark());  // :GU# shows not parked: taken
+        CHECK_FALSE(driver->get_at_park());
+        mount->refuse(":ST", "?#");
+        REQUIRE_NOTHROW(driver->set_tracking(true));  // :GU# already shows tracking: taken
+        refused([&]() { driver->set_tracking(false); }, "Tracking refused by the mount", "no reason given");
+        mount->refuse(":hQ", "?#");
+        refused([&]() { driver->set_park(); }, "SetPark refused by the mount", "no reason given");
+        mount->set_status("nNPHEo180#");  // parked
+        driver->set_connected(false);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        mount->refuse(":hR", "?#");
+        refused([&]() { driver->unpark(); }, "Unpark refused by the mount", "no reason given");
+        CHECK(driver->get_at_park());
+    }
+
     SECTION("a refused Unpark throws and the mount stays parked; 'not parked' is a no-op") {
         mount->set_status("nNPHEo180#");  // parked at home
         driver->set_connected(false);

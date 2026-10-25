@@ -630,7 +630,10 @@ public:
         // The reply is read, not drained: OnStep 4.x refuses :ST while slewing
         // (#1379); the internal tracking restores stay blind.
         if (!OnStepProtocolWrapper::instance().set_tracking_checked(tracking)) {
-            if (const auto code = refusal_code_locked("Tracking")) {
+            // With no :GE# code, refusal_code_locked() has just re-read :GU#: a
+            // mount that now tracks as asked took it (#1379 review).
+            if (const auto code = refusal_code_locked("Tracking");
+                code && !(*code < 0 && cached_status_.is_tracking == tracking)) {
                 throw mount_refused("Tracking", *code);
             }
         }
@@ -995,6 +998,8 @@ public:
         // OnStepX refuses :hQ# while parked, during a GOTO or a guide move, or on a
         // motor fault (Park.cpp set()); a refusal used to read as success (#1379).
         if (!OnStepProtocolWrapper::instance().set_park()) {
+            // Unlike Unpark and Tracking, no :GU# letter shows the park position,
+            // so a 0 with no :GE# code cannot be confirmed and stays a refusal.
             if (const auto code = refusal_code_locked("SetPark")) {
                 throw mount_refused("SetPark", *code);
             }
@@ -1086,7 +1091,10 @@ public:
         // date and time are set or on a motor fault (Park.cpp restore()). "Not
         // parked" (11) is ASCOM's no-op, not a refusal.
         if (!OnStepProtocolWrapper::instance().unpark()) {
-            if (const auto code = refusal_code_locked("Unpark"); code && *code != kCeNotParked) {
+            // 11 (not parked) is ASCOM's no-op; with no :GE# code, the :GU# that
+            // refusal_code_locked() has just re-read decides (#1379 review).
+            if (const auto code = refusal_code_locked("Unpark");
+                code && *code != kCeNotParked && !(*code < 0 && !cached_status_.is_parked)) {
                 throw mount_refused("Unpark", *code);
             }
         }

@@ -366,7 +366,7 @@ it is never reachable through `router.cpp` or the web UI.
   used to send their command blind or ignore the reply, so a mount that refused them read as
   success. They now read it: a bare `0` from `:ST`/`:hQ#`/`:hR#` throws `InvalidOperation`
   ("<member> refused by the mount (<reason>)") with the `:GE#` reason, unless `:GE#` then says `00`
-  or `25`, which is taken as accepted, as for `:hP#`; `Unpark` on a mount that is not parked (`11`)
+  or `25`, which is taken as accepted, as for `:hP#`. With no `:GE#` code (firmware without `:GE#`), the `:GU#` the driver has just re-read decides: an `Unpark` whose mount reads not parked, or a `Tracking` write the mount now shows, is taken; `SetPark` stays a refusal ("no reason given"), since no `:GU#` letter shows the park position; `Unpark` on a mount that is not parked (`11`)
   stays ASCOM's no-op. A `:CM#` `E<n>` throws with the `:MS#` digit's reason, and a sync while a
   GOTO runs is refused before anything is sent, as the slews are (OnStepX refuses it with reply
   `5`). `SyncToTarget` reports under its own name. The driver's own tracking restores after a
