@@ -10,7 +10,7 @@ The ASCOM FilterWheel interface fixes the behaviour both must show: `Position` r
 
 The slice's stop rule is "extract only if both pass unchanged". `AlpacaCore/tests/test_filterwheel_move_model.cpp` runs six case bodies, unchanged, over both drivers (each over its existing fake: `FakeZWOEFWSDK` behind a transit-scripting decorator, and `FakeQhyCfw3` on a pty).
 
-Result on x86_64 over the two drivers as merged at `2e5f28ce`:
+Result on x86_64 over the two drivers as merged on `upstream/main` when the test was written:
 
 | Case | ZWO EFW | QHY CFW3 |
 | --- | --- | --- |
@@ -23,10 +23,10 @@ Result on x86_64 over the two drivers as merged at `2e5f28ce`:
 
 The two ZWO divergences:
 
-- **No primed cache.** `set_connected(true)` only resets the TTL frame (`zwo_filterwheel_driver.cpp:182`), so the first `Position` read after connect is an `EFWGetPosition` call (`:250`). The QHY driver seeds `position_cache_` from the connect handshake (`qhy_cfw3_filterwheel_driver.cpp:176`).
-- **No pending target.** The ZWO driver has no commanded target: it returns whatever the SDK reports and passes only -1 through specially (`zwo_filterwheel_driver.cpp:262`). A device that reported the pre-move slot or a transit slot after the write would be served as the position for up to the TTL. The QHY driver answers -1 for as long as `pending_target_` is set (`qhy_cfw3_filterwheel_driver.cpp:214`) and caches the slot only when the move body reports arrival. The real EFW SDK reports -1 while the wheel turns, so the ZWO result is a gap in the driver's own guard, not a hardware fault seen on a rig.
+- **No primed cache.** `set_connected(true)` only resets the TTL frame (`ZwoFilterWheelDriver::set_connected`, `status_cache_.reset()`), so the first `Position` read after connect is an `EFWGetPosition` call (`get_position`). The QHY driver seeds `position_cache_` from the connect handshake (`QhyCfw3FilterWheelDriver` connect body, `position_cache_ = info.position`).
+- **No pending target.** The ZWO driver has no commanded target: it returns whatever the SDK reports and passes only -1 through specially (`ZwoFilterWheelDriver::get_position`, the `kMovingPosition` branch). A device that reported the pre-move slot or a transit slot after the write would be served as the position for up to the TTL. The QHY driver answers -1 for as long as `pending_target_` is set (`QhyCfw3FilterWheelDriver::get_position`) and caches the slot only when the move body reports arrival. The real EFW SDK reports -1 while the wheel turns, so the ZWO result is a gap in the driver's own guard, not a hardware fault seen on a rig.
 
-One more difference does not show in the table: the ZWO driver does not check the upper slot bound itself in the tested path. The SDK fake refuses it with `InvalidValue`, as the SDK does, so the case passes without proving the driver's check. The QHY driver's check is pinned by the case.
+One more difference does not show in the table: the ZWO driver does check the upper slot bound itself (`ZwoFilterWheelDriver::set_position` throws `InvalidValue` when the slot is at or above the slot count, before the SDK call). The case does not prove that check: the SDK fake also refuses the slot with `InvalidValue`, so removing the driver's check leaves the case green. The QHY driver's check is pinned by the case.
 
 Not tested here, by design: a write at or above the slot count while disconnected. The count is unknown before connect, so the ZWO driver answers `NotConnected`, and the QHY driver answers `InvalidValue` from its 16-slot protocol ceiling and `NotConnected` below it. Both answers are allowed by the interface.
 
