@@ -41,6 +41,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <termios.h>
 
 #include <chrono>
@@ -53,8 +54,8 @@ namespace alpacacore::util {
  *        open, already-configured (9600 8N1, non-canonical) fd and wait up
  *        to @p timeout_ms for the exact reply (the same byte followed by
  *        '#'). Leaves the fd open; the caller owns it before and after.
- *        Every read goes through tty_read() for the time left before the
- *        deadline, so the bound holds even on a USB-serial adapter that
+ *        Every read goes through util::read_until() (and so tty_read()) for the
+ *        time left before the deadline, so the bound holds even on a USB-serial adapter that
  *        ignores VMIN/VTIME, where a bare read() on a silent port parks
  *        forever (#836). Pass a NON-blocking fd (a SerialLink's) for a hard
  *        bound: on a blocking fd the bound is complete only in the common
@@ -85,28 +86,24 @@ inline bool exchange_synscan_echo_on_fd(int fd, int timeout_ms) {
         return false;
     }
 
-    std::string token;
+    ReadSpec spec;
+    spec.stop = ReadSpec::Stop::Terminator;
+    spec.terminators = "#";
+    spec.skip.clear();  // CR/LF are ordinary bytes here: they make a token a non-echo
+    spec.max_len = 9;   // a token longer than 8 bytes ahead of '#' is garbage, not our echo
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     for (;;) {
-        const auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-        if (remaining <= 0) {
-            break;
-        }
-        char ch = 0;
-        const ssize_t r = tty_read(fd, &ch, 1, static_cast<int>(remaining));
-        if (r != 1) {
-            break;  // 0: silence until the deadline; -1: hangup or read error
-        }
-        token.push_back(ch);
-        if (ch == '#') {
-            if (token.size() == 2 && token[0] == kEchoByte) {
+        const ReadResult token = read_until(fd, spec, deadline);
+        if (token.outcome == ReadOutcome::Terminator) {
+            if (token.bytes.size() == 2 && token.bytes[0] == kEchoByte) {
                 return true;
             }
-            token.clear();  // not our echo — keep listening past it, not away from it
-        } else if (token.size() > 8) {
-            token.clear();  // runaway garbage ahead of '#', not our echo either
+            continue;  // not our echo: keep listening past it, not away from it
         }
+        if (token.outcome != ReadOutcome::Overflow) {
+            break;  // silence until the deadline, or hangup or read error
+        }
+        // Overflow: runaway garbage ahead of '#', not our echo either.
     }
     return false;
 }
