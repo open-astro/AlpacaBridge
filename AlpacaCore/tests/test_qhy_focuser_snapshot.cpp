@@ -270,6 +270,34 @@ TEST_CASE("QHY Q-Focuser Snapshot - a frame a Move overtook does not clear the t
     driver->set_connected(false);
 }
 
+// Falsified by: qhy_focuser_driver.cpp:308 move() replace served_frame() with a throw_if_faulted()-only gate
+// (a Move against a frame older than the staleness bound reaches the wire).
+TEST_CASE("QHY Q-Focuser Snapshot - a Move against a frame older than the staleness bound is refused",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    FakeQhyQFocuser fake;
+    FakeTaskClock clock;
+    auto driver = connected_driver(fake, clock);
+    REQUIRE(driver->get_position() == 1000);
+
+    // Park the poll inside its telemetry exchange, so it cannot latch the loss
+    // itself, and let the held frame age past util::kLinkStalenessBound (30 s).
+    const int telemetry_before = fake.count("\"cmd_id\":4}");
+    fake.hold_next_reply_to(4, 1500ms);
+    clock.advance(kTick);
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (fake.count("\"cmd_id\":4}") == telemetry_before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(fake.count("\"cmd_id\":4}") == telemetry_before + 1);
+    clock.advance(31s);
+
+    expect_code([&] { driver->move(1200); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
+    CHECK(fake.count("\"cmd_id\":6") == 0);  // no move command was sent
+    CHECK(driver->get_connected() == false);   // the refused Move latched the loss
+
+    driver->set_connected(false);
+}
+
 // Falsified by: qhy_focuser_driver.cpp: set_connected() drop the connect's first-frame check (a connect whose first
 // state poll was lost succeeds with no frame).
 TEST_CASE("QHY Q-Focuser Driver - a getter after a successful connect never throws DriverException",

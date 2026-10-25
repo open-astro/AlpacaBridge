@@ -399,6 +399,62 @@ TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound dro
     driver->set_connected(false);
 }
 
+// Falsified by: astroasis_focuser_driver.cpp:308 move() replace served_frame() with a throw_if_faulted()-only gate
+// (a Move against a frame older than the staleness bound reaches the wire).
+TEST_CASE("Astroasis Focuser Driver - a Move against a frame older than the staleness bound is refused",
+          "[astroasis][focuser][snapshot][unit]") {
+    auto state = std::make_shared<FakeHidState>();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = connected_focuser(state, clock);
+    REQUIRE(driver->get_position() == 1234);
+
+    // Park the poll inside its status exchange, so it cannot latch the loss
+    // itself, and let the held frame age past util::kLinkStalenessBound (30 s).
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = 0x32;
+        state->gate_entered = false;
+    }
+    clock.advance(kTick);
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        REQUIRE(state->cv.wait_for(lock, kBound, [&] { return state->gate_entered; }));
+    }
+    clock.advance(std::chrono::seconds(31));
+
+    // The Move runs on its own thread: with the gate removed it would reach
+    // the wire and wait behind the held exchange.
+    std::atomic<bool> finished{false};
+    int code = 0;
+    std::thread mover([&] {
+        try {
+            driver->move(2000);
+        } catch (const alpacacore::AlpacaException& ex) {
+            code = ex.error_code();
+        }
+        finished = true;
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!finished && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = 0;
+    }
+    state->cv.notify_all();
+    mover.join();
+    CHECK(finished.load());
+    CHECK(code == alpacacore::AlpacaError::NotConnected);
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        CHECK(state->moves == 0);  // no move command was sent
+    }
+    CHECK_FALSE(driver->get_connected());  // the refused Move latched the loss
+
+    driver->set_connected(false);
+}
+
 // Falsified by: astroasis_focuser_driver.cpp:device_state_age() delete the override (the stamp is the request time).
 TEST_CASE("Astroasis Focuser Driver - DeviceState TimeStamp is when the frame was measured",
           "[astroasis][focuser][snapshot][unit]") {
