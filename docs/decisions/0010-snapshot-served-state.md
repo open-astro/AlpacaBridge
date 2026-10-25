@@ -55,6 +55,7 @@ The rules a change is checked against. Each names where it applies and what chec
 4. The snapshot mutex is never held across device I/O, and a `write()` callback does no I/O. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
 5. A telescope that serves `DeviceState` from the snapshot stamps `TimeStamp` with `measured_at` through `device_state_age()`. Scope: `AlpacaCore/include/alpacacore/telescope_driver.h`, `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_snapshot.cpp`, review.
 6. Each adopter states per getter what a stale frame means, in its instruction file; stale alone never refuses. Scope: `.github/instructions/*.instructions.md`. Checked by: `AlpacaCore/tests/test_contract_sweep.cpp` (the "Contract sweep snapshot" cases: a stale frame is served, never refused, for every adopted driver), `scripts/check_contract_sweep.py` (rule 6: the sweep roster matches the Adoption table), review (the per-getter statement in the instruction file).
+7. A poll-fed driver whose Adoption row names `PolledState` serves its frame through `util::PolledState` (`util/polled_state.h`) and holds no `PolledLinkHealth`, poll slot or loss latch of its own for that frame. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (no `PolledLinkHealth`, `begin_poll` or `link_lost_` in the driver), `AlpacaCore/tests/test_polled_state.cpp`.
 
 ## Alternatives rejected
 
@@ -66,6 +67,8 @@ The rules a change is checked against. Each names where it applies and what chec
 
 Delete the header and its test. No driver depends on it until a later slice moves one; reversing then means restoring that driver's field reads.
 
+`util::PolledState` (rule 7) reverses by reverting the PR that added it: the header, its test, the Astroasis and QHY adoptions and the amendments to this record and to [decision 0016](0016-getters-never-wait-on-device-io.md) go together, and the two focusers return to their hand-written poll glue. Each later adopter reverts its own PR.
+
 ## Consequences
 
 - Getters for polled telemetry answer from memory and carry their age; each driver that moves onto the snapshot states per getter what stale means.
@@ -74,24 +77,24 @@ Delete the header and its test. No driver depends on it until a later slice move
 
 ## Adoption
 
-The roster of drivers that serve polled telemetry from a snapshot. The sections above record the Sky-Watcher, Celestron and Bisque choices; each other driver's per-getter choices are owned by its instruction file. `scripts/check_docs_drift.py` check 23 holds the roster to the code.
+The roster of drivers that serve polled telemetry from a snapshot. The Symbol column names what the driver's source uses for it: `PolledState` once the driver composes `util::PolledState` (rule 7), `StateSnapshot` where it holds the snapshot itself (Sky-Watcher and ZWO keep their fault and loss handling outside the module, so they stay on it). The sections above record the Sky-Watcher, Celestron and Bisque choices; each other driver's per-getter choices are owned by its instruction file. `scripts/check_docs_drift.py` check 23 holds the roster to the code.
 
 Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
 Symbol: `StateSnapshot`
 
-| Driver | Source | State | Issue | Notes |
-| --- | --- | --- | --- | --- |
-| Sky-Watcher telescope | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #1011 | 100 ms; Sky-Watcher adoption above |
-| Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337 | 1 s; Celestron telescope adoption above |
-| Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | 1 s; Bisque telescope adoption above |
-| SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247 | 1 s; [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
-| Gemini focuser | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
-| QHY Q-Focuser | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
-| Astroasis focuser | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
-| Celestron focus motor | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
-| OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | — | |
-| iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
-| ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433 | 250 ms after each poll; 5 s freshness threshold; mandatory GU+RA/Dec sample age is independent of partial publication; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |
+| Driver | Symbol | Source | State | Issue | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Sky-Watcher telescope | `StateSnapshot` | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #1011 | 100 ms; Sky-Watcher adoption above |
+| Celestron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337 | 1 s; Celestron telescope adoption above |
+| Bisque telescope | `StateSnapshot` | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | 1 s; Bisque telescope adoption above |
+| SynScan telescope | `StateSnapshot` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247 | 1 s; [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
+| Gemini focuser | `StateSnapshot` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
+| QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
+| Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
+| Celestron focus motor | `StateSnapshot` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
+| OnStep telescope | `StateSnapshot` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | — | |
+| iOptron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
+| ZWO telescope | `StateSnapshot` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433 | 250 ms after each poll; 5 s freshness threshold; mandatory GU+RA/Dec sample age is independent of partial publication; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |
 
 ## Links
 
