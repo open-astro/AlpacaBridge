@@ -805,7 +805,7 @@ TEST_CASE("Celestron Focuser Driver - DeviceState TimeStamp is when the frame wa
     auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(1, kBound));
-    tick(clock);  // one settled poll: the next is a full period away
+    tick(clock);                                   // one settled poll: the next is a full period away
     clock.advance(std::chrono::milliseconds(90));  // under the poll period: no poll, the frame ages
     std::string stamp;
     for (const auto& entry : driver->get_device_state()) {
