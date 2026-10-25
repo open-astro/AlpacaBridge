@@ -332,6 +332,17 @@ TEST_CASE(
         if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
             return std::string("1");
         }
+        // A real mount clock (2026-01-15 12:00:00, offset 0), months from the
+        // write: the connect's clock read rejects a reply that does not parse (#1626).
+        if (chunk == ":GL#") {
+            return std::string("12:00:00#");
+        }
+        if (chunk == ":GC#") {
+            return std::string("01/15/26#");
+        }
+        if (chunk == ":GG#") {
+            return std::string("+00:00#");
+        }
         return std::string("0#");
     });
     REQUIRE(server.ok());
@@ -368,17 +379,34 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
           "[onstep][telescope][unit][utc-offset]") {
     alpacacore::test::FakeTaskClock clock;  // outlives the driver
     std::atomic<bool> clock_answers{false};
+    std::atomic<bool> clock_silent{false};  // :GL# gets no reply: the read times out (#1626)
     std::atomic<int> clock_reads{0};
+    std::atomic<int> date_reply{0};    // 0 valid, 1 garbled, 2 out of range, 3 not a calendar date (#1626)
+    std::atomic<int> offset_reply{0};  // 0 "+00", 1 "+05:00" (EST), 2 garbled (#1626)
     alpacacore::test::FakeMountServer server([&](const std::string& chunk) {
         if (chunk.rfind(":GL", 0) == 0) {
             ++clock_reads;
+            if (clock_silent) {
+                return std::string();
+            }
             return clock_answers ? std::string("10:20:30#") : std::string("x#");
         }
         if (chunk.rfind(":GC", 0) == 0) {
-            return std::string("10/23/26#");
+            switch (date_reply.load()) {
+                case 0:
+                    return std::string("10/23/26#");
+                case 2:
+                    return std::string("13/40/26#");
+                case 3:
+                    return std::string("02/31/26#");
+                default:
+                    return std::string("xx#");
+            }
         }
         if (chunk.rfind(":GG", 0) == 0) {
-            return std::string("+00#");
+            return offset_reply == 0   ? std::string("+00#")
+                   : offset_reply == 1 ? std::string("+05:00#")
+                                       : std::string("?#");
         }
         if (chunk.rfind(":Gt", 0) == 0) {
             return std::string("+40*30#");
@@ -424,6 +452,23 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
         CHECK(driver->get_utc_date() == mount_utc);
     }
 
+    SECTION("a clock read that times out at connect: the connect succeeds and UTCDate says why") {
+        clock_silent = true;
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(clock_reads == 1);
+        try {
+            (void)driver->get_utc_date();
+            FAIL("UTCDate answered with no mount clock");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(std::string(ex.what()).find("Timeout") != std::string::npos);  // the reason is kept
+        }
+        CHECK(driver->get_connected());
+        CHECK(driver->get_link_fault().empty());  // one slow clock read is not a silent mount
+        REQUIRE_NOTHROW((void)driver->get_right_ascension());
+        driver->set_connected(false);
+    }
+
     SECTION("a clock the connect read: DeviceState makes no clock reads") {
         clock_answers = true;
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
@@ -432,6 +477,33 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
         (void)driver->get_device_state();
         CHECK(driver->get_utc_date() == mount_utc);
         CHECK(clock_reads == 1);
+    }
+
+    // #1626: a garbled date or offset reply used to leave the defaults
+    // (2000-01-01, offset 0) to be stored as the mount clock.
+    SECTION("a garbled :GC# or :GG# reply is an unreadable clock, not a wrong one") {
+        clock_answers = true;
+        for (const int reply : {1, 2, 3}) {  // garbled, out of range, 31 February
+            INFO("date reply " << reply);
+            date_reply = reply;
+            REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+            require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+            driver->set_connected(false);
+        }
+        date_reply = 0;
+        offset_reply = 2;
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    }
+
+    // #1626: OnStepX :GG# is the hours to ADD to local time to get UTC
+    // (Site.command.cpp), so EST reads "+05:00" and UTC = local + 5 h. The
+    // driver used to subtract it.
+    SECTION("a non-zero :GG# offset is added to the local time") {
+        clock_answers = true;
+        offset_reply = 1;
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(driver->get_utc_date() == mount_utc + hours{5});
     }
 
     driver->set_connected(false);
@@ -1628,6 +1700,7 @@ struct ParkHomeFake {
     bool parked = false;
     bool has_ge = true;           // false: firmware without :GE# (answers like an unknown command)
     bool garbled_accept = false;  // :hP# accepted, but its reply reads as '0'
+    bool silent = false;          // a mount that stops answering: every command times out
     int last_error = 0;
     // The fake time of the first :hP# or :hC#, and of every :hP#.
     std::optional<alpacacore::util::TaskClock::clock::time_point> first_try_at;
@@ -1671,6 +1744,7 @@ struct ParkHomeFake {
     std::string reply(const std::string& chunk) {
         std::lock_guard<std::mutex> lock(mutex);
         log.push_back(chunk);
+        if (silent) return "";
         if (chunk.rfind(":GE", 0) == 0) {
             if (!has_ge) return "0";
             if (!ge_reply.empty()) return ge_reply;
@@ -2391,6 +2465,95 @@ TEST_CASE("OnStep Telescope Driver - a Park body that starts late leaves a newer
     settle(*mount, *driver, waits_before);
     CHECK(mount->count(":hC#") == 1);  // the FindHome still runs
     CHECK(mount->count(":hP#") == 0);
+    driver->set_connected(false);
+}
+
+// #1626 (from the #1564 review): a MoveAxis, slew or Unpark refused for a
+// latched link fault is refused before it supersedes a waiting Park, so the
+// Park still runs once the mount answers. The spawn seam holds the Park's body
+// while the fault latches and the command is refused.
+TEST_CASE("OnStep Telescope Driver - a command refused for a link fault leaves a waiting Park to run",
+          "[onstep][telescope][unit]") {
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool released = false;
+    bool park_body_returned = false;
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    start_move(*driver, *mount, 0, 1.0);  // so Park stops first and its body waits for the settle
+    alpacacore::vendor::onstep::set_park_home_spawn_for_testing(
+        *driver, [&](std::function<void()> body) -> std::thread {
+            return std::thread([&, body = std::move(body)] {  // held until released
+                {
+                    std::unique_lock<std::mutex> lock(gate_mutex);
+                    // Bounded, so a case that fails before the release ends.
+                    gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return released; });
+                }
+                body();
+                {
+                    std::lock_guard<std::mutex> lock(gate_mutex);
+                    park_body_returned = true;
+                }
+                gate_cv.notify_all();
+            });
+        });
+    REQUIRE_NOTHROW(driver->park());  // its body is held
+
+    {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        mount->silent = true;
+    }
+    mount->clock.advance(std::chrono::milliseconds(2100));  // past the 2 s caches
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // the third throws: the fault latched
+        }
+    }
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    const auto require_refused = [](const std::function<void()>& fn, const std::string& what) {
+        try {
+            fn();
+            FAIL(what + " succeeded during a fault");
+        } catch (const alpacacore::AlpacaException& ex) {
+            INFO(ex.what());
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).rfind(what + ": ", 0) == 0);
+        }
+    };
+    SECTION("MoveAxis") {
+        require_refused([&] { driver->move_axis(1, 1.0); }, "MoveAxis");
+    }
+    SECTION("SlewToCoordinatesAsync") {
+        require_refused([&] { driver->slew_to_coordinates_async(2.0, 10.0); }, "SlewToCoordinatesAsync");
+    }
+    SECTION("Unpark") {
+        require_refused([&] { driver->unpark(); }, "Unpark");
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        mount->silent = false;
+    }
+    mount->clock.advance(std::chrono::milliseconds(2100));  // past the faulted-read back-off
+    const auto waits_before = mount->clock.wait_count();
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        released = true;
+    }
+    gate_cv.notify_all();
+    settle(*mount, *driver, waits_before, std::chrono::milliseconds(500));
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds(5), [&] { return park_body_returned; }));
+    }
+    CHECK(mount->count(":hP#") == 1);  // the Park still ran
+    CHECK(driver->get_at_park());
+    CHECK(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
 

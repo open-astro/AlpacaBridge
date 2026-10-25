@@ -2,9 +2,9 @@
 08:36:36.785                                              
 08:36:36.785 Operating system is Linux Mint 22.3, Processor is Intel/AMD 64bit, Application is 64bit.          
 08:36:36.785                                              
-08:36:36.785 Alpaca device: OnStep Telescope (192.168.1.81:6800 Telescope/0)          
+08:36:36.785 Alpaca device: OnStep Telescope (<redacted: LAN address>:6800 Telescope/0)          
 08:36:36.785                                              
-08:36:36.786 CreateDevice                        INFO     Creating Alpaca device: Access service: Http, IP address: 192.168.1.81, IP Port: 6800, Alpaca device number: 0 (Not accepting user generated SSL certificates)
+08:36:36.786 CreateDevice                        INFO     Creating Alpaca device: Access service: Http, IP address: <redacted: LAN address>, IP Port: 6800, Alpaca device number: 0 (Not accepting user generated SSL certificates)
 08:36:36.794 CreateDevice                        INFO     Alpaca device created OK
 08:36:36.794 CreateDevice                        INFO     Successfully created driver
 08:36:38.030 CreateDevice                        OK       Found a valid interface version: 4
@@ -27,18 +27,18 @@
 08:36:40.249 Action                              INFO     Conform cannot test the Action method
 08:36:40.249                                              
 08:36:40.261 DeviceState                         OK       Received 12 operational state properties.
-08:36:40.261 DeviceState                         OK         Altitude = 26,101666666666667
+08:36:40.261 DeviceState                         OK         Altitude = <redacted: site>
 08:36:40.261 DeviceState                         OK         AtHome = False
 08:36:40.261 DeviceState                         OK         AtPark = False
-08:36:40.261 DeviceState                         OK         Azimuth = 338,8305555555556
+08:36:40.261 DeviceState                         OK         Azimuth = <redacted: site>
 08:36:40.261 DeviceState                         OK         Declination = 62,499900277777776
 08:36:40.261 DeviceState                         OK         IsPulseGuiding = False
-08:36:40.261 DeviceState                         OK         RightAscension = 18,558611944444444
+08:36:40.261 DeviceState                         OK         RightAscension = <redacted: site>
 08:36:40.261 DeviceState                         OK         SideOfPier = Normal
-08:36:40.261 DeviceState                         OK         SiderealTime = 3,5848317170205215
+08:36:40.261 DeviceState                         OK         SiderealTime = <redacted: site>
 08:36:40.261 DeviceState                         OK         Slewing = False
 08:36:40.261 DeviceState                         OK         Tracking = False
-08:36:40.261 DeviceState                         OK         TimeStamp = 08/08/2026 06:36:40
+08:36:40.261 DeviceState                         OK         TimeStamp = <redacted: local time>
 08:36:40.264 DeviceState                         INFO     Operational property UTCDate was not included in the DeviceState response.
 08:36:40.264                                              
 08:36:40.264 Can Properties                               
@@ -62,18 +62,18 @@
 08:36:40.376 Pre-run Checks                               
 08:36:40.382 Mount Safety                        INFO     Scope is not parked, continuing testing
 08:36:40.515 Mount Safety                        INFO     Scope tracking has been enabled
-08:36:40.515 TimeCheck                           INFO     PC Time Zone:  (UTC+01:00) heure d’Europe centrale (Paris) offset: 1 hours.
-08:36:40.515 TimeCheck                           INFO     PC UTCDate:    08-août-2026 06:36:40.515
-08:36:40.536 TimeCheck                           INFO     Mount UTCDate: 08-août-2026 06:36:40.507
+08:36:40.515 TimeCheck                           INFO     PC Time Zone:  <redacted: local time>
+08:36:40.515 TimeCheck                           INFO     PC UTCDate:    <redacted: local time>
+08:36:40.536 TimeCheck                           INFO     Mount UTCDate: <redacted: local time>
 08:36:40.536                                              
 08:36:40.536 Properties                                   
 08:36:40.601 AlignmentMode                       OK       GermanPolar
-08:36:40.609 Altitude                            OK       +26:06:06,0
+08:36:40.609 Altitude                            OK       <redacted: site>
 08:36:40.615 ApertureArea                        INFO     ApertureArea is 0.0
 08:36:40.623 ApertureDiameter                    INFO     ApertureDiameter is 0.0
 08:36:40.629 AtHome                              OK       False
 08:36:40.636 AtPark                              OK       False
-08:36:40.643 Azimuth                             OK       +338:49:50,0
+08:36:40.643 Azimuth                             OK       <redacted: site>
 08:36:40.649 Declination                         OK       +62:29:59,6
 08:36:40.654 DeclinationRate Read                OK       0,00
 08:36:40.663 DeclinationRate Write               OK       CanSetDeclinationRate is False and a NotImplementedException error was generated as expected
@@ -87,34 +87,34 @@
 08:36:40.725 GuideRateRightAscension Read        OK       0,00
 08:36:40.732 GuideRateRightAscension Write       OK       CanSetGuideRates is False and a NotImplementedException error was generated as expected
 08:36:40.738 IsPulseGuiding                      OK       False
-08:36:40.744 RightAscension                      OK       +18:33:31,00
+08:36:40.744 RightAscension                      OK       <redacted: site>
 08:36:40.751 RightAscensionRate Read             OK       0,00
 08:36:40.758 RightAscensionRate Write            OK       CanSetRightAscensionRate is False and a NotImplementedException error was generated as expected
-08:36:40.765 SiteElevation Read                  OK       0
+08:36:40.765 SiteElevation Read                  OK       <redacted: site>
 08:36:40.773 SiteElevation Write                 OK       Invalid Value exception generated as expected on set site elevation < -300m
 08:36:40.779 SiteElevation Write                 OK       Invalid Value exception generated as expected on set site elevation > 10,000m
-08:36:40.783 SiteElevation Write                 OK       Current value 0m written successfully
-08:36:40.796 SiteElevation Write                 OK       Test value 2385 set and read correctly
-08:36:40.802 SiteElevation Write                 OK       Successfully restored original site elevation: 0.
-08:36:40.808 SiteLatitude Read                   OK       +48:03:00,0
+08:36:40.783 SiteElevation Write                 OK       Current value <redacted: site> written successfully
+08:36:40.796 SiteElevation Write                 OK       Test value <redacted: site> set and read correctly
+08:36:40.802 SiteElevation Write                 OK       Successfully restored original site elevation: <redacted: site>
+08:36:40.808 SiteLatitude Read                   OK       <redacted: site>
 08:36:40.814 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude < -90 degrees
 08:36:40.822 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude > 90 degrees
-08:36:40.962 SiteLatitude Write                  OK       Current value: +48:03:00,0 degrees written successfully
-08:36:41.106 SiteLatitude Write                  OK       Test value +58:03:00,0 set and read correctly
-08:36:41.246 SiteLatitude Write                  OK       Successfully restored original site latitude: +48:03:00,0
-08:36:41.253 SiteLongitude Read                  OK       -02:11:00,0
+08:36:40.962 SiteLatitude Write                  OK       Current value: <redacted: site> degrees written successfully
+08:36:41.106 SiteLatitude Write                  OK       Test value <redacted: site> set and read correctly
+08:36:41.246 SiteLatitude Write                  OK       Successfully restored original site latitude: <redacted: site>
+08:36:41.253 SiteLongitude Read                  OK       <redacted: site>
 08:36:41.259 SiteLongitude Write                 OK       Invalid Value exception generated as expected on set site longitude < -180 degrees
 08:36:41.266 SiteLongitude Write                 OK       Invalid Value exception generated as expected on set site longitude > 180 degrees
-08:36:41.406 SiteLongitude Write                 OK       Current value -02:11:00,0 degrees written successfully
-08:36:41.558 SiteLongitude Write                 OK       Test value -12:11:00,0 set and read correctly
-08:36:41.694 SiteLongitude Write                 OK       Successfully restored original site longitude: -02:11:00,0
+08:36:41.406 SiteLongitude Write                 OK       Current value <redacted: site> degrees written successfully
+08:36:41.558 SiteLongitude Write                 OK       Test value <redacted: site> set and read correctly
+08:36:41.694 SiteLongitude Write                 OK       Successfully restored original site longitude: <redacted: site>
 08:36:41.701 Slewing                             OK       False
 08:36:41.709 SlewSettleTime Read                 OK       0
 08:36:41.715 SlewSettleTime Write                OK       Invalid Value exception generated as expected on set slew settle time < 0
 08:36:41.722 SlewSettleTime Write                OK       Legal value 0 seconds written successfully
 08:36:41.739 SideOfPier Read                     OK       Normal
-08:36:41.746 SiderealTime                        OK       +03:35:06,40
-08:36:41.746 SiderealTime                        OK       Scope and ASCOM sidereal times agree to better than 1 second, Scope: +03:35:06,40, ASCOM: +03:35:07,14
+08:36:41.746 SiderealTime                        OK       <redacted: site>
+08:36:41.746 SiderealTime                        OK       Scope and ASCOM sidereal times agree to better than 1 second, Scope: <redacted: site>, ASCOM: <redacted: site>
 08:36:41.746 TargetDeclination Read              OK       Not Set exception generated on read before write
 08:36:41.746 TargetDeclination Write             INFO     Tests moved after the SlewToCoordinates tests so that Conform can confirm that target coordinates are set as expected.
 08:36:41.746 TargetRightAscension Read           OK       Not Set exception generated on read before write
@@ -132,9 +132,9 @@
 08:36:44.136 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
 08:36:44.143 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
 08:36:44.149 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
-08:36:44.169 UTCDate Read                        OK       08-août-2026 06:36:44.144
-08:36:44.570 UTCDate Write                       OK       New UTCDate written successfully: 08/08/2026 07:36:44
-08:36:44.970 UTCDate Write                       OK       Original UTCDate restored successfully: 08/08/2026 06:36:44
+08:36:44.169 UTCDate Read                        OK       <redacted: local time>
+08:36:44.570 UTCDate Write                       OK       New UTCDate written successfully: <redacted: local time>
+08:36:44.970 UTCDate Write                       OK       Original UTCDate restored successfully: <redacted: local time>
 08:36:44.970                                              
 08:36:44.970 Methods                                      
 08:36:44.981 CanMoveAxis:Primary                 OK       CanMoveAxis:Primary True
@@ -221,55 +221,55 @@
 08:42:40.890 PulseGuide +3,0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37,5,  Expected: -00:00:37,6,  Difference: +00:00:00,1,  Test tolerance: +00:00:01,0
 08:42:46.366 PulseGuide +3,0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02,53, Expected: +00:00:02,51, Difference: +00:00:00,02, Test tolerance: +00:00:00,07
 08:42:51.842 PulseGuide +3,0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02,52, Expected: -00:00:02,51, Difference: +00:00:00,01, Test tolerance: +00:00:00,07
-08:43:25.559 SlewToCoordinates                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: +02:41:16,99, Target RA: +02:41:17,41
+08:43:25.559 SlewToCoordinates                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
 08:43:25.559 SlewToCoordinates                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual DEC: +00:59:59,7, Target DEC: +01:00:00,0
-08:43:25.567 SlewToCoordinates                   OK       The TargetRightAscension property: +02:41:17,41 matches the expected RA +02:41:17,41 within tolerance ±10 arc seconds.
+08:43:25.567 SlewToCoordinates                   OK       The TargetRightAscension property: <redacted: site> matches the expected RA <redacted: site> within tolerance ±10 arc seconds.
 08:43:25.578 SlewToCoordinates                   OK       The TargetDeclination property +01:00:00,0 matches the expected Declination +01:00:00,0 within tolerance ±10 arc seconds.
 08:43:25.598 SlewToCoordinates (Bad L)           OK       Correctly rejected bad RA coordinate: -01:00:00,00
 08:43:25.614 SlewToCoordinates (Bad L)           OK       Correctly rejected bad Dec coordinate: -100:00:00,0
 08:43:25.632 SlewToCoordinates (Bad H)           OK       Correctly rejected bad RA coordinate: +25:00:00,00
 08:43:25.650 SlewToCoordinates (Bad H)           OK       Correctly rejected bad Dec coordinate: +100:00:00,0
-08:43:40.269 SlewToCoordinatesAsync              OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: +01:41:51,02, Target RA: +01:41:50,50
+08:43:40.269 SlewToCoordinatesAsync              OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
 08:43:40.269 SlewToCoordinatesAsync              OK       Slewed OK within tolerance: ±10 arc seconds. Actual DEC: +02:00:00,2, Target DEC: +02:00:00,0
-08:43:40.276 SlewToCoordinatesAsync              OK       The TargetRightAscension property: +01:41:50,50 matches the expected RA +01:41:50,50 within tolerance ±10 arc seconds.
+08:43:40.276 SlewToCoordinatesAsync              OK       The TargetRightAscension property: <redacted: site> matches the expected RA <redacted: site> within tolerance ±10 arc seconds.
 08:43:40.283 SlewToCoordinatesAsync              OK       The TargetDeclination property +02:00:00,0 matches the expected Declination +02:00:00,0 within tolerance ±10 arc seconds.
 08:43:40.298 SlewToCoordinatesAsync (Bad L)      OK       Correctly rejected bad RA coordinate: -01:00:00,00
 08:43:40.312 SlewToCoordinatesAsync (Bad L)      OK       Correctly rejected bad Dec coordinate: -100:00:00,0
 08:43:40.326 SlewToCoordinatesAsync (Bad H)      OK       Correctly rejected bad RA coordinate: +25:00:00,00
 08:43:40.340 SlewToCoordinatesAsync (Bad H)      OK       Correctly rejected bad Dec coordinate: +100:00:00,0
-08:43:59.949 SyncToCoordinates                   OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual RA: +00:42:06,00, Target RA: +00:42:05,54
-08:43:59.949 SyncToCoordinates                   OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual DEC: +24:01:29,9, Target DEC: +24:01:30,0
-08:44:00.291 SyncToCoordinates                   OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual RA: +00:38:05,54, Target RA: +00:38:05,54
-08:44:00.291 SyncToCoordinates                   OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual DEC: +23:01:30,0, Target DEC: +23:01:30,0
-08:44:00.298 SyncToCoordinates                   OK       The TargetRightAscension property +00:38:05,54 matches the expected RA OK. 
-08:44:00.305 SyncToCoordinates                   OK       The TargetDeclination property +23:01:30,0 matches the expected Declination OK. 
-08:44:07.888 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: +00:42:06,03, Target RA: +00:42:05,54
-08:44:07.888 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: +24:01:29,9, Target DEC: +24:01:30,0
-08:44:08.222 SyncToCoordinates                   OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual RA: +00:46:05,54, Target RA: +00:46:05,54
-08:44:08.222 SyncToCoordinates                   OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual DEC: +25:01:30,0, Target DEC: +25:01:30,0
-08:44:15.804 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: +00:42:06,00, Target RA: +00:42:05,54
-08:44:15.804 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: +24:01:29,9, Target DEC: +24:01:30,0
+08:43:59.949 SyncToCoordinates                   OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:43:59.949 SyncToCoordinates                   OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+08:44:00.291 SyncToCoordinates                   OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:44:00.291 SyncToCoordinates                   OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+08:44:00.298 SyncToCoordinates                   OK       The TargetRightAscension property <redacted: site> matches the expected RA <redacted: site> 
+08:44:00.305 SyncToCoordinates                   OK       The TargetDeclination property <redacted: site> matches the expected Declination <redacted: site> 
+08:44:07.888 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:44:07.888 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+08:44:08.222 SyncToCoordinates                   OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:44:08.222 SyncToCoordinates                   OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+08:44:15.804 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:44:15.804 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
 08:44:15.818 SyncToCoordinates (Bad L)           OK       Correctly rejected bad RA coordinate: -01:00:00,00
 08:44:15.836 SyncToCoordinates (Bad L)           OK       Correctly rejected bad Dec coordinate: -100:00:00,0
 08:44:15.849 SyncToCoordinates (Bad H)           OK       Correctly rejected bad RA coordinate: +25:00:00,00
 08:44:15.863 SyncToCoordinates (Bad H)           OK       Correctly rejected bad Dec coordinate: +100:00:00,0
 08:44:15.870 TargetRightAscension Write          OK       Invalid Value exception generated as expected on set TargetRightAscension < 0 hours
 08:44:15.878 TargetRightAscension Write          OK       Invalid Value exception generated as expected on set TargetRightAscension > 24 hours
-08:44:15.898 TargetRightAscension Write          OK       Legal value +23:42:41,64 HH:MM:SS written successfully
+08:44:15.898 TargetRightAscension Write          OK       Legal value <redacted: site> HH:MM:SS written successfully
 08:44:15.906 TargetDeclination Write             OK       Invalid Value exception generated as expected on set TargetDeclination < -90 degrees
 08:44:15.913 TargetDeclination Write             OK       Invalid Value exception generated as expected on set TargetDeclination < -90 degrees
 08:44:15.928 TargetDeclination Write             OK       Legal value +01:00:00,0 DD:MM:SS written successfully
-08:44:33.079 SlewToTarget                        OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: +00:42:42,02, Target RA: +00:42:41,64
+08:44:33.079 SlewToTarget                        OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
 08:44:33.079 SlewToTarget                        OK       Slewed OK within tolerance: ±10 arc seconds. Actual DEC: +02:59:59,8, Target DEC: +03:00:00,0
-08:44:33.087 SlewToTarget                        OK       The TargetRightAscension property: +00:42:41,64 matches the expected RA +00:42:41,64 within tolerance ±10 arc seconds.
+08:44:33.087 SlewToTarget                        OK       The TargetRightAscension property: <redacted: site> matches the expected RA <redacted: site> within tolerance ±10 arc seconds.
 08:44:33.094 SlewToTarget                        OK       The TargetDeclination property +03:00:00,0 matches the expected Declination +03:00:00,0 within tolerance ±10 arc seconds.
 08:44:33.109 SlewToTarget (Bad L)                OK       Telescope.TargetRA correctly rejected bad RA coordinate: -01:00:00,00
 08:44:33.125 SlewToTarget (Bad L)                OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: -100:00:00,0
 08:44:33.139 SlewToTarget (Bad H)                OK       Telescope.TargetRA correctly rejected bad RA coordinate: +25:00:00,00
 08:44:33.156 SlewToTarget (Bad H)                OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: +100:00:00,0
-08:44:47.795 SlewToTargetAsync                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: +23:42:59,02, Target RA: +23:42:58,69
+08:44:47.795 SlewToTargetAsync                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
 08:44:47.795 SlewToTargetAsync                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual DEC: +03:59:59,9, Target DEC: +04:00:00,0
-08:44:47.802 SlewToTargetAsync                   OK       The TargetRightAscension property: +23:42:58,69 matches the expected RA +23:42:58,69 within tolerance ±10 arc seconds.
+08:44:47.802 SlewToTargetAsync                   OK       The TargetRightAscension property: <redacted: site> matches the expected RA <redacted: site> within tolerance ±10 arc seconds.
 08:44:47.809 SlewToTargetAsync                   OK       The TargetDeclination property +04:00:00,0 matches the expected Declination +04:00:00,0 within tolerance ±10 arc seconds.
 08:44:47.823 SlewToTargetAsync (Bad L)           OK       Telescope.TargetRA correctly rejected bad RA coordinate: -01:00:00,00
 08:44:47.837 SlewToTargetAsync (Bad L)           OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: -100:00:00,0
@@ -288,16 +288,16 @@
 08:46:31.608 SlewToAltAzAsync (Bad L)            OK       Correctly rejected bad Azimuth coordinate: -10:00:00,0
 08:46:31.620 SlewToAltAzAsync (Bad H)            OK       Correctly rejected bad Altitude coordinate: +100:00:00,0
 08:46:31.626 SlewToAltAzAsync (Bad H)            OK       Correctly rejected bad Azimuth coordinate: +370:00:00,0
-08:47:49.548 SyncToTarget                        OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual RA: +00:44:58,00, Target RA: +00:44:58,01
-08:47:49.549 SyncToTarget                        OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual DEC: +24:01:29,8, Target DEC: +24:01:30,0
-08:47:49.895 SyncToTarget                        OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual RA: +00:40:58,01, Target RA: +00:40:58,01
-08:47:49.895 SyncToTarget                        OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual DEC: +23:01:30,0, Target DEC: +23:01:30,0
-08:47:57.483 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: +00:44:58,02, Target RA: +00:44:58,01
-08:47:57.483 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: +24:01:29,7, Target DEC: +24:01:30,0
-08:47:57.822 SyncToTarget                        OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual RA: +00:48:58,01, Target RA: +00:48:58,01
-08:47:57.822 SyncToTarget                        OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual DEC: +25:01:30,0, Target DEC: +25:01:30,0
-08:48:05.408 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: +00:44:57,96, Target RA: +00:44:58,01
-08:48:05.408 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: +24:01:30,2, Target DEC: +24:01:30,0
+08:47:49.548 SyncToTarget                        OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:47:49.549 SyncToTarget                        OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+08:47:49.895 SyncToTarget                        OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:47:49.895 SyncToTarget                        OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+08:47:57.483 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:47:57.483 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+08:47:57.822 SyncToTarget                        OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:47:57.822 SyncToTarget                        OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+08:48:05.408 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+08:48:05.408 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
 08:48:05.422 SyncToTarget (Bad L)                OK       Telescope.TargetRA correctly rejected bad RA coordinate: -01:00:00,00
 08:48:05.437 SyncToTarget (Bad L)                OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: -100:00:00,0
 08:48:05.451 SyncToTarget (Bad H)                OK       Telescope.TargetRA correctly rejected bad RA coordinate: +25:00:00,00

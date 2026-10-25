@@ -122,7 +122,7 @@ struct TimeInfo {
     int month = 1;
     int day = 1;
     int year = 0;                   // two-digit year (e.g. 25 for 2025), per :SC#
-    double utc_offset_hours = 0.0;  // :SG#/:GG#, e.g. -5.0 for EST
+    double utc_offset_hours = 0.0;  // :SG#/:GG#: hours to ADD to local time for UTC, e.g. +5.0 for EST
 };
 
 /**

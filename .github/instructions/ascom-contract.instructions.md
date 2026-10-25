@@ -82,8 +82,9 @@ driver's own `Tracking` getter does, a commanded `Tracking=false` still in fligh
 not count as off: a motion state the getter cannot tell apart from Tracking off (iOptron `:GLS` reports a GOTO,
 guiding or a meridian flip in place of tracking, so its guard refuses only a stopped mount), and a retarget of the
 driver's own slew still in flight (ZWO `:GU`, Bisque `IsTracking`: nothing says what they report during a GOTO).
-Syncs and Alt/Az slews are exempt. A driver test that slews turns Tracking on first; do not leave it off and assert
-only that the slew threw.
+Syncs and Alt/Az slews are exempt. A driver test of an equatorial slew turns Tracking on first; do not leave it off
+and assert only that the slew threw. An Alt/Az slew test in a driver that refuses Alt/Az slews while Tracking is true
+(ITelescopeV4; OnStep since #1377) turns Tracking off first instead.
 
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
