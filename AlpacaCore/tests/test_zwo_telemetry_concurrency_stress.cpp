@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <functional>
 #include <future>
 #include <memory>
@@ -88,6 +89,23 @@ struct Rig {
         REQUIRE(clock.wait_for_waiters(1, 5s));
         clock.advance(duration);
         REQUIRE(clock.wait_for_woken_settled(5s));
+    }
+    void check_measurement_age(std::chrono::nanoseconds age) {
+        const auto before = std::chrono::system_clock::now();
+        const auto state = driver->get_device_state();
+        const auto after = std::chrono::system_clock::now();
+        const auto entry =
+            std::find_if(state.begin(), state.end(), [](const auto& item) { return item.name == "TimeStamp"; });
+        REQUIRE(entry != state.end());
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
+        REQUIRE(std::sscanf(std::get<std::string>(entry->value).c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h, &mi,
+                            &s, &ms) == 7);
+        REQUIRE((ms >= 0 && ms < 1000));
+        const auto stamp = std::chrono::sys_days{std::chrono::year{y} / mo / d} + std::chrono::hours(h) +
+                           std::chrono::minutes(mi) + std::chrono::seconds(s) + std::chrono::milliseconds(ms);
+        // UTC advances in real time, not with the fake clock; allow only timestamp millisecond truncation.
+        CHECK(stamp >= before - age - 1ms);
+        CHECK(stamp <= after - age);
     }
     // Commands received, written with the terminating '#'.
     int count(const std::string& command) const {
@@ -293,6 +311,68 @@ TEST_CASE("ZWO initial unavailable telemetry never performs getter I/O", "[zwo][
     CHECK(rig.driver->get_alignment_mode() == AlignmentMode::GermanPolar);
     CHECK_FALSE(rig.driver->get_at_home());
     CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE("ZWO partial status publication retains mandatory measurement age",
+          "[zwo][telescope][telemetry][timestamp]") {
+    const bool moving = GENERATE(false, true);
+    const bool fail_dec = GENERATE(false, true);
+    Rig rig;
+    rig.connect();
+    rig.check_measurement_age(0ns);
+    rig.mount.set_moving(moving);
+    rig.mount.set_tracking(false);
+    rig.fail(fail_dec ? ":GD" : ":GR", true);
+    rig.tick(2s);
+    CHECK_FALSE(rig.driver->get_tracking());  // GU published, even though the pair failed.
+    CHECK(rig.driver->get_link_fault().empty());
+    rig.check_measurement_age(2s);
+    rig.tick();
+    rig.tick();
+    REQUIRE_FALSE(rig.driver->get_link_fault().empty());
+    rig.fail(fail_dec ? ":GD" : ":GR", false);
+    rig.tick();
+    CHECK(rig.driver->get_link_fault().empty());
+    rig.check_measurement_age(0ns);
+}
+
+TEST_CASE("ZWO optional publication cannot renew mandatory measurement age", "[zwo][telescope][telemetry][timestamp]") {
+    Rig rig(5000);
+    rig.connect();
+    rig.mount.hold_reply(":GA");
+    rig.clock.advance(2s);
+    REQUIRE(rig.mount.wait_until_held(5s));
+    rig.check_measurement_age(0ns);  // The complete pair publishes before optional I/O.
+    rig.clock.advance(1500ms);
+    rig.check_measurement_age(1500ms);
+    rig.mount.release();
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
+    rig.check_measurement_age(1500ms);
+    CHECK(rig.driver->get_altitude() == 45.0);
+    rig.tick();
+    rig.check_measurement_age(0ns);
+}
+
+TEST_CASE("ZWO moving warmup timestamp uses its partial frame before the first mandatory pair",
+          "[zwo][telescope][telemetry][timestamp]") {
+    Rig rig(5000);
+    rig.mount.set_moving(true);
+    rig.fail(":GR", true);
+    rig.connect();
+    REQUIRE(rig.driver->get_slewing());
+    error([&] { rig.driver->get_right_ascension(); }, AlpacaError::DriverException, "not available");
+    rig.mount.hold_reply(":GR");
+    rig.clock.advance(2s);
+    REQUIRE(rig.mount.wait_until_held(5s));
+    rig.check_measurement_age(0ns);
+    rig.clock.advance(1s);
+    rig.check_measurement_age(1s);
+    rig.fail(":GR", false);
+    rig.mount.release();
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
+    rig.check_measurement_age(0ns);
+    CHECK(rig.driver->get_right_ascension() == 12.0);
+    CHECK(rig.driver->get_link_fault().empty());
 }
 
 TEST_CASE("ZWO mandatory telemetry alone controls fault recovery and loss", "[zwo][telescope][telemetry]") {
