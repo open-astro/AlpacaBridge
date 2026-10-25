@@ -201,7 +201,7 @@ void act_during_poll(const std::shared_ptr<FakeHidState>& state, alpacacore::tes
 }
 
 // The overlapped poll sampled after the failed exchange released the wrapper, so its frame is real data
-// (decision 0010, point 3) and may land before or after the catch write: 1234 or 5555 are both right.
+// (decision 0010, point 4) and may land before or after the catch write: 1234 or 5555 are both right.
 // What must hold is that nothing invents a value and the next poll measures the device.
 // Falsified by: astroasis_focuser_driver.cpp:move() catch block writes frame.position = position instead
 // of an empty frame write (the position reads 2000 after the failed move).
