@@ -295,7 +295,7 @@ if(TARGET alpacacore_playerone)
     list(APPEND TEST_SOURCES test_playerone_concurrency_stress.cpp)
 endif()
 
-# One move-model case set run over the ZWO EFW and the QHY CFW3 drivers (decision 0020).
+# One move-model case set run over the ZWO EFW and the QHY CFW3 drivers (testing instructions).
 if(TARGET alpacacore_zwo AND TARGET alpacacore_qhy)
     list(APPEND TEST_SOURCES test_filterwheel_move_model.cpp)
 endif()

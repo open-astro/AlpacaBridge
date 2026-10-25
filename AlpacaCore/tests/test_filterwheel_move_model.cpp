@@ -13,7 +13,7 @@
 // One set of filter wheel move-model cases, run unchanged over the ZWO EFW driver (fake EFW SDK) and the QHY CFW3
 // driver (fake CFW3 firmware on a pty). The case bodies are templates over a rig; a rig only builds the driver,
 // scripts a slow move and counts device reads, so a divergence between the drivers shows as a failing
-// instantiation, not as a different body. Decision 0020 records the result and what it means for a shared module.
+// instantiation, not as a different body. The testing instructions record the result and the no-extraction rule.
 
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -209,8 +209,8 @@ void position_ignores_transit_slots_until_the_target_is_reported() {
 }  // namespace
 
 // One TEST_CASE per driver and case body, named in full so the Falsified by gate can find each. "[!shouldfail]" marks a
-// case the ZWO driver diverges on (decision 0020): CI then fails if the divergence goes away without the record being
-// updated.
+// case the ZWO driver diverges on (testing instructions): CI then fails if the divergence goes away without the
+// instructions being updated.
 
 TEST_CASE("Filter wheel move model - Position is -1 while moving, then the target (ZWO EFW)",
           "[filterwheel][move-model][zwo][unit]") {
