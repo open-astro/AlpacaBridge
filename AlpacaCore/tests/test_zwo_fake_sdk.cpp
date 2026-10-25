@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 
 #include <atomic>
@@ -60,6 +61,167 @@ int error_code(const std::function<void()>& fn) {
 }
 
 }  // namespace
+
+TEST_CASE("ZWO USB Limit defaults clamp and only real connects write", "[zwo][camera][unit][usb-bandwidth]") {
+    FakeZWOSDK sdk;
+    long expected = 40;
+    SECTION("ordinary range") {}
+    SECTION("range above default") { sdk.bandwidth_caps->min_value = expected = 60; }
+    SECTION("range below default") {
+        sdk.bandwidth_caps->min_value = 5;
+        sdk.bandwidth_caps->max_value = expected = 30;
+    }
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    connect_camera(*camera);
+    long value = 0;
+    bool is_auto = true;
+    REQUIRE(sdk.get_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value, is_auto));
+    CHECK(value == expected);
+    CHECK_FALSE(is_auto);
+    CHECK(sdk.call_count("set_bandwidth") == 1);
+    camera->set_connected(true);
+    camera->start_exposure(0.01, true);
+    sdk.script_exposure_status({FakeZWOSDK::ExposureStatus::Failed, FakeZWOSDK::ExposureStatus::Success});
+    CHECK_FALSE(camera->get_image_ready());  // a retry trigger is not yet a completed acquisition
+    REQUIRE(camera->get_image_ready());
+    CHECK_FALSE(camera->get_image_array().data.empty());
+    CHECK(sdk.call_count("set_bandwidth") == 1);
+    camera->set_connected(false);
+    connect_camera(*camera);
+    CHECK(sdk.call_count("set_bandwidth") == 2);
+}
+
+TEST_CASE("ZWO USB Limit applies explicit values and rejects unsupported settings",
+          "[zwo][camera][unit][usb-bandwidth]") {
+    FakeZWOSDK sdk;
+    alpacacore::vendor::zwo::ZwoCameraBinding binding;
+    binding.identity.camera_id = sdk.camera.camera_id;
+    bool accepted = true;
+    SECTION("lower endpoint") { binding.usb_bandwidth = 40; }
+    SECTION("upper endpoint") { binding.usb_bandwidth = 100; }
+    SECTION("custom") { binding.usb_bandwidth = 55; }
+    SECTION("zero when supported") {
+        sdk.bandwidth_caps->min_value = 0;
+        binding.usb_bandwidth = 0;
+    }
+    SECTION("below camera range") {
+        binding.usb_bandwidth = 39;
+        accepted = false;
+    }
+    SECTION("above camera range") {
+        sdk.bandwidth_caps->max_value = 90;
+        binding.usb_bandwidth = 100;
+        accepted = false;
+    }
+    SECTION("outside setup range") {
+        binding.usb_bandwidth = std::numeric_limits<std::int64_t>::max();
+        accepted = false;
+    }
+    SECTION("no control default") { sdk.bandwidth_caps.reset(); }
+    SECTION("read only default") { sdk.bandwidth_caps->is_writable = false; }
+    SECTION("no control explicit") {
+        sdk.bandwidth_caps.reset();
+        binding.usb_bandwidth = 40;
+        accepted = false;
+    }
+    SECTION("read only explicit") {
+        sdk.bandwidth_caps->is_writable = false;
+        binding.usb_bandwidth = 40;
+        accepted = false;
+    }
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(0, binding, sdk);
+    if (accepted) {
+        connect_camera(*camera);
+        if (binding.usb_bandwidth) {
+            long value = 0;
+            bool is_auto = true;
+            REQUIRE(sdk.get_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value,
+                                          is_auto));
+            CHECK(value == *binding.usb_bandwidth);
+            CHECK_FALSE(is_auto);
+        } else {
+            CHECK(sdk.call_count("set_bandwidth") == 0);
+        }
+    } else {
+        CHECK(error_code([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
+        CHECK_FALSE(camera->get_connected());
+        CHECK(sdk.open_count() == 0);
+        CHECK(sdk.call_count("set_bandwidth") == 0);
+    }
+}
+
+TEST_CASE("ZWO USB Limit initialization failures close and allow reconnect", "[zwo][camera][unit][usb-bandwidth]") {
+    FakeZWOSDK sdk;
+    SECTION("malformed range") { sdk.bandwidth_caps->min_value = 101; }
+    SECTION("write failure") { sdk.fail_bandwidth_write = true; }
+    SECTION("read failure") { sdk.fail_bandwidth_read = true; }
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    try {
+        camera->set_connected(true);
+        FAIL("USB Limit initialization should fail");
+    } catch (const AlpacaException& e) {
+        CHECK(e.error_code() == AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("USB Limit") != std::string::npos);
+    }
+    CHECK_FALSE(camera->get_connected());
+    CHECK(sdk.open_count() == 0);
+    CHECK(sdk.call_count("open_camera") == sdk.call_count("close_camera"));
+    sdk.bandwidth_caps->min_value = 40;
+    sdk.fail_bandwidth_write = sdk.fail_bandwidth_read = sdk.bandwidth_auto_readback = false;
+    sdk.bandwidth_readback.reset();
+    connect_camera(*camera);
+    CHECK(sdk.open_count() == 1);
+}
+
+TEST_CASE("ZWO USB Limit readback mismatches warn only for the implicit default",
+          "[zwo][camera][unit][usb-bandwidth]") {
+    FakeZWOSDK sdk;
+    SECTION("value mismatch") { sdk.bandwidth_readback = 80; }
+    SECTION("auto mismatch") { sdk.bandwidth_auto_readback = true; }
+    SECTION("value and auto mismatch") {
+        sdk.bandwidth_readback = 80;
+        sdk.bandwidth_auto_readback = true;
+    }
+    for (const bool explicit_setting : {false, true}) {
+        std::vector<std::string> warnings;
+        bool claimed_applied = false;
+        struct SinkGuard {
+            alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            ~SinkGuard() {
+                alpacacore::logging::set_log_sink(previous);
+                alpacacore::logging::set_log_level(level);
+            }
+        } sink_guard;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Info);
+        alpacacore::logging::set_log_sink([&](auto level, auto component, auto message) {
+            if (component != "ZWO" || message.find("USB Limit") == std::string_view::npos) return;
+            if (level == alpacacore::logging::LogLevel::Warn) warnings.emplace_back(message);
+            if (level == alpacacore::logging::LogLevel::Info && message.find(" applied ") != std::string_view::npos)
+                claimed_applied = true;
+        });
+        alpacacore::vendor::zwo::ZwoCameraBinding binding;
+        binding.identity.camera_id = sdk.camera.camera_id;
+        if (explicit_setting) binding.usb_bandwidth = 40;
+        auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(0, binding, sdk);
+        if (explicit_setting) {
+            CHECK(error_code([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
+            CHECK_FALSE(camera->get_connected());
+            CHECK(sdk.open_count() == 0);
+            CHECK(sdk.call_count("open_camera") == sdk.call_count("close_camera"));
+        } else {
+            connect_camera(*camera);
+            CHECK(sdk.open_count() == 1);
+            REQUIRE(warnings.size() == 1);
+            CHECK(warnings.front().find("requested 40") != std::string::npos);
+            CHECK(warnings.front().find("read back " + std::to_string(sdk.bandwidth_readback.value_or(40))) !=
+                  std::string::npos);
+            CHECK(warnings.front().find(sdk.bandwidth_auto_readback ? "auto" : "manual") != std::string::npos);
+            camera->set_connected(false);
+        }
+        CHECK_FALSE(claimed_applied);
+    }
+}
 
 TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zwo][camera][unit][last-exposure]") {
     FakeZWOSDK sdk;
@@ -1066,9 +1228,10 @@ TEST_CASE("ZWO fake SDK - first CCDTemperature read after connect skips the SDK'
     // The control cache is only reachable through the SDK: seed the real reading.
     camera->set_connected(true);
     sdk.set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::Temperature, 215, false);
+    const int connect_reads = sdk.call_count("get_control_value");
 
     CHECK(camera->get_ccd_temperature() == Catch::Approx(21.5));
-    CHECK(sdk.call_count("get_control_value") >= 2);
+    CHECK(sdk.call_count("get_control_value") >= connect_reads + 2);
 
     // Later reads: one SDK call each, no added delay.
     const int before = sdk.call_count("get_control_value");
@@ -1089,15 +1252,16 @@ TEST_CASE("ZWO fake SDK - a first CCDTemperature read that stays 0 returns 0.0 w
     sdk.zero_temperature_reads_after_open = 1000;
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
     camera->set_connected(true);
+    const int connect_reads = sdk.call_count("get_control_value");
 
     const auto start = std::chrono::steady_clock::now();
     CHECK(camera->get_ccd_temperature() == Catch::Approx(0.0));
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(600));
-    CHECK(sdk.call_count("get_control_value") == 6);
+    CHECK(sdk.call_count("get_control_value") == connect_reads + 6);
 
     // The retry is spent: the next read is a single SDK call.
     CHECK(camera->get_ccd_temperature() == Catch::Approx(0.0));
-    CHECK(sdk.call_count("get_control_value") == 7);
+    CHECK(sdk.call_count("get_control_value") == connect_reads + 7);
 }
 
 TEST_CASE("FakeZWOSDK behind LockedZWOSDK - forwards every entry point", "[zwo][camera][unit][fake-sdk]") {
@@ -1118,7 +1282,7 @@ TEST_CASE("FakeZWOSDK behind LockedZWOSDK - forwards every entry point", "[zwo][
     CHECK(sdk.get_camera_info_by_index(0, info));
     CHECK_FALSE(sdk.get_camera_info_by_index(3, info));
     sdk.init_camera(id);
-    CHECK(sdk.get_control_caps(id).size() == 9);
+    CHECK(sdk.get_control_caps(id).size() == 10);
     sdk.set_control_value(id, ZWOControlType::Gain, 42, false);
     CHECK(sdk.get_control_value(id, ZWOControlType::Gain, value, is_auto));
     CHECK(value == 42);

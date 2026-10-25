@@ -29,12 +29,13 @@ namespace alpacacore::test {
  * serialises its entry points. Same shape as LockedZWOSDK; a per-SDK class
  * rather than a shared template, because the interfaces share no signatures.
  *
- * Wraps all 18 entry points, each under the mutex (decision 0015 rule 2). with_link() holds it
- * across its body, which calls back into this decorator's per-device methods on the same thread
- * (issue #1500), so the mutex is recursive. The driver never holds its state lock across an SDK
- * call, so the body adds no lock-order inversion; the inner SharedOpenTable mutex stays innermost.
- * No EAF call blocks, so there is no blocking-mode caveat (the fake's opt-in delays are not used
- * behind this decorator).
+ * Wraps all 18 entry points, each under the mutex (decision 0015 rule 2). The mutex is recursive
+ * because with_link() holds it across its body, which calls back into this decorator's per-device
+ * methods on the same thread (issue #1500); the body may also take the driver's leaf mutex_, which
+ * the driver never holds across an SDK call, so no order inverts. Every other entry point holds the
+ * mutex across the inner call only (the inner SDK never calls back into this interface). No EAF
+ * call blocks, so there is no blocking-mode caveat (the fake's opt-in delays are not used behind
+ * this decorator).
  */
 class LockedZWOEAFSDK final : public vendor::zwo::ZWOEAFSDK {
 public:

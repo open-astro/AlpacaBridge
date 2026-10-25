@@ -320,9 +320,14 @@ it is never reachable through `router.cpp` or the web UI.
   in `util::PolledLinkHealth`: the first two in a row still serve the cache (logged WARN), the
   third latches a fault (ERROR) and those reads throw `DriverException` "OnStep mount
   communications compromised" while `Connected` stays true and `get_link_fault()` reads "Mount not
-  answering (...)"; while faulted no read serves a cache (not inside the 2 s window, not
-  `SideOfPier`): each asks the mount, and one good reply clears the fault (INFO). Writes throw the
-  same `DriverException` (`refuse_while_faulted_locked()`; the motion and state commands, not the
+  answering (...)"; while faulted no status or position cache is served (not inside the 2 s
+  window, not `SideOfPier`): a read asks the mount, and one good reply clears the fault (INFO).
+  Within 2 s (`kFaultedReadBackoff`) of a read that failed while faulted, the reads throw the
+  fault without asking, so a faulted `DeviceState` costs one reply timeout instead of one per
+  getter (#1626). A read that finds the link lost (`NotConnected`) throws it even while a cache is
+  valid (#1626). Writes throw the
+  same `DriverException` (`refuse_while_faulted_locked()`; the motion and state commands and the
+  site and `UTCDate` writes (#1626), not the
   raw `command_blind`/`command_bool` pass-through): the commands are blind, so on a
   healthy fd they cannot fail and would otherwise report success to a mount that is not
   listening. `AbortSlew` and `MoveAxis(axis, 0)` send their stops first and then throw, so the stop
@@ -462,8 +467,8 @@ it is never reachable through `router.cpp` or the web UI.
   (`.github/instructions/ioptron.instructions.md`; worse in the arm64 4.5.0 build, see "ConformU version" in `.github/instructions/testing.instructions.md`).
   `Declination` is a live position refresh, a `:GRa#`/`:GDe#` pair, and its ~0.318s is consistent
   with ~0.16s each, what that pair measured on the HM-17 while the per-character sleep fixed in
-  #1242 was in place. The HM-17 run on ConformU 4.5.2-rc.1, with nothing else connected, has every member
-  within its timing target.
+  #1242 was in place. The HM-17 runs on ConformU 4.5.2-rc.1 and 4.5.3, with nothing else connected, have
+  every member within its timing target.
 - **`PulseGuide` residual ConformU issues: North/South at HA ±9 is refraction, the rest is
   noise.** The `-9.0`/`-3.0`/`+3.0`/`+9.0` in ConformU's PulseGuide member names are the **hour
   angles** of the test position (`TestPulseGuide(ha)` in `TelescopeTester.cs`), not guide rates.
@@ -506,11 +511,23 @@ it is never reachable through `router.cpp` or the web UI.
   reads the mount clock once (`:GL#`/`:GC#`/`:GG#`, `seed_utc_from_mount_locked()`, after any
   `syncTimeOnConnect` write, which makes the read unneeded), so `UTCDate`, and so `DeviceState`,
   performs no serial exchange of its own (it still takes `mutex_`, so it can queue behind another
-  member's exchange until #1449). If that read fails, `UTCDate` throws `InvalidOperation` with
+  member's exchange until #1449). `:GG#` is the hours to add to local time to get UTC (OnStepX
+  `Site.command.cpp`), so UTC is local time plus the offset (#1626; it read minus, which only shows
+  on a mount whose offset was set elsewhere, since AlpacaBridge writes 0). A date or offset reply
+  that does not parse fails the read instead of storing 2000-01-01 or offset 0 (#1626). If that read fails, `UTCDate` throws `InvalidOperation` with
   the reason, with no further read, until a `UTCDate` write or the next connect. The LST
   computations still fall back to the host clock, without storing it. `SiteElevation` throws
   `InvalidOperation` until the device config or a client sets it: the protocol has no elevation
   command, so it is client-side only.
+- **No `gps_status` action: OnStep cannot report a GPS fix** (#1653). iOptron and Celestron answer
+  `gps_status` (#1574) so a client lets the mount's site win only on a fix; OnStep has no reply that
+  says the site or time came from GPS. OnStepX (`097cc579`, `Site.cpp` `gpsCheck()`) puts a GPS
+  site in RAM only, named "GPS"; `:GM#`-`:GP#` read the saved site names, so they never show it,
+  and `:GX89#` says only that the date and time are set, from any source. OnStep 4.x
+  (`release-4.24`, `3b73bffcfb`, `OnStep.ino`) saves a GPS site as site 1 under the name "GPS",
+  so `:GM#` reads "GPS" from then on, across power cycles and whatever the GPS does later, and a
+  user can give a site that name too: it says the site was set from GPS once, not that there is a
+  fix. A client keeps its own site for OnStep.
 - **`DoesRefraction` comes from the firmware, not a local flag** (#1216): OnStepX applies
   refraction to every RA/Dec it reports unless it was built for observed-place coordinates, and
   `:GXEE#` says which: it replies `MOUNT_COORDS - 1` as one bare digit with no `#` (`0` observed
@@ -520,14 +537,16 @@ it is never reachable through `router.cpp` or the web UI.
   fixed when the firmware is built. Legacy firmware, or no answer, keeps the settable local flag.
   The TeSeek HM-17 (OnStepX 10.23a) answers `1`.
 - **ConformU-validated on real hardware**: the TeSeek HM-17 (OnStepX 10.23a) on Linux arm64,
-  ConformU 4.5.2-rc.1 (build 56111): 0 errors, 0 issues, all members within their timing targets
-  (`AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`). The older Generic OnStep DIY
-  harmonic-drive mount report (firmware "On-Step" v10.23a) is a ConformU 4.5.0 run on x86-64
-  (Linux Mint 22.3), not arm64 as its `Linux-arm64.txt` name suggests, made before validation
-  became arm64-only: 0 errors, 0 timing violations in the saved run. The only remaining
-  findings are the 2 PulseGuide East/West residual issues documented above as an accepted, inherent hardware-noise limitation rather than a driver bug — earlier
-  runs during this same validation session also had slow first FAST reads (see the notes
-  above; one came from `get_side_of_pier()`'s live position round trip, since fixed), which is
-  why they are documented even though the saved log is clean of them.
+  bare mount, ConformU 4.5.3 (build 56334), 2026-10-25: 0 errors, 0 warnings, 0 issues, all members
+  within their timing targets (`AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`; its
+  earlier 4.5.2-rc.1 run was clean too). The older Generic OnStep DIY harmonic-drive mount report
+  (firmware "On-Step" v10.23a, the stock OnStepX name and an older public release, so it does not
+  identify the mount) is a ConformU 4.5.0 run from an x86-64 PC (Linux Mint 22.3, the system its
+  header names) against the driver over the LAN; the commit that added it (`9c6b4b4d`) says the
+  driver ran on an arm64 host. It ends with no errors, warnings or issues; being 4.5.0, its timing
+  verdicts are suspect (see "ConformU version" in `testing.instructions.md`). Earlier runs that
+  day also had slow first FAST reads (see the notes above; one came from `get_side_of_pier()`'s
+  live position round trip, since fixed), which is why they are documented even though the saved
+  log is clean of them. Whether to re-run or drop that report is open (#1249).
   See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`,
   `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.

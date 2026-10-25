@@ -910,6 +910,11 @@
                             <input type="number" id="camera-id" name="cameraId" data-config-key="cameraId" min="0">
                             <small>If set, overrides the camera index.</small>
                         </div>
+                        <div class="form-group">
+                            <label for="zwo-usb-bandwidth">USB Limit (optional):</label>
+                            <input type="number" id="zwo-usb-bandwidth" name="zwoUsbBandwidth" data-config-key="usbBandwidth" min="0" max="100" step="1" placeholder="Default: 40">
+                            <small>Blank uses 40, clamped to the camera's range, in manual mode. Lower values may improve USB reliability but slow downloads. Save and reconnect to apply.</small>
+                        </div>
                         <!-- Identity the server learned (#914). Carried through an edit,
                              which removes and re-adds the entry; see zwoCameraIdentityFields(). -->
                         <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial" data-config-key="serialNumber" data-config-fill="manual">
@@ -2042,8 +2047,8 @@
         </div>
     </div>
 
-    <script src="/web/format.js?v=15"></script>
+    <script src="/web/format.js?v=16"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=48"></script>
+    <script src="/web/app.js?v=49"></script>
 </body>
 </html>
