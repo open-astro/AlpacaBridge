@@ -30,10 +30,12 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -356,6 +358,126 @@ TEST_CASE(
     const auto gap = reseeded > written ? reseeded - written : written - reseeded;
     CHECK(gap > std::chrono::minutes(30));
     driver->set_connected(false);
+}
+
+// #1478: the host clock never stands in for the mount's. The connect reads the
+// mount clock once; when that fails UTCDate throws InvalidOperation and reads
+// nothing until a UTCDate write or the next connect, and an LST computation in
+// between does not store the host clock either.
+TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mount clock cannot be read",
+          "[onstep][telescope][unit][utc-offset]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    std::atomic<bool> clock_answers{false};
+    std::atomic<int> clock_reads{0};
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) {
+        if (chunk.rfind(":GL", 0) == 0) {
+            ++clock_reads;
+            return clock_answers ? std::string("10:20:30#") : std::string("x#");
+        }
+        if (chunk.rfind(":GC", 0) == 0) {
+            return std::string("10/23/26#");
+        }
+        if (chunk.rfind(":GG", 0) == 0) {
+            return std::string("+00#");
+        }
+        if (chunk.rfind(":Gt", 0) == 0) {
+            return std::string("+40*30#");
+        }
+        if (chunk.rfind(":Gg", 0) == 0) {
+            return std::string("+085*30#");
+        }
+        if (chunk.rfind(":S", 0) == 0) {
+            return std::string("1");  // bare-digit set acks (:SL/:SC/:SG)
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
+    using namespace std::chrono;
+    const auto mount_utc = sys_days{year{2026} / October / 23} + hours{10} + minutes{20} + seconds{30};
+
+    SECTION("a clock the connect could not read: UTCDate throws, and no read is tried again") {
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(clock_reads == 1);  // the connect's read
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        REQUIRE_NOTHROW((void)driver->get_sidereal_time());  // computes LST from the host clock
+        clock_answers = true;
+        clock.advance(std::chrono::seconds(60));
+        (void)clock.wait_for_woken_settled(std::chrono::seconds(2));
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        (void)driver->get_device_state();
+        (void)driver->get_device_state();
+        CHECK(clock_reads == 1);  // UTCDate and DeviceState never read the clock (#1478)
+
+        const auto written = sys_days{year{2026} / October / 24} + hours{1};
+        REQUIRE_NOTHROW(driver->set_utc_date(written));
+        CHECK(driver->get_utc_date() >= written);  // a UTCDate write sets it
+
+        driver->set_connected(false);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(clock_reads == 2);  // the next connect reads it again
+        CHECK(driver->get_utc_date() == mount_utc);
+    }
+
+    SECTION("a clock the connect read: DeviceState makes no clock reads") {
+        clock_answers = true;
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(clock_reads == 1);
+        (void)driver->get_device_state();
+        (void)driver->get_device_state();
+        CHECK(driver->get_utc_date() == mount_utc);
+        CHECK(clock_reads == 1);
+    }
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("OnStep Telescope Driver - SiteElevation throws InvalidOperation until it is set",
+          "[onstep][telescope][unit]") {
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = 1;
+    auto unset = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    require_alpaca_error([&] { (void)unset->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
+    unset->set_site_elevation(250.0);
+    CHECK(unset->get_site_elevation() == 250.0);
+
+    auto configured = alpacacore::vendor::onstep::create_onstep_telescope_with_site(0, conn, std::nullopt, std::nullopt,
+                                                                                    0.0, std::nullopt);
+    CHECK(configured->get_site_elevation() == 0.0);  // a configured 0 m is a real place
+}
+
+TEST_CASE("OnStep Telescope Driver - DestinationSideOfPier and PulseGuide check arguments before the connection",
+          "[onstep][telescope][unit]") {
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = 1;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (const auto& [ra, dec] : std::vector<std::pair<double, double>>{
+             {-0.1, 0.0}, {24.0, 0.0}, {nan, 0.0}, {12.0, -90.1}, {12.0, 90.1}, {12.0, nan}}) {
+        require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(ra, dec); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(0.0, 90.0); },
+                         alpacacore::AlpacaError::NotConnected);
+
+    require_alpaca_error([&] { driver->pulse_guide(-1, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(4, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(0, -1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(0, 10000); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(3, 9999); }, alpacacore::AlpacaError::NotConnected);
+
+    require_alpaca_error([&] { driver->sync_to_coordinates(24.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 10.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep Telescope Driver - a slow mount ack does not turn an accurate client clock into a warning",
@@ -1847,6 +1969,24 @@ TEST_CASE("OnStep Telescope Driver - Park during a home stops the home and parks
     CHECK(mount->first(":Q#") < mount->first(":hP#"));
     CHECK(mount->count(":hP#") == 1);  // accepted at once: the home had ended
 
+    driver->set_connected(false);
+}
+
+// #1478: the :Mg[nsew]#### field holds 4 digits, so a longer PulseGuide is
+// refused (InvalidValue) instead of being clamped to 9999 ms and reported as
+// done; 9999 ms itself still goes out.
+TEST_CASE("OnStep Telescope Driver - PulseGuide refuses a duration over 9999 ms", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    require_alpaca_error([&] { driver->pulse_guide(0, 10000); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(mount->count(":Mg") == 0);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 9999));
+    CHECK(mount->count(":Mgn9999#") == 1);
     driver->set_connected(false);
 }
 
