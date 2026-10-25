@@ -200,8 +200,12 @@ void act_during_poll(const std::shared_ptr<FakeHidState>& state, alpacacore::tes
     REQUIRE(clock.wait_for_waiters(1, kBound));
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:move():319 delete the state_.write() in move()'s catch block.
-TEST_CASE("Astroasis Focuser Driver - a failed move drops the poll that overlaps it",
+// The overlapped poll sampled after the failed exchange released the wrapper, so its frame is real data
+// (decision 0010, point 4) and may land before or after the catch write: 1234 or 5555 are both right.
+// What must hold is that nothing invents a value and the next poll measures the device.
+// Falsified by: astroasis_focuser_driver.cpp:move() catch block writes frame.position = position instead
+// of an empty frame write (the position reads 2000 after the failed move).
+TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a failed move",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
     alpacacore::test::FakeTaskClock clock;
@@ -214,15 +218,18 @@ TEST_CASE("Astroasis Focuser Driver - a failed move drops the poll that overlaps
         state->position = 5555;
     }
     act_during_poll(state, clock, 0x36, [&] { CHECK_THROWS_AS(driver->move(2000), alpacacore::AlpacaException); });
-    CHECK(driver->get_position() == 1234);  // the overlapped poll's frame was dropped
+    const int overlapped = driver->get_position();
+    CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
     tick(clock);
     CHECK(driver->get_position() == 5555);  // the next poll measured the device
     CHECK(driver->get_is_moving());
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:halt():299 delete the state_.write() in halt()'s catch block.
-TEST_CASE("Astroasis Focuser Driver - a failed halt drops the poll that overlaps it",
+// Same as the move twin: the overlapped poll's frame is real data, so 1234 or 5555 are both right.
+// Falsified by: astroasis_focuser_driver.cpp:halt() catch block writes frame.position = 0 instead of
+// an empty frame write (the position reads 0 after the failed halt).
+TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a failed halt",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
     alpacacore::test::FakeTaskClock clock;
@@ -236,7 +243,8 @@ TEST_CASE("Astroasis Focuser Driver - a failed halt drops the poll that overlaps
         state->position = 5555;
     }
     act_during_poll(state, clock, 0x37, [&] { CHECK_THROWS_AS(driver->halt(), alpacacore::AlpacaException); });
-    CHECK(driver->get_position() == 1234);  // the overlapped poll's frame was dropped
+    const int overlapped = driver->get_position();
+    CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
     tick(clock);
     CHECK(driver->get_position() == 5555);
     CHECK_FALSE(driver->get_is_moving());  // the next poll measured the stop
