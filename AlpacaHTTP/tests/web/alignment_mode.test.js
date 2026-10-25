@@ -56,11 +56,22 @@ test('Celestron protocol picker distinguishes the handset and direct CGX USB tra
 });
 
 test('Celestron direct USB config persists protocol and uses the fixed serial transport', () => {
-    assert.ok(app.includes("setFormValue('celestron-protocol', protocol);"));
+    // The protocol and the CGX site are filled from the catalog (data-config-key);
+    // the connection type and alignment mode stay hand-written (manual).
+    const { readCatalogFixture, formFields } = require('./catalog_form_fields.js');
+    const { editAssignments } = require(path.join(web, 'catalog_schema.js'));
+    const descriptor = readCatalogFixture().find((d) => d.vendor === 'celestron' && d.deviceType === 'telescope');
+    const filled = (config) => new Map(editAssignments(descriptor, config, formFields(html)).map((a) => [a.id, a.value]));
+    assert.equal(filled({ protocol: 'cgx-aux' }).get('celestron-protocol'), 'cgx-aux');
+    assert.equal(filled({}).get('celestron-protocol'), 'nexstar');
+    assert.ok(app.includes("celestronConnection.value = config.protocol === 'cgx-aux' ? 'serial'"));
     assert.ok(app.includes("deviceData.protocol = formData.get('celestronProtocol') || 'nexstar';"));
     assert.ok(app.includes("deviceData.protocol === 'cgx-aux'"));
     assert.ok(app.includes("baudGroup.style.display = directUsb ? 'none' : 'block';"));
-    assert.ok(app.includes("setFormValue('celestron-cgx-site-latitude', config.siteLatitude);"));
+    const site = filled({ siteLatitude: -33.856784, siteLongitude: 151.215297, siteElevation: 42 });
+    assert.equal(site.get('celestron-cgx-site-latitude'), -33.856784);
+    assert.equal(site.get('celestron-cgx-site-longitude'), 151.215297);
+    assert.equal(site.get('celestron-cgx-site-elevation'), 42);
     assert.ok(app.includes("Site latitude and longitude are required for direct CGX USB."));
 });
 

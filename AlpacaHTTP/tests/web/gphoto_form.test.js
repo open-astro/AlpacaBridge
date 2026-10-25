@@ -59,8 +59,22 @@ test('the LENR help line names the Canon camera menu', () => {
 });
 
 test('edit loads both fields from the saved config', () => {
-    assert.ok(app.includes("setFormValue('gphoto-mirror-lockup-settle-ms', config.mirrorLockupSettleMs"));
-    assert.ok(app.includes("setFormValue('gphoto-long-exposure-nr', config.longExposureNR || 'camera');"));
+    // The generic edit fill reads each input's data-config-key (catalog_schema.js).
+    const { readCatalogFixture, formFields } = require('./catalog_form_fields.js');
+    const { editAssignments } = require(path.join(web, 'catalog_schema.js'));
+    const descriptor = readCatalogFixture().find((d) => d.vendor === 'gphoto' && d.deviceType === 'camera');
+    const fields = formFields(html);
+    const keyOf = (id) => fields.find((f) => f.id === id).configKey;
+    assert.equal(keyOf('gphoto-mirror-lockup-settle-ms'), 'mirrorLockupSettleMs');
+    assert.equal(keyOf('gphoto-long-exposure-nr'), 'longExposureNR');
+    const saved = new Map(editAssignments(descriptor, { mirrorLockupSettleMs: 500, longExposureNR: 'on' }, fields)
+        .map((a) => [a.id, a.value]));
+    assert.equal(saved.get('gphoto-mirror-lockup-settle-ms'), 500);
+    assert.equal(saved.get('gphoto-long-exposure-nr'), 'on');
+    // Absent: left to the markup, which holds 2000 and 'camera' (tested above).
+    const absent = new Map(editAssignments(descriptor, {}, fields).map((a) => [a.id, a.value]));
+    assert.equal(absent.get('gphoto-mirror-lockup-settle-ms'), null);
+    assert.equal(absent.get('gphoto-long-exposure-nr'), null);
 });
 
 test('submit sends both fields under their config keys', () => {
