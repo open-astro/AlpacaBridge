@@ -3,4 +3,4 @@
 - **Upstream document notes** (`scripts/dependency_updates.py`, `scripts/dependency_sdk_versions.json`): a `documents` entry may carry a `note` that is printed in the issue the weekly check opens. The ConformU beta entry's note says to adopt and mirror a new beta through `/conformu` before moving its baseline, and to keep its URL on the ASCOM beta download.
 
 ### Changed
-- **ConformU version records** (`SUPPORTED-DRIVERS.md`, OnStep instructions): 4.5.2-rc.1 joins the list of ConformU versions used. The OnStep notes cite the TeSeek HM-17 4.5.2-rc.1 report as the arm64 validation, and say that the older Generic OnStep report is a ConformU 4.5.0 run on x86-64 (Linux Mint), not the "Linux arm64, ConformU 4.4.0" run they described.
+- **ConformU version records** (`SUPPORTED-DRIVERS.md`, OnStep instructions): 4.5.2-rc.1 joins the list of ConformU versions used. The OnStep notes cite the TeSeek HM-17 4.5.2-rc.1 report as the arm64 validation.

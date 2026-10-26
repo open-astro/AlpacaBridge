@@ -8,7 +8,6 @@
 ### Changed (docs)
 
 - `onstep.instructions.md` and the decision 0009 OnStep Adoption row: the faulted-read back-off, the site and `UTCDate` writes refused while faulted, and the Alt/Az reads and the `:GU#` read after a `:GE#` with no code counting toward the fault; the cache rule now says "no status or position cache" (site and `UTCDate` are not polled telemetry).
-- `onstep.instructions.md`: OnStep has no `gps_status` action, with the firmware evidence that neither OnStep 4.x nor OnStepX can report a GPS fix over serial (issue #1653). The HM-17 ConformU notes cite the 4.5.3 run, and the Generic OnStep report notes drop the stale "2 PulseGuide residual issues" (the saved run is clean) and say ConformU ran from an x86-64 PC against the driver over the LAN (issue #1249).
-- `SUPPORTED-DRIVERS.md`: ConformU 4.5.3 is provisional only until a camera run is recorded (the telescope run is the HM-17); the arm64 claim names the Generic OnStep report as the exception (issue #1249).
-- `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt`: its site, local time and LAN address are redacted, as the other reports are.
+- `onstep.instructions.md`: OnStep has no `gps_status` action, with the firmware evidence that neither OnStep 4.x nor OnStepX can report a GPS fix over serial (issue #1653). The HM-17 ConformU notes cite the 4.5.3 run.
+- `SUPPORTED-DRIVERS.md`: ConformU 4.5.3 is provisional only until a camera run is recorded (the telescope run is the HM-17).
 - `ascom-contract.instructions.md`: a driver test of an Alt/Az slew turns Tracking off first where the driver refuses Alt/Az slews while tracking (OnStep since issue #1377); the "turn Tracking on first" rule is for equatorial slews.

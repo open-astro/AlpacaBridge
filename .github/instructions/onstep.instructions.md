@@ -555,14 +555,9 @@ it is never reachable through `router.cpp` or the web UI.
 - **ConformU-validated on real hardware**: the TeSeek HM-17 (OnStepX 10.23a) on Linux arm64,
   bare mount, ConformU 4.5.3 (build 56334), 2026-10-25: 0 errors, 0 warnings, 0 issues, all members
   within their timing targets (`AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`; its
-  earlier 4.5.2-rc.1 run was clean too). The older Generic OnStep DIY harmonic-drive mount report
-  (firmware "On-Step" v10.23a, the stock OnStepX name and an older public release, so it does not
-  identify the mount) is a ConformU 4.5.0 run from an x86-64 PC (Linux Mint 22.3, the system its
-  header names) against the driver over the LAN; the commit that added it (`9c6b4b4d`) says the
-  driver ran on an arm64 host. It ends with no errors, warnings or issues; being 4.5.0, its timing
-  verdicts are suspect (see "ConformU version" in `testing.instructions.md`). Earlier runs that
-  day also had slow first FAST reads (see the notes above; one came from `get_side_of_pier()`'s
-  live position round trip, since fixed), which is why they are documented even though the saved
-  log is clean of them. Whether to re-run or drop that report is open (#1249).
-  See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`,
-  `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.
+  earlier 4.5.2-rc.1 run was clean too).
+  Earlier runs that day also had slow first FAST reads (see the notes above; one came from
+  `get_side_of_pier()`'s live position round trip, since fixed), which is why they are documented
+  even though the saved log is clean of them. The HM-17 report is the OnStep ConformU validation.
+  See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`
+  and `SUPPORTED-DRIVERS.md`.
