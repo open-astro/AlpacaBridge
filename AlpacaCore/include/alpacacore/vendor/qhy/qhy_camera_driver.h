@@ -84,8 +84,8 @@ std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::st
 std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk,
                                                          util::TaskClock& clock = util::default_task_clock());
 
-/// The camera driver's two polling workers, as named to a QHYWorkerStartHook.
-enum class QHYWorker : std::uint8_t { Telemetry, TempControl };
+/// The camera driver's workers, as named to a QHYWorkerStartHook.
+enum class QHYWorker : std::uint8_t { Telemetry, TempControl, CoolerOff };
 
 /**
  * @brief Test-only hook, called by each worker start after the new thread is
@@ -97,6 +97,8 @@ enum class QHYWorker : std::uint8_t { Telemetry, TempControl };
  * thread with only the driver's thread-start mutex held, and must not throw
  * (the built thread is still unstored). A hook that blocks must be released
  * before the driver is destroyed. Production passes none.
+ * CoolerOff instead calls the hook on its worker thread before taking the
+ * state mutex; a throwing hook is caught and ends that test-only worker.
  */
 using QHYWorkerStartHook = std::function<void(QHYWorker)>;
 

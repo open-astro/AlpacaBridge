@@ -87,6 +87,29 @@ enum class QHYExposureStatus {
 // ────────────────────────────────────────────────────────────────────────────
 
 class QHYCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
+    // Wrapper calls retain their physical handle and call mutex before waiting.
+    // Do not retain io_mutex_ here: close must overtake an uncancellable read.
+    template <typename Read>
+    auto live_read(Read&& read) const {
+        std::string id;
+        uint64_t generation;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            id = camera_id_.value_or("");
+            generation = connection_generation_;
+        }
+        auto value = read(id);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            if (generation != connection_generation_) {
+                throw AlpacaException("Camera connection changed during the read", AlpacaError::NotConnected);
+            }
+        }
+        return value;
+    }
+
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
@@ -233,6 +256,7 @@ private:
     // Internal synchronous implementation used by the connection thread and
     // destructor. Performs the actual SDK open/close and state changes.
     void set_connected_impl(bool connected) {
+        std::unique_lock<std::mutex> transition_lock(transition_mutex_);
         // Disconnection path: the temp thread acquires mutex_ on each iteration,
         // so we must join it BEFORE holding mutex_ to avoid deadlock.
         if (!connected) {
@@ -248,8 +272,16 @@ private:
             // exposure_lifecycle_mutex_ from before the join through the close
             // so a concurrent start_exposure cannot spawn a fresh worker in
             // the join→close gap (same shape as the ToupTek camera). Lock
-            // order: exposure_lifecycle_mutex_ -> mutex_.
+            // order: transition -> exposure lifecycle -> I/O -> state.
             std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (record_disconnect_if_connect_in_flight(connected_.load()) || !connected_.load()) {
+                    return;
+                }
+                disconnecting_ = true;
+                ++connection_generation_;
+            }
             // See the matching comment in start_exposure(): joinable() alone
             // misses a worker that a prior reap already detach()ed but which
             // may still be alive and stuck in GetQHYCCDSingleFrame -- retry
@@ -262,7 +294,7 @@ private:
                     cancel_id = camera_id_.value_or("");
                     exposure_thread_superseded_->store(true);
                 }
-                if (!cancel_id.empty()) {
+                if (worker_may_still_be_running && !cancel_id.empty()) {
                     try {
                         sdk_.cancel_exposure(cancel_id);
                     } catch (const std::exception& e) {
@@ -282,17 +314,6 @@ private:
             std::shared_ptr<std::atomic<bool>> telemetry_running_to_join;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                // Base gate (obligation 4) BEFORE the idempotency check: a sync
-                // disconnect during an in-flight connect looks idempotent (both
-                // sides see disconnected) and would be silently dropped without
-                // the record. This function split on `connected` above, so only
-                // the disconnect-side gate belongs in this branch.
-                if (record_disconnect_if_connect_in_flight(connected_.load())) {
-                    return;
-                }
-                if (!connected_.load()) {
-                    return; // already disconnected
-                }
                 temp_thread_stop_->request_stop();
                 temp_running_to_join = temp_thread_running_;
                 temp_to_join = std::move(temp_thread_);
@@ -314,29 +335,28 @@ private:
                 ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during disconnect: " + std::string(e.what()));
             }
 
-            std::lock_guard<std::mutex> lock(mutex_);
-            // Clear driver state and cached capabilities BEFORE the SDK close
-            // (driver-lifecycle.instructions.md): a throwing close must not leave the driver
-            // half-connected serving a previous camera's caps/ranges. Keep the
-            // model string so the web UI device name survives a disconnect
-            // (see the constructor comment).
+            std::string id;
             {
+                std::lock_guard<std::mutex> lock(mutex_);
+                // Clear state before close; retain the model for the disconnected web UI.
                 const std::string model = camera_info_.model;
                 camera_info_ = {};
                 camera_info_.model = model;
                 camera_info_valid_ = false;
+                readout_modes_.clear();
+                readout_mode_ = 0;
+                cached_gain_.reset();
+                cached_offset_.reset();
+                telemetry_temp_valid_ = false;
+                telemetry_temp_unsupported_ = false;
+                telemetry_power_valid_ = false;
+                reset_exposure_state_locked();
+                exposure_range_valid_ = false;
+                connected_.store(false);
+                disconnecting_ = false;
+                id = camera_id_.value_or("");
             }
-            readout_modes_.clear();
-            readout_mode_ = 0;
-            cached_gain_.reset();
-            cached_offset_.reset();
-            telemetry_temp_valid_ = false;
-            telemetry_temp_unsupported_ = false;
-            telemetry_power_valid_ = false;
-            reset_exposure_state_locked();
-            exposure_range_valid_ = false;
-            connected_.store(false);
-            const std::string& id = camera_id_.value_or("");
+            std::lock_guard<std::mutex> io_lock(io_mutex_);
             if (!id.empty()) {
                 // Exposure worker cancel attempted above; join_exposure_thread()
                 // may have joined it cleanly OR hit its 2s timeout and
@@ -370,7 +390,14 @@ private:
             return; // already connected
         }
 
-        const std::string& id = resolve_camera_id_locked();
+        lock.unlock();
+        // A redundant connect must never queue behind a live SDK call while
+        // retaining the lifecycle lock needed by AbortExposure.
+        std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+        std::unique_lock<std::mutex> io_lock(io_mutex_);
+        const auto resolved = resolve_camera();
+        const std::string id = resolved.camera_id;
+        lock.lock();
 
         // A prior disconnect's join_exposure_thread() may have hit its 2s
         // timeout and detached a wedged exposure worker instead of waiting
@@ -398,6 +425,12 @@ private:
                 AlpacaError::InvalidOperation);
         }
 
+        QHYCameraInfo info{};
+        info.camera_id = id;
+        info.model = camera_info_.model.empty() ? resolved.model : camera_info_.model;
+        exposure_range_valid_ = false;
+        lock.unlock();
+
         sdk_.open_camera(id);
         // Roll back the ref-counted open if any init step throws: open_camera()
         // now shares one handle per camera_id with the CFW driver via an
@@ -405,64 +438,67 @@ private:
         // connect — it would pin the handle (CloseQHYCCD never firing) for the
         // life of the process. Same pattern as the filter wheel's connect path.
         try {
-            exposure_range_valid_ = false;
             sdk_.init_camera(id);
 
             // Populate full camera info
-            QHYCameraInfo info{};
-            info.camera_id = id;
-            if (!camera_info_valid_ || camera_info_.model.empty()) {
+            if (info.model.empty()) {
                 sdk_.get_camera_model(id, info.model);
-            } else {
-                info.model = camera_info_.model;
             }
-            if (sdk_.get_chip_info(id, info)) {
-                camera_info_ = info;
-                camera_info_valid_ = true;
-            }
+            const bool info_valid = sdk_.get_chip_info(id, info);
 
             // Select bit depth (prefer 16-bit)
-            bits_ = 8;
+            int bits = 8;
             if (sdk_.is_control_available(id, control::BITS16)) {
-                bits_ = 16;
+                bits = 16;
             }
-            sdk_.set_bits_mode(id, bits_);
+            sdk_.set_bits_mode(id, bits);
 
             // Default to full-frame 1x1 binning
-            bin_x_ = 1;
-            bin_y_ = 1;
-            start_x_ = 0;
-            start_y_ = 0;
-            num_x_ = static_cast<int>(camera_info_.max_width);
-            num_y_ = static_cast<int>(camera_info_.max_height);
             sdk_.set_bin_mode(id, 1, 1);
-            sdk_.set_resolution(id, 0, 0, static_cast<uint32_t>(num_x_), static_cast<uint32_t>(num_y_));
+            sdk_.set_resolution(id, 0, 0, info.max_width, info.max_height);
 
             // Enumerate readout modes
-            load_readout_modes_locked(id);
-            refresh_exposure_range_locked(id);
-            exposure_range_valid_ = true;
-
-            reset_exposure_state_locked();
+            auto modes = load_readout_modes(id);
+            const auto range = read_exposure_range(id);
 
             // Seed the cached CCD temperature with one CURTEMP read so
             // CCDTemperature works before the telemetry worker's first poll
             // (open-astro#941). Runs before that worker starts, so the two
             // cannot race on the cache. A failed read is not an error and
             // never substitutes a value: the property keeps reporting one.
-            telemetry_temp_valid_ = false;
-            telemetry_temp_unsupported_ = false;
-            if (camera_info_valid_ && camera_info_.has_cooler) {
+            bool temp_valid = false;
+            double temperature = 0.0;
+            if (info_valid && info.has_cooler) {
                 try {
                     if (sdk_.is_control_available(id, control::CURTEMP)) {
-                        telemetry_ccd_temp_c_ = sdk_.get_param(id, control::CURTEMP);
-                        telemetry_temp_valid_ = true;
+                        temperature = sdk_.get_param(id, control::CURTEMP);
+                        temp_valid = true;
                     }
                 } catch (const std::exception& e) {
                     ALPACA_LOG_DEBUG("QHY", "Connect-time CURTEMP seed failed: " + std::string(e.what()));
                 }
             }
+            lock.lock();
+            camera_id_ = id;
+            camera_info_ = std::move(info);
+            camera_info_valid_ = info_valid;
+            bits_ = bits;
+            bin_x_ = bin_y_ = 1;
+            start_x_ = start_y_ = 0;
+            num_x_ = static_cast<int>(camera_info_.max_width);
+            num_y_ = static_cast<int>(camera_info_.max_height);
+            readout_modes_ = std::move(modes);
+            readout_mode_ = 0;
+            exposure_range_ = range;
+            exposure_range_valid_ = true;
+            reset_exposure_state_locked();
+            telemetry_ccd_temp_c_ = temperature;
+            telemetry_temp_valid_ = temp_valid;
+            telemetry_temp_unsupported_ = false;
         } catch (...) {
+            if (lock.owns_lock()) {
+                lock.unlock();
+            }
             try {
                 sdk_.close_camera(id);
             } catch (const std::exception& e) {
@@ -471,13 +507,19 @@ private:
             throw;
         }
         connected_.store(true);
+        const auto generation = ++connection_generation_;
+        const bool has_cooler = camera_info_.has_cooler;
+        const bool cooler_on = cooler_on_;
+        lock.unlock();
+        io_lock.unlock();
+        lifecycle_lock.unlock();
+        transition_lock.unlock();
 
         // Start threads without holding the lock so they don't block the caller.
-        if (camera_info_.has_cooler) {
-            lock.unlock();
-            start_telemetry_thread();
-            if (cooler_on_) {
-                start_temp_control_thread();
+        if (has_cooler) {
+            start_telemetry_thread(generation);
+            if (cooler_on) {
+                start_temp_control_thread(generation);
             }
         }
     }
@@ -513,6 +555,7 @@ public:
     int get_bayer_offset_x() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not applicable to monochrome sensor",
                                   AlpacaError::PropertyNotImplemented);
@@ -529,6 +572,7 @@ public:
     int get_bayer_offset_y() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not applicable to monochrome sensor",
                                   AlpacaError::PropertyNotImplemented);
@@ -581,6 +625,7 @@ public:
     CameraState get_camera_state() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         switch (exposure_status_) {
         case QHYExposureStatus::Working:
             if (expire_overdue_exposure_locked()) {
@@ -606,12 +651,14 @@ public:
         // previous camera's dimensions (same for the caps getters below).
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return camera_info_valid_ ? static_cast<int>(camera_info_.max_width) : 0;
     }
 
     int get_camera_y_size() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return camera_info_valid_ ? static_cast<int>(camera_info_.max_height) : 0;
     }
 
@@ -656,6 +703,7 @@ public:
         ALPACA_LOG_TRACE("QHY", "get_ccd_temperature entry");
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
             ALPACA_LOG_TRACE("QHY", "get_ccd_temperature exit (no cooler)");
             throw AlpacaException("This QHY camera has no readable CCD temperature sensor",
@@ -678,6 +726,7 @@ public:
     bool get_cooler_on() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
             throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
@@ -687,26 +736,36 @@ public:
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
         if (cooler_on) {
+            uint64_t generation;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                ensure_connected();
                 if (camera_info_valid_ && !camera_info_.has_cooler) {
                     throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
                 }
                 cooler_on_ = true;
-                if (!connected_.load()) {
+                if (disconnecting_) {
                     return;
                 }
+                generation = connection_generation_;
             }
             // Must not hold mutex_ here: start_temp_control_thread() locks internally.
-            start_temp_control_thread();
+            start_temp_control_thread(generation);
             return;
         }
 
-        // Turning cooler OFF: do not touch mutex_ on the HTTP thread. Something
-        // (temp or telemetry thread, or SDK) can hold it or contend for ~10s;
-        // doing the full turn-off in a background thread avoids ConformU timeouts.
-        if (camera_info_valid_ && !camera_info_.has_cooler) {
-            throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
+        uint64_t generation;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            if (camera_info_valid_ && !camera_info_.has_cooler) {
+                throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
+            }
+            cooler_on_ = false;
+            if (disconnecting_) {
+                return;
+            }
+            generation = connection_generation_;
         }
         // Serialise spawn vs join under cooler_off_lifecycle_mutex_; the
         // previous worker (if any) has either finished or is finishing —
@@ -734,7 +793,7 @@ public:
         // if it throws (e.g. thread limit), nothing was spawned to ever clear
         // the flag, so publishing it early would wedge cooler-off forever.
         auto running_flag = std::make_shared<std::atomic<bool>>(true);
-        cooler_off_thread_ = std::thread([this, running_flag, sdk = &sdk_, clock = &clock_]() {
+        cooler_off_thread_ = std::thread([this, generation, running_flag, sdk = &sdk_, clock = &clock_]() {
             // Clear the in-flight flag on every exit path, including throws.
             // The GUARD below holds only the shared_ptr -- the enclosing lambda
             // does capture `this`, but the guard's destructor deliberately does
@@ -755,17 +814,23 @@ public:
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
             } running_guard{running_flag};
+            if (on_worker_start_) {
+                try {
+                    on_worker_start_(QHYWorker::CoolerOff);
+                } catch (...) {
+                    return;
+                }
+            }
             std::thread temp_to_join;
             std::shared_ptr<std::atomic<bool>> temp_running_to_join;
             std::string cam_id_for_pwm;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!cooler_on_) {
-                    return; // already off
-                }
-                cooler_on_ = false;
-                if (!connected_.load()) {
+                if (!connected_.load() || disconnecting_ || generation != connection_generation_) {
                     return;
+                }
+                if (cooler_on_) {
+                    return;  // a newer ON superseded this queued OFF
                 }
                 temp_thread_stop_->request_stop();
                 temp_running_to_join = temp_thread_running_;
@@ -861,36 +926,28 @@ public:
     }
 
     int get_gain() const override {
-        ensure_connected();
-        return param_to_int(sdk_.get_param(camera_id_value(), control::GAIN), "Gain");
+        return live_read([&](const auto& id) { return param_to_int(sdk_.get_param(id, control::GAIN), "Gain"); });
     }
 
     void set_gain(int gain) override {
         ensure_connected();
-        auto range = sdk_.get_param_range(camera_id_value(), control::GAIN);
+        check_configuration_write();
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        check_configuration_write();
+        const auto id = camera_id_value();
+        auto range = sdk_.get_param_range(id, control::GAIN);
         if (range.available && (gain < static_cast<int>(range.min) ||
                                 gain > static_cast<int>(range.max))) {
             throw AlpacaException("Gain value out of range", AlpacaError::InvalidValue);
         }
-        // After the InvalidValue range check (validation precedes state checks).
-        // Hold mutex_ across the register write itself: releasing it between
-        // ensure_not_exposing_locked() and set_param would let a racing
-        // start_exposure begin integration in the gap and land this write
-        // mid-frame — the exact race the guard exists to close. The id is
-        // read inline (camera_id_value() would re-lock and self-deadlock).
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_not_exposing_locked();
-        const std::string id = camera_id_.value_or("");
-        if (id.empty()) {
-            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-        }
         sdk_.set_param(id, control::GAIN, static_cast<double>(gain));
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         cached_gain_ = gain;
     }
 
     int get_gain_max() const override {
-        ensure_connected();
-        auto range = sdk_.get_param_range(camera_id_value(), control::GAIN);
+        auto range = live_read([&](const auto& id) { return sdk_.get_param_range(id, control::GAIN); });
         if (!range.available) {
             throw AlpacaException("Gain range not available", AlpacaError::NotImplemented);
         }
@@ -898,8 +955,7 @@ public:
     }
 
     int get_gain_min() const override {
-        ensure_connected();
-        auto range = sdk_.get_param_range(camera_id_value(), control::GAIN);
+        auto range = live_read([&](const auto& id) { return sdk_.get_param_range(id, control::GAIN); });
         if (!range.available) {
             throw AlpacaException("Gain range not available", AlpacaError::NotImplemented);
         }
@@ -929,6 +985,7 @@ public:
         ensure_connected();
 
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         expire_overdue_exposure_locked();
         if (!last_exposure_valid_) {
             throw AlpacaException::asked_too_early("No exposure has been taken");
@@ -963,6 +1020,7 @@ public:
         ALPACA_LOG_TRACE("QHY", "get_image_ready entry");
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         expire_overdue_exposure_locked();
         if (!last_exposure_valid_) {
             ALPACA_LOG_TRACE("QHY", "get_image_ready exit (no exposure)");
@@ -1011,6 +1069,7 @@ public:
     int get_max_adu() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         int depth = (bits_ > 0) ? bits_ : static_cast<int>(camera_info_.bpp);
         if (depth <= 0) {
             return 65535;
@@ -1019,8 +1078,7 @@ public:
     }
 
     int get_max_bin_x() const override {
-        ensure_connected();
-        return max_supported_bin(sdk_, camera_id_value());
+        return live_read([&](const auto& id) { return max_supported_bin(sdk_, id); });
     }
 
     int get_max_bin_y() const override {
@@ -1042,31 +1100,28 @@ public:
     void set_num_y(int num_y) override { set_roi_size_locked(std::nullopt, num_y); }
 
     int get_offset() const override {
-        ensure_connected();
-        return param_to_int(sdk_.get_param(camera_id_value(), control::OFFSET), "Offset");
+        return live_read([&](const auto& id) { return param_to_int(sdk_.get_param(id, control::OFFSET), "Offset"); });
     }
 
     void set_offset(int offset) override {
         ensure_connected();
-        auto range = sdk_.get_param_range(camera_id_value(), control::OFFSET);
+        check_configuration_write();
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        check_configuration_write();
+        const auto id = camera_id_value();
+        auto range = sdk_.get_param_range(id, control::OFFSET);
         if (range.available && (offset < static_cast<int>(range.min) ||
                                 offset > static_cast<int>(range.max))) {
             throw AlpacaException("Offset value out of range", AlpacaError::InvalidValue);
         }
-        // Hold mutex_ across the register write (see set_gain for rationale).
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_not_exposing_locked();
-        const std::string id = camera_id_.value_or("");
-        if (id.empty()) {
-            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-        }
         sdk_.set_param(id, control::OFFSET, static_cast<double>(offset));
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         cached_offset_ = offset;
     }
 
     int get_offset_max() const override {
-        ensure_connected();
-        auto range = sdk_.get_param_range(camera_id_value(), control::OFFSET);
+        auto range = live_read([&](const auto& id) { return sdk_.get_param_range(id, control::OFFSET); });
         if (!range.available) {
             throw AlpacaException("Offset range not available", AlpacaError::NotImplemented);
         }
@@ -1074,8 +1129,7 @@ public:
     }
 
     int get_offset_min() const override {
-        ensure_connected();
-        auto range = sdk_.get_param_range(camera_id_value(), control::OFFSET);
+        auto range = live_read([&](const auto& id) { return sdk_.get_param_range(id, control::OFFSET); });
         if (!range.available) {
             throw AlpacaException("Offset range not available", AlpacaError::NotImplemented);
         }
@@ -1089,6 +1143,7 @@ public:
     double get_percent_completed() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (exposure_status_ == QHYExposureStatus::Success) {
             return 100.0;
         }
@@ -1107,29 +1162,36 @@ public:
     double get_pixel_size_x() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return camera_info_valid_ ? camera_info_.pixel_size_x_um : 0.0;
     }
 
     double get_pixel_size_y() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return camera_info_valid_ ? camera_info_.pixel_size_y_um : 0.0;
     }
 
     int get_readout_mode() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return readout_mode_;
     }
 
     void set_readout_mode(int mode) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            if (mode < 0 || mode >= static_cast<int>(readout_modes_.size())) {
+                throw AlpacaException("Invalid readout mode index", AlpacaError::InvalidValue);
+            }
+        }
+        check_configuration_write();
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         ensure_connected();
-        // Hold mutex_ across the whole apply + geometry refresh (all fast
-        // metadata/register calls, no blocking image wait): releasing it
-        // after ensure_not_exposing_locked() would let a racing
-        // start_exposure begin integration against half-applied readout
-        // geometry (see set_gain for the rationale on the inline id read).
-        std::lock_guard<std::mutex> lock(mutex_);
         if (mode < 0 || mode >= static_cast<int>(readout_modes_.size())) {
             throw AlpacaException("Invalid readout mode index", AlpacaError::InvalidValue);
         }
@@ -1139,8 +1201,17 @@ public:
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         exposure_range_valid_ = false;  // The SDK can change hardware before its re-initialization throws.
+        const auto gain = cached_gain_;
+        const auto offset = cached_offset_;
+        auto updated_info = camera_info_;
+        mode_change_active_.store(true);
+        struct ModeChangeGuard {
+            std::atomic<bool>& active;
+            ~ModeChangeGuard() { active.store(false); }
+        } mode_change_guard{mode_change_active_};
+        lock.unlock();
         sdk_.set_readout_mode(id, static_cast<uint32_t>(mode));
-        refresh_exposure_range_locked(id);
+        const auto range = read_exposure_range(id);
 
         // set_readout_mode() re-runs InitQHYCCD on the same handle to fix
         // "Linearity HDR"'s slow download (see its own comment). Switching
@@ -1163,24 +1234,24 @@ public:
         // always silently was before this driver ever touched read modes at
         // all) and only meaningfully restores Gain/Offset when switching
         // between modes where the SDK actually honors them.
-        if (cached_gain_.has_value()) {
+        if (gain.has_value()) {
             try {
-                sdk_.set_param(id, control::GAIN, static_cast<double>(*cached_gain_));
+                sdk_.set_param(id, control::GAIN, static_cast<double>(*gain));
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Failed to restore gain after readout mode change: " + std::string(e.what()));
             }
         }
-        if (cached_offset_.has_value()) {
+        if (offset.has_value()) {
             try {
-                sdk_.set_param(id, control::OFFSET, static_cast<double>(*cached_offset_));
+                sdk_.set_param(id, control::OFFSET, static_cast<double>(*offset));
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Failed to restore offset after readout mode change: " + std::string(e.what()));
             }
         }
 
         // After changing readout mode, refresh chip info as dimensions may change
-        QHYCameraInfo updated_info;
-        if (sdk_.get_chip_info(id, updated_info)) {
+        const bool info_valid = sdk_.get_chip_info(id, updated_info);
+        if (info_valid) {
             int new_max_w = static_cast<int>(updated_info.max_width);
             int new_max_h = static_cast<int>(updated_info.max_height);
             try {
@@ -1189,21 +1260,25 @@ public:
                 ALPACA_LOG_WARN("QHY", "Failed to reset ROI after readout mode change: " +
                                 std::string(e.what()));
             }
-            readout_mode_ = mode;
+        }
+        lock.lock();
+        ensure_connected();
+        readout_mode_ = mode;
+        if (info_valid) {
             camera_info_ = updated_info;
-            num_x_ = new_max_w;
-            num_y_ = new_max_h;
+            num_x_ = static_cast<int>(updated_info.max_width);
+            num_y_ = static_cast<int>(updated_info.max_height);
             start_x_ = 0;
             start_y_ = 0;
-        } else {
-            readout_mode_ = mode;
         }
+        exposure_range_ = range;
         exposure_range_valid_ = true;
     }
 
     std::vector<std::string> get_readout_modes() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (readout_modes_.empty()) {
             return {"Normal"};
         }
@@ -1213,12 +1288,14 @@ public:
     std::string get_sensor_name() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return camera_info_valid_ ? camera_info_.model : std::string();  // unknown: "" (ICameraV4 SensorName)
     }
 
     SensorType get_sensor_type() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (!camera_info_valid_ || !camera_info_.is_color) {
             return SensorType::Monochrome;
         }
@@ -1228,6 +1305,7 @@ public:
     double get_set_ccd_temperature() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
             throw AlpacaException("Cooler not available", AlpacaError::PropertyNotImplemented);
         }
@@ -1247,7 +1325,10 @@ public:
                 AlpacaError::InvalidValue);
         }
         ensure_connected();
+        check_configuration_write();
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (camera_info_valid_ && !camera_info_.has_cooler) {
             throw AlpacaException("Cooler not available", AlpacaError::PropertyNotImplemented);
         }
@@ -1304,6 +1385,7 @@ public:
         // (same shape as the Player One camera, PR #119).
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
             pulse_guiding_end_ = clock_.now() + std::chrono::milliseconds(duration);
             pulse_guiding_->store(true);
         }
@@ -1351,38 +1433,32 @@ public:
         // the join in stop_exposure (join racing the thread-assignment is UB on
         // std::thread — a concurrent StartExposure/AbortExposure pair could hit
         // join_exposure_thread() and `exposure_thread_ = ...` on the same object).
-        // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
+        // Lock order: exposure lifecycle -> I/O -> state.
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         // Re-check under the lifecycle lock: a disconnect holds this mutex
         // from the exposure-worker join through the SDK close, so a
         // start_exposure that was blocked on it must not arm a closed camera.
         ensure_connected();
 
-        const std::string& id = camera_id_value();
+        const std::string id = camera_id_value();
 
-        // Validate ROI against sensor bounds (setters defer this check to here)
+        // Reject an oversized replacement before cancelling its valid predecessor.
+        // An in-flight mode change has invalidated its range; validate that range
+        // after acquiring io_mutex_, when the transaction has finished.
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (num_x_ <= 0 || num_y_ <= 0) {
-                throw AlpacaException("ROI dimensions are invalid", AlpacaError::InvalidValue);
+            if (exposure_range_valid_) {
+                validate_exposure_locked(duration);
             }
-            if (camera_info_valid_) {
-                int max_w = static_cast<int>(camera_info_.max_width)  / bin_x_;
-                int max_h = static_cast<int>(camera_info_.max_height) / bin_y_;
-                if (num_x_ > max_w || num_y_ > max_h) {
-                    throw AlpacaException("ROI exceeds sensor area for current binning",
-                                          AlpacaError::InvalidValue);
-                }
-                if (start_x_ + num_x_ > max_w || start_y_ + num_y_ > max_h) {
-                    throw AlpacaException("Start position + ROI exceeds sensor area",
-                                          AlpacaError::InvalidValue);
-                }
-            }
-            ensure_exposure_range_valid_locked();
-            const double maximum = exposure_range_.available ? exposure_range_.max / 1'000'000.0 : 3600.0;
-            if (duration > maximum) {
-                throw AlpacaException("Exposure duration exceeds ExposureMax", AlpacaError::InvalidValue);
-            }
+        }
+
+        // Serialize even the cancellation bypass with mode changes. Workers and
+        // live reads never hold this lock, so a blocked download stays cancellable.
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            validate_exposure_locked(duration);
         }
 
         // Reap the previous worker FIRST, before any other SDK call in this
@@ -1421,10 +1497,12 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 exposure_thread_superseded_->store(true);
             }
-            try {
-                sdk_.cancel_exposure(id);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "cancel_exposure before re-arm failed: " + std::string(e.what()));
+            if (worker_may_still_be_running) {
+                try {
+                    sdk_.cancel_exposure(id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("QHY", "cancel_exposure before re-arm failed: " + std::string(e.what()));
+                }
             }
             if (exposure_thread_.joinable()) {
                 join_exposure_thread();
@@ -1472,6 +1550,7 @@ public:
         uint32_t num_x_u = 0;
         uint32_t num_y_u = 0;
         uint32_t bits_u = 0;
+        int readout_mode = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             bin_x_u = static_cast<uint32_t>(bin_x_);
@@ -1481,6 +1560,7 @@ public:
             num_x_u = static_cast<uint32_t>(num_x_);
             num_y_u = static_cast<uint32_t>(num_y_);
             bits_u = static_cast<uint32_t>(bits_);
+            readout_mode = readout_mode_;
         }
         // Order matches QHY's own SingleFrameMode.cpp sample (resolution
         // before bin mode) -- not confirmed load-bearing on its own, but kept
@@ -1562,8 +1642,8 @@ public:
         // 4s exposure cleanly -- the one thing that sample does that this
         // driver didn't was keep Exp and Get on the SAME thread). QHY's SDK
         // appears to keep thread-affine state for a single-frame session.
-        exposure_thread_ = std::thread([this, id, exposure_us, exposure_running, exposure_superseded, sdk_ptr = &sdk_,
-                                        clock = &clock_]() {
+        exposure_thread_ = std::thread([this, id, exposure_us, readout_mode, exposure_running, exposure_superseded,
+                                        sdk_ptr = &sdk_, clock = &clock_]() {
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
@@ -1740,14 +1820,8 @@ public:
             // on that mode go undetected far longer than the flat 60s
             // margin already covers it for (review finding on PR #201).
             //
-            // Read without mutex_: safe because set_readout_mode() calls
-            // ensure_not_exposing_locked() under mutex_ before it ever
-            // writes readout_mode_, and exposure_status_ was published as
-            // Working (also under mutex_) before this worker was spawned --
-            // so a concurrent set_readout_mode() call can't succeed while
-            // this worker is running, and readout_mode_ can't change out
-            // from under this read for the life of this exposure.
-            if (readout_mode_ != 0) {
+            // Captured with the configuration; never read driver state unlocked.
+            if (readout_mode != 0) {
                 constexpr double kMinTransferBytesPerSecond = 500'000.0;
                 auto min_transfer = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(static_cast<double>(mem_length) / kMinTransferBytesPerSecond));
@@ -1896,6 +1970,7 @@ private:
         // Serialise this join against start_exposure's spawn (join vs
         // thread-assignment on the same std::thread is UB).
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
@@ -1978,7 +2053,14 @@ private:
     bool cooler_on_;
 
     std::atomic<bool> connected_;
+    // Foreground order: transition -> exposure lifecycle -> I/O -> state.
+    // Detachable workers use only the wrapper's shared handle/call mutex for I/O;
+    // they must never keep a driver-owned lock across an uncancellable SDK call.
+    std::mutex transition_mutex_;
+    mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
+    uint64_t connection_generation_{0};  // state lock; rejects obsolete worker-start tails
+    bool disconnecting_{false};
 
     // Exposure state. exposure_status_ is mutable because the watchdog in
     // get_camera_state (const) marks a hung exposure Failed once the deadline
@@ -1994,6 +2076,7 @@ private:
     uint32_t exposure_channels_{};
     QHYControlRange exposure_range_{};  // Refreshed outside acquisitions; validation must not queue behind download.
     bool exposure_range_valid_{false};
+    std::atomic<bool> mode_change_active_{false};  // Polling pauses only for the transaction, not a failed range.
     // Current acquisition only; successful metadata lives in published_exposure_.
     double last_exposure_duration_;
     std::chrono::steady_clock::time_point last_exposure_start_;
@@ -2003,10 +2086,9 @@ private:
     util::LastExposure published_exposure_;
     std::thread exposure_thread_;
     // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
-    // (stop_exposure). Join racing the spawn's thread-assignment is UB on
-    // std::thread. The destructor's join is exempt (runs after the connection
-    // thread is joined; no client calls in flight). Lock order:
-    // exposure_lifecycle_mutex_ -> mutex_; the exposure thread never takes it.
+    // (abort, disconnect and destruction). Join racing thread-assignment is UB.
+    // Order: exposure lifecycle -> I/O -> state; workers never take either
+    // lifecycle or I/O locks, so a joiner may retain them across a bounded reap.
     std::mutex exposure_lifecycle_mutex_;
     // GetQHYCCDSingleFrame has no SDK-side timeout and can hang indefinitely
     // (it did, before the exposing-guards on temp_thread_/telemetry_thread_
@@ -2149,12 +2231,39 @@ private:
         }
     }
 
-    void refresh_exposure_range_locked(const std::string& id) {
+    QHYControlRange read_exposure_range(const std::string& id) {
         const auto range = sdk_.get_param_range(id, control::EXPOSURE);
         if (!range.available && sdk_.is_control_available(id, control::EXPOSURE)) {
             throw AlpacaException("Failed to read the camera's exposure range", AlpacaError::DriverException);
         }
-        exposure_range_ = range;
+        return range;
+    }
+
+    void validate_exposure_locked(double duration) const {
+        if (num_x_ <= 0 || num_y_ <= 0) {
+            throw AlpacaException("ROI dimensions are invalid", AlpacaError::InvalidValue);
+        }
+        if (camera_info_valid_) {
+            const int max_w = static_cast<int>(camera_info_.max_width) / bin_x_;
+            const int max_h = static_cast<int>(camera_info_.max_height) / bin_y_;
+            if (num_x_ > max_w || num_y_ > max_h) {
+                throw AlpacaException("ROI exceeds sensor area for current binning", AlpacaError::InvalidValue);
+            }
+            if (start_x_ > max_w - num_x_ || start_y_ > max_h - num_y_) {
+                throw AlpacaException("Start position + ROI exceeds sensor area", AlpacaError::InvalidValue);
+            }
+        }
+        ensure_exposure_range_valid_locked();
+        const double maximum = exposure_range_.available ? exposure_range_.max / 1'000'000.0 : 3600.0;
+        if (duration > maximum) {
+            throw AlpacaException("Exposure duration exceeds ExposureMax", AlpacaError::InvalidValue);
+        }
+    }
+
+    void check_configuration_write() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        ensure_not_exposing_locked();
     }
 
     // Reject runtime register writes (gain/offset/bin/ROI/readout/temp) while a
@@ -2164,46 +2273,38 @@ private:
     // Checked under mutex_ — the same lock start_exposure publishes
     // exposure_status_ under (driver-lifecycle.instructions.md TOCTOU rule). Caller must hold mutex_.
     void ensure_not_exposing_locked() const {
+        if (disconnecting_) {
+            throw AlpacaException("Cannot change camera settings while disconnecting", AlpacaError::InvalidOperation);
+        }
         if (exposure_status_ == QHYExposureStatus::Working) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
         }
-        // get_camera_state()'s watchdog marks a hung exposure Failed purely
-        // from elapsed time -- it does NOT confirm exposure_thread_ has
-        // actually returned. A genuinely wedged GetQHYCCDSingleFrame call can
-        // still be running (and still holding QHYSDKWrapper's call_mutex)
-        // well after exposure_status_ flips to Failed. Every setter that
-        // reaches this check next holds mutex_ across its own call_mutex-
-        // guarded SDK write (set_gain, set_offset, set_readout_mode,
-        // set_bin_xy, set_temperature, ...); if one of them were let through
-        // here it would block forever on call_mutex while STILL HOLDING
-        // mutex_, and every other operation on this instance -- including
-        // start_exposure()'s and disconnect()'s own reap/cancel logic, which
-        // also need mutex_ -- would then stall forever behind it. That's a
-        // whole-driver deadlock reachable only via this narrow window
-        // (review finding on PR #201). Reject explicitly instead: a stuck
-        // worker degrades to "camera busy, try again" rather than silently
-        // wedging every other property and the paired CFW (shared handle).
+        // The watchdog can report Failed before the download has returned.
+        // Refuse before any SDK query can queue behind that worker's call_mutex.
         if (exposure_thread_running_ && exposure_thread_running_->load()) {
             throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
                                   AlpacaError::InvalidOperation);
         }
     }
 
-    const std::string& camera_id_value() const {
+    std::string camera_id_value() const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (!camera_id_.has_value()) {
             throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
         return camera_id_.value();
     }
 
-    const std::string& resolve_camera_id_locked() {
+    QHYCameraInfo resolve_camera() {
+        std::unique_lock<std::mutex> lock(mutex_);
         if (camera_index_.has_value() && !camera_id_.has_value()) {
+            const int index = camera_index_.value();
+            lock.unlock();
             auto cameras = sdk_.enumerate_cameras();
             if (cameras.empty()) {
                 throw AlpacaException("No QHY cameras detected", AlpacaError::NotConnected);
             }
-            int index = camera_index_.value();
             if (index < 0 || index >= static_cast<int>(cameras.size())) {
                 throw AlpacaException("Camera index out of range: " + std::to_string(index),
                                       AlpacaError::InvalidValue);
@@ -2211,31 +2312,31 @@ private:
             const auto& info = cameras[static_cast<std::size_t>(index)];
             ALPACA_LOG_INFO("QHY", "Resolved camera index " + std::to_string(index) +
                             " → ID: " + info.camera_id);
-            camera_id_ = info.camera_id;
-            if (info.model.empty() == false) {
-                camera_info_.model = info.model;
-            }
+            return info;
         }
         if (!camera_id_.has_value()) {
             throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
         }
-        return camera_id_.value();
+        QHYCameraInfo info{};
+        info.camera_id = camera_id_.value();
+        info.model = camera_info_.model;
+        return info;
     }
 
-    void load_readout_modes_locked(const std::string& id) {
-        readout_modes_.clear();
+    std::vector<std::string> load_readout_modes(const std::string& id) {
+        std::vector<std::string> modes;
         try {
             uint32_t num = sdk_.get_num_readout_modes(id);
             for (uint32_t i = 0; i < num; ++i) {
-                readout_modes_.push_back(sdk_.get_readout_mode_name(id, i));
+                modes.push_back(sdk_.get_readout_mode_name(id, i));
             }
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG("QHY", "Readout mode enumeration failed: " + std::string(e.what()));
         }
-        if (readout_modes_.empty()) {
-            readout_modes_.push_back("Normal");
+        if (modes.empty()) {
+            modes.push_back("Normal");
         }
-        readout_mode_ = 0;
+        return modes;
     }
 
     void reset_exposure_state_locked() {
@@ -2319,6 +2420,8 @@ private:
     }
 
     void stop_all_threads() {
+        // Function-scoped: release before the destructor calls set_connected_impl.
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         // Do not hold mutex_ across join: temp and telemetry threads acquire
         // mutex_ in their loops; joining while holding it would deadlock.
         // The cooler-off worker takes mutex_ and joins the temp thread, so it
@@ -2349,11 +2452,12 @@ private:
         }
         // Wake a worker parked in GetQHYCCDSingleFrame before joining, or the
         // join blocks for the whole remaining exposure (driver-lifecycle.instructions.md abort rule).
-        if (exposure_thread_.joinable()) {
+        if (exposure_thread_running_ && exposure_thread_running_->load()) {
             std::string cancel_id;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 cancel_id = camera_id_.value_or("");
+                exposure_thread_superseded_->store(true);
             }
             if (!cancel_id.empty()) {
                 try {
@@ -2368,11 +2472,17 @@ private:
 
     // Start temp control thread. Call without holding mutex_ so the HTTP thread
     // does not block ~10s (new thread would otherwise contend for mutex_).
-    void start_temp_control_thread() {
+    void start_temp_control_thread(uint64_t generation) {
         // Serialise concurrent starters: without this, two callers could both
         // pass the joinable() pre-check and the loser would destroy a joinable
         // std::thread (std::terminate). Lock order: thread_start_mutex_ -> mutex_.
         std::lock_guard<std::mutex> start_lock(thread_start_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load() || disconnecting_ || !cooler_on_ || generation != connection_generation_) {
+                return;
+            }
+        }
         if (!reap_stopped_worker(temp_thread_, temp_thread_stop_, temp_thread_running_, "temp-control")) {
             return;  // a live generation already owns the worker
         }
@@ -2380,6 +2490,9 @@ private:
         std::shared_ptr<WorkerStopSignal> stop_flag;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load() || disconnecting_ || !cooler_on_ || generation != connection_generation_) {
+                return;
+            }
             // Fresh flag per generation, not a store(false) reset of the
             // shared member: a prior generation's timed-out-and-detached
             // zombie (join_temp_thread) keeps its own captured copy of the
@@ -2405,7 +2518,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             temp_thread_running_ = running_flag;
         }
-        std::thread t([this, id, stop_flag, running_flag, sdk = &sdk_]() {
+        std::thread t([this, id, generation, stop_flag, running_flag, sdk = &sdk_]() {
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
@@ -2415,8 +2528,13 @@ private:
                 bool exposing = false;
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
+                    if (stop_flag->stopped() || !connected_.load() || disconnecting_ ||
+                        generation != connection_generation_) {
+                        break;
+                    }
                     target = target_temp_;
-                    exposing = (exposure_status_ == QHYExposureStatus::Working);
+                    exposing = exposure_status_ == QHYExposureStatus::Working || mode_change_active_.load() ||
+                               exposure_thread_running_->load();
                 }
                 // Skip this cycle's SDK call while a frame is downloading:
                 // ControlQHYCCDTemp and the exposure worker's
@@ -2493,16 +2611,16 @@ private:
         join_worker_thread(t, running_flag, "temp-control");
     }
 
-    // Called only from set_connected_impl while holding mutex_. Starts thread
-    // without holding lock for thread construction to avoid blocking.
-    void start_temp_control_thread_locked() {
-        start_temp_control_thread();
-    }
-
     // Start telemetry thread. Call without holding mutex_ to avoid blocking.
-    void start_telemetry_thread() {
+    void start_telemetry_thread(uint64_t generation) {
         // Same double-start guard as start_temp_control_thread.
         std::lock_guard<std::mutex> start_lock(thread_start_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load() || disconnecting_ || generation != connection_generation_) {
+                return;
+            }
+        }
         if (!reap_stopped_worker(telemetry_thread_, telemetry_thread_stop_, telemetry_thread_running_, "telemetry")) {
             return;  // a live generation already owns the worker
         }
@@ -2511,6 +2629,9 @@ private:
         std::shared_ptr<std::atomic<bool>> running_flag;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load() || disconnecting_ || generation != connection_generation_) {
+                return;
+            }
             // Fresh signal per generation, not a reset of the old one: a
             // previous generation's timed-out-and-detached zombie keeps its
             // own copy, and resetting in place would un-stop it (same
@@ -2532,7 +2653,7 @@ private:
             running_flag->store(false);
             return;
         }
-        std::thread t([this, id, stop_flag, running_flag, sdk_ptr = &sdk_]() {
+        std::thread t([this, id, generation, stop_flag, running_flag, sdk_ptr = &sdk_]() {
             // Clears on every exit path, so the bounded join below can tell a
             // finished worker from one that needs detaching.
             struct RunningGuard {
@@ -2541,29 +2662,19 @@ private:
             } running_guard{running_flag};
             auto& sdk = *sdk_ptr;
             while (!stop_flag->stopped()) {
-                bool connected = connected_.load();
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
-                    if (!connected || !camera_info_valid_ || !camera_info_.has_cooler) {
-                        telemetry_temp_valid_ = false;
-                        telemetry_temp_unsupported_ = false;
-                        telemetry_power_valid_ = false;
+                    if (stop_flag->stopped() || !connected_.load() || disconnecting_ ||
+                        generation != connection_generation_) {
+                        break;
                     }
-                }
-
-                if (!connected) {
-                    // open-astro#323: all three of this loop's waits are
-                    // interruptible, not just the tail one -- a disconnect
-                    // arriving while the worker is parked in ANY of them must
-                    // wake it.
-                    stop_flag->wait_for(std::chrono::seconds(1));
-                    continue;
                 }
 
                 bool exposing = false;
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
-                    exposing = (exposure_status_ == QHYExposureStatus::Working);
+                    exposing = exposure_status_ == QHYExposureStatus::Working || mode_change_active_.load() ||
+                               exposure_thread_running_->load();
                 }
                 if (exposing) {
                     // Skip this cycle: see the matching comment in
@@ -2602,6 +2713,12 @@ private:
                 }
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
+                    // The atomic stop flag can change while acquiring the state lock.
+                    // cppcheck-suppress identicalConditionAfterEarlyExit
+                    if (stop_flag->stopped() || !connected_.load() || disconnecting_ ||
+                        generation != connection_generation_) {
+                        break;
+                    }
                     if (have_temp) {
                         telemetry_ccd_temp_c_ = temp_c;
                         telemetry_temp_valid_ = true;
@@ -2694,22 +2811,15 @@ private:
         if (bin_x <= 0 || bin_y <= 0) {
             throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
         }
-        // Hold mutex_ across the whole check + SDK apply, like every other
-        // setter (see set_gain): a check/release/write gap would let a racing
-        // start_exposure begin integration against half-applied binning. The
-        // old "don't hold mutex_ across SDK calls, control_temp holds the SDK
-        // mutex ~10s" rationale is stale — control_temp snapshots the handle
-        // and releases the wrapper mutex before its blocking PID call, so
-        // these are all fast register writes with brief wrapper-mutex holds.
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Check for a live exposure BEFORE the bin query: bin_is_supported() is an
-        // SDK call that waits on the per-handle call mutex the exposure worker
-        // holds for the whole frame, and mutex_ is held here, so asking first
-        // blocked CameraState, AbortExposure and Disconnect behind the frame.
+        check_configuration_write();
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
+        ensure_connected();
         ensure_not_exposing_locked();
         const std::string id = camera_id_.value_or("");
         const int max_w = static_cast<int>(camera_info_.max_width) / bin_x;
         const int max_h = static_cast<int>(camera_info_.max_height) / bin_y;
+        lock.unlock();
         if (!bin_is_supported(sdk_, id, bin_x)) {
             throw AlpacaException("Bin value not supported: " + std::to_string(bin_x),
                                   AlpacaError::InvalidValue);
@@ -2721,6 +2831,8 @@ private:
             ALPACA_LOG_WARN("QHY", "Failed to apply binning: " + std::string(e.what()));
             return;
         }
+        lock.lock();
+        ensure_connected();
         bin_x_ = bin_x;
         bin_y_ = bin_y;
         num_x_ = max_w;
@@ -2735,15 +2847,21 @@ private:
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
         ensure_connected();
+        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
+            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
+        }
+        check_configuration_write();
         // Do not bounds-check against sensor dimensions here: ConformU "Reject Bad XSize/YSize"
         // tests require that the setter accepts out-of-range values and that StartExposure
         // rejects them. Just store the value; start_exposure validates before calling the SDK.
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
         if (width <= 0 || height <= 0) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         ensure_not_exposing_locked();
         num_x_ = width;
         num_y_ = height;
@@ -2751,15 +2869,21 @@ private:
 
     void set_start_pos_locked(std::optional<int> start_x_opt, std::optional<int> start_y_opt) {
         ensure_connected();
+        if ((start_x_opt && *start_x_opt < 0) || (start_y_opt && *start_y_opt < 0)) {
+            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
+        }
+        check_configuration_write();
         // Do not bounds-check start+ROI against sensor dimensions here: ConformU
         // "Reject Bad XStart/YStart" tests require the setter to accept the value and
         // StartExposure to reject it. Just store; start_exposure validates before the SDK call.
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         const int start_x = start_x_opt.value_or(start_x_);
         const int start_y = start_y_opt.value_or(start_y_);
         if (start_x < 0 || start_y < 0) {
             throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         ensure_not_exposing_locked();
         start_x_ = start_x;
         start_y_ = start_y;

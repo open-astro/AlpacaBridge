@@ -44,11 +44,29 @@ TEST_CASE("QHY camera - concurrent connect/disconnect/exposure stress", "[qhy][c
                                             alpacacore::AlpacaError::InvalidOperation};
     alpacacore::test::run_lifecycle_stress(*camera, [&guard](alpacacore::AlpacaDriver& device) {
         auto& cam = static_cast<alpacacore::CameraDriver&>(device);
+        guard([&] { static_cast<void>(cam.get_name()); });
+        guard([&] { static_cast<void>(cam.get_camera_x_size()); });
+        guard([&] { static_cast<void>(cam.get_camera_y_size()); });
+        guard([&] { static_cast<void>(cam.get_pixel_size_x()); });
+        guard([&] { static_cast<void>(cam.get_pixel_size_y()); });
+        guard([&] { static_cast<void>(cam.get_readout_modes()); });
         guard([&] { static_cast<void>(cam.get_camera_state()); });
         guard([&] { static_cast<void>(cam.get_image_ready()); });
         guard([&] { static_cast<void>(cam.get_last_exposure_duration()); });
         guard([&] { static_cast<void>(cam.get_last_exposure_start_time()); });
         guard([&] { static_cast<void>(cam.get_image_array()); });
+        // Valid values only: InvalidOperation is a live exposure or a competing
+        // configuration transition, not a reason to admit arbitrary SDK failures.
+        guard([&] { cam.set_readout_mode(1); });
+        guard([&] { cam.set_readout_mode(0); });
+        guard([&] { cam.set_gain(42); });
+        guard([&] { cam.set_offset(17); });
+        guard([&] { cam.set_bin_x(2); });
+        guard([&] { cam.set_bin_y(1); });
+        guard([&] { cam.set_num_x(32); });
+        guard([&] { cam.set_num_y(24); });
+        guard([&] { cam.set_start_x(0); });
+        guard([&] { cam.set_start_y(0); });
         guard([&] { cam.start_exposure(0.001, true); });
         guard([&] { cam.abort_exposure(); });
     });
