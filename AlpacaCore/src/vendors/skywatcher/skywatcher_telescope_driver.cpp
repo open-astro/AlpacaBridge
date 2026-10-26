@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -266,10 +267,11 @@ class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::
     // Decision 0016: getters never wait on device I/O. Two locks, in this order:
     //   transition_mutex_ -> io_mutex_ (the operation lock) -> mutex_ (the state lock, a leaf)
     // io_mutex_ keeps one command's exchanges and state writes together, as mutex_ alone did before: every
-    // member that reaches the wire holds it for the whole command and releases it wherever it released
-    // mutex_ (a sleep, a wait). mutex_ is never held ACROSS an exchange: every call through Wire drops it
-    // for the call and takes it back after. A getter takes mutex_ alone, so it waits at most for the
-    // few state writes between two exchanges. The wrapper's own per-link lock serialises the wire itself.
+    // command that reaches the wire holds it for the whole command and releases it wherever it released
+    // mutex_ (a sleep, a wait); the status poll's sample holds neither lock (see Wire). mutex_ is never held
+    // ACROSS an exchange: every call through Wire drops it for the call and takes it back after. A getter
+    // takes mutex_ alone, so it waits at most for the few state writes between two exchanges. The wrapper's
+    // own per-link lock serialises the wire itself.
     //
     // Which locks this thread holds is recorded per driver in a thread-local table, so Wire, called from
     // helpers that were handed no lock object, knows whether to drop mutex_ (and which lock to re-take).
@@ -298,6 +300,7 @@ class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::
             // lock, so an exchange would hold it. Never expected; say so rather than stall silently.
             ALPACA_LOG_ERROR("SkyWatcher",
                              "Lock table full on this thread; the state lock stays held across exchanges");
+            assert(false && "SkyWatcher lock table full on this thread");  // debug and test builds only
         }
         return nullptr;
     }
@@ -311,7 +314,7 @@ public:
     // The driver's state lock, with the operation lock above it in Mode::Io. unique_lock-shaped: lock(),
     // unlock() (releases both) and owns_lock() mean what they meant when this was a unique_lock on mutex_,
     // so a release point (a sleep, a join) still lets every other command in. Mode::State is for members
-    // that touch no wire: a getter, the poll's publish.
+    // that touch no wire: the getters, the set_connected() link probe, restart_duty_worker_if_armed().
     class StateLock {
     public:
         enum class Mode : std::uint8_t { State, Io };
@@ -386,6 +389,11 @@ private:
             if (held == nullptr || !held->state) {
                 return f(*driver_.protocol_);
             }
+            // Dropping mutex_ is only safe under the operation lock: without it a second command could
+            // interleave with this exchange. Every caller that holds mutex_ without io_mutex_ is Mode::State
+            // (the getters, the set_connected() link probe, restart_duty_worker_if_armed()), and none of them
+            // reaches the wire.
+            assert(held->io && "Wire::call dropped mutex_ on a thread that does not hold io_mutex_");
             held->state = false;
             driver_.mutex_.unlock();
             struct Restore {
@@ -657,9 +665,9 @@ public:
             // disconnected device.
             ALPACA_LOG_WARN("SkyWatcher", "Connect requested on a lost link; reconnecting");
             session_open_.store(false);
-            protocol.disconnect();
             snapshot_.reset();
-            connected_ = false;
+            connected_ = false;  // before the close: a getter during it reads NotConnected (decision 0016)
+            protocol.disconnect();
             reset_runtime_state_locked();
         }
         if (!connected && record_disconnect_if_connect_in_flight(connected_)) {
@@ -806,8 +814,8 @@ public:
                 adopt_surviving_motion_locked(entry_status);
             } catch (const AlpacaException& e) {
                 session_open_.store(false);
+                connected_ = false;  // before the close, as in the disconnect branch below
                 protocol.disconnect();
-                connected_ = false;
                 reset_runtime_state_locked();
                 if (connection_info_.type == ConnectionType::Serial) {
                     throw AlpacaException(std::string("The Sky-Watcher mount on ") + connection_info_.port_path +
@@ -818,8 +826,8 @@ public:
                 throw;
             } catch (...) {
                 session_open_.store(false);
+                connected_ = false;  // before the close, as in the disconnect branch below
                 protocol.disconnect();
-                connected_ = false;
                 reset_runtime_state_locked();
                 throw;
             }
@@ -840,8 +848,13 @@ public:
                 // Best effort; status polling still reports the true state.
             }
             session_open_.store(false);
-            protocol.disconnect();
+            // Decision 0016, item 4: connected_ goes false under mutex_ BEFORE the close, which runs through
+            // Wire with mutex_ released; a getter during the close reads NotConnected, not a closing link.
             connected_ = false;
+            protocol.call([this](auto& p) {
+                run_disconnect_before_close_hook();
+                p.disconnect();
+            });
             // Identity (model/firmware) is left as last known-good: a clean
             // disconnect doesn't change what mount this is, and clearing it
             // here made the web UI / configureddevices listing revert to a
@@ -1070,6 +1083,12 @@ public:
         StateLock lock(*this, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
+        // Kept as a write under the state lock, not moved into the poll's publish (#1600): the settle
+        // writes only tracking_, tracking_stop_unconfirmed_ and restore_tracking_after_slew_, all guarded
+        // by mutex_, which this getter holds, and reads the published snapshot, so it touches no wire and
+        // needs no io_mutex_. It settles only while its stop still owns RA (motion_generation_,
+        // axis_busy_locked() and restoring_tracking_ checks inside). Settling here keeps Tracking exact
+        // at the read; a settle in the publish would leave it true until the next poll.
         settle_unconfirmed_tracking_stop_locked();
         return tracking_;
     }
@@ -3973,6 +3992,18 @@ private:
         }
     }
 
+    // Test seam: runs in a clean disconnect's close window, with mutex_ released, before the close.
+    void run_disconnect_before_close_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = disconnect_before_close_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     // Test seam: called between a poll's sample and its publish, with no lock
     // held, so a case can land a client write in that window.
     void run_status_poll_after_sample_hook() {
@@ -6341,6 +6372,11 @@ public:
         rate_verify_before_start_hook_ = std::move(hook);
     }
 
+    void set_disconnect_before_close_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        disconnect_before_close_hook_ = std::move(hook);
+    }
+
 private:
     // Per-axis (open-astro#620): a pulse on one axis must never cancel or
     // join the other axis's pulse body -- ASCOM allows RA and Dec PulseGuide
@@ -6399,7 +6435,10 @@ private:
     util::TaskClock& clock_;
     // Decision 0016: see the lock-order comment at the top of the class. Both are mutable: a const helper
     // that reaches the wire (Wire::call) takes and drops them.
-    std::mutex transition_mutex_;  // set_connected() against set_connected(); no getter takes it
+    // set_connected() against set_connected(); no getter takes it. set_connected() runs cancel_async_tasks()
+    // under it, which joins task threads. That is safe only while no task body calls set_connected():
+    // such a body would wait on this mutex for the thread that is joining it.
+    std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
     // Lock-free (decision 0016 rule 3): Connected reads it without a lock. Written under mutex_.
@@ -6626,6 +6665,7 @@ private:
     std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
     std::function<void()> rate_verify_before_start_hook_;
+    std::function<void()> disconnect_before_close_hook_;
     util::OperationGeneration status_poll_generation_;
     util::AsyncOperation status_poll_{"SkyWatcher status poll", status_poll_generation_, clock_};
 
@@ -6804,6 +6844,12 @@ void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std:
 void set_rate_verify_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_rate_verify_before_start_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_disconnect_before_close_hook_for_testing(std::move(hook));
     }
 }
 

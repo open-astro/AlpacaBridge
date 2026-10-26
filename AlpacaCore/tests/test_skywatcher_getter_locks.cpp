@@ -233,6 +233,48 @@ TEST_CASE("SkyWatcher getters - a connect on the wire holds up no getter and rea
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher getters - a getter during a clean disconnect's close reads as not connected",
+          "[skywatcher][getter-locks]") {
+    // Decision 0016, item 4: a disconnect clears Connected under the state lock before the close, which runs with
+    // that lock released. A getter on another thread in that window answers NotConnected; it never serves the
+    // session that is being closed.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->get_right_ascension());
+
+    bool hook_ran = false;
+    bool connected_in_close = true;
+    int ra_error = 0;
+    int slewing_error = 0;
+    auto error_of = [&](const std::function<void()>& read) {
+        try {
+            read();
+        } catch (const alpacacore::AlpacaException& e) {
+            return e.error_code();
+        }
+        return 0;
+    };
+    sw::set_disconnect_before_close_hook_for_testing(*driver, [&] {
+        hook_ran = true;
+        std::thread reader([&] {
+            connected_in_close = driver->get_connected();
+            ra_error = error_of([&] { (void)driver->get_right_ascension(); });
+            slewing_error = error_of([&] { (void)driver->get_slewing(); });
+        });
+        reader.join();
+    });
+    driver->set_connected(false);
+    sw::set_disconnect_before_close_hook_for_testing(*driver, nullptr);
+
+    REQUIRE(hook_ran);
+    CHECK_FALSE(connected_in_close);
+    CHECK(ra_error == alpacacore::AlpacaError::NotConnected);
+    CHECK(slewing_error == alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+}
+
 TEST_CASE("SkyWatcher getters - SiderealTime and UTCDate read one client-clock state while it is written",
           "[skywatcher][getter-locks][stress-guard]") {
     struct ProbeGuard {

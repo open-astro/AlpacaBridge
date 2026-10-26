@@ -38,7 +38,7 @@ The how-to and its history stay in the [driver lifecycle instructions](../../.gi
 
 - Reviewers check each driver PR in the #295 series against the Rules above; until a family converts, its `mutex_` use is a defect with an issue, not an exception.
 - Each slice is one driver family. A getter that must reach the device (a live read) still takes the I/O lock and waits; the rule covers members that need no device access.
-- No Adoption table yet: the roster is the slice list on #295, and a table would have to match the code as it is now, where no family has converted.
+- No Adoption table yet: the roster is the slice list on #295, and a table would have to be updated in every slice as each family converts.
 
 ## How to reverse
 
