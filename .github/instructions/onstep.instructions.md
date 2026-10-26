@@ -556,8 +556,8 @@ it is never reachable through `router.cpp` or the web UI.
   bare mount, ConformU 4.5.3 (build 56334), 2026-10-25: 0 errors, 0 warnings, 0 issues, all members
   within their timing targets (`AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`; its
   earlier 4.5.2-rc.1 run was clean too).
-  Earlier runs that day also had slow first FAST reads (see the notes above; one came from
-  `get_side_of_pier()`'s live position round trip, since fixed), which is why they are documented
-  even though the saved log is clean of them. The HM-17 report is the OnStep ConformU validation.
+  Older ConformU 4.5.0 runs had slow first FAST reads (see the notes above; one came from
+  `get_side_of_pier()`'s live position round trip, since fixed), which is why they are documented.
+  The HM-17 report is the OnStep ConformU validation.
   See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`
   and `SUPPORTED-DRIVERS.md`.
