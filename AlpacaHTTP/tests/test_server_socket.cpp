@@ -353,8 +353,9 @@ public:
     // lets a test hold this call in flight past the watchdog interval, to
     // prove the client's own request never gets aborted out from under it.
     std::atomic<int> slew_sleep_ms{0};
-    // The router refuses the synchronous forms (#775), so the stub holds the
-    // async initiator in flight instead; the guard under test is the same.
+    // The router serves the synchronous forms through the async initiators
+    // (#1660), so the stub holds the async initiator in flight; the guard
+    // under test is the same.
     void slew_to_coordinates(double, double) override {}
     void slew_to_coordinates_async(double, double) override {
         const int ms = slew_sleep_ms.load();

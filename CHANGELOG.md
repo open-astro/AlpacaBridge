@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [5.0.0] - 2026-10-21
+## [5.0.1] - 2026-10-26
+
+### Fixed
+- **Telescope `CanSlew` reads the driver's value again, and `SlewToCoordinates` and `SlewToTarget` are served** (issue #1660, AlpacaHTTP): 5.0.0 hard-coded `CanSlew` false and refused both calls (issue #775), which stopped NINA manual control and TPPA from slewing. `CanSlew` now returns the driver's value (`test_routing.cpp`, "telescope synchronous slews follow the driver's CanSlew"). For a mount that can slew, the two calls start the async slew and wait up to 90 s for `Slewing` to clear; at the limit they answer a `DriverException` that says the slew continues and to poll `Slewing`, and the slew is not aborted. A mount that cannot slew still gets `MethodNotImplemented` (0x400) before any parse or driver call. `CanSlewAltAz` stays false and `SlewToAltAz` stays refused. This corrects the #775 entry in Breaking changes of 5.0.0 and its release notes, which say `CanSlew` reads false.
+
+<details>
+<summary><strong>[5.0.0] - 2026-10-21</strong></summary>
 
 ### Breaking changes
 - **A serial port can belong to one device only** (AlpacaCore, issue #1202): two devices configured on the same serial port used to both report connected while they fought over the line; the second connect is now refused and the message names the device that holds the port. Another program (a GPS scanner, ModemManager, a terminal) can no longer open a port AlpacaBridge holds. If you relied on either, give each device its own port, or stop the other program while AlpacaBridge is connected.
@@ -280,6 +286,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **The `Falsified by:` gate no longer reports a false "no marker" error for a new hand-rolled block inserted directly before another one** (CI, `scripts/check_falsified_by.py`, issue #993). Git can slide such an insertion so the added `    {` is the next block's opener; the gate now judges each top-level block by its body in the file at HEAD: an added `// case:` first line names a case (also when a later body line is unchanged, as when a block is split), and a block with no marker is an error only when every body line was added. Editing the top of an existing block is not a new block. `--self-test` case "slid block: real case name collected, no false marker error" fails on the old code with the false error and passes now.
 - **The `Falsified by` gate keys base test cases by file** (`scripts/check_falsified_by.py`, issue #1292): a new case named like a case that stays in another file is now reported as new; a case cut from one file and added to another is still a moved case. Covered by the scratch-repo self-test.
 - **The contract-sweep gate checks each catalog file's vendor** (`scripts/check_contract_sweep.py`, issue #1292): a `DeviceKey` vendor id that differs from the file's directory fails with `CATALOG VENDOR MISMATCH`, and a file with no `DeviceKey` literal fails with `CATALOG VENDOR UNVERIFIED`, so the `ORPHAN ENTRY` exemption cannot go to the wrong vendor.
+
+</details>
 
 <details>
 <summary><strong>[4.2.0] - 2026-09-30</strong></summary>

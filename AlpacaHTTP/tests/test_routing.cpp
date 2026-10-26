@@ -524,7 +524,10 @@ public:
     void set_site_latitude(double) override {}
     double get_site_longitude() const override { return 0.0; }
     void set_site_longitude(double) override {}
-    bool get_slewing() const override { return false; }
+    // Slewing reads true for slewing_polls_left calls, then false (the router's
+    // bounded wait for the synchronous slew forms polls it).
+    mutable std::atomic<int> slewing_polls_left{0};
+    bool get_slewing() const override { return slewing_polls_left.fetch_sub(1) > 0; }
     double get_target_declination() const override { return 0.0; }
     void set_target_declination(double) override { ++sync_slew_calls; }
     double get_target_right_ascension() const override { return 0.0; }
@@ -536,14 +539,15 @@ public:
     void park() override {}
     void pulse_guide(int, int) override {}
     void set_park() override {}
-    // #775: the driver says it can slew synchronously; the router must not
-    // let a client reach these three.
+    // #1660: the router serves the synchronous forms through the async calls
+    // when the driver says it can slew; it never calls the blocking ones.
     bool can_slew_flags = false;
     int sync_slew_calls = 0;
     void slew_to_coordinates(double, double) override { ++sync_slew_calls; }
-    void slew_to_coordinates_async(double, double) override {}
+    void slew_to_coordinates_async(double, double) override { ++async_slew_calls; }
     void slew_to_target() override { ++sync_slew_calls; }
-    void slew_to_target_async() override {}
+    void slew_to_target_async() override { ++async_slew_calls; }
+    int async_slew_calls = 0;
     void sync_to_coordinates(double, double) override {}
     void sync_to_target() override {}
     void unpark() override {}
@@ -1476,34 +1480,64 @@ int main() {
     }
 
     {
-        // case: telescope synchronous slews are MethodNotImplemented (#775)
-        // ASCOM's slew FAQ: a synchronous slew blocks past the client's
-        // timeout, so CanSlew and CanSlewAltAz read false for every telescope
-        // and the three synchronous slew calls raise 0x400 before any
-        // parameter parse, target write or driver call. Async forms stay.
+        // case: telescope synchronous slews follow the driver's CanSlew (#775, #1660)
+        // CanSlew reports the driver's value; SlewToCoordinates and
+        // SlewToTarget are refused 0x400 before any parse, target write or
+        // driver call when the driver cannot slew, and served through the
+        // async calls with a bounded wait otherwise. AltAz stays refused.
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto scope = std::make_shared<TelescopeClockStubDriver>(9775);
-        scope->can_slew_flags = true;
         EXPECT(registry.register_device(scope));
         const std::string base = "/api/v1/telescope/9775";
-        for (const char* getter : {"/canslew", "/canslewaltaz"}) {
-            const auto resp = route_request(router, "GET", base + getter);
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+        const auto value_of = [&](const std::string& path) {
+            const auto json = nlohmann::json::parse(route_request(router, "GET", base + path).body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
-            EXPECT(json.contains("Value") && json["Value"].is_boolean() && json["Value"].get<bool>() == false);
+            return json["Value"].get<bool>();
+        };
+        const auto error_of = [&](const std::string& path) {
+            const auto json = nlohmann::json::parse(route_request(router, "PUT", base + path).body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            return json.value("ErrorNumber", -1);
+        };
+        // Driver cannot slew: CanSlew false, both forms refused untouched.
+        EXPECT(!value_of("/canslew"));
+        for (const char* path :
+             {"/slewtocoordinates?RightAscension=5&Declination=10", "/slewtotarget", "/slewtocoordinates"}) {
+            EXPECT(error_of(path) == 0x400);
         }
-        for (const char* path : {"/slewtocoordinates?RightAscension=5&Declination=10", "/slewtotarget",
-                                 "/slewtoaltaz?Altitude=45&Azimuth=90", "/slewtocoordinates"}) {
-            const auto resp = route_request(router, "PUT", base + path);
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x400);
-        }
-        EXPECT(scope->sync_slew_calls == 0);
+        EXPECT(scope->sync_slew_calls == 0 && scope->async_slew_calls == 0);
+        // Driver can slew: CanSlew true, forms served via the async calls,
+        // returning once Slewing clears (here after 3 polls).
+        scope->can_slew_flags = true;
+        EXPECT(value_of("/canslew"));
+        scope->slewing_polls_left = 3;
+        EXPECT(error_of("/slewtocoordinates?RightAscension=5&Declination=10") == 0);
+        EXPECT(scope->async_slew_calls == 1 && scope->slewing_polls_left.load() < 0);
+        EXPECT(error_of("/slewtotarget") == 0);
+        EXPECT(scope->async_slew_calls == 2 && scope->sync_slew_calls == 0);  // the blocking slews are never called
+        // Missing parameter still fails the same way as the async form (#1476: 400, text/plain).
+        const auto missing = route_request(router, "PUT", base + "/slewtocoordinates");
+        const auto missing_async = route_request(router, "PUT", base + "/slewtocoordinatesasync");
+        EXPECT(missing.status_code() == 400 && missing.status_code() == missing_async.status_code());
+        EXPECT(missing.body() == missing_async.body());
+        EXPECT(scope->async_slew_calls == 2);
+        // Timeout: the slew keeps running, the call fails naming the limit.
+        router.set_sync_slew_wait_limit(std::chrono::milliseconds(100));
+        scope->slewing_polls_left = 1000000;
+        const auto timed_out =
+            nlohmann::json::parse(route_request(router, "PUT", base + "/slewtotarget").body(), nullptr, false);
+        EXPECT(!timed_out.is_discarded() && timed_out.value("ErrorNumber", 0) == 0x500);
+        EXPECT(timed_out.value("ErrorMessage", "").find("poll Slewing") != std::string::npos);
+        router.set_sync_slew_wait_limit(std::chrono::milliseconds(90000));
+        scope->slewing_polls_left = 0;
+        // AltAz is unchanged: false and MethodNotImplemented.
+        EXPECT(!value_of("/canslewaltaz"));
+        const int before = scope->sync_slew_calls;
+        EXPECT(error_of("/slewtoaltaz?Altitude=45&Azimuth=90") == 0x400);
+        EXPECT(scope->sync_slew_calls == before);
         for (const char* path : {"/slewtocoordinatesasync?RightAscension=5&Declination=10", "/slewtotargetasync",
                                  "/slewtoaltazasync?Altitude=45&Azimuth=90"}) {
-            const auto resp = route_request(router, "PUT", base + path);
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            EXPECT(error_of(path) == 0);
         }
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9775);
     }

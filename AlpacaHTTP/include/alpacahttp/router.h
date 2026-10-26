@@ -162,6 +162,16 @@ public:
         return std::chrono::milliseconds(connect_wait_limit_ms_.load(std::memory_order_relaxed));
     }
 
+    // open-astro#1660: how long PUT SlewToCoordinates / SlewToTarget wait for
+    // Slewing to clear. Kept under 100 s, the ASCOM Alpaca client's long-call
+    // timeout, so the client sees our answer and not its own timeout.
+    void set_sync_slew_wait_limit(std::chrono::milliseconds limit) {
+        sync_slew_wait_limit_ms_.store(limit.count(), std::memory_order_relaxed);
+    }
+    std::chrono::milliseconds sync_slew_wait_limit() const {
+        return std::chrono::milliseconds(sync_slew_wait_limit_ms_.load(std::memory_order_relaxed));
+    }
+
     // open-astro#392: extra names route() accepts as a request's Host, on
     // top of the built-in ones (IP literals, localhost, this machine's name,
     // *.local, *.home.arpa, *.internal). An entry with a leading dot is a
@@ -236,6 +246,7 @@ private:
 
     // open-astro#776.
     std::atomic<std::chrono::milliseconds::rep> connect_wait_limit_ms_{60000};
+    std::atomic<std::chrono::milliseconds::rep> sync_slew_wait_limit_ms_{90000};
 
     // Lazily constructed on first /management/v1/wifi/* request so setups
     // without NetworkManager (or without a wifi adapter) pay no cost.

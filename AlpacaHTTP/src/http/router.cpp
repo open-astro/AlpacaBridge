@@ -883,6 +883,34 @@ std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
     return reason.empty() ? std::string("Connection failed") : reason;
 }
 
+// open-astro#1660: SlewToCoordinates and SlewToTarget are served by starting
+// the async slew and waiting here, so a driver that cannot slew is refused
+// before anything is parsed or written.
+void require_can_slew(const alpacacore::TelescopeDriver& telescope) {
+    if (!telescope.get_can_slew()) {
+        throw alpacacore::AlpacaException("This mount cannot slew; CanSlew is false",
+                                          alpacacore::AlpacaError::MethodNotImplemented);
+    }
+}
+
+// Waits while Slewing is true, up to limit (Router::sync_slew_wait_limit(),
+// 90 s: under the 100 s long-call timeout of ASCOM Alpaca clients, so they
+// read this error and not their own timeout). On expiry the slew is NOT
+// aborted. An exception from get_slewing() propagates as is.
+void wait_for_slew_end(const alpacacore::TelescopeDriver& telescope, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (telescope.get_slewing()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw alpacacore::AlpacaException(
+                "The slew was still running after " +
+                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(limit).count()) +
+                    " s; it continues, poll Slewing for its end",
+                alpacacore::AlpacaError::DriverException);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 // open-astro#711: libstdc++ std::regex recurses once per repeated character,
 // so a long path segment overflowed the worker stack and killed the server.
 // route() refuses anything longer before a regex sees it. The longest valid
@@ -2982,7 +3010,7 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 return call.ok(telescope->get_can_pulse_guide());
             }
             else if (method_name == "canslew") {
-                return call.ok(false);  // #775: synchronous slews are not served
+                return call.ok(telescope->get_can_slew());  // #1660: the driver's value again
             }
             else if (method_name == "canslewasync") {
                 return call.ok(telescope->get_can_slew_async());
@@ -3420,20 +3448,24 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 return call.ok_void();
             }
             else if (method_name == "slewtotarget") {
-                // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
-                // any parameter parse, target write or driver call.
-                throw alpacacore::AlpacaException("Synchronous slews are not implemented; use the async form",
-                                                  alpacacore::AlpacaError::MethodNotImplemented);
+                // #1660: refused untouched when the driver cannot slew; else the
+                // async initiator, then a bounded wait for Slewing to clear.
+                require_can_slew(*telescope);
+                telescope->slew_to_target_async();
+                wait_for_slew_end(*telescope, sync_slew_wait_limit());
+                return call.ok_void();
             }
             else if (method_name == "slewtotargetasync") {
                 telescope->slew_to_target_async();
                 return call.ok_void();
             }
             else if (method_name == "slewtocoordinates") {
-                // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
-                // any parameter parse, target write or driver call.
-                throw alpacacore::AlpacaException("Synchronous slews are not implemented; use the async form",
-                                                  alpacacore::AlpacaError::MethodNotImplemented);
+                require_can_slew(*telescope);
+                double ra = call.get_double("RightAscension");
+                double dec = call.get_double("Declination");
+                telescope->slew_to_coordinates_async(ra, dec);
+                wait_for_slew_end(*telescope, sync_slew_wait_limit());
+                return call.ok_void();
             }
             else if (method_name == "slewtocoordinatesasync") {
                 double ra = call.get_double("RightAscension");
