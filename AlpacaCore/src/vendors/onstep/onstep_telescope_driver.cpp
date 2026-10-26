@@ -78,6 +78,8 @@ constexpr int kMaxPulseGuideMs = 9999;
 constexpr int kCeSlewInMotion = 22;
 constexpr int kCeTrue = 25;
 constexpr int kCeNotParked = 11;
+constexpr int kCeParked = 9;       // "already parked" (OnStep 4.x answers a park of a parked mount with it)
+constexpr int kCeSlewInPark = 18;  // "mount parked" (OnStep 4.x answers a home of a parked mount with it)
 
 std::string describe_onstepx_error(int code) {
     switch (code) {
@@ -717,11 +719,13 @@ public:
         // scale this decision operates on — so reuse whatever is already
         // cached and only force a live fetch if a position has never been
         // read at all (e.g. immediately after connect), or while the link
-        // fault is latched (no cache is served then, #1414).
-        ensure_site_info_cached_locked();
+        // fault is latched (no cache is served then, #1414). The position comes
+        // first: a reply to it clears a latched fault, so a site the connect
+        // could not read is then fetched instead of throwing the fault.
         if (!equatorial_cache_valid_ || link_health_.faulted()) {
             refresh_equatorial_cache_locked();  // faulted: never the cache (decision 0009 rule 1, #1414)
         }
+        ensure_site_info_cached_locked();
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         const double hour_angle = util::shortest_ra_delta_hours(lst, cached_ra_hours_);
         return util::pier_side_for_hour_angle(hour_angle);
@@ -964,6 +968,7 @@ public:
         check_not_parked_locked("FindHome");
         refresh_status_cache_locked(true);
         if (cached_status_.is_at_home || cached_status_.is_homing) {
+            park_home_error_.reset();  // a new command: an earlier body's refusal is not this call's
             return;  // there, or on its way
         }
         start_park_or_home_locked(lock, "FindHome", true);
@@ -975,6 +980,7 @@ public:
         refuse_while_faulted_locked("Park");
         refresh_status_cache_locked(true);
         if (cached_status_.is_parked || cached_status_.is_parking) {
+            park_home_error_.reset();  // a new command: an earlier body's refusal is not this call's
             return;  // ASCOM: Park() on an already-parked mount is a no-op; one already parking too.
         }
         start_park_or_home_locked(lock, "Park", false);
@@ -1002,6 +1008,7 @@ public:
         // is_pulse_guiding() just compares against the known end time.
         OnStepProtocolWrapper::instance().pulse_guide(direction, duration);
         pulse_guiding_active_ = true;
+        pulse_guide_axis_ = direction >= 2 ? 0 : 1;  // East/West is axis 0, North/South axis 1
         pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(duration);
         equatorial_cache_valid_ = false;
     }
@@ -1085,7 +1092,7 @@ public:
         protocol.set_target_dec(dec);
         const std::string reply = protocol.sync_to_target();
         if (reply.size() >= 2 && reply[0] == 'E' && std::isdigit(static_cast<unsigned char>(reply[1]))) {
-            throw digit_refused(who, "sync", ":CM#", reply[1], reply);
+            throw digit_refused(who, RefusedCommand::Sync, reply[1], reply);
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -1155,6 +1162,11 @@ public:
             const std::string stop_error = stop_axis_locked(axis);
             if (!stop_error.empty()) {
                 throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
+            }
+            // :Qe#/:Qw# and :Qn#/:Qs# end every guide on that axis, a pulse
+            // guide included (OnStepX Guide.command.cpp stopAxis1/stopAxis2).
+            if (pulse_guide_axis_ == axis) {
+                pulse_guiding_active_ = false;
             }
         }
         std::uint64_t generation = 0;
@@ -1316,6 +1328,7 @@ public:
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         clear_manual_motion_locked();
+        pulse_guiding_active_ = false;  // :Q# ends every guide, a pulse guide included (Guide::stop())
         status_cache_valid_ = false;
         // ASCOM: after AbortSlew, tracking returns to its state before the
         // slew. Decide now instead of at a later slew end the driver may never
@@ -1610,9 +1623,15 @@ private:
         const std::uint64_t claim = park_home_claim_;
         const bool stopped = stop_motion_before_park_or_home_locked(who);
         int code = -1;
-        if (!stopped && try_park_or_home_locked(who, home, code)) {
-            finish_park_or_home_locked(home);
-            return;
+        if (!stopped) {
+            const ParkHomeTry tried = try_park_or_home_locked(who, home, code);
+            if (tried == ParkHomeTry::Taken) {
+                finish_park_or_home_locked(home);
+                return;
+            }
+            if (tried == ParkHomeTry::AlreadyParked) {
+                return;
+            }
         }
         // Decision 0006 rule 3: claimed under mutex_ before the unlock, so a
         // newer motion command in the gap before start() still ends this one,
@@ -1683,25 +1702,36 @@ private:
     // refusal a retry may change sets `code` (22 "in motion", or -1 for a
     // park on firmware without :GE#, whose reason is unknown) and returns
     // false; any other refusal throws InvalidOperation. Without a code a
-    // home counts as started, as before.
-    bool try_park_or_home_locked(const char* who, bool home, int& code) {
+    // home counts as started, as before. A park the mount answers "already
+    // parked" (9) is ASCOM's no-op and a home it answers "mount parked" (18)
+    // is InvalidWhileParked, as when the status cache shows it parked: OnStep
+    // 4.x (Park.ino park(), Home.ino goHome()) gives them when the cache was stale.
+    enum class ParkHomeTry : std::uint8_t { Taken, AlreadyParked, Retry };
+    ParkHomeTry try_park_or_home_locked(const char* who, bool home, int& code) {
         auto& protocol = OnStepProtocolWrapper::instance();
         if (home) {
             protocol.find_home();
             code = last_command_error_locked(who).value_or(kCeNone);
         } else {
             if (protocol.park()) {
-                return true;
+                return ParkHomeTry::Taken;
             }
             code = last_command_error_locked(who).value_or(-1);
         }
         if (code == kCeNone || code == kCeTrue) {
-            return true;  // for a park: the reply was lost or garbled, but the mount took it
+            return ParkHomeTry::Taken;  // for a park: the reply was lost or garbled, but the mount took it
+        }
+        if (!home && code == kCeParked) {
+            refresh_status_cache_locked(true);  // AtPark reads the mount's parked state
+            return ParkHomeTry::AlreadyParked;
+        }
+        if (home && code == kCeSlewInPark) {
+            throw AlpacaException(std::string(who) + " is not allowed while parked", AlpacaError::InvalidWhileParked);
         }
         if (code != kCeSlewInMotion && !(code < 0 && !home)) {
             throw mount_refused(who, code);
         }
-        return false;
+        return ParkHomeTry::Retry;
     }
 
     // :GE# with no code is firmware without it, or a mount that stopped
@@ -1827,8 +1857,12 @@ private:
                     }
                 }
                 try_now = false;
-                if (try_park_or_home_locked(who, home, code)) {
+                const ParkHomeTry tried = try_park_or_home_locked(who, home, code);
+                if (tried == ParkHomeTry::Taken) {
                     finish_park_or_home_locked(home);
+                    return;
+                }
+                if (tried == ParkHomeTry::AlreadyParked) {
                     return;
                 }
             }
@@ -1960,6 +1994,9 @@ private:
     // new one (Goto.cpp request(): CE_SLEW_IN_SLEW -> abort(), :MS# reply 5), so the
     // driver refuses first and leaves it running (#1379): its own GOTO (also in the
     // grace before :GU# shows it), a park or home already moving, or a handset GOTO.
+    // A home with home sensors runs as a guide move, not a GOTO (:GU# shows 'h',
+    // not the missing 'N'): it is refused too, or the slew would end the waiting
+    // FindHome and the mount would answer "already moving" (reply 8).
     void refuse_while_goto_running_locked(const char* who) const {
         bool running = clock_.now() < slew_force_until_;
         if (!running) {
@@ -1970,17 +2007,24 @@ private:
             throw AlpacaException(std::string(who) + " is not allowed while a GOTO is running",
                                   AlpacaError::InvalidOperation);
         }
+        if (cached_status_.is_homing) {
+            throw AlpacaException(std::string(who) + " is not allowed while the mount is homing",
+                                  AlpacaError::InvalidOperation);
+        }
     }
 
     // The :MS# refusal digit (OnStepX Goto.command.cpp) as the error the client sees (#1379).
     static AlpacaException slew_refused(const char* who, const std::string& reply) {
-        return digit_refused(who, "GOTO", ":MS#", reply.empty() ? '?' : reply[0], reply);
+        return digit_refused(who, RefusedCommand::Goto, reply.empty() ? '?' : reply[0], reply);
     }
 
     // The :MS# digits, also behind the E of a :CM# refusal (OnStep Command.ino).
-    static AlpacaException digit_refused(const char* who, const char* what, const char* command, char code,
-                                         const std::string& reply) {
-        const bool is_goto = std::string(what) == "GOTO";
+    enum class RefusedCommand : std::uint8_t { Goto, Sync };  // :MS# and :CM#
+
+    static AlpacaException digit_refused(const char* who, RefusedCommand refused, char code, const std::string& reply) {
+        const bool is_goto = refused == RefusedCommand::Goto;
+        const char* what = is_goto ? "GOTO" : "sync";
+        const char* command = is_goto ? ":MS#" : ":CM#";
         const char* why = "an unknown reason";
         switch (code) {
             case '1':
@@ -2199,9 +2243,15 @@ private:
         lose_link_if_stale_locked(now);
         if (link_health_.faulted()) {
             faulted_read_failed_at_ = now;  // the back-off window starts (#1626)
-            throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
-                                  AlpacaError::DriverException);
+            throw_fault_locked();
         }
+    }
+
+    // The latched fault as every faulted read reports it (decision 0009 rule 1),
+    // one text for all of them (#1658 review).
+    [[noreturn]] void throw_fault_locked() const {
+        throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
+                              AlpacaError::DriverException);
     }
 
     // #1626: inside kFaultedReadBackoff of a faulted read that failed, throw the
@@ -2216,8 +2266,7 @@ private:
             return;  // ask the mount again
         }
         lose_link_if_stale_locked(now);
-        throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
-                              AlpacaError::DriverException);
+        throw_fault_locked();
     }
 
     // A read that found the link gone is reported even when a cache is valid,
@@ -2340,6 +2389,14 @@ private:
             return;
         }
         auto now = clock_.now();
+        // A site the connect could not read is fetched again here; while the
+        // link fault is latched that fetch would wait out the reply timeout
+        // under mutex_ and swallow the failure, so throw the fault as the
+        // status and position reads do (decision 0009 rule 1; #1658 review).
+        if (link_health_.faulted()) {
+            lose_link_if_stale_locked(now);
+            throw_fault_locked();
+        }
         if (last_site_info_attempt_ != std::chrono::steady_clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
             return;
@@ -2495,6 +2552,7 @@ private:
     bool sync_time_on_connect_;
 
     mutable bool pulse_guiding_active_ = false;
+    int pulse_guide_axis_ = -1;  // the axis of the last pulse guide (0 East/West, 1 North/South)
     mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
 
     // Decision 0009 fault latch for a silent mount (#1414). Under mutex_.

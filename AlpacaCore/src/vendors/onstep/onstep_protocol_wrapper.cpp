@@ -1035,6 +1035,9 @@ public:
             throw AlpacaException("Invalid OnStep local time response");
         }
         double hours = time_val.value();
+        if (hours < 0.0 || hours >= 24.0) {
+            throw AlpacaException("Invalid OnStep local time response");  // e.g. "25:00:00" (#1626 follow-up)
+        }
         info.hour = static_cast<int>(hours);
         double rem_min = (hours - info.hour) * 60.0;
         info.minute = static_cast<int>(rem_min);
@@ -1047,7 +1050,10 @@ public:
         int mm = 0;
         int dd = 0;
         int yy = -1;
-        if (std::sscanf(date_resp.c_str(), "%d/%d/%d", &mm, &dd, &yy) != 3 || yy < 0 || yy > 99 || mm < 1 || dd < 1 ||
+        // The 1..12 and 1..31 bounds come first: std::chrono::month and day keep
+        // only 0..255, so 257 would wrap and pass the calendar check.
+        if (std::sscanf(date_resp.c_str(), "%d/%d/%d", &mm, &dd, &yy) != 3 || yy < 0 || yy > 99 || mm < 1 || mm > 12 ||
+            dd < 1 || dd > 31 ||
             !std::chrono::year_month_day{std::chrono::year{2000 + yy}, std::chrono::month{static_cast<unsigned>(mm)},
                                          std::chrono::day{static_cast<unsigned>(dd)}}
                  .ok()) {  // a real calendar date: 13/40 and 02/31 are refused too
@@ -1431,6 +1437,9 @@ private:
     util::TaskClock& clock() const { return *clock_.load(); }
 
     // The last-alive and loss stamps, as no loss and no alive time (#1460).
+    // link_lost_ is kept on purpose: the driver times an outage from the
+    // stamps, not the flag, so a link still lost after a clock change relinks
+    // with no outage stamp and stops nothing; only tests change the clock.
     void forget_clock_stamps() {
         last_alive_ns_ = 0;
         {

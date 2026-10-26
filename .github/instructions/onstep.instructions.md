@@ -118,7 +118,9 @@ it is never reachable through `router.cpp` or the web UI.
 - **Pulse guiding is hardware-timed**: OnStep supports native duration-bearing guide commands
   (`:Mgn####`/`:Mgs####`/`:Mge####`/`:Mgw####`, 4-digit zero-padded milliseconds) — fire-and-forget,
   the mount stops the pulse itself. `IsPulseGuiding` is tracked from the known requested
-  duration, not polled from the mount. Unlike SynScan (no native pulse guide), this driver does
+  duration, not polled from the mount, and ends early on a stop that ends the pulse: `AbortSlew`
+  (`:Q#` ends every guide, OnStepX `Guide::stop()`) and a `MoveAxis(axis, 0)` on the pulse's axis
+  (`:Qe#`/`:Qw#` or `:Qn#`/`:Qs#` end that axis's guides). Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread. A `Duration` over 9999 ms does not fit the 4-digit field
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
   checked before the connected, link-fault and parked checks, as are `SyncToCoordinates`' and
@@ -322,6 +324,11 @@ it is never reachable through `router.cpp` or the web UI.
   communications compromised" while `Connected` stays true and `get_link_fault()` reads "Mount not
   answering (...)"; while faulted no status or position cache is served (not inside the 2 s
   window, not `SideOfPier`): a read asks the mount, and one good reply clears the fault (INFO).
+  A site the connect could not read is not fetched again while faulted: `SiteLatitude`,
+  `SiteLongitude`, `SiderealTime` and `DestinationSideOfPier` throw the fault instead (#1659;
+  `DestinationSideOfPier` used to answer from a default site after the timeout). `SideOfPier`
+  reads the position first, so it still asks the mount, and a good reply clears the fault and
+  lets the site be fetched.
   Within 2 s (`kFaultedReadBackoff`) of a read that failed while faulted, the reads throw the
   fault without asking, so a faulted `DeviceState` costs one reply timeout instead of one per
   getter (#1626). A read that finds the link lost (`NotConnected`) throws it even while a cache is
@@ -361,7 +368,10 @@ it is never reachable through `router.cpp` or the web UI.
   `InvalidOperation` ("<member> is not allowed while a GOTO is running") before it cancels or sends
   anything while `:GU#` shows a GOTO, the driver's own within the 2 s slew grace included
   (`refuse_while_goto_running_locked()`). That covers a park or home already moving and a handset GOTO
-  too, which the second `:MS#` would also have stopped. `AbortSlew` ends the grace and the status cache,
+  too, which the second `:MS#` would also have stopped. A home with home sensors runs as a guide
+  move, not a GOTO (`:GU#` shows `h` with `N`), so it is refused separately ("<member> is not allowed
+  while the mount is homing"), the syncs included: before, the slew ended the waiting `FindHome` and
+  the mount refused it as already moving (reply `8`). `AbortSlew` ends the grace and the status cache,
   so the next slew asks the mount; it goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
   GOTO state while it brakes after `:Q#` (HM-17 2026-10-24: about 1.6 s), and a slew in that time
   is refused, as the firmware would refuse it (reply `5`). A `:MS#` the mount refuses reports its reply digit and reason (the digits are
@@ -408,7 +418,10 @@ it is never reachable through `router.cpp` or the web UI.
   - **On a still mount** the call sends `:hP#` (reads its bare `1`/`0`) or `:hC#` (no reply), then
     `:GE#` right after a refused `:hP#` and after every `:hC#` (any later command replaces the code;
     checked on the HM-17: `22` during braking, `25` after an accepted park, `00` after an accepted
-    home), and returns; a refusal a retry cannot change (no park position set, outside limits)
+    home), and returns. A park answered `9` (already parked) is ASCOM's no-op and a home answered
+    `18` (mount parked) is `InvalidWhileParked`, as when the status cache shows the mount parked:
+    OnStep 4.x gives them (`Park.ino` `park()`, `Home.ino` `goHome()`) when the cache was stale;
+    OnStepX takes a park of a parked mount as done (`Park::request()`); a refusal a retry cannot change (no park position set, outside limits)
     throws `InvalidOperation` with the reason from the call (HM-17: 0.15 s).
   - **When the mount moves** (the driver's `MoveAxis` flags, or `:GU#` showing `g`, `G`, a GOTO or
     `h`) the call sends AbortSlew's stops and returns (a stop that cannot be sent throws
@@ -418,7 +431,8 @@ it is never reachable through `router.cpp` or the web UI.
   - **Code 22 is retried** every 200 ms for 3 s in that task, also when the first try on a still mount
     met it. A refusal the task meets is kept and raised by `Slewing`, and by `AtPark` (a park's) or
     `AtHome` (a home's), until the next motion command (`MoveAxis`, `AbortSlew`, a GOTO, `Unpark`,
-    `Park`, `FindHome`) or a reconnect clears it; those also end a task still running, without
+    `Park`, `FindHome`; a `Park` or `FindHome` that is a no-op because the mount is already parked,
+    parking, home or homing clears it too) or a reconnect clears it; those also end a task still running, without
     sending anything (the shared rule "A failed async operation body keeps its error"). A GOTO
     does so only when it is sent: a slew is refused while `:GU#` shows a GOTO (#1379), which covers
     the braking after the stops of a GOTO the park interrupted and the park itself once it moves,
@@ -514,7 +528,9 @@ it is never reachable through `router.cpp` or the web UI.
   member's exchange until #1449). `:GG#` is the hours to add to local time to get UTC (OnStepX
   `Site.command.cpp`), so UTC is local time plus the offset (#1626; it read minus, which only shows
   on a mount whose offset was set elsewhere, since AlpacaBridge writes 0). A date or offset reply
-  that does not parse fails the read instead of storing 2000-01-01 or offset 0 (#1626). If that read fails, `UTCDate` throws `InvalidOperation` with
+  that does not parse fails the read instead of storing 2000-01-01 or offset 0 (#1626), as does a
+  local time outside 0-24 h or a month or day outside 1-12 and 1-31 (checked before the calendar
+  check, since `std::chrono::month` and `day` keep only 0-255). If that read fails, `UTCDate` throws `InvalidOperation` with
   the reason, with no further read, until a `UTCDate` write or the next connect. The LST
   computations still fall back to the host clock, without storing it. `SiteElevation` throws
   `InvalidOperation` until the device config or a client sets it: the protocol has no elevation

@@ -381,13 +381,19 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
     std::atomic<bool> clock_answers{false};
     std::atomic<bool> clock_silent{false};  // :GL# gets no reply: the read times out (#1626)
     std::atomic<int> clock_reads{0};
-    std::atomic<int> date_reply{0};    // 0 valid, 1 garbled, 2 out of range, 3 not a calendar date (#1626)
+    // 0 valid, 1 garbled, 2 out of range, 3 not a calendar date (#1626), 4 a month past 255 (wraps in
+    // std::chrono::month), 5 a three-digit year (2100-01-01 is a calendar date)
+    std::atomic<int> date_reply{0};
+    std::atomic<bool> hour_out_of_range{false};  // :GL# "25:00:00#"
     std::atomic<int> offset_reply{0};  // 0 "+00", 1 "+05:00" (EST), 2 garbled (#1626)
     alpacacore::test::FakeMountServer server([&](const std::string& chunk) {
         if (chunk.rfind(":GL", 0) == 0) {
             ++clock_reads;
             if (clock_silent) {
                 return std::string();
+            }
+            if (hour_out_of_range) {
+                return std::string("25:00:00#");
             }
             return clock_answers ? std::string("10:20:30#") : std::string("x#");
         }
@@ -399,6 +405,10 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
                     return std::string("13/40/26#");
                 case 3:
                     return std::string("02/31/26#");
+                case 4:
+                    return std::string("257/01/26#");
+                case 5:
+                    return std::string("01/01/100#");
                 default:
                     return std::string("xx#");
             }
@@ -483,7 +493,7 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
     // (2000-01-01, offset 0) to be stored as the mount clock.
     SECTION("a garbled :GC# or :GG# reply is an unreadable clock, not a wrong one") {
         clock_answers = true;
-        for (const int reply : {1, 2, 3}) {  // garbled, out of range, 31 February
+        for (const int reply : {1, 2, 3, 4, 5}) {  // garbled, out of range, 31 February, month 257, year 100
             INFO("date reply " << reply);
             date_reply = reply;
             REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
@@ -492,6 +502,11 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
         }
         date_reply = 0;
         offset_reply = 2;
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        driver->set_connected(false);
+        offset_reply = 0;
+        hour_out_of_range = true;  // a local time of 25:00:00
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
         require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
     }
@@ -1246,6 +1261,7 @@ TEST_CASE("OnStep Telescope Driver - a refused re-send stops nothing after an Ab
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(std::string(ex.what()).find("MoveAxis could not keep") == std::string::npos);
     }
+    REQUIRE(abort.joinable());  // the spawn hook ran: a regression fails here, not in join()
     abort.join();
     REQUIRE(fake.logged(":Qe#", 1));
     CHECK_FALSE(fake.logged(":Qe#", 2, std::chrono::milliseconds(200)));  // the AbortSlew's stop only
@@ -1782,6 +1798,7 @@ struct ParkHomeFake {
         if (chunk.rfind(":hP", 0) == 0) {
             park_tries.push_back(clock.now());
             last_error = refusal_locked();
+            if (last_error == 9) parked = true;  // "already parked": the mount is parked
             if (last_error != 0) return "0";
             last_error = park_zero_ok ? 0 : 25;
             parked = true;
@@ -2246,11 +2263,11 @@ TEST_CASE("OnStep Telescope Driver - Park reports a stop it could not send", "[o
 }
 
 // #1430: each OnStepX refusal code reads as its reason (COMMAND_REFERENCE.md,
-// "Command Error Codes"), and an unknown one as its number.
+// "Command Error Codes"), and an unknown one as its number. 9 ("already
+// parked") is a no-op instead (next case).
 TEST_CASE("OnStep Telescope Driver - Park names every OnStepX refusal code", "[onstep][telescope][unit]") {
     const auto [code, reason] = GENERATE(table<int, std::string>({
         {8, "not parked or at home"},
-        {9, "already parked"},
         {10, "park failed"},
         {11, "not parked"},
         {12, "no park position set"},
@@ -2278,6 +2295,165 @@ TEST_CASE("OnStep Telescope Driver - Park names every OnStepX refusal code", "[o
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
         CHECK(std::string(ex.what()).find("(" + reason + ")") != std::string::npos);
+    }
+    driver->set_connected(false);
+}
+
+// A Park that stops a running GOTO leaves the mount braking for a moment
+// (OnStepX keeps the GOTO state about 1.6 s after :Q# on the HM-17). A slew
+// sent then is refused as "GOTO running", as any slew during a GOTO is
+// (#1379), and the Park goes on: the slew does not supersede it.
+TEST_CASE(
+    "OnStep Telescope Driver - a slew while a Park still brakes the GOTO it stopped is refused and the Park "
+    "goes on",
+    "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(2.0, 10.0));  // the fake runs the GOTO
+    const auto waits_before = mount->clock.wait_count();
+    REQUIRE_NOTHROW(driver->park());  // stops the GOTO; the body waits for the mount to settle
+    try {
+        driver->slew_to_coordinates_async(3.0, 20.0);
+        FAIL("a slew went out while the stopped GOTO still braked");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(std::string(ex.what()) == "SlewToCoordinatesAsync is not allowed while a GOTO is running");
+    }
+    CHECK(mount->count(":MS#") == 1);  // only the first GOTO
+    settle(*mount, *driver, waits_before);
+    CHECK(mount->count(":hP#") >= 1);  // the Park still went out
+    CHECK(driver->get_at_park());
+    driver->set_connected(false);
+}
+
+// OnStep 4.x answers a park of a parked mount with 9 ("already parked",
+// Park.ino park()) and a home of one with 18 ("mount parked", Home.ino
+// goHome() -> validateGoto()); the driver meets them when its status cache
+// still read the mount unparked. ASCOM: Park on a parked mount is a no-op,
+// and FindHome while parked is InvalidWhileParked.
+TEST_CASE(
+    "OnStep Telescope Driver - a park answered already parked is a no-op and a home answered parked is "
+    "InvalidWhileParked",
+    "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    SECTION("Park answered 9") {
+        mount->refuse_code = 9;
+        REQUIRE_NOTHROW(on_clock(*mount, *driver, [&] { driver->park(); }));
+        CHECK(mount->count(":hP#") == 1);  // no retry
+        CHECK(driver->get_at_park());
+        CHECK_FALSE(driver->get_slewing());
+    }
+    SECTION("FindHome answered 18") {
+        mount->refuse_code = 18;
+        try {
+            driver->find_home();
+            FAIL("FindHome succeeded on a parked mount");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
+        }
+    }
+    driver->set_connected(false);
+}
+
+// A no-op Park or FindHome is a new command: it drops the refusal an earlier
+// body kept, as any other new command does (the shared async rule), so
+// Slewing no longer raises it.
+TEST_CASE("OnStep Telescope Driver - a no-op Park or FindHome drops an earlier body's kept refusal",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    start_move(*driver, *mount, 0, 1.0);  // so the park runs in the body
+    mount->refuse_code = 21;              // the body's try is refused: hardware fault
+    CHECK_THROWS_AS(on_clock(*mount, *driver, [&] { driver->park(); }), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);  // the kept refusal
+
+    SECTION("the mount was parked meanwhile, then Park") {
+        {
+            std::lock_guard<std::mutex> lock(mount->mutex);
+            mount->parked = true;  // the handset parked it
+        }
+        mount->clock.advance(std::chrono::milliseconds(2100));  // past the status cache
+        REQUIRE_NOTHROW(driver->park());
+    }
+    SECTION("the mount was homed meanwhile, then FindHome") {
+        {
+            std::lock_guard<std::mutex> lock(mount->mutex);
+            mount->homing = true;  // on its way home
+        }
+        mount->clock.advance(std::chrono::milliseconds(2100));
+        REQUIRE_NOTHROW(driver->find_home());
+    }
+    CHECK_NOTHROW((void)driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// A home with home sensors runs as a guide move (:GU# 'h' with 'N'), not a
+// GOTO, so the GOTO-running check missed it: a slew went out, ended the
+// waiting FindHome and met the mount's "already moving" (8).
+TEST_CASE("OnStep Telescope Driver - a slew or sync while the mount homes is refused", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        mount->homing = true;
+    }
+    mount->clock.advance(std::chrono::milliseconds(2100));  // past the status cache
+    const auto stops_before = mount->count(":Q");
+    const auto require_refused = [](const std::function<void()>& fn, const std::string& who) {
+        try {
+            fn();
+            FAIL(who + " went out while the mount homes");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(std::string(ex.what()) == who + " is not allowed while the mount is homing");
+        }
+    };
+    require_refused([&] { driver->slew_to_coordinates_async(2.0, 10.0); }, "SlewToCoordinatesAsync");
+    require_refused([&] { driver->sync_to_coordinates(2.0, 10.0); }, "SyncToCoordinates");
+    CHECK(mount->count(":MS#") == 0);
+    CHECK(mount->count(":CM#") == 0);
+    CHECK(mount->count(":Q") == stops_before);  // the home was not stopped
+    driver->set_connected(false);
+}
+
+// OnStepX :Q# ends every guide (Guide::stop()) and :Qe#/:Qw#, :Qn#/:Qs# end
+// the guides on one axis, a pulse guide included; IsPulseGuiding read true
+// until the pulse's own end time after them.
+TEST_CASE("OnStep Telescope Driver - AbortSlew and a MoveAxis stop on its axis end IsPulseGuiding",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    driver->pulse_guide(0, 5000);  // North: axis 1
+    REQUIRE(driver->get_is_pulse_guiding());
+
+    SECTION("AbortSlew") {
+        driver->abort_slew();
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+    }
+    SECTION("MoveAxis(1, 0)") {
+        driver->move_axis(1, 0.0);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+    }
+    SECTION("MoveAxis(0, 0) leaves a North pulse") {
+        driver->move_axis(0, 0.0);
+        CHECK(driver->get_is_pulse_guiding());
     }
     driver->set_connected(false);
 }
@@ -2899,9 +3075,10 @@ TEST_CASE("OnStep Telescope Driver - the firmware hook does not wait for the con
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     REQUIRE(gvp_asked);
-    // Releases the reply after 2 s, so a hook that waits still returns.
+    // Releases the reply after 1.2 s, past the 1 s bound below, so a hook that
+    // waits still returns and still fails the bound.
     std::thread releaser([&] {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
         release();
     });
     const auto t0 = std::chrono::steady_clock::now();
@@ -3281,6 +3458,15 @@ TEST_CASE("OnStep Telescope Driver - a slew while a GOTO runs is refused and the
         refused_and_left_running([&]() { driver->slew_to_target_async(); }, "SlewToTargetAsync");
         refused_and_left_running([&]() { driver->slew_to_coordinates(13.0, 40.0); }, "SlewToCoordinates");
         refused_and_left_running([&]() { driver->slew_to_target(); }, "SlewToTarget");
+        CHECK(driver->get_slewing());
+    }
+
+    SECTION("our own GOTO the mount shows, with Tracking off: the Alt/Az forms") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("npEW180#");  // slewing, not tracking: the Alt/Az check passes
+        observe_slewing(*driver, *mount, clock);
+        refused_and_left_running([&]() { driver->slew_to_alt_az_async(45.0, 180.0); }, "SlewToAltAzAsync");
+        refused_and_left_running([&]() { driver->slew_to_alt_az(45.0, 180.0); }, "SlewToAltAz");
         CHECK(driver->get_slewing());
     }
 
