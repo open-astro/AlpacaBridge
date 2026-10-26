@@ -851,7 +851,10 @@ public:
             // Decision 0016 rule 4: connected_ goes false under mutex_ BEFORE the close, which runs through
             // Wire with mutex_ released; a getter during the close reads NotConnected, not a closing link.
             connected_ = false;
-            protocol.disconnect();
+            protocol.call([this](auto& p) {
+                run_disconnect_before_close_hook();
+                p.disconnect();
+            });
             // Identity (model/firmware) is left as last known-good: a clean
             // disconnect doesn't change what mount this is, and clearing it
             // here made the web UI / configureddevices listing revert to a
@@ -3989,6 +3992,18 @@ private:
         }
     }
 
+    // Test seam: runs in a clean disconnect's close window, with mutex_ released, before the close.
+    void run_disconnect_before_close_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = disconnect_before_close_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     // Test seam: called between a poll's sample and its publish, with no lock
     // held, so a case can land a client write in that window.
     void run_status_poll_after_sample_hook() {
@@ -6357,6 +6372,11 @@ public:
         rate_verify_before_start_hook_ = std::move(hook);
     }
 
+    void set_disconnect_before_close_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        disconnect_before_close_hook_ = std::move(hook);
+    }
+
 private:
     // Per-axis (open-astro#620): a pulse on one axis must never cancel or
     // join the other axis's pulse body -- ASCOM allows RA and Dec PulseGuide
@@ -6645,6 +6665,7 @@ private:
     std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
     std::function<void()> rate_verify_before_start_hook_;
+    std::function<void()> disconnect_before_close_hook_;
     util::OperationGeneration status_poll_generation_;
     util::AsyncOperation status_poll_{"SkyWatcher status poll", status_poll_generation_, clock_};
 
@@ -6823,6 +6844,12 @@ void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std:
 void set_rate_verify_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_rate_verify_before_start_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_disconnect_before_close_hook_for_testing(std::move(hook));
     }
 }
 
