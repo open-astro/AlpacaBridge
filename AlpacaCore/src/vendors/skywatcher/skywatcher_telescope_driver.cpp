@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -298,6 +299,7 @@ class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::
             // lock, so an exchange would hold it. Never expected; say so rather than stall silently.
             ALPACA_LOG_ERROR("SkyWatcher",
                              "Lock table full on this thread; the state lock stays held across exchanges");
+            assert(false && "SkyWatcher lock table full on this thread");  // debug and test builds only
         }
         return nullptr;
     }
@@ -386,6 +388,10 @@ private:
             if (held == nullptr || !held->state) {
                 return f(*driver_.protocol_);
             }
+            // Dropping mutex_ is only safe under the operation lock: without it a second command could
+            // interleave with this exchange. Every locked caller is Mode::Io, except the getters, which
+            // reach no wire.
+            assert(held->io && "Wire::call dropped mutex_ on a thread that does not hold io_mutex_");
             held->state = false;
             driver_.mutex_.unlock();
             struct Restore {
@@ -657,9 +663,9 @@ public:
             // disconnected device.
             ALPACA_LOG_WARN("SkyWatcher", "Connect requested on a lost link; reconnecting");
             session_open_.store(false);
-            protocol.disconnect();
             snapshot_.reset();
-            connected_ = false;
+            connected_ = false;  // before the close: a getter during it reads NotConnected (decision 0016)
+            protocol.disconnect();
             reset_runtime_state_locked();
         }
         if (!connected && record_disconnect_if_connect_in_flight(connected_)) {
@@ -806,8 +812,8 @@ public:
                 adopt_surviving_motion_locked(entry_status);
             } catch (const AlpacaException& e) {
                 session_open_.store(false);
+                connected_ = false;  // before the close, as in the disconnect branch below
                 protocol.disconnect();
-                connected_ = false;
                 reset_runtime_state_locked();
                 if (connection_info_.type == ConnectionType::Serial) {
                     throw AlpacaException(std::string("The Sky-Watcher mount on ") + connection_info_.port_path +
@@ -818,8 +824,8 @@ public:
                 throw;
             } catch (...) {
                 session_open_.store(false);
+                connected_ = false;  // before the close, as in the disconnect branch below
                 protocol.disconnect();
-                connected_ = false;
                 reset_runtime_state_locked();
                 throw;
             }
@@ -840,8 +846,10 @@ public:
                 // Best effort; status polling still reports the true state.
             }
             session_open_.store(false);
-            protocol.disconnect();
+            // Decision 0016 rule 4: connected_ goes false under mutex_ BEFORE the close, which runs through
+            // Wire with mutex_ released; a getter during the close reads NotConnected, not a closing link.
             connected_ = false;
+            protocol.disconnect();
             // Identity (model/firmware) is left as last known-good: a clean
             // disconnect doesn't change what mount this is, and clearing it
             // here made the web UI / configureddevices listing revert to a
@@ -1070,6 +1078,12 @@ public:
         StateLock lock(*this, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
+        // Kept as a write under the state lock, not moved into the poll's publish (#1600): the settle
+        // writes only tracking_, tracking_stop_unconfirmed_ and restore_tracking_after_slew_, all guarded
+        // by mutex_, which this getter holds, and reads the published snapshot, so it touches no wire and
+        // needs no io_mutex_. It settles only while its stop still owns RA (motion_generation_,
+        // axis_busy_locked() and restoring_tracking_ checks inside). Settling here keeps Tracking exact
+        // at the read; a settle in the publish would leave it true until the next poll.
         settle_unconfirmed_tracking_stop_locked();
         return tracking_;
     }
@@ -6399,7 +6413,10 @@ private:
     util::TaskClock& clock_;
     // Decision 0016: see the lock-order comment at the top of the class. Both are mutable: a const helper
     // that reaches the wire (Wire::call) takes and drops them.
-    std::mutex transition_mutex_;  // set_connected() against set_connected(); no getter takes it
+    // set_connected() against set_connected(); no getter takes it. set_connected() runs cancel_async_tasks()
+    // under it, which joins task threads. That is safe only while no task body calls set_connected():
+    // such a body would wait on this mutex for the thread that is joining it.
+    std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
     // Lock-free (decision 0016 rule 3): Connected reads it without a lock. Written under mutex_.
