@@ -267,10 +267,11 @@ class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::
     // Decision 0016: getters never wait on device I/O. Two locks, in this order:
     //   transition_mutex_ -> io_mutex_ (the operation lock) -> mutex_ (the state lock, a leaf)
     // io_mutex_ keeps one command's exchanges and state writes together, as mutex_ alone did before: every
-    // member that reaches the wire holds it for the whole command and releases it wherever it released
-    // mutex_ (a sleep, a wait). mutex_ is never held ACROSS an exchange: every call through Wire drops it
-    // for the call and takes it back after. A getter takes mutex_ alone, so it waits at most for the
-    // few state writes between two exchanges. The wrapper's own per-link lock serialises the wire itself.
+    // command that reaches the wire holds it for the whole command and releases it wherever it released
+    // mutex_ (a sleep, a wait); the status poll's sample holds neither lock (see Wire). mutex_ is never held
+    // ACROSS an exchange: every call through Wire drops it for the call and takes it back after. A getter
+    // takes mutex_ alone, so it waits at most for the few state writes between two exchanges. The wrapper's
+    // own per-link lock serialises the wire itself.
     //
     // Which locks this thread holds is recorded per driver in a thread-local table, so Wire, called from
     // helpers that were handed no lock object, knows whether to drop mutex_ (and which lock to re-take).
@@ -313,7 +314,7 @@ public:
     // The driver's state lock, with the operation lock above it in Mode::Io. unique_lock-shaped: lock(),
     // unlock() (releases both) and owns_lock() mean what they meant when this was a unique_lock on mutex_,
     // so a release point (a sleep, a join) still lets every other command in. Mode::State is for members
-    // that touch no wire: a getter, the poll's publish.
+    // that touch no wire: the getters, the set_connected() link probe, restart_duty_worker_if_armed().
     class StateLock {
     public:
         enum class Mode : std::uint8_t { State, Io };
@@ -389,8 +390,9 @@ private:
                 return f(*driver_.protocol_);
             }
             // Dropping mutex_ is only safe under the operation lock: without it a second command could
-            // interleave with this exchange. Every locked caller is Mode::Io, except the getters, which
-            // reach no wire.
+            // interleave with this exchange. Every caller that holds mutex_ without io_mutex_ is Mode::State
+            // (the getters, the set_connected() link probe, restart_duty_worker_if_armed()), and none of them
+            // reaches the wire.
             assert(held->io && "Wire::call dropped mutex_ on a thread that does not hold io_mutex_");
             held->state = false;
             driver_.mutex_.unlock();
