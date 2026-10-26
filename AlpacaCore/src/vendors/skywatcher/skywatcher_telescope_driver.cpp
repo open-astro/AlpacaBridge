@@ -848,7 +848,7 @@ public:
                 // Best effort; status polling still reports the true state.
             }
             session_open_.store(false);
-            // Decision 0016 rule 4: connected_ goes false under mutex_ BEFORE the close, which runs through
+            // Decision 0016, item 4: connected_ goes false under mutex_ BEFORE the close, which runs through
             // Wire with mutex_ released; a getter during the close reads NotConnected, not a closing link.
             connected_ = false;
             protocol.call([this](auto& p) {

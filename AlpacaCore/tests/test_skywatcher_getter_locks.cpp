@@ -235,7 +235,7 @@ TEST_CASE("SkyWatcher getters - a connect on the wire holds up no getter and rea
 
 TEST_CASE("SkyWatcher getters - a getter during a clean disconnect's close reads as not connected",
           "[skywatcher][getter-locks]") {
-    // Decision 0016 rule 4: a disconnect clears Connected under the state lock before the close, which runs with
+    // Decision 0016, item 4: a disconnect clears Connected under the state lock before the close, which runs with
     // that lock released. A getter on another thread in that window answers NotConnected; it never serves the
     // session that is being closed.
     FakeSkyWatcherMount mount;
