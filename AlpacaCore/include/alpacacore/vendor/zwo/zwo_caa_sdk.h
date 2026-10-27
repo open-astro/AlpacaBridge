@@ -21,6 +21,8 @@ struct ZWOCAARotatorInfo {
     int rotator_id{};
     std::string name;
     double max_degree{};
+    // SDK enumeration slot, not the device ID; unknown for ID-only reads.
+    int slot_index{-1};
 };
 
 struct ZWOCAAMotionStatus {

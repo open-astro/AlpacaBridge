@@ -406,7 +406,7 @@ std::pair<std::string, std::string> late_then_next(Send&& send, const std::strin
 }
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
-// Falsified by: ioptron_protocol_wrapper.cpp read_response() without late_byte() on a timeout (the read times out at
+// Falsified by: ioptron_protocol_wrapper.cpp read_response() without spec.late_byte_grace (the read times out at
 // 300 ms and the late '#' answers "Next")
 TEST_CASE("iOptron mount - a '#' that arrives within one read slice after the timeout ends its own reply",
           "[ioptron][network][serial_read][issue1644]") {
@@ -478,7 +478,7 @@ TEST_CASE("iOptron mount - a TCP flush waits one read slice for each stale byte"
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
-// Falsified by: celestron_protocol_wrapper.cpp read_response() without late_byte() on a timeout (the read times out at
+// Falsified by: celestron_protocol_wrapper.cpp read_response() without spec.late_byte_grace (the read times out at
 // 300 ms and the late '#' answers "Next")
 TEST_CASE("Celestron mount - a '#' that arrives within one read slice after the timeout ends its own reply",
           "[celestron][network][serial_read][issue1644]") {
@@ -515,8 +515,8 @@ TEST_CASE("Celestron mount - a reply that starts after the timeout is still a ti
     wrapper.disconnect();
     CHECK(result.first.find("Timeout") != std::string::npos);
 }
-// Falsified by: celestron_protocol_wrapper.cpp read_response() taking one late_byte() in the binary phase (the second
-// payload byte is left in the line, the read times out and "Next" reads the 0x10)
+// Falsified by: celestron_protocol_wrapper.cpp read_response() without late_byte_grace on the binary read (the payload
+// is left in the line, the read times out and "Next" reads it)
 TEST_CASE("Celestron mount - a binary reply that starts after the timeout is read whole",
           "[celestron][network][serial_read][issue1644]") {
     alpacacore::test::FakeMountServer server(late_hash_reply);
@@ -550,7 +550,7 @@ TEST_CASE("Celestron mount - a binary reply that starts after the timeout is rea
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-// Falsified by: synscan_protocol_wrapper.cpp read_response() without late_byte() on a timeout (the read times out at
+// Falsified by: synscan_protocol_wrapper.cpp read_response() without spec.late_byte_grace (the read times out at
 // 300 ms and the late '#' answers "Next")
 TEST_CASE("SynScan mount - a '#' that arrives within one read slice after the timeout ends its own reply",
           "[synscan][network][serial_read][issue1644]") {
@@ -587,8 +587,8 @@ TEST_CASE("SynScan mount - a reply that starts after the timeout is still a time
     wrapper.disconnect();
     CHECK(result.first.find("Timeout") != std::string::npos);
 }
-// Falsified by: synscan_protocol_wrapper.cpp read_response() taking one late_byte() in the binary phase (seven payload
-// bytes are left in the line, the read times out and "Next" reads them)
+// Falsified by: synscan_protocol_wrapper.cpp read_response() without late_byte_grace on the binary read (the payload
+// is left in the line, the read times out and "Next" reads it)
 TEST_CASE("SynScan mount - a binary reply that starts after the timeout is read whole",
           "[synscan][network][serial_read][issue1644]") {
     alpacacore::test::FakeMountServer server(late_hash_reply);
@@ -798,7 +798,7 @@ TEST_CASE("OnStep mount - a read that does not require the '#' ends at the '#'",
     CHECK(took < std::chrono::seconds(1));
 }
 
-// Falsified by: onstep_protocol_wrapper.cpp read_response() without late_byte() on a timeout (the read times out at
+// Falsified by: onstep_protocol_wrapper.cpp read_response() without spec.late_byte_grace (the read times out at
 // 300 ms and the late '#' answers "Next")
 TEST_CASE("OnStep mount - a '#' that arrives within one read slice after the timeout ends its own reply",
           "[onstep][network][serial_read][issue1644]") {

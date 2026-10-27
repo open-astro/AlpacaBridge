@@ -283,7 +283,8 @@ it is never reachable through `router.cpp` or the web UI.
   [serial rule](serial-autodetect.instructions.md#serial--socket-io-always-use-the-shared-helpers-utilserial_ioh)):
   `read_response()` waits in `poll()` for the `#`, or for an unterminated ack the `#` or 100 ms of
   silence after its first byte, with no per-byte pacing sleep; when the timeout runs out the byte in
-  the next read slice still settles the reply (a late `#` ends it). The probe's `:GVP#`/`:GVN#`
+  the next read slice still settles the reply (a late `#` ends it; `ReadSpec::late_byte_grace` set to
+  `read_slice()`, whose TCP value is `kSocketTimeoutMs`, the socket's `SO_RCVTIMEO`). The probe's `:GVP#`/`:GVN#`
   reads and `drain_stale()` are `read_until` calls too. A hangup on the tty loses the link
   ("read failed: <errno text>", below), a read that ends on silence checks the node, and over the
   TCP test seam a hangup throws `DriverException` "OnStep network link lost (hangup): <errno text>"

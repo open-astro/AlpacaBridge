@@ -1,0 +1,7 @@
+### Changed
+
+- **The late-byte rule of the mount reply reads moves into `util::read_until`** (AlpacaCore `util/serial_read.h`, issue #1686): `ReadSpec` gains `late_byte_grace`. When a read times out, it waits that long for one more byte: a terminator ends the read (outcome `Terminator`), any other byte is kept and the read stays a `Timeout`, and in a `Length` read each byte within the grace of the last is kept, so a payload in flight is read whole. The Celestron NexStar, iOptron, SynScan and OnStep wrappers set it to their read slice and drop their own `late_byte()` copies; replies, timeouts, exception texts and link-loss handling are as before. Each wrapper names its TCP read slice `kSocketTimeoutMs`, the one constant its `SO_RCVTIMEO` setup uses too. Tests: seven `late_byte_grace` cases in `AlpacaCore/tests/test_serial_read.cpp`.
+
+### Fixed
+
+- **A serial read no longer spins through its last millisecond** (AlpacaCore `util/serial_link.h`, issue #1696): `tty_read()` and `tty_write_all()` rounded the time left down, so with under 1 ms left `poll()` got 0 and returned at once, and `read_until()` asked again in a busy loop (each pass a `poll()`, a `tcgetattr()` and the process-wide line-settings lock) on every timed-out or idle-gap read. The wait now rounds up through the one shared `detail::wait_ms_until()`, and the truncating `detail::remaining_ms()` is gone. Test: `Serial link - a 1 ms read on a silent line waits the whole millisecond` (`AlpacaCore/tests/test_serial_link.cpp`).

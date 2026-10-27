@@ -98,10 +98,13 @@ inline bool same_line_settings(const struct termios& a, const struct termios& b)
            a.c_cc[VTIME] == b.c_cc[VTIME];
 }
 
-inline int remaining_ms(std::chrono::steady_clock::time_point deadline) {
-    const auto left =
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-    return left > 0 ? static_cast<int>(left) : 0;
+/// Whole milliseconds left to @p t, rounded up, so a wait never ends early: a
+/// wait under 1 ms polls 1 ms, not 0 (a 0 returns at once and spins, #1696).
+/// 0 only once @p t has passed.
+inline int wait_ms_until(std::chrono::steady_clock::time_point t) {
+    const auto left = t - std::chrono::steady_clock::now();
+    if (left <= std::chrono::steady_clock::duration::zero()) return 0;
+    return static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(left).count());
 }
 
 }  // namespace detail
@@ -156,7 +159,7 @@ inline ssize_t tty_read(int fd, void* buf, std::size_t len, int timeout_ms) {
         struct pollfd pfd {};
         pfd.fd = fd;
         pfd.events = POLLIN;
-        const int pr = ::poll(&pfd, 1, detail::remaining_ms(deadline));
+        const int pr = ::poll(&pfd, 1, detail::wait_ms_until(deadline));
         if (pr < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -180,7 +183,7 @@ inline ssize_t tty_read(int fd, void* buf, std::size_t len, int timeout_ms) {
             return -1;
         }
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
-            if (detail::remaining_ms(deadline) == 0) return 0;
+            if (detail::wait_ms_until(deadline) == 0) return 0;
             continue;
         }
         return -1;
@@ -211,7 +214,7 @@ inline bool tty_write_all(int fd, const void* data, std::size_t len, int timeout
         }
         if (errno == EINTR) continue;
         if (errno != EAGAIN && errno != EWOULDBLOCK) return false;
-        const int left = detail::remaining_ms(deadline);
+        const int left = detail::wait_ms_until(deadline);
         if (left == 0) {
             errno = ETIMEDOUT;
             return false;

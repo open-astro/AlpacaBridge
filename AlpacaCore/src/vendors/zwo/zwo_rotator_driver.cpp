@@ -450,17 +450,17 @@ private:
                 throw AlpacaException("No ZWO CAA rotators detected", AlpacaError::NotConnected);
             }
             int index = rotator_index_.value();
-            if (index < 0 || index >= static_cast<int>(rotators.size())) {
-                ALPACA_LOG_WARN("ZWO", "CAA rotator index out of range: " + std::to_string(index) +
-                                         " (count=" + std::to_string(rotators.size()) + ")");
-                throw AlpacaException("Rotator index not found", AlpacaError::InvalidValue);
+            for (const auto& info : rotators) {
+                if (info.slot_index == index) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    rotator_id_ = info.rotator_id;
+                    rotator_info_ = info;
+                    rotator_info_valid_ = true;
+                    return info.rotator_id;
+                }
             }
-            const auto& info = rotators[static_cast<std::size_t>(index)];
-            std::lock_guard<std::mutex> lock(mutex_);
-            rotator_id_ = info.rotator_id;
-            rotator_info_ = info;
-            rotator_info_valid_ = true;
-            return info.rotator_id;
+            ALPACA_LOG_WARN("ZWO", "CAA rotator SDK slot not found: " + std::to_string(index));
+            throw AlpacaException("Rotator index not found", AlpacaError::InvalidValue);
         }
 
         std::lock_guard<std::mutex> lock(mutex_);

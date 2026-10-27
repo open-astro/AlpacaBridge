@@ -61,6 +61,10 @@ constexpr const char* kSerialOwner = "iOptron mount";
 // A mount reply never nears this; it caps a runaway line instead of growing a string forever.
 constexpr std::size_t kMaxReplyLen = 65536;
 
+// The TCP socket's receive and send timeout (SO_RCVTIMEO, SO_SNDTIMEO), and so
+// the read slice over TCP: the window of the old byte-at-a-time recv() loop.
+constexpr int kSocketTimeoutMs = 200;
+
 #ifndef _WIN32
 // 8N1 raw at @p speed. The mount reads through tty_read(), so VMIN/VTIME
 // are not set here (SerialLink keeps the fd non-blocking).
@@ -1494,26 +1498,10 @@ private:
     }
 
     // The read slice of the byte-at-a-time loop: 100 ms over serial, the
-    // socket's 200 ms SO_RCVTIMEO over TCP.
+    // socket's SO_RCVTIMEO (kSocketTimeoutMs) over TCP. A reply read waits this
+    // long past its timeout for the byte in flight (ReadSpec::late_byte_grace).
     std::chrono::milliseconds read_slice() const {
-        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
-    }
-
-    // The byte the line sends in the read slice after a reply's timeout ran
-    // out, or "" when it stays quiet. The byte-at-a-time loop checked the
-    // timeout after each byte and never after a '#', so the byte in flight when
-    // the timeout ran out settled the reply: a '#' still ended it, any other
-    // byte was kept and the reply had timed out. A strict deadline would leave
-    // a late '#' to answer the next command; a deadline one slice later would
-    // take a whole late reply.
-    std::string late_byte(const std::string& skip) {
-        util::ReadSpec spec;
-        spec.stop = util::ReadSpec::Stop::Length;
-        spec.length = 1;
-        spec.skip = skip;
-        const auto r = read_reply(spec, std::chrono::steady_clock::now() + read_slice());
-        if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
-        return r.bytes;
+        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : kSocketTimeoutMs);
     }
 
     // The reply without its '#': a read that ended on the terminator holds it
@@ -1534,25 +1522,24 @@ private:
             spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
             spec.idle_gap = std::chrono::milliseconds(100);
         }
+        // The byte in flight when the timeout runs out settles the reply: a
+        // late '#' ends it, any other byte is kept and the reply timed out.
+        spec.late_byte_grace = read_slice();
         const auto r = read_reply(spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
         switch (r.outcome) {
             case util::ReadOutcome::LinkDead:
                 throw_link_lost(r.err);
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("iOptron mount response too long");
-            case util::ReadOutcome::Timeout: {
-                const std::string late = late_byte(spec.skip);
-                if (late == "#") return r.bytes;
-                if (!require_hash_terminator) return r.bytes + late;
+            case util::ReadOutcome::Timeout:
+                if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for mount response");
-            }
             default:
                 return without_terminator(r);
         }
     }
 
     void configure_network_timeouts() {
-        constexpr int kSocketTimeoutMs = 200;
         int nodelay = 1;
 #ifdef _WIN32
         DWORD timeout = kSocketTimeoutMs;
@@ -1572,7 +1559,6 @@ private:
 #endif
     }
 
-    
 public:
     // Helper: Convert RA hours to iOptron format (0.01 arc-seconds)
     int64_t ra_to_ioptron_format(double ra_hours) {
