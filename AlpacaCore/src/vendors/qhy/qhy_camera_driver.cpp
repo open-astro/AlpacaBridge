@@ -26,6 +26,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -87,27 +88,47 @@ enum class QHYExposureStatus {
 // ────────────────────────────────────────────────────────────────────────────
 
 class QHYCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
-    // Wrapper calls retain their physical handle and call mutex before waiting.
-    // Do not retain io_mutex_ here: close must overtake an uncancellable read.
-    template <typename Read>
-    auto live_read(Read&& read) const {
-        std::string id;
-        uint64_t generation;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ensure_connected();
-            id = camera_id_.value_or("");
-            generation = connection_generation_;
-        }
-        auto value = read(id);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ensure_connected();
-            if (generation != connection_generation_) {
-                throw AlpacaException("Camera connection changed during the read", AlpacaError::NotConnected);
+    enum class CoolerOffState : uint8_t { None, Pending, Issued };
+    struct CachedInt {
+        std::optional<int> value;
+        std::exception_ptr error;
+
+        int get() const {
+            if (error) std::rethrow_exception(error);
+            if (!value) {
+                throw AlpacaException("Camera control cache unavailable", AlpacaError::InvalidOperation);
             }
+            return *value;
         }
-        return value;
+    };
+
+    template <typename Read>
+    static CachedInt cache_read(Read&& read) {
+        try {
+            return {read(), {}};
+        } catch (...) {
+            return {{}, std::current_exception()};
+        }
+    }
+
+    struct ControlCache {
+        CachedInt value, min, max;
+    };
+
+    ControlCache read_control(const std::string& id, int control, const char* name) {
+        ControlCache result;
+        result.value = cache_read([&] { return param_to_int(sdk_.get_param(id, control), name); });
+        try {
+            const auto range = sdk_.get_param_range(id, control);
+            if (!range.available) {
+                throw AlpacaException(std::string(name) + " range not available", AlpacaError::PropertyNotImplemented);
+            }
+            result.min.value = param_to_int(range.min, name);
+            result.max.value = param_to_int(range.max, name);
+        } catch (...) {
+            result.min.error = result.max.error = std::current_exception();
+        }
+        return result;
     }
 
 public:
@@ -305,8 +326,8 @@ private:
                     join_exposure_thread();
                 }
             }
-            // Join the cooler-off worker before taking mutex_ below: it takes
-            // mutex_ itself and joins the temp thread.
+            // Bound the wait for OFF cleanup, which polls the old PID worker's
+            // running flag; the OFF body never takes mutex_ or joins PID.
             join_cooler_off_thread();
             std::thread temp_to_join;
             std::thread telemetry_to_join;
@@ -337,25 +358,38 @@ private:
 
             std::string id;
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                // Clear state before close; retain the model for the disconnected web UI.
-                const std::string model = camera_info_.model;
-                camera_info_ = {};
-                camera_info_.model = model;
-                camera_info_valid_ = false;
-                readout_modes_.clear();
-                readout_mode_ = 0;
-                cached_gain_.reset();
-                cached_offset_.reset();
-                telemetry_temp_valid_ = false;
-                telemetry_temp_unsupported_ = false;
-                telemetry_power_valid_ = false;
-                reset_exposure_state_locked();
-                exposure_range_valid_ = false;
-                connected_.store(false);
-                disconnecting_ = false;
-                id = camera_id_.value_or("");
+                std::lock_guard<std::mutex> cooler_lock(cooler_off_lifecycle_mutex_);
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    // Clear state before close; retain the model for the disconnected web UI.
+                    const std::string model = camera_info_.model;
+                    camera_info_ = {};
+                    camera_info_.model = model;
+                    camera_info_valid_ = false;
+                    readout_modes_.clear();
+                    readout_mode_ = 0;
+                    cached_gain_.reset();
+                    cached_offset_.reset();
+                    gain_state_ = {};
+                    offset_state_ = {};
+                    max_bin_ = {};
+                    telemetry_temp_valid_ = false;
+                    telemetry_temp_unsupported_ = false;
+                    telemetry_power_valid_ = false;
+                    reset_exposure_state_locked();
+                    exposure_range_valid_ = false;
+                    connected_.store(false);
+                    disconnecting_ = false;
+                    id = camera_id_.value_or("");
+                }
+                // Acceptance ends with Connected=false; cleanup owns every remaining OFF.
+                try {
+                    start_cooler_off_worker();
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_ERROR("QHY", "Failed to prepare cooler OFF during disconnect: " + std::string(e.what()));
+                }
             }
+            join_cooler_off_thread();
             std::lock_guard<std::mutex> io_lock(io_mutex_);
             if (!id.empty()) {
                 // Exposure worker cancel attempted above; join_exposure_thread()
@@ -424,6 +458,10 @@ private:
                 "Camera cannot reconnect while a previous exposure download is still finishing; try again shortly",
                 AlpacaError::InvalidOperation);
         }
+        if (cooler_off_running_->load()) {
+            throw AlpacaException("Camera cooler OFF is still finishing; try again shortly",
+                                  AlpacaError::InvalidOperation);
+        }
 
         QHYCameraInfo info{};
         info.camera_id = id;
@@ -460,6 +498,9 @@ private:
             // Enumerate readout modes
             auto modes = load_readout_modes(id);
             const auto range = read_exposure_range(id);
+            const auto gain = read_control(id, control::GAIN, "Gain");
+            const auto offset = read_control(id, control::OFFSET, "Offset");
+            const auto max_bin = cache_read([&] { return max_supported_bin(sdk_, id); });
 
             // Seed the cached CCD temperature with one CURTEMP read so
             // CCDTemperature works before the telemetry worker's first poll
@@ -491,6 +532,10 @@ private:
             readout_mode_ = 0;
             exposure_range_ = range;
             exposure_range_valid_ = true;
+            gain_state_ = gain;
+            offset_state_ = offset;
+            max_bin_ = max_bin;
+            cooler_off_request_->store(CoolerOffState::None);
             reset_exposure_state_locked();
             telemetry_ccd_temp_c_ = temperature;
             telemetry_temp_valid_ = temp_valid;
@@ -744,6 +789,8 @@ public:
                     throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
                 }
                 cooler_on_ = true;
+                auto pending = CoolerOffState::Pending;
+                cooler_off_request_->compare_exchange_strong(pending, CoolerOffState::None);
                 if (disconnecting_) {
                     return;
                 }
@@ -754,117 +801,29 @@ public:
             return;
         }
 
-        uint64_t generation;
         {
+            std::lock_guard<std::mutex> request_lock(*cooler_off_request_mutex_);
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             if (camera_info_valid_ && !camera_info_.has_cooler) {
                 throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
             }
             cooler_on_ = false;
+            // Even a coalesced OFF must stop a worker started by an intervening ON.
+            temp_thread_stop_->request_stop();
+            if (!cooler_off_running_->load() || cooler_off_request_->load() != CoolerOffState::Issued) {
+                cooler_off_request_->store(CoolerOffState::Pending);
+            }
             if (disconnecting_) {
                 return;
             }
-            generation = connection_generation_;
         }
-        // Serialise spawn vs join under cooler_off_lifecycle_mutex_; the
-        // previous worker (if any) has either finished or is finishing —
-        // joining it here bounds us to one worker. It is joined (or, on
-        // timeout, detached — see join_cooler_off_thread()) again in
-        // disconnect and the destructor.
         std::lock_guard<std::mutex> cooler_lock(cooler_off_lifecycle_mutex_);
-        if (cooler_off_thread_.joinable()) {
-            if (cooler_off_running_->load()) {
-                // A turn-off worker is already in flight (it can block for
-                // seconds joining the temp thread mid-PID-call). Joining it
-                // here would stall this HTTP thread for that whole duration —
-                // the exact ConformU-timeout stall the background worker
-                // exists to avoid. Turn-off is idempotent: just return.
-                return;
-            }
-            cooler_off_thread_.join();  // finished worker — instant reap
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load() || disconnecting_) return;  // disconnect owns the pending request
         }
-        // Fresh flag per generation, not a store(true) on the shared member: a
-        // prior generation's timed-out-and-detached zombie (join_cooler_off_thread)
-        // keeps its own captured copy of the OLD flag, so reusing the member
-        // would let this new worker's completion be masked by the zombie's
-        // later RunningGuard clearing the SAME flag out from under it (review
-        // finding). Also set the member only after the thread ctor succeeds:
-        // if it throws (e.g. thread limit), nothing was spawned to ever clear
-        // the flag, so publishing it early would wedge cooler-off forever.
-        auto running_flag = std::make_shared<std::atomic<bool>>(true);
-        cooler_off_thread_ = std::thread([this, generation, running_flag, sdk = &sdk_, clock = &clock_]() {
-            // Clear the in-flight flag on every exit path, including throws.
-            // The GUARD below holds only the shared_ptr -- the enclosing lambda
-            // does capture `this`, but the guard's destructor deliberately does
-            // not touch it: if join_cooler_off_thread() times out and detaches
-            // this thread while it's still stuck inside SetQHYCCDParam below,
-            // the destructor is the ONLY thing that runs after the blocking
-            // call returns, and it must not touch a driver that may by then be
-            // destroyed.
-            //
-            // The rest of this lambda is NOT protected that way. join_temp_thread()
-            // below is a member call that itself blocks up to 2s -- the same bound
-            // join_cooler_off_thread() waits before detaching -- so this worker can
-            // be detached while still inside it, with `this` already gone. That is
-            // a real window, not a theoretical one; it is why detachment here is
-            // bounded-and-unsafe rather than safe, and why the SDK is reached
-            // through a captured pointer instead of `sdk_`.
-            struct RunningGuard {
-                std::shared_ptr<std::atomic<bool>> flag;
-                ~RunningGuard() { flag->store(false); }
-            } running_guard{running_flag};
-            if (on_worker_start_) {
-                try {
-                    on_worker_start_(QHYWorker::CoolerOff);
-                } catch (...) {
-                    return;
-                }
-            }
-            std::thread temp_to_join;
-            std::shared_ptr<std::atomic<bool>> temp_running_to_join;
-            std::string cam_id_for_pwm;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_.load() || disconnecting_ || generation != connection_generation_) {
-                    return;
-                }
-                if (cooler_on_) {
-                    return;  // a newer ON superseded this queued OFF
-                }
-                temp_thread_stop_->request_stop();
-                temp_running_to_join = temp_thread_running_;
-                temp_to_join = std::move(temp_thread_);
-                cam_id_for_pwm = camera_id_.value_or(""); // mutex_ already held; don't call camera_id_value()
-            }
-            join_temp_thread(temp_to_join, temp_running_to_join);  // bounded; may detach
-            if (!cam_id_for_pwm.empty()) {
-                // Timing is logged because this call has no SDK-side timeout
-                // and can occasionally run long on real hardware (ConformU
-                // finding) -- worth being able to see how long after the fact.
-                // Safe to call after a detach: only touches local state.
-                const auto call_start = clock->now();
-                ALPACA_LOG_INFO("QHY", "Calling SetQHYCCDParam(MANULPWM,0)...");
-                try {
-                    sdk->set_param(cam_id_for_pwm, control::MANULPWM, 0.0);
-                    const auto elapsed_ms =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(clock->now() - call_start).count();
-                    ALPACA_LOG_INFO(
-                        "QHY", "SetQHYCCDParam(MANULPWM,0) returned OK after " + std::to_string(elapsed_ms) + "ms");
-                } catch (const std::exception& e) {
-                    // MANULPWM may not be writable on all cameras — ignore
-                    const auto elapsed_ms =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(clock->now() - call_start).count();
-                    ALPACA_LOG_INFO("QHY", "SetQHYCCDParam(MANULPWM,0) threw after " + std::to_string(elapsed_ms) +
-                                               "ms: " + e.what());
-                }
-            }
-        });
-        // Publish only after the thread is actually running: if the ctor
-        // above throws, we never reach here, so cooler_off_running_ still
-        // reflects the previous (already-finished) generation instead of
-        // being wedged true with no worker left to clear it.
-        cooler_off_running_ = running_flag;
+        start_cooler_off_worker();
     }
 
     double get_cooler_power() const override {
@@ -926,7 +885,9 @@ public:
     }
 
     int get_gain() const override {
-        return live_read([&](const auto& id) { return param_to_int(sdk_.get_param(id, control::GAIN), "Gain"); });
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        return gain_state_.value.get();
     }
 
     void set_gain(int gain) override {
@@ -936,30 +897,34 @@ public:
         check_configuration_write();
         const auto id = camera_id_value();
         auto range = sdk_.get_param_range(id, control::GAIN);
-        if (range.available && (gain < static_cast<int>(range.min) ||
-                                gain > static_cast<int>(range.max))) {
+        if (range.available &&
+            (gain < param_to_int(range.min, "GainMin") || gain > param_to_int(range.max, "GainMax"))) {
             throw AlpacaException("Gain value out of range", AlpacaError::InvalidValue);
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            gain_state_.value = {};  // A throwing write may already have changed hardware.
+        }
         sdk_.set_param(id, control::GAIN, static_cast<double>(gain));
+        const auto applied = read_control(id, control::GAIN, "Gain");
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        if (disconnecting_) throw AlpacaException("Camera is disconnecting", AlpacaError::NotConnected);
         cached_gain_ = gain;
+        gain_state_ = applied;
     }
 
     int get_gain_max() const override {
-        auto range = live_read([&](const auto& id) { return sdk_.get_param_range(id, control::GAIN); });
-        if (!range.available) {
-            throw AlpacaException("Gain range not available", AlpacaError::NotImplemented);
-        }
-        return static_cast<int>(range.max);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        return gain_state_.max.get();
     }
 
     int get_gain_min() const override {
-        auto range = live_read([&](const auto& id) { return sdk_.get_param_range(id, control::GAIN); });
-        if (!range.available) {
-            throw AlpacaException("Gain range not available", AlpacaError::NotImplemented);
-        }
-        return static_cast<int>(range.min);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        return gain_state_.min.get();
     }
 
     std::vector<std::string> get_gains() const override {
@@ -1078,7 +1043,9 @@ public:
     }
 
     int get_max_bin_x() const override {
-        return live_read([&](const auto& id) { return max_supported_bin(sdk_, id); });
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        return max_bin_.get();
     }
 
     int get_max_bin_y() const override {
@@ -1100,7 +1067,9 @@ public:
     void set_num_y(int num_y) override { set_roi_size_locked(std::nullopt, num_y); }
 
     int get_offset() const override {
-        return live_read([&](const auto& id) { return param_to_int(sdk_.get_param(id, control::OFFSET), "Offset"); });
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        return offset_state_.value.get();
     }
 
     void set_offset(int offset) override {
@@ -1110,30 +1079,34 @@ public:
         check_configuration_write();
         const auto id = camera_id_value();
         auto range = sdk_.get_param_range(id, control::OFFSET);
-        if (range.available && (offset < static_cast<int>(range.min) ||
-                                offset > static_cast<int>(range.max))) {
+        if (range.available &&
+            (offset < param_to_int(range.min, "OffsetMin") || offset > param_to_int(range.max, "OffsetMax"))) {
             throw AlpacaException("Offset value out of range", AlpacaError::InvalidValue);
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            offset_state_.value = {};
+        }
         sdk_.set_param(id, control::OFFSET, static_cast<double>(offset));
+        const auto applied = read_control(id, control::OFFSET, "Offset");
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        if (disconnecting_) throw AlpacaException("Camera is disconnecting", AlpacaError::NotConnected);
         cached_offset_ = offset;
+        offset_state_ = applied;
     }
 
     int get_offset_max() const override {
-        auto range = live_read([&](const auto& id) { return sdk_.get_param_range(id, control::OFFSET); });
-        if (!range.available) {
-            throw AlpacaException("Offset range not available", AlpacaError::NotImplemented);
-        }
-        return static_cast<int>(range.max);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        return offset_state_.max.get();
     }
 
     int get_offset_min() const override {
-        auto range = live_read([&](const auto& id) { return sdk_.get_param_range(id, control::OFFSET); });
-        if (!range.available) {
-            throw AlpacaException("Offset range not available", AlpacaError::NotImplemented);
-        }
-        return static_cast<int>(range.min);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        return offset_state_.min.get();
     }
 
     std::vector<std::string> get_offsets() const override {
@@ -1201,6 +1174,9 @@ public:
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         exposure_range_valid_ = false;  // The SDK can change hardware before its re-initialization throws.
+        gain_state_ = {};
+        offset_state_ = {};
+        max_bin_ = {};
         const auto gain = cached_gain_;
         const auto offset = cached_offset_;
         // Binning only changes under io_mutex_, which this call holds throughout.
@@ -1270,8 +1246,15 @@ public:
                                 std::string(e.what()));
             }
         }
+        const auto applied_gain = read_control(id, control::GAIN, "Gain");
+        const auto applied_offset = read_control(id, control::OFFSET, "Offset");
+        const auto max_bin = cache_read([&] { return max_supported_bin(sdk_, id); });
         lock.lock();
         ensure_connected();
+        if (disconnecting_) return;
+        gain_state_ = applied_gain;
+        offset_state_ = applied_offset;
+        max_bin_ = max_bin;
         readout_mode_ = mode;
         if (info_valid) {
             camera_info_ = updated_info;
@@ -1462,7 +1445,7 @@ public:
         }
 
         // Serialize even the cancellation bypass with mode changes. Workers and
-        // live reads never hold this lock, so a blocked download stays cancellable.
+        // cached getters never hold this lock, so a blocked download stays cancellable.
         std::lock_guard<std::mutex> io_lock(io_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2006,8 +1989,8 @@ private:
 
     // ── Members ──────────────────────────────────────────────────────────────
 
-    // The SDK seam (issue #321). Every background worker below that can be
-    // DETACHED still captures `this` for everything else it touches, but must
+    // The SDK seam (issue #321). Exposure and polling workers that can be
+    // DETACHED still capture `this` for everything else they touch, but must
     // reach the SDK itself through a captured raw QHYSDK*, never through
     // `this->sdk_`. The SDK object outlives every driver built on it -- the
     // singleton is process-scoped, and a test fake must be declared before
@@ -2020,7 +2003,8 @@ private:
     // detached worker that outlives the driver still dereferences `this`
     // after the call (connected_, mutex_, the exposure_superseded re-check),
     // and that is UB either way. Bound these workers' lifetimes; do not read
-    // the raw-pointer rule as making detachment safe.
+    // the raw-pointer rule as making detachment safe. Cooler-off and guide
+    // bodies capture no driver state.
     QHYSDK& sdk_;
     // Declared before every member that is built from it (the worker stop
     // signals below). Workers that can be detached capture &clock_ by value,
@@ -2049,6 +2033,8 @@ private:
     // left alone exactly as before this fix.
     std::optional<int> cached_gain_;
     std::optional<int> cached_offset_;
+    ControlCache gain_state_, offset_state_;
+    CachedInt max_bin_;
 
     int bin_x_;
     int bin_y_;
@@ -2182,8 +2168,8 @@ private:
     // join; joined in disconnect and the destructor.
     std::thread cooler_off_thread_;
     std::mutex cooler_off_lifecycle_mutex_;
-    // True while a cooler-off worker is in flight; lets a second CoolerOn=false
-    // return immediately instead of blocking on the join (see set_cooler_on).
+    // True until the retained action is released; request state decides whether
+    // a repeated OFF coalesces with this worker or needs another PWM-zero attempt.
     // shared_ptr, not a plain member: SetQHYCCDParam(MANULPWM) can hang
     // indefinitely on real hardware with no SDK-side timeout (ConformU
     // finding), so join_cooler_off_thread() bounds its wait and detaches on
@@ -2191,6 +2177,10 @@ private:
     // outlive the driver (driver-lifecycle.instructions.md) — the shared_ptr keeps this flag alive
     // independent of `this`, same pattern as pulse_guiding_ below.
     std::shared_ptr<std::atomic<bool>> cooler_off_running_{std::make_shared<std::atomic<bool>>(false)};
+    std::shared_ptr<std::atomic<CoolerOffState>> cooler_off_request_{
+        std::make_shared<std::atomic<CoolerOffState>>(CoolerOffState::None)};
+    // OFF acceptance and a cancelled worker's claim/retirement are indivisible.
+    std::shared_ptr<std::mutex> cooler_off_request_mutex_{std::make_shared<std::mutex>()};
 
     // Serialises temp/telemetry thread starts: two concurrent starters could
     // both pass the joinable() pre-check and the loser would destroy a
@@ -2395,27 +2385,73 @@ private:
         }
     }
 
+    // Caller holds cooler_off_lifecycle_mutex_; the body never accesses the driver.
+    void start_cooler_off_worker() {
+        if (cooler_off_running_->load()) return;
+        if (cooler_off_thread_.joinable()) cooler_off_thread_.join();
+        std::string id;
+        std::shared_ptr<std::atomic<bool>> temp_running;
+        auto running = std::make_shared<std::atomic<bool>>(true);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cooler_off_request_->load() != CoolerOffState::Pending) return;
+            id = camera_id_.value_or("");
+            temp_thread_stop_->request_stop();
+            temp_running = temp_thread_running_;
+            cooler_off_running_ = running;
+        }
+        try {
+            auto action = sdk_.prepare_cooler_off(id, running);
+            cooler_off_thread_ = std::thread([action = std::move(action), running, temp_running,
+                                              request = cooler_off_request_, request_mutex = cooler_off_request_mutex_,
+                                              hook = on_worker_start_, clock = &clock_]() mutable {
+                // Declared before the guard: a failed claim releases the action
+                // and clears running before another OFF can publish Pending.
+                std::unique_lock<std::mutex> request_lock(*request_mutex, std::defer_lock);
+                struct RunningGuard {
+                    std::function<void()> action;
+                    std::shared_ptr<std::atomic<bool>> flag;
+                    ~RunningGuard() {
+                        action = {};  // Release the physical handle before allowing a reopen.
+                        flag->store(false);
+                    }
+                } guard{std::move(action), running};
+                try {
+                    if (hook) hook(QHYWorker::CoolerOff);
+                    // shortcut: a permanently wedged PID retains this handle; use cancellation if QHY adds it.
+                    while (temp_running->load()) clock->sleep_for(std::chrono::milliseconds(20));
+                    auto pending = CoolerOffState::Pending;
+                    request_lock.lock();
+                    if (!request->compare_exchange_strong(pending, CoolerOffState::Issued)) return;
+                    request_lock.unlock();
+                    const auto started = clock->now();
+                    ALPACA_LOG_INFO("QHY", "Calling SetQHYCCDParam(MANULPWM,0)...");
+                    try {
+                        guard.action();
+                        const auto ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(clock->now() - started).count();
+                        ALPACA_LOG_INFO("QHY",
+                                        "SetQHYCCDParam(MANULPWM,0) returned OK after " + std::to_string(ms) + "ms");
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_ERROR("QHY", "SetQHYCCDParam(MANULPWM,0) failed: " + std::string(e.what()));
+                    }
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_ERROR("QHY", "Cooler OFF cleanup failed: " + std::string(e.what()));
+                }
+            });
+        } catch (...) {
+            running->store(false);
+            throw;
+        }
+    }
+
     void join_cooler_off_thread() {
         std::lock_guard<std::mutex> cooler_lock(cooler_off_lifecycle_mutex_);
         if (!cooler_off_thread_.joinable()) {
             return;
         }
-        // This worker joins temp_thread_ before touching the SDK, and
-        // ControlQHYCCDTemp (the temp thread's per-iteration SDK call) is
-        // documented elsewhere in this file as blocking ~10s (PID loop),
-        // occasionally longer (ConformU finding). SetQHYCCDParam itself also
-        // has no SDK-side timeout. ASCOM clients (ConformU included) apply
-        // their own ~5s budget to the bare Disconnect() call, so this can't
-        // simply wait out the documented worst case -- it must return well
-        // under that regardless of how long the underlying hardware call
-        // actually takes. Bound the wait short and detach on timeout; safe
-        // because the QHY SDK wrapper's handle is now reference-counted
-        // (shared_ptr, not a raw pointer -- see qhy_sdk_wrapper.cpp), so a
-        // still-running SetQHYCCDParam call can't be invalidated by a
-        // concurrent close_camera(), and everything this worker does after
-        // this point runs through cooler_off_running_ (a shared_ptr, not
-        // `this` -- see the RunningGuard in set_cooler_on), so detaching here
-        // can never touch a driver that outlives it.
+        // Bound logical disconnect even if PID or PWM never returns. The body
+        // owns its retained action and shared flags, and never accesses this.
         auto deadline = clock_.now() + std::chrono::seconds(2);
         while (cooler_off_running_->load() && clock_.now() < deadline) {
             clock_.sleep_for(std::chrono::milliseconds(20));
@@ -2433,8 +2469,8 @@ private:
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         // Do not hold mutex_ across join: temp and telemetry threads acquire
         // mutex_ in their loops; joining while holding it would deadlock.
-        // The cooler-off worker takes mutex_ and joins the temp thread, so it
-        // too must be joined without mutex_ held.
+        // OFF cleanup only polls the old PID worker's running flag. Bound its
+        // wait here too; join_cooler_off_thread takes the lifecycle lock first.
         join_cooler_off_thread();
         std::thread temp_to_join;
         std::thread telemetry_to_join;
@@ -2543,7 +2579,7 @@ private:
                     }
                     target = target_temp_;
                     exposing = exposure_status_ == QHYExposureStatus::Working || mode_change_active_.load() ||
-                               exposure_thread_running_->load();
+                               exposure_thread_running_->load() || cooler_off_running_->load();
                 }
                 // Skip this cycle's SDK call while a frame is downloading:
                 // ControlQHYCCDTemp and the exposure worker's
