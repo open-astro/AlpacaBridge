@@ -222,10 +222,23 @@ public:
         exposure_start_count_.fetch_add(1);
     }
     void stop_exposure(int) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         require_open_locked("stop_exposure");
         stop_count_.fetch_add(1);
         if (stop_failure_.load()) {
+            // A slow failing stop (#1745): the lock is dropped until the body has polled readiness this many
+            // more times, so the body's poll runs while the stop is in flight. Bounded, so a body that stops
+            // polling ends the wait instead of hanging the test.
+            const int polls = stop_failure_polls_.load();
+            if (polls > 0) {
+                const int target = image_ready_polls_.load() + polls;
+                lock.unlock();
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (image_ready_polls_.load() < target && std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                lock.lock();
+            }
             if (ready_on_stop_failure_.load()) ready_ = true;
             throw std::runtime_error("scripted stop-exposure failure");
         }
@@ -244,6 +257,7 @@ public:
     bool image_ready(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("image_ready");
+        image_ready_polls_.fetch_add(1);
         if (readiness_error_.load()) throw std::runtime_error("scripted image-ready failure");
         return ready_.load();
     }
@@ -438,6 +452,9 @@ public:
     }
     void set_pulse_off_failure(bool fail) { pulse_off_failure_ = fail; }
     void set_stop_failure(bool fail) { stop_failure_ = fail; }
+    // A failing stop lasts until the body has polled readiness `polls` more times (0 = fails at once).
+    void set_stop_failure_polls(int polls) { stop_failure_polls_ = polls; }
+    int image_ready_polls() const { return image_ready_polls_.load(); }
     void set_cooler_power_failure(bool fail) {
         std::lock_guard<std::mutex> lock(mutex_);
         cooler_power_failure_ = fail;
@@ -552,6 +569,8 @@ private:
     std::atomic<int> pulse_off_count_{0};
     std::atomic<bool> pulse_off_failure_{false};
     std::atomic<bool> stop_failure_{false};
+    std::atomic<int> stop_failure_polls_{0};
+    std::atomic<int> image_ready_polls_{0};
     std::atomic<bool> ready_on_stop_failure_{false};
     std::atomic<int> stop_count_{0};
     std::atomic<int> exposure_start_count_{0};

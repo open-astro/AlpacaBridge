@@ -19,7 +19,9 @@
 #include "locked_qhy_sdk.h"
 
 TEST_CASE("QHY camera - concurrent connect/disconnect/exposure stress", "[qhy][camera][stress]") {
-    auto fake = alpacacore::test::FakeQHYSDK::with_one_camera();
+    const bool cooled = GENERATE(false, true);
+    auto fake = cooled ? alpacacore::test::FakeQHYSDK::with_one_cooled_camera()
+                       : alpacacore::test::FakeQHYSDK::with_one_camera();
     fake.read_directly = true;
     alpacacore::test::LockedQHYSDK sdk(fake);
     auto camera = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
@@ -42,7 +44,7 @@ TEST_CASE("QHY camera - concurrent connect/disconnect/exposure stress", "[qhy][c
     //    60 s watchdog margin to pass; this case never passes one, and the fake is instant.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*camera, [&guard](alpacacore::AlpacaDriver& device) {
+    alpacacore::test::run_lifecycle_stress(*camera, [&guard, cooled](alpacacore::AlpacaDriver& device) {
         auto& cam = static_cast<alpacacore::CameraDriver&>(device);
         guard([&] { static_cast<void>(cam.get_name()); });
         guard([&] { static_cast<void>(cam.get_camera_x_size()); });
@@ -55,6 +57,18 @@ TEST_CASE("QHY camera - concurrent connect/disconnect/exposure stress", "[qhy][c
         guard([&] { static_cast<void>(cam.get_last_exposure_duration()); });
         guard([&] { static_cast<void>(cam.get_last_exposure_start_time()); });
         guard([&] { static_cast<void>(cam.get_image_array()); });
+        guard([&] { static_cast<void>(cam.get_gain()); });
+        guard([&] { static_cast<void>(cam.get_gain_min()); });
+        guard([&] { static_cast<void>(cam.get_gain_max()); });
+        guard([&] { static_cast<void>(cam.get_offset()); });
+        guard([&] { static_cast<void>(cam.get_offset_min()); });
+        guard([&] { static_cast<void>(cam.get_offset_max()); });
+        guard([&] { static_cast<void>(cam.get_max_bin_x()); });
+        guard([&] { static_cast<void>(cam.get_max_bin_y()); });
+        if (cooled) {
+            guard([&] { cam.set_cooler_on(false); });
+            guard([&] { cam.set_cooler_on(true); });
+        }
         // Valid values only: InvalidOperation is a live exposure or a competing
         // configuration transition, not a reason to admit arbitrary SDK failures.
         guard([&] { cam.set_readout_mode(1); });
