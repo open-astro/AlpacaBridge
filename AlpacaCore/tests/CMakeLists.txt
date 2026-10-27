@@ -198,6 +198,9 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_link_loss.cpp)
     # Serial-port ownership over a pty (issue #1202).
     list(APPEND TEST_SOURCES test_onstep_serial_ownership.cpp)
+    # Getters never wait behind a command or a Park/FindHome body on the wire
+    # (decision 0016, issue #1449).
+    list(APPEND TEST_SOURCES test_onstep_getter_locks.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.

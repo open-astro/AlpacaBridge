@@ -410,12 +410,37 @@ it is never reachable through `router.cpp` or the web UI.
   Alt/Az validation and the parked check, before anything is sent, under their own names
   (`check_alt_az_slew_locked()`). With Tracking off the driver converts to RA/Dec and runs the same
   GOTO as an equatorial slew; it does not use OnStepX's `:MA#`.
-- **`Connected` is read lock-free** (#910): `set_connected(true)` holds `mutex_` for the whole connect
-  (port open, handshake, site and time sync, cache warm-up, an auto-detect scan with no explicit port),
-  so `get_connected()` reads the atomic `published_connected_` instead, plus `link_alive()`, which takes
-  no lock a connect holds. The flag is raised only after the warm-up and dropped before any disconnect,
+- **`Connected` is read lock-free** (#910): `set_connected(true)` holds `transition_mutex_` and the
+  operation lock for the whole connect (port open, handshake, site and time sync, cache warm-up, an
+  auto-detect scan with no explicit port), so `get_connected()` reads the atomic `published_connected_`
+  instead, plus `link_alive()`, which takes no lock a connect holds. The flag is raised only after the warm-up and dropped before any disconnect,
   so `Connected` stays false while `Connecting` is true (the tier-2 contract sweep checks it). The
-  internal `connected_` still flips at the old point, because the warm-up's own helpers check it.
+  internal `connected_` goes true right after the port opens, before the warm-up, because the warm-up's
+  own helpers check it; a disconnect clears it, with `published_connected_`, before the close.
+- **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
+  #1449, the shape of Sky-Watcher's #1530). Order: `transition_mutex_` (`set_connected()` against
+  `set_connected()`; no getter takes it) -> `io_mutex_` (the operation lock) -> `mutex_` (the state lock, a
+  leaf) -> the protocol wrapper's own lock. Every command holds `io_mutex_` for the whole command through a
+  `StateLock` (Mode::Io, the default), which also holds `mutex_`; its `unlock()` releases both, so the places
+  that let other commands in (a task-clock wait, a slot start) are unchanged. Every exchange goes through
+  `Wire` (`wire()`), which drops `mutex_` for the call and takes it back after, so `mutex_` is never held across
+  serial I/O, and sequences that must stay together (`:hP#` or `:hC#` then `:GE#`, `:Sr#`/`:Sd#` then `:MS#` or
+  `:CM#`, the re-send tick's reads and move) stay together under `io_mutex_`. A getter takes `mutex_` alone
+  (`StateLock::Mode::State`) and answers from the state and the 2 s caches; when a cache is stale (or the fault
+  is latched) its read goes through `Wire`, which then takes `io_mutex_` for that one exchange (dropping
+  `mutex_` first, retaking it before `io_mutex_` is released, so the reply is stored before another command's
+  exchange lands): a live read waits for the wire, as 0016 allows. While a connect runs a getter reads
+  `NotConnected` (`check_connected()`: `published_connected_` unless the thread holds `io_mutex_`), and a
+  disconnect clears `connected_` before the close. The single read re-checks the session under `io_mutex_`
+  (`connected_` and `session_generation_`, bumped by every connect and disconnect): a Disconnect or a
+  reconnect that won the race makes it throw `NotConnected` without touching the wire. A `Slewing` read
+  whose `:GU#` dropped `mutex_` decides "the slew just ended" only if no slew was sent meanwhile
+  (`slew_epoch_`), so a newer GOTO keeps its tracking-restore flag. The stops (AbortSlew, `MoveAxis(axis, 0)`, Park/FindHome's
+  pre-stops, a refused re-send, the #521 relink) all go through `send_stops_locked()`. A getter changes
+  state between a command's exchanges only from what it already holds: anything it learns from the mount
+  needs a read, and so the operation lock. A new command takes a default `StateLock` and calls `wire()`, never
+  `OnStepProtocolWrapper::instance()` for an exchange; a new getter takes `Mode::State`. Tests:
+  `test_onstep_getter_locks.cpp`, and the Park/FindHome storm in `test_onstep_concurrency_stress.cpp`.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
   without waiting for the park or home to finish (a running motion is stopped first, #1430, below;
   optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
@@ -474,11 +499,12 @@ it is never reachable through `router.cpp` or the web UI.
     the link fault and `Park`/`FindHome` throw `DriverException` instead of reading as started.
     OnStep 4.x `:GU#` (`Command.ino`) has `I` (parking) but no `h`, so a `FindHome` there is never
     taken as one already running.
-  - **Locks and clock:** the task waits on the driver's task clock (decision 0005) with `mutex_`
-    released, so getters, `AbortSlew` and Disconnect answer meanwhile. The stops, the `:GU#` polls,
-    `:hP#` and `:GE#` (up to 1 s each without a reply; on firmware without `:GE#` a `FindHome` takes
-    about 1 s longer) and `:hC#` hold `mutex_`, as every OnStep exchange does (decision 0016 rule 1,
-    #1449). A `Park` while one runs (`I`), or a `FindHome` while one runs (`h`), is a no-op.
+  - **Locks and clock:** the task waits on the driver's task clock (decision 0005) with both driver
+    locks released, so getters, `AbortSlew` and Disconnect answer meanwhile. The stops, the `:GU#`
+    polls, `:hP#` and `:GE#` (up to 1 s each without a reply; on firmware without `:GE#` a `FindHome`
+    takes about 1 s longer) and `:hC#` hold the operation lock, so nothing lands between `:hP#` and
+    its `:GE#`, and run with `mutex_` free (decision 0016, #1449; see "Locks" below). A `Park` while one
+    runs (`I`), or a `FindHome` while one runs (`h`), is a no-op.
 - **A slow first post-Connect `DeviceState` means the connect did not run** (#1242). A
   ConformU-style preamble from one ClientID (`Connected=True` → `Connected=False` → `Connect()`,
   poll `Connecting`) gets its first `DeviceState` in 3-5 ms with no serial reads: the connect's
@@ -543,8 +569,8 @@ it is never reachable through `router.cpp` or the web UI.
 - **`UTCDate` is the mount's clock or a client's write, never the host's** (#1478): the connect
   reads the mount clock once (`:GL#`/`:GC#`/`:GG#`, `seed_utc_from_mount_locked()`, after any
   `syncTimeOnConnect` write, which makes the read unneeded), so `UTCDate`, and so `DeviceState`,
-  performs no serial exchange of its own (it still takes `mutex_`, so it can queue behind another
-  member's exchange until #1449). `:GG#` is the hours to add to local time to get UTC (OnStepX
+  performs no serial exchange of its own, and takes only the state lock, so it never queues behind
+  another member's exchange (#1449). `:GG#` is the hours to add to local time to get UTC (OnStepX
   `Site.command.cpp`), so UTC is local time plus the offset (#1626; it read minus, which only shows
   on a mount whose offset was set elsewhere, since AlpacaBridge writes 0). A date or offset reply
   that does not parse fails the read instead of storing 2000-01-01 or offset 0 (#1626), as does a

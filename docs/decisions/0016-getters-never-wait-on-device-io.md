@@ -32,7 +32,6 @@ The how-to and its history stay in the [driver lifecycle instructions](../../.gi
 - **Atomics for all state.** Multi-field state (names lists, limits) would tear. Atomics are for `connected_` and single scalars only.
 - **Convert the cameras now.** `with_camera` and `with_handle` hold `mutex_` across short SDK calls by design, and no getter stall has been measured. Out of scope until one is (evidence over narrative).
 - **Wanderer cover and filter-wheel `state_mutex_`, and the QHY CFW3 `Position` fallback.** Fire-and-forget writes with no reply wait, and a path that runs only after a failed move. No measurable stall.
-- **OnStep.** The OnStep work is owned by a contributor and is not sliced here.
 
 ## Consequences
 
@@ -46,6 +45,6 @@ Each slice is one driver family in one PR; reverting that PR restores the old lo
 
 ## Links
 
-- Issues [#295](https://github.com/open-astro/AlpacaBridge/issues/295) (the migration), [#1390](https://github.com/open-astro/AlpacaBridge/issues/1390) (this slice).
+- Issues [#295](https://github.com/open-astro/AlpacaBridge/issues/295) (the migration), [#1390](https://github.com/open-astro/AlpacaBridge/issues/1390) (this slice), [#1449](https://github.com/open-astro/AlpacaBridge/issues/1449) (OnStep: a getter whose 2 s cache is stale takes the I/O lock for that one read).
 - Rules: [driver lifecycle instructions](../../.github/instructions/driver-lifecycle.instructions.md).
 - Related: [decision 0010](0010-snapshot-served-state.md) (snapshot-served state), [decision 0006](0006-async-operation-ownership.md) (async operation ownership; the slot mutex nests under `mutex_`).

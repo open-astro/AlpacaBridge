@@ -35,6 +35,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -151,6 +152,110 @@ TEST_CASE("OnStep telescope - destruction mid-operation (slew/pulse threads live
         }
         driver.reset();
     }
+}
+
+// Decision 0016 (#1449): the getters take the state lock alone, and refresh a
+// stale cache with one read under the operation lock, while Park and FindHome
+// and their park_home_ body, AbortSlew, MoveAxis and its re-send, and a
+// disconnect and reconnect hold the operation lock and drop the state lock for
+// each exchange. A storm of all of them, so both locks, the thread-local lock
+// table and every state the getters read while a command is on the wire run
+// under TSan. The fake answers a park or home and its :GE#; while a MoveAxis
+// runs, :GU# shows the guide move until a stop arrives.
+TEST_CASE("OnStep telescope - Park and FindHome race the getters and a reconnect", "[onstep][telescope][stress]") {
+    std::atomic<bool> moving{false};
+    alpacacore::test::FakeMountServer server([&moving](const std::string& chunk) {
+        if (chunk.rfind(":GVP", 0) == 0) return std::string("OnStep#");
+        if (chunk.rfind(":GVN", 0) == 0) return std::string("10.23a#");
+        if (chunk.rfind(":GXEE", 0) == 0) return std::string("1");
+        if (chunk.rfind(":GU", 0) == 0) return std::string(moving.load() ? "NpgEW180#" : "NpEW180#");
+        if (chunk.rfind(":GRa", 0) == 0) return std::string("12:00:00.0000#");
+        if (chunk.rfind(":GDe", 0) == 0) return std::string("+45*00:00.000#");
+        if (chunk.rfind(":GA", 0) == 0) return std::string("+45*00:00#");
+        if (chunk.rfind(":GZ", 0) == 0) return std::string("180*00:00#");
+        if (chunk.rfind(":GE", 0) == 0) return std::string("00#");
+        if (chunk.rfind(":Q", 0) == 0) {
+            moving = false;
+            return std::string();
+        }
+        if (chunk.rfind(":M", 0) == 0) {
+            moving = true;
+            return std::string();
+        }
+        if (chunk.rfind(":R", 0) == 0 || chunk.rfind(":hC", 0) == 0) return std::string();
+        if (chunk.rfind(":S", 0) == 0 || chunk.rfind(":h", 0) == 0) return std::string("1");
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    auto info = onstep_endpoint(server.port());
+    info.response_timeout_ms = 200;
+    auto driver =
+        alpacacore::vendor::onstep::create_onstep_telescope_with_site(0, info, 40.5, -74.0, std::nullopt, true);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    // As in the lifecycle storm above: a call racing a disconnect throws NotConnected,
+    // one racing a park or a home is refused (InvalidOperation, or InvalidWhileParked
+    // once the fake has parked), and the canned fake answers some reads with what the
+    // driver reports as DriverException.
+    alpacacore::test::StressCallGuard guard{
+        alpacacore::AlpacaError::NotConnected,      alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation,  alpacacore::AlpacaError::ValueNotSet,
+        alpacacore::AlpacaError::NotImplemented,    alpacacore::AlpacaError::DriverException,
+        alpacacore::AlpacaError::InvalidWhileParked};
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> readers;
+    // Joins every reader on every way out.
+    struct JoinAll {
+        std::atomic<bool>& stop;
+        std::vector<std::thread>& threads;
+        ~JoinAll() {
+            stop.store(true);
+            for (auto& t : threads) {
+                if (t.joinable()) t.join();
+            }
+        }
+    } join_all{stop, readers};
+    for (int r = 0; r < 3; ++r) {
+        readers.emplace_back([&] {
+            auto& scope = *driver;
+            while (!stop.load()) {
+                guard([&] { static_cast<void>(scope.get_slewing()); });
+                guard([&] { static_cast<void>(scope.get_at_park()); });
+                guard([&] { static_cast<void>(scope.get_at_home()); });
+                guard([&] { static_cast<void>(scope.get_tracking()); });
+                guard([&] { static_cast<void>(scope.get_right_ascension()); });
+                guard([&] { static_cast<void>(scope.get_altitude()); });
+                guard([&] { static_cast<void>(scope.get_side_of_pier()); });
+                guard([&] { static_cast<void>(scope.get_sidereal_time()); });
+                guard([&] { static_cast<void>(scope.get_utc_date()); });
+                guard([&] { static_cast<void>(scope.get_is_pulse_guiding()); });
+                guard([&] { static_cast<void>(scope.get_device_state()); });
+                guard([&] { static_cast<void>(scope.get_connected()); });
+            }
+        });
+    }
+    for (int i = 0; i < 60; ++i) {
+        guard([&] { driver->move_axis(i % 2, 1.0); });
+        guard([&] { driver->park(); });
+        guard([&] { driver->unpark(); });
+        guard([&] { driver->move_axis(1, 1.0); });
+        guard([&] { driver->find_home(); });
+        guard([&] { driver->abort_slew(); });
+        guard([&] { driver->move_axis(i % 2, 0.0); });
+        if (i % 10 == 9) {
+            guard([&] { driver->set_connected(false); });
+            guard([&] { driver->set_connected(true); });
+        }
+    }
+    stop.store(true);
+    for (auto& t : readers) {
+        t.join();
+    }
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 // open-astro#1289: link_alive() runs with no wrapper mutex_ held, from

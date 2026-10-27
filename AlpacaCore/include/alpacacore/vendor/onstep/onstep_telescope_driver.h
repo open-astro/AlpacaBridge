@@ -73,6 +73,27 @@ void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
 /// anything else is ignored.
 void set_park_home_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam: `hook` runs on the thread of a clean set_connected(false), with
+/// the driver's state lock released and the close not yet sent, so a case can
+/// read a getter while the close is in flight (decision 0016, #1449). Pass an
+/// empty function to clear it. `driver` must come from the factories above;
+/// anything else is ignored.
+void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: `hook` runs once, on the next getter thread that reads the mount
+/// because its cache is stale, after it has released the driver's state lock and
+/// before it takes the operation lock (decision 0016, #1449), so a case can land
+/// a command, a disconnect or a reconnect in that gap. Pass an empty function to
+/// clear it. `driver` must come from the factories above; anything else is ignored.
+void set_single_read_before_io_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: `hook` runs in a MoveAxis re-send tick after its status and
+/// altitude reads and before the re-send, with the driver locks held; when it
+/// returns true the tick ends the move there, as a cancel that landed between
+/// those reads and the re-send would (decision 0006 rule 3, #1728). The hook
+/// must not call the driver. Pass an empty function to clear it.
+void set_move_axis_resend_before_send_hook_for_testing(TelescopeDriver& driver, std::function<bool()> hook);
+
 namespace detail {
 // open-astro#521 / #1241: how long the serial link may be gone before motion
 // that outlived the outage is stopped at relink rather than left running
