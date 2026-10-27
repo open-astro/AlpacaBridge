@@ -33,8 +33,9 @@
 # tries the same commit again.
 #
 # A second job builds all vendors with ASan + UBSan and runs the full suite
-# (issue #1740): ci.yml's sanitizer job builds vendors OFF and TSan runs only
-# [stress], so the vendor tests ran under no sanitizer. It does not gate the
+# (issue #1740): ci.yml's ASan + UBSan job builds vendors OFF and its TSan job
+# runs only the [stress] and [stress-guard] tags, so most vendor tests ran
+# under no sanitizer, and none under ASan or UBSan. It does not gate the
 # .deb build: a sanitizer finding is a signal filed as its own issue, and
 # testers' nightlies keep shipping. The run still shows red.
 #
