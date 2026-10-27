@@ -40,7 +40,9 @@ std::vector<ZwoSlotRead<Info>> read_zwo_slots(int count, const std::string& kind
         Info info{};
         std::string error;
         if (!read(slot, info, error)) {
-            ALPACA_LOG_WARN("ZWO", "Skipping " + kind + " slot " + std::to_string(slot) + ": " + error);
+            std::string message = "Skipping ";
+            message.append(kind).append(" slot ").append(std::to_string(slot)).append(": ").append(error);
+            ALPACA_LOG_WARN("ZWO", message);
             if (unreadable != nullptr) unreadable->push_back({slot, error});
             continue;
         }
