@@ -72,11 +72,11 @@ namespace alpacacore::test {
  *    case that sets it to block a named method owns the consequences and
  *    must release the block before its driver is destroyed (the three #339
  *    cases). LockedQHYSDK::slowest_call_ms() is the mechanical check that no
- *    method has quietly gained a block; the 26-forward sweep asserts it.
+ *    method has quietly gained a block; the forward sweep asserts it.
  * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT, including those
  *    detachable workers, which reach the SDK through a captured QHYSDK*
- *    rather than through the driver's `sdk_` member. (All but pulse-guide
- *    still capture `this` too and touch it after the SDK call returns, so
+ *    rather than through the driver's `sdk_` member. (Exposure and polling workers
+ *    still capture `this` too and can touch it after the SDK call returns, so
  *    they are not safe to outlive the driver either -- the capture narrows
  *    that window, it does not remove it.) Declare the fake before the driver
  *    (locals destroy in reverse order); never stash a driver beyond the
@@ -365,6 +365,10 @@ public:
     void open_camera(const std::string& camera_id) override {
         hit("open_camera");
         require_resource();
+        const auto cooler = cooler_off_workers_.find(camera_id);
+        if (cooler != cooler_off_workers_.end() && cooler->second->load()) {
+            throw AlpacaException("Camera cooler OFF is still finishing", AlpacaError::InvalidOperation);
+        }
         if (!known_id(camera_id)) {
             // Matches QHYSDKWrapper::open_camera(): OpenQHYCCD returning null
             // for an id it doesn't recognize throws DriverException, not
@@ -496,6 +500,17 @@ public:
         hit("set_param");
         require_open(camera_id);
         params[control_id] = value;
+    }
+
+    vendor::qhy::CoolerOffAction prepare_cooler_off(const std::string& camera_id,
+                                                    std::shared_ptr<std::atomic<bool>> running_flag) override {
+        hit("prepare_cooler_off");
+        require_open(camera_id);
+        cooler_off_workers_[camera_id] = std::move(running_flag);
+        ++ref_counts_[camera_id];
+        auto lease = std::shared_ptr<void>(this, [this, camera_id](void*) { close_camera(camera_id); });
+        return
+            [this, camera_id, lease = std::move(lease)] { set_param(camera_id, vendor::qhy::control::MANULPWM, 0.0); };
     }
 
     void set_resolution(const std::string& camera_id, uint32_t start_x, uint32_t start_y, uint32_t width,
@@ -812,9 +827,10 @@ private:
 
     std::map<std::string, int> ref_counts_;
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> exposure_workers_;
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>> cooler_off_workers_;
     // open-astro#328: the frame size the most recent get_mem_length() promised.
     // A plain member, guarded exactly as roi_ and bits_ are: every seam test
-    // reaches this fake through LockedQHYSDK, which serialises 24 of the 26
+    // reaches this fake through LockedQHYSDK, which serialises the ordinary
     // forwards through its one mutex_ -- cancel_exposure() takes its own
     // cancel_mutex_ (#339) and get_sdk_version() its own version_mutex_
     // (#1646); the cancel body touches no member at all, and get_sdk_version()

@@ -101,6 +101,7 @@ public:
     // a real growth concern, and erasing on a clean return would just
     // reintroduce a window to get it wrong.
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> exposure_worker_flags;
+    std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cooler_off_worker_flags;
     mutable bool resource_initialized{false};
     mutable bool resource_init_attempted{false};
     // Filled on successful init. Guarded by its own leaf mutex, not `mutex`:
@@ -263,6 +264,10 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
     // reconnects. No liveness check on reuse today; if this bites in
     // practice, the fix is a cheap probe (e.g. IsQHYCCDControlAvailable) on
     // reuse that re-opens on failure.
+    const auto cooler = pimpl_->cooler_off_worker_flags.find(camera_id);
+    if (cooler != pimpl_->cooler_off_worker_flags.end() && cooler->second->load()) {
+        throw AlpacaException("Camera cooler OFF is still finishing; try again shortly", AlpacaError::InvalidOperation);
+    }
     auto it = pimpl_->handles.find(camera_id);
     if (it != pimpl_->handles.end() && it->second.open_count > 0) {
         ++it->second.open_count;
@@ -347,6 +352,19 @@ void QHYSDKWrapper::register_exposure_worker(const std::string& camera_id,
                                              std::shared_ptr<std::atomic<bool>> running_flag) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
     pimpl_->exposure_worker_flags[camera_id] = std::move(running_flag);
+}
+
+CoolerOffAction QHYSDKWrapper::prepare_cooler_off(const std::string& camera_id,
+                                                  std::shared_ptr<std::atomic<bool>> running_flag) {
+    auto ref = pimpl_->get_handle_ref(camera_id);
+    {
+        std::lock_guard<std::mutex> lock(pimpl_->mutex);
+        pimpl_->cooler_off_worker_flags[camera_id] = std::move(running_flag);
+    }
+    return [ref = std::move(ref)] {
+        std::lock_guard<std::mutex> call_lock(*ref.call_mutex);
+        check_result(SetQHYCCDParam(ref.handle.get(), CONTROL_MANULPWM, 0.0), "SetQHYCCDParam(MANULPWM,0)");
+    };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
