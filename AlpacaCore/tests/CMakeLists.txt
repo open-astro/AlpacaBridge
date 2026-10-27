@@ -34,6 +34,7 @@ set(TEST_SOURCES
     test_image_validation.cpp
     test_motion_limits.cpp
     test_poll_settle.cpp
+    test_atomic_file.cpp
     test_device_location_store.cpp
     test_power_port_state_store.cpp
     test_rotator_sync_offset_store.cpp
