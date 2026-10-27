@@ -10,9 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/vendor/zwo/zwo_caa_wrapper.h>
-#include <alpacacore/util/error_handling.h>
 #include <CAA_API.h>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_caa_wrapper.h>
+#include <alpacacore/vendor/zwo/zwo_slots.h>
+
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -118,24 +120,13 @@ ZWOCAASDKWrapper& ZWOCAASDKWrapper::instance() {
 
 std::vector<ZWOCAARotatorInfo> ZWOCAASDKWrapper::enumerate_rotators() {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int count = CAAGetNum();
+    const auto slots =
+        read_zwo_accessory_slots<CAA_INFO>(CAAGetNum(), "CAA", CAAGetID, CAAGetProperty, error_code_to_string);
     std::vector<ZWOCAARotatorInfo> result;
-    if (count <= 0) {
-        return result;
-    }
-    result.reserve(static_cast<std::size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        int id = 0;
-        throw_on_error(CAAGetID(i, &id), "CAAGetID");
-        CAA_INFO info{};
-        CAA_ERROR_CODE code = CAAGetProperty(id, &info);
-        if (code == CAA_SUCCESS) {
-            result.push_back(convert_rotator_info(info));
-        } else {
-            ZWOCAARotatorInfo fallback;
-            fallback.rotator_id = id;
-            result.push_back(std::move(fallback));
-        }
+    result.reserve(slots.size());
+    for (const auto& slot : slots) {
+        result.push_back(convert_rotator_info(slot.info));
+        result.back().slot_index = slot.slot;
     }
     return result;
 }
@@ -161,10 +152,11 @@ bool ZWOCAASDKWrapper::get_rotator_info_by_index(int rotator_index, ZWOCAARotato
     CAA_INFO sdk_info{};
     code = CAAGetProperty(rotator_id, &sdk_info);
     if (code != CAA_SUCCESS) {
-        info = ZWOCAARotatorInfo{rotator_id, std::string(), 0.0};
+        info = ZWOCAARotatorInfo{rotator_id, std::string(), 0.0, rotator_index};
         return true;
     }
     info = convert_rotator_info(sdk_info);
+    info.slot_index = rotator_index;
     return true;
 }
 

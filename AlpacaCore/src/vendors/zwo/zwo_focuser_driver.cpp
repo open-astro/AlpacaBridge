@@ -551,17 +551,17 @@ private:
                 throw AlpacaException("No ZWO EAF focusers detected", AlpacaError::NotConnected);
             }
             int index = focuser_index_.value();
-            if (index < 0 || index >= static_cast<int>(focusers.size())) {
-                ALPACA_LOG_WARN("ZWO", "Focuser index out of range: " + std::to_string(index) +
-                                         " (count=" + std::to_string(focusers.size()) + ")");
-                throw AlpacaException("Focuser index not found", AlpacaError::InvalidValue);
+            for (const auto& info : focusers) {
+                if (info.slot_index == index) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    focuser_id_ = info.focuser_id;
+                    focuser_info_ = info;
+                    focuser_info_valid_ = true;
+                    return info.focuser_id;
+                }
             }
-            const auto& info = focusers[static_cast<std::size_t>(index)];
-            std::lock_guard<std::mutex> lock(mutex_);
-            focuser_id_ = info.focuser_id;
-            focuser_info_ = info;
-            focuser_info_valid_ = true;
-            return info.focuser_id;
+            ALPACA_LOG_WARN("ZWO", "Focuser SDK slot not found: " + std::to_string(index));
+            throw AlpacaException("Focuser index not found", AlpacaError::InvalidValue);
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
