@@ -76,7 +76,7 @@ public:
 
     explicit LockedQHYSDK(QHYSDK& inner) : inner_(inner) {}
 
-    /// The longest any of the 26 forwards has spent INSIDE the inner call,
+    /// The longest any forward has spent INSIDE the inner call,
     /// in milliseconds (open-astro#339); time queued behind another forward
     /// on a mutex is not counted, since the clock starts after the lock is
     /// taken. cancel_exposure() is timed too, by its own Guard, even though it
@@ -122,6 +122,14 @@ public:
     }
     void set_param(const std::string& camera_id, int control_id, double value) override {
         locked([&] { inner_.set_param(camera_id, control_id, value); });
+    }
+    vendor::qhy::CoolerOffAction prepare_cooler_off(const std::string& camera_id,
+                                                    std::shared_ptr<std::atomic<bool>> running_flag) override {
+        auto action = locked([&] { return inner_.prepare_cooler_off(camera_id, std::move(running_flag)); });
+        // The fake's retained handle is released under the same lock as its forwards.
+        auto retained = std::shared_ptr<std::function<void()>>(new std::function<void()>(std::move(action)),
+                                                               [this](auto* p) { locked([&] { delete p; }); });
+        return [this, retained = std::move(retained)] { locked([&] { (*retained)(); }); };
     }
 
     void set_resolution(const std::string& camera_id, uint32_t start_x, uint32_t start_y, uint32_t width,
