@@ -356,12 +356,13 @@ private:
                 throw AlpacaException("No ZWO EFW wheels detected", AlpacaError::NotConnected);
             }
             int index = wheel_index_.value();
-            if (index < 0 || index >= static_cast<int>(wheels.size())) {
-                ALPACA_LOG_WARN("ZWO", "Filter wheel index out of range: " + std::to_string(index) +
-                                         " (count=" + std::to_string(wheels.size()) + ")");
-                throw AlpacaException("Filter wheel index not found", AlpacaError::InvalidValue);
+            for (const auto& info : wheels) {
+                if (info.slot_index == index) {
+                    return info.wheel_id;
+                }
             }
-            return wheels[static_cast<std::size_t>(index)].wheel_id;
+            ALPACA_LOG_WARN("ZWO", "Filter wheel SDK slot not found: " + std::to_string(index));
+            throw AlpacaException("Filter wheel index not found", AlpacaError::InvalidValue);
         }
 
         std::lock_guard<std::mutex> lock(mutex_);

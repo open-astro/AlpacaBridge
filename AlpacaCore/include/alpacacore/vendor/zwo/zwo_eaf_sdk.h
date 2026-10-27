@@ -26,6 +26,8 @@ struct ZWOEAFFocuserInfo {
     int focuser_id{};
     std::string name;
     int max_step{};
+    // SDK enumeration slot, not the device ID; unknown for ID-only reads.
+    int slot_index{-1};
 };
 
 /**
