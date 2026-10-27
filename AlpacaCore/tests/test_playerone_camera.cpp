@@ -1899,3 +1899,55 @@ TEST_CASE("Player One Camera Driver - ImageArray before any exposure is asked to
     }
     driver->set_connected(false);
 }
+
+// #1745: set_stopping must not change what the body sees. A failing AbortExposure stop that outlasts a poll
+// step leaves the exposure running, not failed with "ended without an image".
+TEST_CASE("Player One Camera Driver - A slow failing AbortExposure stop leaves the exposure running",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    sdk.set_stop_failure(true);
+    sdk.set_stop_failure_polls(2);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30));
+    driver->set_connected(true);
+    driver->start_exposure(5.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+
+    CHECK_THROWS(driver->abort_exposure());
+    REQUIRE(sdk.stop_count() == 1);
+    sdk.set_stop_failure(false);
+    const int polls = sdk.image_ready_polls();
+    // A body that still owns the session keeps polling; one that gave up does not.
+    CHECK(eventually([&] { return sdk.image_ready_polls() >= polls + 2; }));
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_FALSE(driver->get_image_ready());
+    driver->abort_exposure();
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    driver->set_connected(false);
+}
+
+// #1745: after a failed AbortExposure stop the exposure runs on, so a real download failure is kept again.
+TEST_CASE("Player One Camera Driver - A download failure after a failed AbortExposure stop is kept",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    sdk.set_stop_failure(true);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30));
+    driver->set_connected(true);
+    driver->start_exposure(5.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+
+    CHECK_THROWS(driver->abort_exposure());
+    sdk.set_stop_failure(false);
+    sdk.set_download_failure(true);
+    sdk.set_image_ready(true);
+    CHECK(eventually([&] {
+        try {
+            static_cast<void>(driver->get_image_ready());
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+        return false;
+    }));
+    driver->set_connected(false);
+}

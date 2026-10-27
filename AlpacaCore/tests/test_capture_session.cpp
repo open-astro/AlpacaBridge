@@ -348,6 +348,33 @@ TEST_CASE("CaptureSession - abort wakes the body, discards the frame and keeps t
     CHECK(h.session->camera_state() == CameraState::Idle);
 }
 
+// #1745: a body that fails after the driver began stopping the SDK exposure does not fail the exposure.
+TEST_CASE("CaptureSession - a throw after set_stopping is dropped, and set_stopping(false) hands ownership back",
+          "[util][capture-session]") {
+    for (const bool hand_back : {false, true}) {
+        Harness h;
+        std::promise<void> release;
+        std::shared_future<void> gate = release.get_future().share();
+        h.session->start(1.0, [gate](CaptureControl&) {
+            gate.wait();
+            throw std::runtime_error("download broken by the stop");
+        });
+        h.session->set_stopping(true);
+        if (hand_back) h.session->set_stopping(false);
+        release.set_value();
+        REQUIRE(eventually([&] { return !h.session->busy(); }));
+        if (hand_back) {
+            CHECK(*h.session->failure() == "download broken by the stop");
+        } else {
+            CHECK_FALSE(h.session->failure().has_value());
+            CHECK(h.session->camera_state() == CameraState::Exposing);
+            h.session->abort();
+            CHECK(h.session->camera_state() == CameraState::Idle);
+            CHECK(error_of([&] { (void)h.session->image_ready(); }) == -1);
+        }
+    }
+}
+
 TEST_CASE("CaptureSession - a body that throws fails the exposure until the next start", "[util][capture-session]") {
     Harness h;
     h.session->start(1.0, [](CaptureControl& c) {

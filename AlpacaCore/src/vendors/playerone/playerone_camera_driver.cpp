@@ -259,6 +259,8 @@ public:
             // connection check before this disconnect raises NotConnected and runs no body. A failed stop
             // leaves the exposure running: fail() keeps the error for ImageReady, nothing is joined and the
             // camera stays connected.
+            // A body failure the SDK stop causes is dropped, not kept (#1745).
+            session_.set_stopping(true);
             exposure_stop_error = stop_sdk_exposure();
             if (!exposure_stop_error.empty()) {
                 session_.fail(exposure_stop_error);
@@ -922,9 +924,11 @@ public:
                                       AlpacaError::InvalidOperation);
             }
             if (sdk_exposure_started_) {
+                session_.set_stopping(true);  // a download the stop breaks is not a failure (#1745)
                 try {
                     sdk_.stop_exposure(camera_info_.camera_id);
                 } catch (...) {
+                    session_.set_stopping(false);  // the exposure runs on
                     if (sdk_.image_ready(camera_info_.camera_id)) {
                         throw AlpacaException("AbortExposure is no longer possible because image readout has begun",
                                               AlpacaError::InvalidOperation);
