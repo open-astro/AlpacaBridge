@@ -25,17 +25,21 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -69,6 +73,8 @@ constexpr double kSiteLongitude = 151.215297;
 struct HeldOnStep {
     std::atomic<int> latency_ms{0};
     std::atomic<bool> moving{false};
+    std::atomic<bool> garble_site{false};      // :Gt#/:Gg# answer something that does not parse
+    std::atomic<bool> refuse_latitude{false};  // :St# answers 0
     std::mutex mutex;
     std::vector<std::string> log;
     std::string status;  // non-empty: :GU# answers this (under `mutex`)
@@ -101,6 +107,9 @@ struct HeldOnStep {
         if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
         if (chunk.rfind(":GA", 0) == 0) return "+45*00:00#";
         if (chunk.rfind(":GZ", 0) == 0) return "180*00:00#";
+        if (chunk.rfind(":St", 0) == 0 && refuse_latitude.load()) return "0";
+        if (chunk.rfind(":Gt", 0) == 0) return garble_site.load() ? "?#" : "+40*30#";
+        if (chunk.rfind(":Gg", 0) == 0) return garble_site.load() ? "?#" : "+074*00#";
         if (chunk.rfind(":Gh", 0) == 0) return "-10*#";
         if (chunk.rfind(":Go", 0) == 0) return "90*#";
         if (chunk.rfind(":GE", 0) == 0) return "00#";
@@ -134,10 +143,12 @@ struct Rig {
     alpacacore::test::FakeMountServer server{[m = mount](const std::string& chunk) { return m->reply(chunk); }};
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
 
-    explicit Rig(bool moving = false) {
+    // Without a site in the config the connect reads the mount's (:Gt#/:Gg#).
+    explicit Rig(bool moving = false, bool with_site = true) {
         mount->moving = moving;
-        driver = onstep::create_onstep_telescope_with_site(0, endpoint(), kSiteLatitude, kSiteLongitude, std::nullopt,
-                                                           true, clock);
+        driver = onstep::create_onstep_telescope_with_site(
+            0, endpoint(), with_site ? std::optional<double>(kSiteLatitude) : std::nullopt,
+            with_site ? std::optional<double>(kSiteLongitude) : std::nullopt, std::nullopt, true, clock);
     }
     ~Rig() {
         mount->latency_ms = 0;
@@ -524,6 +535,342 @@ TEST_CASE("OnStep getters - a MoveAxis ended between the re-send tick's reads an
     REQUIRE(rig.mount->count(":Go#") >= 1);    // the tick got through its reads
     CHECK(rig.mount->count(":Me#") == moves);  // and re-sent nothing
     rig.mount->moving = false;
+}
+
+// A site getter whose site is not cached reads :Gt#/:Gg# through the single
+// read. A Disconnect and Connect that win the race for the operation lock end
+// that read with NotConnected; the getter must report it, not answer from the
+// cache, and must not mark the new session's site unread (#1728 review).
+TEST_CASE("OnStep getters - a site read that waited out a reconnect reads as not connected", "[onstep][getter-locks]") {
+    Rig rig(false, false);
+    REQUIRE(rig.server.ok());
+    rig.mount->garble_site = true;  // the connect cannot read the site
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    rig.mount->garble_site = false;
+    rig.clock.advance(std::chrono::milliseconds(2100));  // past the site retry delay
+
+    std::size_t sites_after_reconnect = 0;
+    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, [&] {
+        std::thread other([&] {
+            rig.driver->set_connected(false);
+            rig.driver->set_connected(true);  // reads the site again
+        });
+        other.join();
+        sites_after_reconnect = rig.mount->count(":Gt");
+    });
+    int error = 0;
+    try {
+        (void)rig.driver->get_site_latitude();
+    } catch (const alpacacore::AlpacaException& e) {
+        error = e.error_code();
+    }
+    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, nullptr);
+
+    REQUIRE(sites_after_reconnect >= 2);  // the first connect's read and the reconnect's
+    CHECK(error == alpacacore::AlpacaError::NotConnected);
+    // The new session's site stands: served from its cache, with no further read.
+    rig.clock.advance(std::chrono::milliseconds(2100));
+    CHECK(std::fabs(rig.driver->get_site_latitude() - 40.5) < 1e-9);
+    CHECK(rig.mount->count(":Gt") == sites_after_reconnect);
+}
+
+// The tracking restore a Slewing read sends when a GOTO ends is a single read
+// too: it drops mutex_ and waits for the operation lock. A GOTO sent in that
+// gap owns the mount; the restore must not go out behind it (#1728 review).
+namespace {
+
+// A GOTO started with tracking on has ended with tracking off, so the next
+// Slewing read owes a tracking restore (:ST60.164275#). Its first single read
+// is the :GU#; the second, the restore. `intruder` runs on another thread in
+// front of the restore, while the read waits for the operation lock. Returns
+// what that Slewing read answered.
+bool slewing_with_command_before_restore(Rig& rig, const std::function<void()>& intruder) {
+    REQUIRE(rig.server.ok());
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    REQUIRE(rig.driver->get_tracking());
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);  // starts with tracking on: a restore is owed
+    rig.mount->set_status("pEW180#");                  // the GOTO runs, tracking on
+    rig.clock.advance(std::chrono::milliseconds(2100));
+    REQUIRE(rig.driver->get_slewing());
+    rig.mount->set_status("nNpEW180#");  // it ended with tracking off: the next read restores it
+    rig.clock.advance(std::chrono::milliseconds(2100));
+
+    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, [&] {
+        onstep::set_single_read_before_io_hook_for_testing(*rig.driver, [&] {
+            std::thread other([&] {
+                try {
+                    intruder();
+                } catch (const std::exception& e) {
+                    FAIL_CHECK(e.what());
+                }
+            });
+            other.join();
+        });
+    });
+    const bool slewing = rig.driver->get_slewing();
+    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, nullptr);
+    return slewing;
+}
+
+}  // namespace
+
+TEST_CASE("OnStep getters - a slew sent while a Slewing read waits to restore tracking gets no restore",
+          "[onstep][getter-locks]") {
+    Rig rig;
+    const bool slewing = slewing_with_command_before_restore(
+        rig, [&] { rig.driver->slew_to_alt_az_async(45.0, 180.0); });  // allowed: tracking off
+
+    REQUIRE(rig.mount->count(":MS#") == 2);  // the second GOTO went out in the gap
+    CHECK(rig.mount->count(":ST60") == 0);   // and no :ST60.164275# behind it
+    CHECK(slewing);                          // the new slew's grace
+}
+
+// The client's Tracking write decides tracking: the restore must not undo it.
+TEST_CASE("OnStep getters - a Tracking write sent while a Slewing read waits to restore tracking gets no restore",
+          "[onstep][getter-locks]") {
+    Rig rig;
+    (void)slewing_with_command_before_restore(rig, [&] { rig.driver->set_tracking(false); });
+
+    REQUIRE(rig.mount->count(":ST0#") == 1);  // the write went out in the gap
+    CHECK(rig.mount->count(":ST60") == 0);    // and no restore behind it
+}
+
+// A Park or FindHome the mount takes ends with tracking off on purpose (#1218).
+TEST_CASE("OnStep getters - a Park or FindHome taken while a Slewing read waits to restore tracking gets no restore",
+          "[onstep][getter-locks]") {
+    for (const bool home : {false, true}) {
+        CAPTURE(home);
+        Rig rig;
+        (void)slewing_with_command_before_restore(rig, [&] {
+            if (home) {
+                rig.driver->find_home();
+            } else {
+                rig.driver->park();
+            }
+        });
+
+        REQUIRE(rig.mount->count(home ? ":hC#" : ":hP#") == 1);  // a still mount: sent at once, and taken
+        CHECK(rig.mount->count(":ST60") == 0);
+    }
+}
+
+// A Park or FindHome on a moving mount sends AbortSlew's stops first (#1430);
+// those decide tracking too, before the body parks or homes.
+TEST_CASE(
+    "OnStep getters - the stops before a Park or FindHome sent while a Slewing read waits to restore tracking "
+    "leave no restore",
+    "[onstep][getter-locks]") {
+    for (const bool home : {false, true}) {
+        CAPTURE(home);
+        Rig rig;
+        (void)slewing_with_command_before_restore(rig, [&] {
+            rig.mount->set_status("nNpgEW180#");  // a guide move runs: the call stops it first
+            if (home) {
+                rig.driver->find_home();
+            } else {
+                rig.driver->park();
+            }
+        });
+
+        REQUIRE(rig.mount->count(":Q#") >= 1);  // the stops went out in the gap
+        CHECK(rig.mount->count(":ST60") == 0);
+    }
+}
+
+// Setters with no wire I/O take the state lock alone (#1728 review): they never
+// wait behind a command on the wire.
+TEST_CASE("OnStep setters - none without wire I/O waits behind a command that is on the wire",
+          "[onstep][getter-locks]") {
+    const std::vector<Getter> setters = {
+        {"TargetRightAscension write", [](auto& d) { d.set_target_right_ascension(3.0); }},
+        {"TargetDeclination write", [](auto& d) { d.set_target_declination(30.0); }},
+        {"DoesRefraction write", [](auto& d) { d.set_does_refraction(true); }},  // the firmware's own value
+    };
+    for (const auto& command : commands()) {
+        CAPTURE(command.name);
+        Rig rig;
+        REQUIRE(rig.server.ok());
+        rig.driver->set_connected(true);
+        REQUIRE(rig.driver->get_connected());
+        rig.driver->set_target_right_ascension(2.0);
+        rig.driver->set_target_declination(20.0);
+
+        rig.mount->latency_ms = static_cast<int>(kLatency.count());
+        const std::size_t before = rig.mount->served();
+        std::atomic<bool> done{false};
+        std::thread issuer([&] {
+            try {
+                command.run(*rig.driver);
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): only the setters are under test
+            }
+            done = true;
+        });
+        wait_for_exchange(*rig.mount, before);
+        const auto sampled = slowest_reads(*rig.driver, setters, [&] { return !done.load(); });
+        rig.mount->latency_ms = 0;
+        issuer.join();
+        check_no_getter_waited(sampled);
+    }
+}
+
+// A target written while a slew's exchanges run lands after the slew, so it
+// stands; the slew still sets the target it did not touch.
+TEST_CASE("OnStep setters - a target written during a slew's exchanges stands", "[onstep][getter-locks]") {
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+
+    rig.mount->latency_ms = static_cast<int>(kLatency.count());
+    const std::size_t before = rig.mount->served();
+    std::thread issuer([&] { rig.driver->slew_to_coordinates_async(2.0, 20.0); });
+    wait_for_exchange(*rig.mount, before);
+    rig.driver->set_target_right_ascension(5.0);
+    rig.mount->latency_ms = 0;
+    issuer.join();
+
+    REQUIRE(rig.mount->count(":MS#") == 1);
+    CHECK(rig.driver->get_target_right_ascension() == 5.0);
+    CHECK(rig.driver->get_target_declination() == 20.0);
+}
+
+// The same for a sync: its :Sr#/:Sd#/:CM# exchanges run with mutex_ free.
+TEST_CASE("OnStep setters - a target written during a sync's exchanges stands", "[onstep][getter-locks]") {
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+
+    rig.mount->latency_ms = static_cast<int>(kLatency.count());
+    const std::size_t before = rig.mount->served();
+    std::thread issuer([&] { rig.driver->sync_to_coordinates(2.0, 20.0); });
+    wait_for_exchange(*rig.mount, before);
+    rig.driver->set_target_right_ascension(5.0);
+    rig.mount->latency_ms = 0;
+    issuer.join();
+
+    REQUIRE(rig.mount->count(":CM#") == 1);
+    CHECK(rig.driver->get_target_right_ascension() == 5.0);
+    CHECK(rig.driver->get_target_declination() == 20.0);
+}
+
+// A slew's or sync's own checks can read the mount first: with the status
+// cache older than 2 s, the Tracking and GOTO checks send :GU#. A target
+// written during that read stands too (#1728 review bot).
+TEST_CASE("OnStep setters - a target written during a slew's status check stands", "[onstep][getter-locks]") {
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    rig.clock.advance(std::chrono::milliseconds(2100));  // past the status cache: the check asks the mount
+
+    rig.mount->latency_ms = static_cast<int>(kLatency.count());
+    const std::size_t before = rig.mount->served();
+    std::thread issuer([&] { rig.driver->slew_to_coordinates_async(2.0, 20.0); });
+    wait_for_exchange(*rig.mount, before);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        REQUIRE(rig.mount->log.at(before).rfind(":GU", 0) == 0);  // the write below lands during the check
+    }
+    rig.driver->set_target_right_ascension(5.0);
+    rig.mount->latency_ms = 0;
+    issuer.join();
+
+    REQUIRE(rig.mount->count(":MS#") == 1);
+    CHECK(rig.driver->get_target_right_ascension() == 5.0);
+    CHECK(rig.driver->get_target_declination() == 20.0);
+}
+
+TEST_CASE("OnStep setters - a target written during a sync's status check stands", "[onstep][getter-locks]") {
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    rig.clock.advance(std::chrono::milliseconds(2100));  // past the status cache: the GOTO check asks the mount
+
+    rig.mount->latency_ms = static_cast<int>(kLatency.count());
+    const std::size_t before = rig.mount->served();
+    std::thread issuer([&] { rig.driver->sync_to_coordinates(2.0, 20.0); });
+    wait_for_exchange(*rig.mount, before);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        REQUIRE(rig.mount->log.at(before).rfind(":GU", 0) == 0);
+    }
+    rig.driver->set_target_right_ascension(5.0);
+    rig.mount->latency_ms = 0;
+    issuer.join();
+
+    REQUIRE(rig.mount->count(":CM#") == 1);
+    CHECK(rig.driver->get_target_right_ascension() == 5.0);
+    CHECK(rig.driver->get_target_declination() == 20.0);
+}
+
+// OnStep refuses :St#/:Sg# only for a value it cannot take, never for the
+// mount's state. A refusal at connect is logged at WARN with the reason, and
+// the connect still succeeds with the mount's own site.
+TEST_CASE("OnStep connect - a site write the mount refuses is logged and the connect still succeeds",
+          "[onstep][getter-locks]") {
+    std::mutex warn_mutex;
+    std::vector<std::string> warnings;
+    const auto previous = alpacacore::logging::get_log_sink();
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn) {
+                std::lock_guard<std::mutex> lock(warn_mutex);
+                warnings.emplace_back(message);
+            }
+        });
+    struct Restore {
+        alpacacore::logging::LogSink previous;
+        ~Restore() { alpacacore::logging::set_log_sink(previous); }
+    } restore{previous};
+
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    rig.mount->refuse_latitude = true;
+    rig.driver->set_connected(true);
+    CHECK(rig.driver->get_connected());
+    CHECK(std::fabs(rig.driver->get_site_latitude() - 40.5) < 1e-9);  // the mount's own site
+
+    std::vector<std::string> site_warnings;
+    {
+        std::lock_guard<std::mutex> lock(warn_mutex);
+        for (const auto& w : warnings) {
+            if (w.find("Site ") != std::string::npos) {
+                site_warnings.push_back(w);
+            }
+        }
+    }
+    REQUIRE(site_warnings.size() == 1);
+    CHECK(site_warnings[0].find("latitude") != std::string::npos);
+    CHECK(site_warnings[0].find("Mount rejected site latitude") != std::string::npos);  // the reason
+}
+
+// Wire's single read records the operation lock for the read, so a nested
+// wire() or check_connected() inside it does not take io_mutex_ again (#1728
+// review).
+TEST_CASE("OnStep getters - a stale-cache read holds the operation lock as its own", "[onstep][getter-locks]") {
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    rig.clock.advance(std::chrono::milliseconds(2100));  // past the position cache
+
+    bool hook_ran = false;
+    bool held_inside = false;
+    onstep::set_single_read_in_io_hook_for_testing(*rig.driver, [&] {
+        hook_ran = true;
+        held_inside = onstep::holds_operation_lock_for_testing(*rig.driver);
+    });
+    CHECK_FALSE(onstep::holds_operation_lock_for_testing(*rig.driver));
+    (void)rig.driver->get_right_ascension();
+    onstep::set_single_read_in_io_hook_for_testing(*rig.driver, nullptr);
+
+    REQUIRE(hook_ran);
+    CHECK(held_inside);
+    CHECK_FALSE(onstep::holds_operation_lock_for_testing(*rig.driver));  // released with the read
 }
 
 TEST_CASE("OnStep getters - a connect on the wire holds up no getter and reads as not connected",

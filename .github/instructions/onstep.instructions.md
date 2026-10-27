@@ -435,11 +435,17 @@ it is never reachable through `router.cpp` or the web UI.
   (`connected_` and `session_generation_`, bumped by every connect and disconnect): a Disconnect or a
   reconnect that won the race makes it throw `NotConnected` without touching the wire. A `Slewing` read
   whose `:GU#` dropped `mutex_` decides "the slew just ended" only if no slew was sent meanwhile
-  (`slew_epoch_`), so a newer GOTO keeps its tracking-restore flag. The stops (AbortSlew, `MoveAxis(axis, 0)`, Park/FindHome's
+  (`slew_epoch_`), so a newer GOTO keeps its tracking-restore flag; the `:ST` restore that read sends is a
+  single read too, and goes out only if no slew, Tracking write, Park or FindHome the mount took, or the
+  stops before one, went out while it waited for `io_mutex_` (`tracking_epoch_`). A site read that waited out a Disconnect throws `NotConnected` and leaves
+  the site cache alone. The stops (AbortSlew, `MoveAxis(axis, 0)`, Park/FindHome's
   pre-stops, a refused re-send, the #521 relink) all go through `send_stops_locked()`. A getter changes
   state between a command's exchanges only from what it already holds: anything it learns from the mount
   needs a read, and so the operation lock. A new command takes a default `StateLock` and calls `wire()`, never
-  `OnStepProtocolWrapper::instance()` for an exchange; a new getter takes `Mode::State`. Tests:
+  `OnStepProtocolWrapper::instance()` for an exchange; a new getter takes `Mode::State`, and so does a setter
+  that sends nothing (`TargetRightAscension`, `TargetDeclination`, `DoesRefraction`): a target written while a
+  slew or sync runs, its checks' reads included, stands (each entry point notes the target writes before
+  any check, and the command sets only a target nobody wrote since). Tests:
   `test_onstep_getter_locks.cpp`, and the Park/FindHome storm in `test_onstep_concurrency_stress.cpp`.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
   without waiting for the park or home to finish (a running motion is stopped first, #1430, below;
@@ -503,7 +509,7 @@ it is never reachable through `router.cpp` or the web UI.
     locks released, so getters, `AbortSlew` and Disconnect answer meanwhile. The stops, the `:GU#`
     polls, `:hP#` and `:GE#` (up to 1 s each without a reply; on firmware without `:GE#` a `FindHome`
     takes about 1 s longer) and `:hC#` hold the operation lock, so nothing lands between `:hP#` and
-    its `:GE#`, and run with `mutex_` free (decision 0016, #1449; see "Locks" below). A `Park` while one
+    its `:GE#`, and run with `mutex_` free (decision 0016, #1449; see "Locks" above). A `Park` while one
     runs (`I`), or a `FindHome` while one runs (`h`), is a no-op.
 - **A slow first post-Connect `DeviceState` means the connect did not run** (#1242). A
   ConformU-style preamble from one ClientID (`Connected=True` → `Connected=False` → `Connect()`,

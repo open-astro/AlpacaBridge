@@ -421,12 +421,10 @@ public:
     /**
      * @brief Set site longitude.
      *
-     * Sends :Sg sDDD*MM#.
-     *
-     * TODO: Verify sign convention against real firmware. Modern OnStep
-     * accepts signed East-positive longitude directly; classic LX200 used an
-     * unsigned 0-360 West-positive convention. This wrapper sends the signed
-     * ASCOM (East-positive) form.
+     * Sends :Sg sDDD*MM#. Takes the ASCOM East-positive longitude and sends it
+     * negated, West-positive, which is what the firmware's sidereal-time
+     * formula expects (confirmed on real hardware; see format_longitude()).
+     * get_site_info() negates it back on read.
      */
     void set_longitude(double longitude_degrees);
 

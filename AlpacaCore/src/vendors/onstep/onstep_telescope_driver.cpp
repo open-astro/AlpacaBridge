@@ -349,6 +349,7 @@ private:
             if (!driver_.connected_.load() || driver_.session_generation_.load() != session) {
                 throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
             }
+            driver_.run_single_read_in_io_hook();
             return f(protocol);
         }
 
@@ -469,6 +470,27 @@ private:
         return held != nullptr && held->io;
     }
 
+    // A slew or sync to (ra, dec) sets both targets, except one a client wrote
+    // while the command ran: the target setters take mutex_ alone (#1728
+    // review), so a write can land during any exchange of the command, its
+    // checks' :GU# or site reads included. Each entry point takes the snapshot
+    // right after its StateLock, before any of them, so that write stands.
+    struct TargetWrites {
+        std::uint64_t ra;
+        std::uint64_t dec;
+    };
+    TargetWrites target_writes_locked() const { return {target_ra_writes_, target_dec_writes_}; }
+    void store_target_locked(double ra, double dec, TargetWrites before) {
+        if (target_ra_writes_ == before.ra) {
+            target_ra_hours_ = ra;
+            target_ra_set_ = true;
+        }
+        if (target_dec_writes_ == before.dec) {
+            target_dec_degrees_ = dec;
+            target_dec_set_ = true;
+        }
+    }
+
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
@@ -528,9 +550,14 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Product name + firmware version captured at connect; web-UI only.
-    // Guarded by its OWN narrow mutex, NOT the coarse mutex_ that
-    // set_connected() holds across the multi-second connect, so a
-    // configureddevices poll never blocks on the mount connection.
+    // The connect no longer holds mutex_ across its exchanges: it holds
+    // transition_mutex_ and io_mutex_ for its whole multi-second run and
+    // takes mutex_ only between exchanges (decision 0016), so mutex_ would
+    // serve here now. firmware_mutex_ is kept anyway, held only for the copy:
+    // it is the shared rule's guard (driver-lifecycle, "Device firmware / SDK
+    // version"), the configureddevices listing then never queues behind the
+    // state writes of a getter or a command, and the connect fills the cache
+    // without firmware_mutex_ held across its :GVP#/:GVN# reads.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (firmware_cache_.empty()) {
@@ -715,14 +742,22 @@ public:
             // values were provided AND both writes succeeded -- it's a single
             // flag covering both fields together (see the atomic :Gt#/:Gg#
             // fetch in ensure_site_info_cached_locked()). Setting it after
-            // only one field actually landed (the mount can reject a site
-            // update depending on alignment state) would pin the other field
+            // only one field actually landed (a write can fail, see below)
+            // would pin the other field
             // at its stale/default 0.0 while callers trust it as valid --
             // e.g. compute_alt_az_target_locked() feeding a wrong latitude
             // into the Alt/Az->RA/Dec transform for SlewToAltAz. Leaving the
             // flag false on any partial failure just falls through to
             // ensure_site_info_cached_locked()'s atomic re-fetch on next
             // access instead.
+            //
+            // Neither firmware refuses :St#/:Sg# for the mount's state (aligned,
+            // parked, slewing): OnStepX (Site.command.cpp) and OnStep 4.x
+            // (Command.ino) answer 0 only for a value they cannot parse or that
+            // is out of range. A failed write is therefore a bad config value or
+            // a link that did not answer. The connect still succeeds, as before,
+            // with the mount's own site read back below; the config values stay
+            // as they are and are written again at the next connect.
             bool latitude_pushed = false;
             bool longitude_pushed = false;
             if (pending_site_latitude_.has_value()) {
@@ -730,8 +765,10 @@ public:
                     protocol.set_latitude(pending_site_latitude_.value());
                     site_latitude_cached_ = pending_site_latitude_.value();
                     latitude_pushed = true;
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    // TODO: Confirm OnStep accepts site updates in every alignment state.
+                } catch (const std::exception& ex) {
+                    ALPACA_LOG_WARN("OnStep", std::string("Site latitude from the device config not written to the "
+                                                          "mount; using the mount's own site: ") +
+                                                  ex.what());
                 }
             }
             if (pending_site_longitude_.has_value()) {
@@ -739,8 +776,10 @@ public:
                     protocol.set_longitude(pending_site_longitude_.value());
                     site_longitude_cached_ = pending_site_longitude_.value();
                     longitude_pushed = true;
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    // TODO: see above.
+                } catch (const std::exception& ex) {
+                    ALPACA_LOG_WARN("OnStep", std::string("Site longitude from the device config not written to the "
+                                                          "mount; using the mount's own site: ") +
+                                                  ex.what());
                 }
             }
             if (pending_site_latitude_.has_value() && pending_site_longitude_.has_value() && latitude_pushed &&
@@ -983,8 +1022,10 @@ public:
         status_cache_valid_ = true;
         last_status_update_ = clock_.now();
         // The client has said what it wants; a pending GOTO restore must not
-        // override it when the slew ends (#1230).
+        // override it when the slew ends (#1230), nor one a Slewing read is
+        // about to send.
         tracking_before_slew_ = false;
+        ++tracking_epoch_;
     }
 
     double get_focal_length() const override { return focal_length_m_; }
@@ -1094,7 +1135,7 @@ public:
     }
 
     void set_does_refraction(bool does_refraction) override {
-        StateLock lock(*this);
+        StateLock lock(*this, StateLock::Mode::State);  // no wire I/O, see set_target_declination()
         check_connected();
         if (refraction_from_firmware_.has_value()) {
             if (does_refraction != *refraction_from_firmware_) {
@@ -1210,9 +1251,10 @@ public:
 
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
-        StateLock lock(*this);
+        StateLock lock(*this, StateLock::Mode::State);  // no wire I/O: never waits behind a command (#1728 review)
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
+        ++target_dec_writes_;
     }
 
     double get_target_right_ascension() const override {
@@ -1225,9 +1267,10 @@ public:
 
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
-        StateLock lock(*this);
+        StateLock lock(*this, StateLock::Mode::State);  // see set_target_declination()
         target_ra_hours_ = ra;
         target_ra_set_ = true;
+        ++target_ra_writes_;
     }
 
     int get_tracking_rate() const override {
@@ -1374,31 +1417,35 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         StateLock lock(*this);
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         check_equatorial_slew_locked(ra, dec, "SlewToCoordinates");
-        start_slew_locked(ra, dec, "SlewToCoordinates");
+        start_slew_locked(ra, dec, "SlewToCoordinates", targets);
         wait_for_slew_complete_locked(lock);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
         StateLock lock(*this);
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         check_equatorial_slew_locked(ra, dec, "SlewToCoordinatesAsync");
-        start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
+        start_slew_locked(ra, dec, "SlewToCoordinatesAsync", targets);
     }
 
     // Under the target slew's own name, so a refusal names the member called (#1379).
     void slew_to_target() override {
         StateLock lock(*this);
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
         check_equatorial_slew_locked(ra, dec, "SlewToTarget");
-        start_slew_locked(ra, dec, "SlewToTarget");
+        start_slew_locked(ra, dec, "SlewToTarget", targets);
         wait_for_slew_complete_locked(lock);
     }
 
     void slew_to_target_async() override {
         StateLock lock(*this);
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
         check_equatorial_slew_locked(ra, dec, "SlewToTargetAsync");
-        start_slew_locked(ra, dec, "SlewToTargetAsync");
+        start_slew_locked(ra, dec, "SlewToTargetAsync", targets);
     }
 
     std::pair<double, double> target_or_throw_locked() const {
@@ -1410,19 +1457,21 @@ public:
 
     void sync_to_coordinates(double ra, double dec) override {
         StateLock lock(*this);
-        sync_locked(ra, dec, "SyncToCoordinates");
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
+        sync_locked(ra, dec, "SyncToCoordinates", targets);
     }
 
     void sync_to_target() override {
         StateLock lock(*this);
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
-        sync_locked(ra, dec, "SyncToTarget");
+        sync_locked(ra, dec, "SyncToTarget", targets);
     }
 
     // Under the member's own name (#1379). A sync during a GOTO is refused by the
     // mount (Goto.cpp validate(): CE_SLEW_IN_SLEW) and used to read as success, as
     // did every :CM# refusal; the driver refuses first and reads the reply.
-    void sync_locked(double ra, double dec, const char* who) {
+    void sync_locked(double ra, double dec, const char* who, TargetWrites targets) {
         util::validate_ra_dec(ra, dec, who);  // arguments first, even while disconnected (#1478)
         check_connected();
         refuse_while_faulted_locked(who);
@@ -1438,10 +1487,7 @@ public:
         if (reply.size() >= 2 && reply[0] == 'E' && std::isdigit(static_cast<unsigned char>(reply[1]))) {
             throw digit_refused(who, RefusedCommand::Sync, reply[1], reply);
         }
-        target_ra_hours_ = ra;
-        target_dec_degrees_ = dec;
-        target_ra_set_ = true;
-        target_dec_set_ = true;
+        store_target_locked(ra, dec, targets);
         cached_ra_hours_ = ra;
         cached_dec_degrees_ = dec;
         equatorial_cache_valid_ = true;
@@ -1702,8 +1748,9 @@ public:
         double ra = 0.0;
         double dec = 0.0;
         StateLock lock(*this);
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAz");
-        start_slew_locked(ra, dec, "SlewToAltAz");
+        start_slew_locked(ra, dec, "SlewToAltAz", targets);
         wait_for_slew_complete_locked(lock);
     }
 
@@ -1711,8 +1758,9 @@ public:
         double ra = 0.0;
         double dec = 0.0;
         StateLock lock(*this);
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAzAsync");
-        start_slew_locked(ra, dec, "SlewToAltAzAsync");
+        start_slew_locked(ra, dec, "SlewToAltAzAsync", targets);
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -1749,6 +1797,13 @@ public:
         single_read_before_io_hook_ = std::move(hook);
     }
 
+    void set_single_read_in_io_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
+        single_read_in_io_hook_ = std::move(hook);
+    }
+
+    bool holds_operation_lock_for_testing() const { return holds_io_lock(); }
+
 private:
     // Test seam: runs in the re-send tick after its reads, under mutex_ and io_mutex_; true makes the tick
     // end the move there, as a cancel landing between the reads and the re-send would.
@@ -1768,6 +1823,18 @@ private:
         {
             std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
             hook.swap(single_read_before_io_hook_);
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    // Test seam: runs in Wire's single-read path under io_mutex_, just before the read itself. Runs once.
+    void run_single_read_in_io_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
+            hook.swap(single_read_in_io_hook_);
         }
         if (hook) {
             hook();
@@ -2095,6 +2162,7 @@ private:
         pulse_guiding_active_ = false;  // AbortSlew's stops end every guide, a pulse guide included
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         tracking_before_slew_ = false;
+        ++tracking_epoch_;
         return true;
     }
 
@@ -2197,6 +2265,7 @@ private:
     // The mount took the park or home: it now moves to it with tracking off.
     void finish_park_or_home_locked(bool home) {
         tracking_before_slew_ = false;  // never restart tracking afterwards (#1218)
+        ++tracking_epoch_;
         cached_status_.is_at_home = false;
         cached_status_.is_slewing = true;
         if (!home) {
@@ -2505,7 +2574,7 @@ private:
         alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_, lst, ra_out, dec_out);
     }
 
-    void start_slew_locked(double ra, double dec, const char* context) {
+    void start_slew_locked(double ra, double dec, const char* context, TargetWrites targets) {
         util::validate_ra_dec(ra, dec, context);
         refuse_while_faulted_locked(context);
         refuse_while_goto_running_locked(context);  // before anything is cancelled or sent (#1379)
@@ -2517,15 +2586,13 @@ private:
         if (reply.empty() || reply[0] != '0') {
             throw slew_refused(context, reply);
         }
-        target_ra_hours_ = ra;
-        target_dec_degrees_ = dec;
-        target_ra_set_ = true;
-        target_dec_set_ = true;
+        store_target_locked(ra, dec, targets);
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
         status_cache_valid_ = false;
         slew_force_until_ = clock_.now() + kSlewForceGrace;
         ++slew_epoch_;
+        ++tracking_epoch_;
         clear_manual_motion_locked();
         tracking_before_slew_ = cached_status_.is_tracking;
     }
@@ -2578,6 +2645,11 @@ private:
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             finish_slew_tracking_locked();
+            // The restore can drop mutex_ too: a slew sent meanwhile reads as
+            // running (its grace), as above.
+            if (slew_epoch_ != epoch) {
+                return clock_.now() < slew_force_until_ || cached_status_.is_slewing;
+            }
         }
         return cached_status_.is_slewing;
     }
@@ -2587,13 +2659,30 @@ private:
     // reports it off. Every path that ends a coordinate slew calls this (the
     // async edge above, wait_for_slew_complete_locked(), abort_slew()), so the
     // flag cannot outlive its slew and fire at an unrelated one (#1230).
+    //
+    // From a Slewing getter the restore is a single read: Wire drops mutex_ and
+    // waits for io_mutex_, so a GOTO, a Tracking write, a Park or a FindHome can
+    // go out first. The restore then belongs to none of them (a 4.x mount
+    // refuses :ST mid-slew, and a Park ends with tracking off on purpose), so
+    // it is re-checked under io_mutex_, where those commands bump
+    // tracking_epoch_, and dropped if one ran (#1728 review). Wire re-checks
+    // the session there too.
     void finish_slew_tracking_locked() const {
         const bool restore_tracking = tracking_before_slew_ && !cached_status_.is_tracking;
         tracking_before_slew_ = false;
         if (restore_tracking) {
+            const std::uint64_t epoch = tracking_epoch_;
             try {
-                wire().start_tracking();
-                cached_status_.is_tracking = true;
+                const bool sent = wire().call([&](auto& p) {
+                    if (tracking_epoch_ != epoch) {
+                        return false;
+                    }
+                    p.start_tracking();
+                    return true;
+                });
+                if (sent) {
+                    cached_status_.is_tracking = true;
+                }
             } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
         }
@@ -2843,6 +2932,14 @@ private:
             site_latitude_cached_ = info.latitude_degrees;
             site_longitude_cached_ = info.longitude_degrees;
             site_info_valid_ = true;
+        } catch (const AlpacaException& ex) {
+            // NotConnected: the link is lost, or a Disconnect or reconnect won the race for the operation lock
+            // (Wire's session re-check). It is reported, and this read leaves the state alone: it may belong to
+            // a newer session now.
+            if (ex.error_code() == AlpacaError::NotConnected) {
+                throw;
+            }
+            site_info_valid_ = false;
         } catch (...) {  // NOLINT(bugprone-empty-catch)
             site_info_valid_ = false;
         }
@@ -2924,6 +3021,10 @@ private:
     // Bumped by every coordinate slew sent (under mutex_), so a Slewing read that dropped mutex_ for its
     // status read can tell that a newer slew started meanwhile.
     mutable std::uint64_t slew_epoch_ = 0;
+    // Bumped under io_mutex_ and mutex_ by every command that decides tracking (a slew sent, a Tracking write,
+    // a Park or FindHome that stops the mount or is taken), so the tracking restore a Slewing read sends after
+    // waiting for io_mutex_ can tell that one went out first (finish_slew_tracking_locked()).
+    mutable std::uint64_t tracking_epoch_ = 0;
     // What get_connected() reports, read lock-free (#910). Raised only once a
     // connect has finished, so Connected never reads true while Connecting
     // does; dropped before any disconnect. Written under io_mutex_ and mutex_.
@@ -2942,6 +3043,9 @@ private:
     // resets -- still set or clear both.
     mutable bool target_ra_set_ = false;
     mutable bool target_dec_set_ = false;
+    // Bumped by each target write (under mutex_); see store_target_locked().
+    std::uint64_t target_ra_writes_ = 0;
+    std::uint64_t target_dec_writes_ = 0;
 
     double aperture_diameter_m_ = 0.0;
     double aperture_area_m2_ = 0.0;
@@ -3049,6 +3153,7 @@ private:
     mutable std::mutex disconnect_hook_mutex_;
     std::function<void()> disconnect_before_close_hook_;
     mutable std::function<void()> single_read_before_io_hook_;
+    mutable std::function<void()> single_read_in_io_hook_;
     std::function<bool()> move_axis_resend_before_send_hook_;
     // The tail of a Park or FindHome that must first wait for motion to end
     // (#1430). Declared last with the re-send slot, for the same reason.
@@ -3135,6 +3240,17 @@ void set_single_read_before_io_hook_for_testing(TelescopeDriver& driver, std::fu
     if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
         onstep->set_single_read_before_io_hook_for_testing(std::move(hook));
     }
+}
+
+void set_single_read_in_io_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_single_read_in_io_hook_for_testing(std::move(hook));
+    }
+}
+
+bool holds_operation_lock_for_testing(const TelescopeDriver& driver) {
+    const auto* onstep = dynamic_cast<const OnStepTelescopeDriver*>(&driver);
+    return onstep != nullptr && onstep->holds_operation_lock_for_testing();
 }
 
 void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
