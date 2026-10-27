@@ -1,0 +1,8 @@
+### Fixed
+- **OnStep telescope: follow-ups to the getter lock change** (AlpacaCore, issue #1734, #1728 reviews, issue #1449): a site getter whose read waited out a Disconnect or a reconnect now throws `NotConnected` instead of answering from the cache, and no longer marks the new session's site unread. The tracking restore a `Slewing` read sends when a GOTO ends no longer goes out behind a slew, `Tracking` write, Park or FindHome that another client sent while it waited for the wire. The `TargetRightAscension`, `TargetDeclination` and `DoesRefraction` writes, which send nothing, no longer wait behind a command on the wire, and a target written while a slew or sync runs (its checks' status read included) stands. A site from the device config that the mount does not take at connect is logged at WARN with the reason instead of dropped silently.
+
+### Changed (docs)
+- **OnStep comments and instructions** (#1728 reviews): the `set_longitude()` header says the wrapper sends the longitude West-positive, as the code does; the `get_device_firmware()` comment names the locks the connect holds now and why `firmware_mutex_` stays (#1734); the OnStep instructions point "Locks" above, not below, and describe the new checks.
+
+### Added (tests)
+- **OnStep getter and setter locks** (#1728 reviews): `test_onstep_getter_locks.cpp` covers the site read that waited out a reconnect, the tracking restore after a slew, a `Tracking` write, a Park or FindHome, or the stops before one, sent in its gap, the three setters against ten commands on the wire, a target written during a slew or a sync, or during their status check, a site write refused at connect (one WARN, the connect succeeds), and the operation lock a stale-cache read holds as its own.

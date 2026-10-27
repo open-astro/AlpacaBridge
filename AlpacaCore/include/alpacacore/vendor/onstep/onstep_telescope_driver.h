@@ -87,6 +87,18 @@ void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::
 /// clear it. `driver` must come from the factories above; anything else is ignored.
 void set_single_read_before_io_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// Test seam: `hook` runs once, on the next getter thread that reads the mount
+/// because its cache is stale, with the operation lock taken and just before the
+/// read itself, so a case can see what a nested call inside the read sees (#1728
+/// review). Pass an empty function to clear it. `driver` must come from the
+/// factories above; anything else is ignored.
+void set_single_read_in_io_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: true when the calling thread holds the driver's operation lock, as
+/// the driver's own nested calls see it. False for anything the factories above
+/// did not make.
+bool holds_operation_lock_for_testing(const TelescopeDriver& driver);
+
 /// Test seam: `hook` runs in a MoveAxis re-send tick after its status and
 /// altitude reads and before the re-send, with the driver locks held; when it
 /// returns true the tick ends the move there, as a cancel that landed between
