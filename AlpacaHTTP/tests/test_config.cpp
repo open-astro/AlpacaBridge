@@ -56,6 +56,61 @@ int main() {
     // Test device enable/disable (default should be enabled)
     EXPECT(config.is_device_enabled("camera", 0) == true);
 
+    {
+        // case: thread_pool_size clamps file and environment values and preserves fallback
+        char path_template[] = "/tmp/alpacahttp_test_thread_pool_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string path = path_template;
+        const auto loaded_workers = [&path](const char* value) {
+            std::ofstream out(path);
+            out << "http:\n";
+            if (*value != '\0') {
+                out << "  thread_pool_size: " << value << "\n";
+            }
+            out.close();
+            alpacahttp::Config from_file;
+            EXPECT(from_file.load(path));
+            return from_file.thread_pool_size();
+        };
+        ::unsetenv("ALPACAHTTP_THREAD_POOL_SIZE");
+        EXPECT(loaded_workers("0") == 1);
+        EXPECT(loaded_workers("") == 32);
+        EXPECT(loaded_workers("1") == 1);
+        EXPECT(loaded_workers("32") == 32);
+        EXPECT(loaded_workers("256") == 256);
+        EXPECT(loaded_workers("257") == 256);
+        EXPECT(loaded_workers("-1") == 256);
+        EXPECT(loaded_workers("18446744073709551616") == 32);
+        EXPECT(loaded_workers("banana") == 32);
+
+        // A failed parse also preserves a value already loaded on this object.
+        alpacahttp::Config previous;
+        previous.set_thread_pool_size(7);
+        EXPECT(previous.load(path));
+        EXPECT(previous.thread_pool_size() == 7);
+
+        ::setenv("ALPACAHTTP_THREAD_POOL_SIZE", "9", 1);
+        EXPECT(loaded_workers("7") == 9);
+        ::setenv("ALPACAHTTP_THREAD_POOL_SIZE", "1", 1);
+        EXPECT(loaded_workers("7") == 1);
+        ::setenv("ALPACAHTTP_THREAD_POOL_SIZE", "256", 1);
+        EXPECT(loaded_workers("7") == 256);
+        ::setenv("ALPACAHTTP_THREAD_POOL_SIZE", "0", 1);
+        EXPECT(loaded_workers("7") == 1);
+        for (const char* large : {"257", "-1"}) {
+            ::setenv("ALPACAHTTP_THREAD_POOL_SIZE", large, 1);
+            EXPECT(loaded_workers("7") == 256);
+        }
+        for (const char* invalid : {"banana", "18446744073709551616", ""}) {
+            ::setenv("ALPACAHTTP_THREAD_POOL_SIZE", invalid, 1);
+            EXPECT(loaded_workers("7") == 7);
+        }
+        ::unsetenv("ALPACAHTTP_THREAD_POOL_SIZE");
+        ::unlink(path.c_str());
+    }
+
     // Connection bound and keep-alive lifetime cap: defaults, clamping
     // setters, config-file keys under [http], and environment overrides
     // (which take precedence over the file, like the other overrides).

@@ -200,7 +200,10 @@ void Config::load_config_from_yaml(const std::string& config_path) {
             if (key == "port") {
                 parse_uint16_value(value, http_port_);
             } else if (key == "thread_pool_size") {
-                parse_size_value(value, thread_pool_size_);
+                std::size_t parsed = 0;
+                if (parse_size_value(value, parsed)) {
+                    set_thread_pool_size(parsed);
+                }
             } else if (key == "max_connections") {
                 // Through the setter so the file and the environment clamp
                 // the same way.
@@ -395,10 +398,7 @@ void Config::apply_environment_overrides() {
     const char* thread_pool_env = std::getenv("ALPACAHTTP_THREAD_POOL_SIZE");
     if (thread_pool_env) {
         try {
-            thread_pool_size_ = static_cast<std::size_t>(std::stoul(thread_pool_env));
-            // Clamp to reasonable range (1-256)
-            if (thread_pool_size_ < 1) thread_pool_size_ = 1;
-            if (thread_pool_size_ > 256) thread_pool_size_ = 256;
+            set_thread_pool_size(static_cast<std::size_t>(std::stoul(thread_pool_env)));
         } catch (...) {
             // Invalid value, use default
         }
