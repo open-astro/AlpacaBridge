@@ -37,7 +37,8 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
 - **A reply is read with `util::read_until(fd, ReadSpec, deadline)`** (`util/serial_read.h`), not a hand-written loop
   around `tty_read()`; `read_until_socket()` is the same read over a TCP fd. It stops on a terminator set, a length,
   an idle gap or the first of a terminator and an idle gap, drops CR/LF, caps the length, keeps one `steady_clock`
-  deadline and returns `LinkDead` with the errno for a hangup. It never latches, closes, throws, sleeps or flushes:
+  deadline (with `late_byte_grace` set it can run up to one grace past it, and a `Length` read up to one
+  grace per late byte, since the grace restarts after each) and returns `LinkDead` with the errno for a hangup. It never latches, closes, throws, sleeps or flushes:
   the wrapper keeps its flush, command delay and exception text and decides what `LinkDead` means. It is two concrete
   overloads, not a `ByteChannel` (decision 0013 section 7). The rule binds new reads and the ones migrated so far: the
   Gemini focuser and flat panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that
@@ -50,8 +51,9 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   iOptron TCP `flush_input()`, which still waits one 200 ms read slice for each of up to 16 stale bytes). A read there that does not require the `#` still ends at the `#`
   (`TerminatorOrIdleGap`). When their timeout runs out, the next byte within one read slice (100 ms over serial,
   the socket's `SO_RCVTIMEO`, 200 ms, over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
-  is a timeout. The wrapper sets `ReadSpec::late_byte_grace` to its read slice and `read_until()` does the wait
-  (#1686); a wrapper does not read the late byte itself. For the Celestron and SynScan binary payloads, a `Length`
+  is a timeout. The Celestron, iOptron, SynScan and OnStep wrappers set `ReadSpec::late_byte_grace` to their read slice and
+  `read_until()` does the wait (#1686). The ZWO mount still reads the late byte itself, because it reads in slices to
+  see `closing_`. For the Celestron and SynScan binary payloads, a `Length`
   read, the same field keeps each payload byte within one read slice of the last, so a payload that starts after the
   timeout is read whole. A wait in `tty_read()`/`read_until()` rounds up to the next whole millisecond, never down
   to a zero `poll()` that spins (#1696). On those five a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
@@ -60,7 +62,8 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   is noticed. OnStep keeps its decision 0009 loss on the tty (`lose_link_locked("read failed: <errno text>")`,
   `NotConnected`; a read that ends on silence checks the node, as each empty read slice did) and throws a
   `DriverException` "OnStep network link lost (hangup): <errno text>" over its TCP test seam, which is never lost; its
-  drain waits at least one read slice and ends after a quiet one, and over TCP a hangup just ends it. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
+  drain waits at least one read slice and ends after a quiet one, or at its 2 s cap on a line that never goes
+  quiet (#1449), and over TCP a hangup just ends it. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
   the Wanderer cover and filter wheel probes, which back off 50 ms and keep listening until their deadline as before.
   The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial or overflowed reply as it stands;
   the Wanderer probes drop an overflowed token and keep listening. Still on their own loops, moving in later slices

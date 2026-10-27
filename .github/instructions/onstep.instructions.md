@@ -296,7 +296,9 @@ it is never reachable through `router.cpp` or the web UI.
   (5 sequential blind commands) toward ConformU's 1.0s STANDARD timeout. `send_command_blind()`'s
   stale-input drain window is `50ms` (half a read window) for the same reason — `120ms` (2+ windows)
   pushed `AbortSlew` to 1.04s, just over budget. The drain still waits at least one read slice for
-  a first byte and ends after a quiet slice, as the byte-at-a-time loop did. After an aborted GOTO, `AbortSlew` also reads
+  a first byte and ends after a quiet slice, as the byte-at-a-time loop did, and it ends without an error
+  at `kDrainCap` (2 s, first-byte wait included) on a line that never goes quiet: it holds `io_mutex_`, so
+  every command waits behind it (#1449), and before the cap a byte inside every slice could hold it for hours. After an aborted GOTO, `AbortSlew` also reads
   `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17. The fd is
   non-blocking (`util::SerialLink`), so a port another program retunes to `VMIN=1` can no longer park
   the drain after a blind command (the TeSeek HM-17 hang reported on #1202).

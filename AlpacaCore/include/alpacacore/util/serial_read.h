@@ -15,7 +15,8 @@
 // The read loop above util::tty_read(): read a reply to its terminator, its
 // length, an idle gap or the first of a terminator and an idle gap, drop the
 // bytes the protocol ignores, cap the length,
-// keep one steady_clock deadline and classify a hangup.
+// keep one steady_clock deadline (late_byte_grace may run past it) and
+// classify a hangup.
 //
 // read_until() reads a tty fd (SerialLink::fd()) through tty_read();
 // read_until_socket() reads a TCP fd through recv(). Both share one private
@@ -58,7 +59,7 @@ namespace alpacacore::util {
 struct ReadSpec {
     enum class Stop : std::uint8_t {
         Terminator,  ///< any byte of `terminators` ends the read (kept in the result)
-        Length,      ///< `length` kept bytes end the read
+        Length,      ///< `length` kept bytes end the read; `length` 0 ends it at once, reading nothing
         IdleGap,     ///< `idle_gap` of silence after the first kept byte ends the read
         /// Terminator and IdleGap together: a byte of `terminators` ends the read
         /// (kept, outcome Terminator), and so does `idle_gap` of silence after
@@ -86,6 +87,11 @@ struct ReadSpec {
     /// Length read each byte that comes within this long of the last is kept,
     /// so a payload in flight is read whole (outcome Length once complete).
     /// A hangup in that wait is LinkDead. Unset: the read ends at the deadline.
+    /// The grace does not check max_len. A text read keeps at most one more
+    /// byte, and the grace only follows a read that stopped below max_len, so
+    /// it never ends above it; a Length read is bounded by `length` instead.
+    /// The read can end up to one grace past the deadline, and a Length read
+    /// up to one grace per payload byte past it (the grace restarts each byte).
     std::optional<std::chrono::milliseconds> late_byte_grace;
 };
 
@@ -177,6 +183,13 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
                            std::chrono::steady_clock::time_point deadline) {
     using Clock = std::chrono::steady_clock;
     ReadResult res;
+    // Zero bytes to read: done before reading one, so no byte is taken from
+    // the next reply. Without this the first byte, on time or in the grace,
+    // would meet `size() >= 0` and be kept.
+    if (spec.stop == ReadSpec::Stop::Length && spec.length == 0) {
+        res.outcome = ReadOutcome::Length;
+        return res;
+    }
     const bool idle_stop = spec.stop == ReadSpec::Stop::IdleGap || spec.stop == ReadSpec::Stop::TerminatorOrIdleGap;
     const bool terminator_stop =
         spec.stop == ReadSpec::Stop::Terminator || spec.stop == ReadSpec::Stop::TerminatorOrIdleGap;
