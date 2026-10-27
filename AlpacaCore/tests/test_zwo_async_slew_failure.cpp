@@ -71,6 +71,10 @@ struct Rig {
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
 
     Rig() { driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(mount.port()), clock); }
+    ~Rig() {
+        mount.release();
+        driver.reset();
+    }
     void connect(std::chrono::milliseconds budget = std::chrono::seconds(10)) {
         REQUIRE(mount.ok());
         REQUIRE(alpacacore::test::settle_connected(*driver, true, budget));
@@ -334,6 +338,131 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
     CHECK(alpacacore::test::settle_connected(*driver, false));
 }
 
+TEST_CASE("ZWO replacement GOTO cannot complete during a delayed setup retry", "[zwo][telescope][async][goto-setup]") {
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    mount.reject_goto("e3", 2);
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // poll and first GOTO's retry
+
+    mount.hold_reply(":Sr");
+    driver->slew_to_coordinates_async(6.0, 25.0);  // cancels the older retry
+    const bool held = mount.wait_until_held(std::chrono::seconds(5));
+    CHECK(held);
+    const int pairs_before = mount.count(":GD");
+    mount.set_position(13.0, 46.0);
+    rig.clock.advance(std::chrono::milliseconds(5500));
+    mount.release();  // the replacement now reaches e3 and waits another 300 virtual ms
+    REQUIRE(mount.wait_for_count(":MS", 2, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    // An older worker must not release this setup's poll pause. If polling does run, stopped telemetry
+    // still cannot complete a GOTO that has not been accepted by the mount.
+    CHECK(mount.count(":GD") == pairs_before);
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+    CHECK(mount.count(":MS") == 2);  // both rejected; no accepted GOTO yet
+
+    rig.tick(std::chrono::milliseconds(300));
+    REQUIRE(mount.wait_for_count(":MS", 3, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(driver->command_string(":GVP", false));
+    rig.await_poll_resumed();
+    rig.tick(std::chrono::milliseconds(5500));
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-9);
+    CHECK(std::abs(driver->get_declination() - 25.0) < 1e-9);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO GOTO stays incomplete when Connected refresh polls during setup",
+          "[zwo][telescope][async][goto-setup]") {
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    mount.reject_goto("e3", 1);
+    driver->set_target_right_ascension(6.0);
+    driver->set_target_declination(25.0);
+    mount.hold_reply(":Sr");
+    driver->slew_to_target_async();
+    const bool held = mount.wait_until_held(std::chrono::seconds(5));
+    CHECK(held);
+    rig.clock.advance(std::chrono::milliseconds(5500));
+    mount.release();
+    REQUIRE(mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    mount.set_position(13.0, 46.0);
+    const int pairs_before = mount.count(":GD");
+    driver->set_connected(true);  // deliberately refreshes stopped telemetry while the retry is pending
+    REQUIRE(mount.count(":GD") > pairs_before);
+    REQUIRE(std::abs(driver->get_right_ascension() - 13.0) < 1e-9);
+    CHECK(mount.count(":MS") == 1);  // rejected, not accepted
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+
+    rig.tick(std::chrono::milliseconds(300));
+    REQUIRE(mount.wait_for_count(":MS", 2, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(driver->command_string(":GVP", false));
+    rig.await_poll_resumed();
+    rig.tick(std::chrono::milliseconds(5500));
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-9);
+    CHECK(std::abs(driver->get_declination() - 25.0) < 1e-9);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO blocking slew cannot return success during a delayed setup retry", "[zwo][telescope][goto-setup]") {
+    const bool use_target = GENERATE(false, true);
+    CAPTURE(use_target);
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+    driver->set_target_right_ascension(6.0);
+    driver->set_target_declination(25.0);
+    mount.reject_goto("e3", 1);
+    mount.hold_reply(":SMTI");
+    auto slew = std::async(std::launch::async, [&] {
+        if (use_target)
+            driver->slew_to_target();
+        else
+            driver->slew_to_coordinates(6.0, 25.0);
+    });
+    // No fatal assertions until the synchronous caller has been released and joined.
+    CHECK(mount.wait_until_held(std::chrono::seconds(5)));
+    CHECK(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    rig.clock.advance(std::chrono::milliseconds(5500));
+    mount.release();
+    CHECK(mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    CHECK(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));
+    CHECK_NOTHROW(driver->set_connected(true));
+    rig.clock.advance(std::chrono::milliseconds(200));  // synchronous reader wakes; retry is still pending
+    CHECK(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(mount.count(":MS") == 1);
+    CHECK(slew.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+
+    rig.clock.advance(std::chrono::milliseconds(100));
+    CHECK(mount.wait_for_count(":MS", 2, std::chrono::seconds(5)));
+    CHECK_NOTHROW(driver->command_string(":GVP", false));
+    for (int step = 0; step < 2 && slew.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++step) {
+        CHECK(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+        rig.clock.advance(step == 0 ? std::chrono::milliseconds(5500) : std::chrono::milliseconds(250));
+        CHECK(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
+    const bool completed = slew.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    driver->set_connected(false);
+    if (!completed) {
+        static_cast<void>(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        rig.clock.advance(std::chrono::seconds(1));
+    }
+    CHECK(completed);
+    REQUIRE_NOTHROW(slew.get());
+}
+
 TEST_CASE("ZWO moving status remains visible when coordinate reads fail", "[zwo][telescope][async][arrival]") {
     Rig rig;
     rig.connect(std::chrono::seconds(5));
@@ -342,6 +471,79 @@ TEST_CASE("ZWO moving status remains visible when coordinate reads fail", "[zwo]
     rig.mount.override_reply(":GR", "bad");
     rig.tick();
     CHECK(rig.driver->get_slewing());
+    CHECK(alpacacore::test::settle_connected(*rig.driver, false));
+}
+
+TEST_CASE("ZWO Unpark during GOTO setup cancels the pending retry", "[zwo][telescope][async][goto-setup]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.reject_goto("e3", 1);
+    rig.driver->slew_to_coordinates_async(6.0, 25.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    rig.driver->unpark();
+    rig.tick(std::chrono::milliseconds(5500));
+    CHECK(rig.mount.count(":MS") == 1);
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(alpacacore::test::settle_connected(*rig.driver, false));
+}
+
+TEST_CASE("ZWO slow setup retries complete after an accepted GOTO", "[zwo][telescope][async][goto-setup]") {
+    const std::string rejection = GENERATE("e3", "e5", "e7");
+    CAPTURE(rejection);
+    Rig rig;
+    rig.connect();
+    rig.mount.reject_goto(rejection, 1);
+    rig.mount.hold_reply(":Sr");
+    rig.driver->slew_to_coordinates_async(6.0, 25.0);
+    const bool held = rig.mount.wait_until_held(std::chrono::seconds(5));
+    CHECK(held);
+    rig.clock.advance(std::chrono::milliseconds(5500));
+    CHECK(rig.driver->get_slewing());
+    CHECK(rig.mount.count(":MS") == 0);
+    rig.mount.release();
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    if (rejection == "e3") {
+        REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+        rig.tick(std::chrono::milliseconds(300));
+    }
+    REQUIRE(rig.mount.wait_for_count(":MS", 2, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+    rig.await_poll_resumed();
+    rig.tick(std::chrono::milliseconds(5500));
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(std::abs(rig.driver->get_right_ascension() - 6.0) < 1e-9);
+    CHECK(std::abs(rig.driver->get_declination() - 25.0) < 1e-9);
+    CHECK(alpacacore::test::settle_connected(*rig.driver, false));
+}
+
+TEST_CASE("ZWO slow setup keeps startup protection after MS acceptance", "[zwo][telescope][async][goto-setup]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    rig.mount.set_slew_duration(std::chrono::seconds(1));
+    rig.mount.hold_reply(":Sr");
+    rig.driver->slew_to_coordinates_async(6.0, 25.0);
+    REQUIRE(rig.mount.wait_until_held(std::chrono::seconds(5)));
+    rig.tick(std::chrono::milliseconds(5500));  // the initiator's original force window expires during setup
+    rig.mount.release();
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+
+    // Model one stopped status reply before the mount reports its accepted GOTO as moving.
+    const int pairs_before = rig.mount.count(":GD");
+    rig.mount.override_reply(":GU", "NG", 1);
+    rig.await_poll_resumed();
+    REQUIRE(rig.mount.count(":GD") > pairs_before);
+    CHECK(rig.driver->get_slewing());
+
+    rig.tick(std::chrono::milliseconds(4500));
+    CHECK_FALSE(rig.mount.slewing());  // even a fast arrival stays protected until the new five-second deadline
+    CHECK(rig.driver->get_slewing());
+    rig.tick(std::chrono::milliseconds(500));
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(std::abs(rig.driver->get_right_ascension() - 6.0) < 1e-9);
+    CHECK(std::abs(rig.driver->get_declination() - 25.0) < 1e-9);
     CHECK(alpacacore::test::settle_connected(*rig.driver, false));
 }
 
