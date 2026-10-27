@@ -282,6 +282,24 @@ TEST_CASE("Serial link - a severed pty reads as an error, not as silence", "[ser
     CHECK_FALSE(link.node_present());
 }
 
+// Falsified by: serial_link.h tty_read() passing poll() the remaining wait rounded down (a wait under 1 ms polls 0 and
+// returns at once, so read_until spins through its last millisecond)
+TEST_CASE("Serial link - a 1 ms read on a silent line waits the whole millisecond",
+          "[serial][serial_link][issue1696]") {
+    alpacacore::test::PtyPair pty("link-wait");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "Gemini focuser", raw_9600);
+    REQUIRE(link);
+    for (int i = 0; i < 20; ++i) {
+        char ch = 0;
+        const auto start = std::chrono::steady_clock::now();
+        const ssize_t n = tty_read(link.fd(), &ch, 1, 1);
+        const auto took = std::chrono::steady_clock::now() - start;
+        INFO("read " << i << " took " << std::chrono::duration_cast<std::chrono::microseconds>(took).count() << " us");
+        CHECK(n == 0);
+        CHECK(took >= std::chrono::milliseconds(1));
+    }
+}
+
 TEST_CASE("Serial link - a probe skips a port a connected driver holds without opening it",
           "[serial][serial_link][issue1202]") {
     alpacacore::test::PtyPair pty("link-probe");

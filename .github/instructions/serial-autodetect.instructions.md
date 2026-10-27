@@ -49,9 +49,12 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   serial blind-command ack drain, which reads on past its wait until 100 ms of silence once an ack byte came, and the
   iOptron TCP `flush_input()`, which still waits one 200 ms read slice for each of up to 16 stale bytes). A read there that does not require the `#` still ends at the `#`
   (`TerminatorOrIdleGap`). When their timeout runs out, the next byte within one read slice (100 ms over serial,
-  200 ms over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
-  is a timeout. The Celestron and SynScan binary payloads are the exception: each payload byte within one read slice
-  of the last is still payload, so a payload that starts after the timeout is read whole. On those five a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
+  the socket's `SO_RCVTIMEO`, 200 ms, over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
+  is a timeout. The wrapper sets `ReadSpec::late_byte_grace` to its read slice and `read_until()` does the wait
+  (#1686); a wrapper does not read the late byte itself. For the Celestron and SynScan binary payloads, a `Length`
+  read, the same field keeps each payload byte within one read slice of the last, so a payload that starts after the
+  timeout is read whole. A wait in `tty_read()`/`read_until()` rounds up to the next whole millisecond, never down
+  to a zero `poll()` that spins (#1696). On those five a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
   a `DriverException` "<mount> serial link lost (hangup): <errno text>" ("network" over TCP), and the ZWO mount feeds
   it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
   is noticed. OnStep keeps its decision 0009 loss on the tty (`lose_link_locked("read failed: <errno text>")`,
