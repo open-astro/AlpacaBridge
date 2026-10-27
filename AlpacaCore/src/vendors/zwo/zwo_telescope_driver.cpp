@@ -1772,8 +1772,8 @@ public:
 
         // Joinable member thread, NOT detached (H1): cancel + join any
         // previous GOTO setup first, then reset the cancel flag for this one.
-        // Park, FindHome, MoveAxis, AbortSlew and set_connected(false) cancel
-        // and join via cancel_and_join_goto_thread(); the destructor cancels
+        // Park, FindHome, MoveAxis, AbortSlew, Sync, Unpark and set_connected(false)
+        // cancel and join via cancel_and_join_goto_thread(); the destructor cancels
         // and joins too. The reap stays inline here because goto_reap_mutex_
         // must be held across the respawn and is not recursive.
         // goto_reap_mutex_ serializes concurrent SlewAsync callers — without
@@ -2871,9 +2871,9 @@ private:
     // open-astro#720 fence: after this returns no GOTO setup thread started
     // before the call can put anything on the wire. The join waits for at
     // most the one mount round trip in flight (the body checks goto_cancel_
-    // between protocol calls). The caller must NOT hold mutex_, pulse_mutex_
-    // or the protocol mutex: the GOTO body takes mutex_ and the protocol
-    // mutex, so a join under either deadlocks. Does not reset goto_cancel_;
+    // between protocol calls). The caller must NOT hold mutex_, pulse_mutex_,
+    // target_write_mutex_ or the protocol mutex: the GOTO body takes the state,
+    // target and protocol locks, so joining under one deadlocks. Does not reset goto_cancel_;
     // only slew_to_target_async() does, under goto_mutex_.
     void cancel_and_join_goto_thread() {
         {
@@ -2884,7 +2884,7 @@ private:
             }
         }
         // Every caller starts other motion or none (Park, FindHome, MoveAxis,
-        // AbortSlew, disconnect): the driver's GOTO is no longer in flight.
+        // AbortSlew, Sync, Unpark, disconnect): the driver's GOTO is no longer in flight.
         // Taken after the reap lock is released, never nested in it.
         std::lock_guard<std::mutex> lock(mutex_);
         goto_active_ = false;
@@ -2912,6 +2912,7 @@ private:
 
     mutable std::mutex mutex_;
     // Serializes target writes through CM/MS, never held across a join or a driver wait; getters never take it.
+    // Order: before the protocol wrapper's mutex and mutex_.
     std::mutex target_write_mutex_;
     // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
     // read-back and re-send. No getter takes it. Order: set_connected_mutex_, then this, then the protocol
