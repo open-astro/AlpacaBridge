@@ -71,6 +71,10 @@ constexpr const char* kSerialOwner = "OnStep mount";
 // The fd is non-blocking and every read is poll()-bounded (util::read_until).
 constexpr int kSerialReadSliceMs = 100;
 
+// The TCP socket's receive and send timeout (SO_RCVTIMEO, SO_SNDTIMEO), and so
+// the read slice over TCP: the window of the old byte-at-a-time recv() loop.
+constexpr int kSocketTimeoutMs = 200;
+
 // A mount reply never nears this; it caps a runaway line instead of growing a string forever.
 constexpr std::size_t kMaxReplyLen = 65536;
 
@@ -1264,7 +1268,6 @@ private:
             return false;
         }
 
-        constexpr int kSocketTimeoutMs = 200;
         timeval timeout{};
         timeout.tv_sec = 0;
         timeout.tv_usec = static_cast<decltype(timeout.tv_usec)>(kSocketTimeoutMs) * 1000;
@@ -1288,10 +1291,11 @@ private:
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
 
-    // The read slice of the byte-at-a-time loop: 100 ms over serial, the
-    // socket's 200 ms SO_RCVTIMEO over TCP.
+    // The read slice of the byte-at-a-time loop: kSerialReadSliceMs over
+    // serial, the socket's SO_RCVTIMEO (kSocketTimeoutMs) over TCP.
     std::chrono::milliseconds read_slice() const {
-        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? kSerialReadSliceMs : 200);
+        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? kSerialReadSliceMs
+                                                                                    : kSocketTimeoutMs);
     }
 
     // One read for both transports: util::read_until on the tty or
@@ -1322,21 +1326,6 @@ private:
         return r;
     }
 
-    // The byte the line sends in the read slice after a reply's timeout ran
-    // out, or "" when it stays quiet. The byte-at-a-time loop checked the
-    // timeout after each byte and never after a '#', so the byte in flight when
-    // the timeout ran out settled the reply: a '#' still ended it, any other
-    // byte was kept and the reply had timed out. A strict deadline would leave
-    // a late '#' to answer the next command; a deadline one slice later would
-    // take a whole late reply.
-    std::string late_byte(const std::string& skip) {
-        util::ReadSpec spec;
-        spec.stop = util::ReadSpec::Stop::Length;
-        spec.length = 1;
-        spec.skip = skip;
-        return checked_read(spec, std::chrono::steady_clock::now() + read_slice()).bytes;
-    }
-
     std::string read_response(bool require_hash_terminator, int timeout_ms) {
         // The '#' ends the reply; an unterminated ack ("0"/"1" with no '#')
         // ends when the line goes quiet for 100 ms after its first byte, or at
@@ -1349,16 +1338,16 @@ private:
             spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
             spec.idle_gap = std::chrono::milliseconds(100);
         }
+        // The byte in flight when the timeout runs out settles the reply: a
+        // late '#' ends it, any other byte is kept and the reply timed out.
+        spec.late_byte_grace = read_slice();
         const auto r = checked_read(spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
         switch (r.outcome) {
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("OnStep response too long");
-            case util::ReadOutcome::Timeout: {
-                const std::string late = late_byte(spec.skip);
-                if (late == "#") return r.bytes;
-                if (!require_hash_terminator) return r.bytes + late;
+            case util::ReadOutcome::Timeout:
+                if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for OnStep response");
-            }
             case util::ReadOutcome::Terminator: {
                 std::string bytes = r.bytes;
                 bytes.pop_back();  // the '#'

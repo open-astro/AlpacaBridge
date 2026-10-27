@@ -21,9 +21,12 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_pty_write.h"
@@ -377,4 +380,167 @@ TEST_CASE("read_until_socket - a signal during the wait is retried", "[serial][s
                             [&] { feed(sp.b, "ok#"); }, &bytes);
     CHECK(outcome == ReadOutcome::Terminator);
     CHECK(bytes == "ok#");
+}
+
+// ReadSpec::late_byte_grace (issue #1686): the byte in flight when the timeout runs out settles the read. Each case
+// gives the read a 100 ms deadline and a 200 ms grace, with "12" waiting in the line and the rest written late.
+namespace {
+
+constexpr auto kLateDeadline = 100ms;
+constexpr auto kLateGrace = 200ms;
+
+// Writes each (delay from start, bytes) step to @p fd from a helper thread while @p read runs.
+template <typename Read>
+alpacacore::util::ReadResult read_with_late_writes(int fd, std::vector<std::pair<Clock::duration, std::string>> steps,
+                                                   Read read, Clock::duration* took = nullptr) {
+    const auto start = Clock::now();
+    std::atomic<bool> wrote_all{true};
+    std::thread writer([fd, start, steps, &wrote_all] {
+        for (const auto& [at, bytes] : steps) {
+            std::this_thread::sleep_until(start + at);
+            if (::write(fd, bytes.data(), bytes.size()) != static_cast<ssize_t>(bytes.size())) wrote_all.store(false);
+        }
+    });
+    const auto r = read(start);
+    if (took != nullptr) *took = Clock::now() - start;
+    writer.join();
+    REQUIRE(wrote_all.load());
+    return r;
+}
+
+ReadSpec late_spec() {
+    ReadSpec spec;
+    spec.late_byte_grace = kLateGrace;
+    return spec;
+}
+
+}  // namespace
+
+// Falsified by: serial_read.h read_late_byte() not checking spec.terminators for the late byte (the '#' is kept as a
+// timeout)
+TEST_CASE("read_until - late_byte_grace: a '#' in flight when the timeout runs out ends the read",
+          "[serial][serial_read][issue1686]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), "12");
+    const auto r = read_with_late_writes(pty.master_fd(), {{150ms, "#"}}, [&](Clock::time_point start) {
+        return read_until(link.fd(), late_spec(), start + kLateDeadline);
+    });
+    CHECK(r.outcome == ReadOutcome::Terminator);
+    CHECK(r.bytes == "12#");
+    CHECK(r.err == 0);
+
+    // Without the grace the same read times out and leaves the '#' for the next one.
+    feed(pty.master_fd(), "12");
+    const auto strict = read_with_late_writes(pty.master_fd(), {{150ms, "#"}}, [&](Clock::time_point start) {
+        return read_until(link.fd(), ReadSpec{}, start + kLateDeadline);
+    });
+    CHECK(strict.outcome == ReadOutcome::Timeout);
+    CHECK(strict.bytes == "12");
+    const auto next = read_until(link.fd(), ReadSpec{}, Clock::now() + 1s);
+    CHECK(next.bytes == "#");
+}
+
+// Falsified by: serial_read.h read_late_byte() reading on after a non-terminator byte in a Terminator read (deleting
+// the "spec.stop != ReadSpec::Stop::Length" return ends the read on the length check instead)
+TEST_CASE("read_until - late_byte_grace: a late byte that is not a terminator is kept and the read times out",
+          "[serial][serial_read][issue1686]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), "12");
+    const auto r = read_with_late_writes(pty.master_fd(), {{150ms, "\r34#"}}, [&](Clock::time_point start) {
+        return read_until(link.fd(), late_spec(), start + kLateDeadline);
+    });
+    CHECK(r.outcome == ReadOutcome::Timeout);
+    CHECK(r.bytes == "123");  // the CR is skipped, the '3' is the late byte
+    CHECK(r.err == 0);
+    const auto next = read_until(link.fd(), ReadSpec{}, Clock::now() + 1s);
+    CHECK(next.outcome == ReadOutcome::Terminator);
+    CHECK(next.bytes == "4#");
+}
+
+// Falsified by: serial_read.h read_late_byte() waiting three times late_byte_grace (the reply that starts 150 ms after
+// the grace is taken)
+TEST_CASE("read_until - late_byte_grace: silence times out after the grace and a later reply is not taken",
+          "[serial][serial_read][issue1686]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), "12");
+    Clock::duration took{};
+    const auto r = read_with_late_writes(
+        pty.master_fd(), {{kLateDeadline + kLateGrace + 150ms, "ab#"}},
+        [&](Clock::time_point start) { return read_until(link.fd(), late_spec(), start + kLateDeadline); }, &took);
+    CHECK(r.outcome == ReadOutcome::Timeout);
+    CHECK(r.bytes == "12");
+    CHECK(r.err == 0);
+    CHECK(took >= kLateDeadline + kLateGrace);
+    const auto next = read_until(link.fd(), ReadSpec{}, Clock::now() + 1s);
+    CHECK(next.outcome == ReadOutcome::Terminator);
+    CHECK(next.bytes == "ab#");
+}
+
+// Falsified by: serial_read.h read_late_byte() not restarting the grace after a kept byte of a Length read
+TEST_CASE("read_until - late_byte_grace: a Length payload in flight is read whole",
+          "[serial][serial_read][issue1686]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), std::string("\x01", 1));
+    ReadSpec spec = late_spec();
+    spec.stop = ReadSpec::Stop::Length;
+    spec.length = 4;
+    spec.skip.clear();
+    // Each payload byte 120 ms after the last: the last one comes 160 ms after the grace that began at the deadline.
+    const auto r = read_with_late_writes(
+        pty.master_fd(), {{150ms, std::string("\x02", 1)}, {270ms, std::string("\x0a", 1)}, {390ms, "#"}},
+        [&](Clock::time_point start) { return read_until(link.fd(), spec, start + kLateDeadline); });
+    CHECK(r.outcome == ReadOutcome::Length);
+    CHECK(r.bytes == std::string("\x01\x02\x0a#", 4));
+}
+
+// Falsified by: serial_read.h read_late_byte() not checking spec.terminators for the late byte
+TEST_CASE("read_until_socket - late_byte_grace: a '#' in flight when the timeout runs out ends the read",
+          "[serial][serial_read][issue1686]") {
+    SocketPair sp;
+    feed(sp.b, "12");
+    const auto r = read_with_late_writes(sp.b, {{150ms, "#"}}, [&](Clock::time_point start) {
+        return read_until_socket(sp.a, late_spec(), start + kLateDeadline);
+    });
+    CHECK(r.outcome == ReadOutcome::Terminator);
+    CHECK(r.bytes == "12#");
+}
+
+// Falsified by: serial_read.h read_late_byte() not reporting a hangup errno as LinkDead (the severed line reads as a
+// Timeout)
+TEST_CASE("read_until - late_byte_grace: a hangup during the grace is LinkDead", "[serial][serial_read][issue1686]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), "12");
+    const auto start = Clock::now();
+    std::thread severer([&pty, start] {
+        std::this_thread::sleep_until(start + 150ms);
+        pty.sever();
+    });
+    const auto r = read_until(link.fd(), late_spec(), start + kLateDeadline);
+    severer.join();
+    CHECK(r.outcome == ReadOutcome::LinkDead);
+    CHECK(r.bytes == "12");
+    CHECK(r.err == EIO);
+}
+
+// Falsified by: serial_read.h read_late_byte() not reporting a hangup errno as LinkDead (the closed peer reads as a
+// Timeout)
+TEST_CASE("read_until_socket - late_byte_grace: a peer that closes during the grace is LinkDead",
+          "[serial][serial_read][issue1686]") {
+    SocketPair sp;
+    feed(sp.b, "12");
+    const auto start = Clock::now();
+    std::thread closer([&sp, start] {
+        std::this_thread::sleep_until(start + 150ms);
+        sp.close_b();
+    });
+    const auto r = read_until_socket(sp.a, late_spec(), start + kLateDeadline);
+    closer.join();
+    CHECK(r.outcome == ReadOutcome::LinkDead);
+    CHECK(r.bytes == "12");
+    CHECK(r.err == ECONNRESET);
 }

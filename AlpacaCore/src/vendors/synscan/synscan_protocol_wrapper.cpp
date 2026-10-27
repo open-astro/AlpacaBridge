@@ -52,6 +52,10 @@ namespace {
 // A mount reply never nears this; it caps a runaway line instead of growing a string forever.
 constexpr std::size_t kMaxReplyLen = 65536;
 
+// The TCP socket's receive and send timeout (SO_RCVTIMEO, SO_SNDTIMEO), and so
+// the read slice over TCP: the window of the old byte-at-a-time recv() loop.
+constexpr int kSocketTimeoutMs = 200;
+
 // Operator-facing owner of this wrapper's ports, for both the auto-detect
 // probe and the connected link (issue #1202): a probe skips a port another
 // device holds, and lists one a SynScan mount holds without opening it.
@@ -1179,26 +1183,10 @@ private:
     }
 
     // The read slice of the byte-at-a-time loop: 100 ms over serial, the
-    // socket's 200 ms SO_RCVTIMEO over TCP.
+    // socket's SO_RCVTIMEO (kSocketTimeoutMs) over TCP. A reply read waits this
+    // long past its timeout for the byte in flight (ReadSpec::late_byte_grace).
     std::chrono::milliseconds read_slice() const {
-        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
-    }
-
-    // The byte the line sends in the read slice after a reply's timeout ran
-    // out, or "" when it stays quiet. The byte-at-a-time loop checked the
-    // timeout after each byte and never after a '#', so the byte in flight when
-    // the timeout ran out settled a text reply: a '#' still ended it, any
-    // other byte was kept and the reply had timed out. A strict deadline would leave
-    // a late '#' to answer the next command; a deadline one slice later would
-    // take a whole late reply.
-    std::string late_byte(const std::string& skip) {
-        util::ReadSpec spec;
-        spec.stop = util::ReadSpec::Stop::Length;
-        spec.length = 1;
-        spec.skip = skip;
-        const auto r = read_reply(spec, std::chrono::steady_clock::now() + read_slice());
-        if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
-        return r.bytes;
+        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : kSocketTimeoutMs);
     }
 
     // The reply without its '#': a read that ended on the terminator holds it
@@ -1221,22 +1209,15 @@ private:
             spec.stop = util::ReadSpec::Stop::Length;
             spec.length = static_cast<std::size_t>(binary_bytes);
             spec.skip.clear();
-            auto r = read_reply(spec, deadline);
+            // The byte-at-a-time loop read on after each payload byte without
+            // checking the timeout, so a payload byte that comes within one
+            // read slice of the last (or of the timeout) is still payload.
+            spec.late_byte_grace = read_slice();
+            const auto r = read_reply(spec, deadline);
             if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
             if (r.outcome != util::ReadOutcome::Length) {
-                // The byte-at-a-time loop read on after each payload byte
-                // without checking the timeout, so a payload byte that comes
-                // within one read slice of the last (or of the timeout) is
-                // still payload.
-                while (r.bytes.size() < spec.length) {
-                    const std::string late = late_byte(spec.skip);
-                    if (late.empty()) break;
-                    r.bytes += late;
-                }
-                if (r.bytes.size() < spec.length) {
-                    if (!require_hash_terminator) return r.bytes;
-                    throw AlpacaException("Timeout waiting for SynScan response");
-                }
+                if (!require_hash_terminator) return r.bytes;
+                throw AlpacaException("Timeout waiting for SynScan response");
             }
             // The drain waits at least one read slice for the '#', as the
             // byte-at-a-time drain did.
@@ -1250,18 +1231,18 @@ private:
             spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
             spec.idle_gap = std::chrono::milliseconds(100);
         }
+        // The byte in flight when the timeout runs out settles the reply: a
+        // late '#' ends it, any other byte is kept and the reply timed out.
+        spec.late_byte_grace = read_slice();
         const auto r = read_reply(spec, deadline);
         switch (r.outcome) {
             case util::ReadOutcome::LinkDead:
                 throw_link_lost(r.err);
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("SynScan response too long");
-            case util::ReadOutcome::Timeout: {
-                const std::string late = late_byte(spec.skip);
-                if (late == "#") return r.bytes;
-                if (!require_hash_terminator) return r.bytes + late;
+            case util::ReadOutcome::Timeout:
+                if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for SynScan response");
-            }
             default:
                 return without_terminator(r);
         }
@@ -1279,7 +1260,6 @@ private:
     }
 
     void configure_network_timeouts() {
-        constexpr int kSocketTimeoutMs = 200;
 #ifdef _WIN32
         DWORD timeout = kSocketTimeoutMs;
         setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
