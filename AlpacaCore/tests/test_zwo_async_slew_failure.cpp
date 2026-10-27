@@ -517,6 +517,36 @@ TEST_CASE("ZWO slow setup retries complete after an accepted GOTO", "[zwo][teles
     CHECK(alpacacore::test::settle_connected(*rig.driver, false));
 }
 
+TEST_CASE("ZWO slow setup keeps startup protection after MS acceptance", "[zwo][telescope][async][goto-setup]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    rig.mount.set_slew_duration(std::chrono::seconds(1));
+    rig.mount.hold_reply(":Sr");
+    rig.driver->slew_to_coordinates_async(6.0, 25.0);
+    REQUIRE(rig.mount.wait_until_held(std::chrono::seconds(5)));
+    rig.tick(std::chrono::milliseconds(5500));  // the initiator's original force window expires during setup
+    rig.mount.release();
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+
+    // Model one stopped status reply before the mount reports its accepted GOTO as moving.
+    const int pairs_before = rig.mount.count(":GD");
+    rig.mount.override_reply(":GU", "NG", 1);
+    rig.await_poll_resumed();
+    REQUIRE(rig.mount.count(":GD") > pairs_before);
+    CHECK(rig.driver->get_slewing());
+
+    rig.tick(std::chrono::milliseconds(4500));
+    CHECK_FALSE(rig.mount.slewing());  // even a fast arrival stays protected until the new five-second deadline
+    CHECK(rig.driver->get_slewing());
+    rig.tick(std::chrono::milliseconds(500));
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(std::abs(rig.driver->get_right_ascension() - 6.0) < 1e-9);
+    CHECK(std::abs(rig.driver->get_declination() - 25.0) < 1e-9);
+    CHECK(alpacacore::test::settle_connected(*rig.driver, false));
+}
+
 TEST_CASE("ZWO horizon rejection never retries with mirrored longitude", "[zwo][telescope][async][longitude]") {
     const bool west = GENERATE(false, true);
     CAPTURE(west);

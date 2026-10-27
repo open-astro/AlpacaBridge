@@ -1845,6 +1845,7 @@ public:
                             std::lock_guard<std::mutex> lock(mutex_);
                             if (slew_error_epoch_ == slew_epoch) {
                                 goto_setup_pending_ = false;
+                                slew_force_until_ = clock_.now() + std::chrono::seconds(5);
                                 // A stopped sample taken before MS acceptance cannot finish this GOTO.
                                 snapshot_.write([](PolledFrame&) {});
                             }
