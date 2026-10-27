@@ -1925,3 +1925,29 @@ TEST_CASE("Player One Camera Driver - A slow failing AbortExposure stop leaves t
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
     driver->set_connected(false);
 }
+
+// #1745: after a failed AbortExposure stop the exposure runs on, so a real download failure is kept again.
+TEST_CASE("Player One Camera Driver - A download failure after a failed AbortExposure stop is kept",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    sdk.set_stop_failure(true);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30));
+    driver->set_connected(true);
+    driver->start_exposure(5.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+
+    CHECK_THROWS(driver->abort_exposure());
+    sdk.set_stop_failure(false);
+    sdk.set_download_failure(true);
+    sdk.set_image_ready(true);
+    CHECK(eventually([&] {
+        try {
+            static_cast<void>(driver->get_image_ready());
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+        return false;
+    }));
+    driver->set_connected(false);
+}

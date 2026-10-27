@@ -259,7 +259,7 @@ public:
             // connection check before this disconnect raises NotConnected and runs no body. A failed stop
             // leaves the exposure running: fail() keeps the error for ImageReady, nothing is joined and the
             // camera stays connected.
-            // The body stops owning the session before the SDK stop breaks its download (#1745).
+            // A body failure the SDK stop causes is dropped, not kept (#1745).
             session_.set_stopping(true);
             exposure_stop_error = stop_sdk_exposure();
             if (!exposure_stop_error.empty()) {
