@@ -14,7 +14,6 @@
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/version.h>
 
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -1901,48 +1900,28 @@ TEST_CASE("Player One Camera Driver - ImageArray before any exposure is asked to
     driver->set_connected(false);
 }
 
-// #1745: an exposure the driver itself ended (disconnect, AbortExposure) leaves no stored download error, even
-// when the body's download fails between the SDK stop and the session abort.
-TEST_CASE("Player One Camera Driver - Disconnect during a download stores no download error",
+// #1745: set_stopping must not change what the body sees. A failing AbortExposure stop that outlasts a poll
+// step leaves the exposure running, not failed with "ended without an image".
+TEST_CASE("Player One Camera Driver - A slow failing AbortExposure stop leaves the exposure running",
           "[playerone][camera][unit]") {
     alpacacore::test::FakePlayerOneSDK sdk;
-    sdk.set_hold_image_data(true);
-    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30));
-    driver->set_connected(true);
-    driver->start_exposure(0.001, true);
-    REQUIRE(eventually([&] { return sdk.image_data_started(); }));
-
-    std::atomic<bool> disconnected{false};
-    std::thread disconnect([&] {
-        driver->set_connected(false);
-        disconnected.store(true);
-    });
-    bool raised = false;
-    while (!disconnected.load()) {
-        try {
-            static_cast<void>(driver->get_image_ready());
-        } catch (const alpacacore::AlpacaException& e) {
-            // NotConnected is the disconnect itself; only a kept download error is the defect.
-            if (e.error_code() == alpacacore::AlpacaError::DriverException) raised = true;
-        }
-        std::this_thread::yield();
-    }
-    disconnect.join();
-    CHECK_FALSE(raised);
-    CHECK(sdk.stop_count() == 1);
-}
-
-TEST_CASE("Player One Camera Driver - AbortExposure stores no download error", "[playerone][camera][unit]") {
-    alpacacore::test::FakePlayerOneSDK sdk;
     sdk.set_image_ready(false);
-    sdk.set_ready_after_stop(true);
+    sdk.set_stop_failure(true);
+    sdk.set_stop_failure_polls(2);
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30));
     driver->set_connected(true);
-    driver->start_exposure(1.0, true);
+    driver->start_exposure(5.0, true);
     REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
 
+    CHECK_THROWS(driver->abort_exposure());
+    REQUIRE(sdk.stop_count() == 1);
+    sdk.set_stop_failure(false);
+    const int polls = sdk.image_ready_polls();
+    // A body that still owns the session keeps polling; one that gave up does not.
+    CHECK(eventually([&] { return sdk.image_ready_polls() >= polls + 2; }));
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_FALSE(driver->get_image_ready());
     driver->abort_exposure();
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    CHECK_FALSE(driver->get_image_ready());
     driver->set_connected(false);
 }

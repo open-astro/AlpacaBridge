@@ -76,8 +76,8 @@ private:
  * Locks: mutex_ is a leaf. While it is held the session calls no slot method,
  * body, log call or callback. Joins serialise on join_mutex_, taken without
  * mutex_. Call start(), abort(), disconnect_and_join() and the destructor
- * without the driver mutex; the getters, fail(), discard_image() and open()
- * may run under it. A body never calls start(), abort(), disconnect_and_join()
+ * without the driver mutex; the getters, fail(), set_stopping(), discard_image()
+ * and open() may run under it. A body never calls start(), abort(), disconnect_and_join()
  * or open().
  */
 class CaptureSession {
@@ -227,10 +227,11 @@ public:
         fail_locked(lock, std::move(message));
     }
 
-    /// The driver is about to stop the SDK exposure itself (a disconnect, an AbortExposure): the body stops
-    /// owning the session now, so a download the stop breaks is dropped, not kept as a failure. A later
-    /// abort() or fail() ends the exposure; set_stopping(false) hands ownership back when the stop failed
-    /// and the exposure runs on. A no-op when nothing is exposing; start() clears it.
+    /// The driver is about to stop the SDK exposure itself (a disconnect, an AbortExposure): a body that ends
+    /// while this is set has its failure dropped, not kept, because the stop broke its download. The body
+    /// still owns the session (wait_for and the state getters are unchanged). A later abort() or fail() ends
+    /// the exposure; set_stopping(false) when the stop failed and the exposure runs on. A no-op when nothing
+    /// is exposing; start() clears it.
     void set_stopping(bool stopping) {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = stopping && is_exposing_locked();
@@ -315,7 +316,7 @@ private:
     };
 
     bool is_exposing_locked() const { return state_ == State::Exposing || state_ == State::Download; }
-    bool owns_locked(std::uint64_t token) const { return owner_ == token && is_exposing_locked() && !stopping_; }
+    bool owns_locked(std::uint64_t token) const { return owner_ == token && is_exposing_locked(); }
 
     void require_startable_locked() const {
         if (!open_) {
@@ -386,7 +387,7 @@ private:
         bool stale = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (owns_locked(token)) {
+            if (owns_locked(token) && !stopping_) {
                 state_ = State::Failed;
                 failure_ = thrown ? *thrown : name_ + ": the exposure ended without an image";
                 owner_ = 0;
@@ -417,7 +418,7 @@ private:
     int running_ = 0;  // bodies reserved or running
     int disconnecting_ = 0;
     bool open_ = true;
-    bool stopping_ = false;  // the driver is stopping the SDK exposure: the body no longer owns the session
+    bool stopping_ = false;  // the driver is stopping the SDK exposure: a body failure is not kept
     bool started_ = false;
     double duration_ = 0.0;
     std::chrono::system_clock::time_point start_time_{};

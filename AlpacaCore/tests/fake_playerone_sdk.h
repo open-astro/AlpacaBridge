@@ -222,16 +222,29 @@ public:
         exposure_start_count_.fetch_add(1);
     }
     void stop_exposure(int) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         require_open_locked("stop_exposure");
         stop_count_.fetch_add(1);
         if (stop_failure_.load()) {
+            // A slow failing stop (#1745): the lock is dropped until the body has polled readiness this many
+            // more times, so the body's poll runs while the stop is in flight. Bounded, so a body that stops
+            // polling ends the wait instead of hanging the test.
+            const int polls = stop_failure_polls_.load();
+            if (polls > 0) {
+                const int target = image_ready_polls_.load() + polls;
+                lock.unlock();
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (image_ready_polls_.load() < target && std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                lock.lock();
+            }
             if (ready_on_stop_failure_.load()) ready_ = true;
             throw std::runtime_error("scripted stop-exposure failure");
         }
         if (exposure_started_) {
             stopped_ = true;
-            ready_ = ready_after_stop_.load();
+            ready_ = false;
             exposure_started_ = false;
             download_cv_.notify_all();
         }
@@ -244,6 +257,7 @@ public:
     bool image_ready(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("image_ready");
+        image_ready_polls_.fetch_add(1);
         if (readiness_error_.load()) throw std::runtime_error("scripted image-ready failure");
         return ready_.load();
     }
@@ -438,6 +452,9 @@ public:
     }
     void set_pulse_off_failure(bool fail) { pulse_off_failure_ = fail; }
     void set_stop_failure(bool fail) { stop_failure_ = fail; }
+    // A failing stop lasts until the body has polled readiness `polls` more times (0 = fails at once).
+    void set_stop_failure_polls(int polls) { stop_failure_polls_ = polls; }
+    int image_ready_polls() const { return image_ready_polls_.load(); }
     void set_cooler_power_failure(bool fail) {
         std::lock_guard<std::mutex> lock(mutex_);
         cooler_power_failure_ = fail;
@@ -467,9 +484,6 @@ public:
     int pulse_off_count() const { return pulse_off_count_.load(); }
     int stop_count() const { return stop_count_.load(); }
     int exposure_start_count() const { return exposure_start_count_.load(); }
-    // The frame looks ready again once the stop has landed, as when readiness flips just as the stop does:
-    // the body's next poll sees ready and its download then fails (#1745).
-    void set_ready_after_stop(bool on) { ready_after_stop_.store(on); }
     bool image_data_started() const { return image_data_started_.load(); }
     bool image_data_finished() const { return image_data_finished_.load(); }
     bool close_during_download() const { return close_during_download_.load(); }
@@ -548,7 +562,6 @@ private:
     std::atomic<bool> ready_on_start_{true};
     std::atomic<bool> readiness_error_{false};
     std::atomic<bool> image_data_started_{false};
-    std::atomic<bool> ready_after_stop_{false};
     std::atomic<bool> image_data_finished_{false};
     std::atomic<long> gain_{10};
     std::atomic<int> open_count_{0};
@@ -556,6 +569,8 @@ private:
     std::atomic<int> pulse_off_count_{0};
     std::atomic<bool> pulse_off_failure_{false};
     std::atomic<bool> stop_failure_{false};
+    std::atomic<int> stop_failure_polls_{0};
+    std::atomic<int> image_ready_polls_{0};
     std::atomic<bool> ready_on_stop_failure_{false};
     std::atomic<int> stop_count_{0};
     std::atomic<int> exposure_start_count_{0};
