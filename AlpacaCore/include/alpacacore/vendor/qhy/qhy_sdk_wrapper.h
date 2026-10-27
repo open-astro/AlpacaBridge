@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -24,6 +25,8 @@
 #include <vector>
 
 namespace alpacacore::vendor::qhy {
+
+using CoolerOffAction = std::function<void()>;
 
 /**
  * @brief Basic camera info returned by enumeration (no open required).
@@ -218,6 +221,10 @@ public:
     virtual QHYControlRange get_param_range(const std::string& camera_id, int control_id) = 0;
     virtual void set_param(const std::string& camera_id, int control_id, double value) = 0;
 
+    // Retain this physical handle now; the returned action may run after logical close.
+    virtual CoolerOffAction prepare_cooler_off(const std::string& camera_id,
+                                               std::shared_ptr<std::atomic<bool>> running_flag) = 0;
+
     // ── Image configuration ──────────────────────────────────────────────────
 
     virtual void set_resolution(const std::string& camera_id, uint32_t start_x, uint32_t start_y, uint32_t width,
@@ -331,6 +338,8 @@ public:
     double get_param(const std::string& camera_id, int control_id) override;
     QHYControlRange get_param_range(const std::string& camera_id, int control_id) override;
     void set_param(const std::string& camera_id, int control_id, double value) override;
+    CoolerOffAction prepare_cooler_off(const std::string& camera_id,
+                                       std::shared_ptr<std::atomic<bool>> running_flag) override;
 
     void set_resolution(const std::string& camera_id, uint32_t start_x, uint32_t start_y, uint32_t width,
                         uint32_t height) override;
