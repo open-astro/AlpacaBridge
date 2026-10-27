@@ -32,6 +32,11 @@ std::string slurp(const fs::path& p) {
     return buf.str();
 }
 
+void spit(const fs::path& p, const std::string& text) {
+    std::ofstream out(p);
+    out << text;
+}
+
 // Makes any write past @p bytes fail with EFBIG; restores limit and SIGXFSZ.
 struct FileSizeLimit {
     rlimit saved{};
@@ -56,7 +61,7 @@ TEST_CASE("write_file_atomic - replaces the file and leaves no temp", "[atomic-f
     fs::remove_all(dir);
     fs::create_directories(dir);
     const fs::path target = dir / "state.json";
-    { std::ofstream(target) << "old"; }
+    spit(target, "old");
     alpacacore::util::write_file_atomic(target, "new content");
     CHECK(slurp(target) == "new content");
     CHECK_FALSE(fs::exists(target.string() + ".tmp"));
@@ -68,7 +73,7 @@ TEST_CASE("write_file_atomic - a failed write keeps the old file and removes the
     fs::remove_all(dir);
     fs::create_directories(dir);
     const fs::path target = dir / "state.json";
-    { std::ofstream(target) << "old"; }
+    spit(target, "old");
     {
         FileSizeLimit limit(8);
         CHECK_THROWS(alpacacore::util::write_file_atomic(target, std::string(4096, 'x')));
