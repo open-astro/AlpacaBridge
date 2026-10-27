@@ -17,6 +17,7 @@
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/alignment_mode.h>
+#include <alpacacore/util/atomic_file.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hardware_config_refusal.h>
 #include <alpacacore/util/image_validation.h>
@@ -183,6 +184,17 @@ using ConfigKeyValues = std::vector<std::pair<std::string, std::string>>;
 // One top-level section and the keys to set under it, e.g. {"http", {...}}.
 using ConfigSectionValues = std::pair<std::string, ConfigKeyValues>;
 
+// Replaces config.yaml in one atomic step; a failed write leaves the old file as it was (#1689).
+bool write_config_file(const std::string& config_path, const std::string& text, std::string& error_message) {
+    try {
+        alpacacore::util::write_file_atomic(config_path, text);
+        return true;
+    } catch (const std::exception& e) {
+        error_message = std::string("Unable to write config file: ") + e.what();
+        return false;
+    }
+}
+
 // Update keys under one or more top-level sections of the config file (the
 // `server:`, `http:` and `discovery:` ones) in a single read/rewrite pass, so a request that
 // sets several values can never leave the file with only some of them
@@ -202,11 +214,7 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
 
     std::ifstream input(config_path);
     if (!input.is_open()) {
-        std::ofstream output(config_path, std::ios::trunc);
-        if (!output.is_open()) {
-            error_message = "Unable to open config file for writing";
-            return false;
-        }
+        std::ostringstream output;
         for (const auto& [section, values] : sections) {
             if (values.empty()) {
                 continue;
@@ -216,7 +224,7 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
                 output << "  " << key << ": \"" << escape_yaml_string(value) << "\"\n";
             }
         }
-        return true;
+        return write_config_file(config_path, output.str(), error_message);
     }
 
     std::vector<std::string> lines;
@@ -358,16 +366,12 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         append_unwritten(i, 2);
     }
 
-    std::ofstream output_file(config_path, std::ios::trunc);
-    if (!output_file.is_open()) {
-        error_message = "Unable to open config file for writing";
-        return false;
-    }
+    std::string text;
     for (const auto& output_line : output) {
-        output_file << output_line << '\n';
+        text += output_line;
+        text += '\n';
     }
-
-    return true;
+    return write_config_file(config_path, text, error_message);
 }
 
 std::optional<LogLevel> parse_log_level_string(const std::string& input) {
@@ -6370,9 +6374,8 @@ bool Router::save_persisted_devices() const {
         // tail, which the next start cannot parse and so loads NO devices.
         // Writing a sibling temp file and renaming it over the real one
         // makes each save atomic for a concurrent reader: the file is always
-        // a complete dump. (Atomic against readers, not against power loss:
-        // without fsync on the temp file and its directory, a crash right
-        // after the rename can still leave a zero-length file on ext4.)
+        // a complete dump. write_file_atomic also fsyncs the temp file and the
+        // directory, so a crash or a full disk keeps the previous file (#1688).
         //
         // The file lock is taken BEFORE the snapshot (lock order: file, then
         // list, the same everywhere). Snapshotting first let worker A copy
@@ -6385,34 +6388,7 @@ bool Router::save_persisted_devices() const {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             payload = persisted_devices_;
         }
-        const std::filesystem::path temp = kPersistedDevicesFile.string() + ".tmp";
-        try {
-            {
-                std::ofstream out(temp, std::ios::trunc);
-                if (!out) {
-                    throw std::runtime_error("Unable to open " + temp.string() + " for writing");
-                }
-                out << payload.dump(4);
-                out.flush();
-                if (!out) {
-                    throw std::runtime_error("Unable to write " + temp.string());
-                }
-            }
-            // The rename swaps the inode, so the mode the package's postinst
-            // (or an operator) set on the real file would otherwise be
-            // replaced by this process's umask. Carry it over.
-            std::error_code ec;
-            const auto existing = std::filesystem::status(kPersistedDevicesFile, ec);
-            if (!ec && std::filesystem::is_regular_file(existing)) {
-                std::filesystem::permissions(temp, existing.permissions(), ec);
-            }
-            std::filesystem::rename(temp, kPersistedDevicesFile);
-        } catch (...) {
-            // Never leave a half-written .tmp beside the real file.
-            std::error_code ec;
-            std::filesystem::remove(temp, ec);
-            throw;
-        }
+        alpacacore::util::write_file_atomic(kPersistedDevicesFile, payload.dump(4));
         return true;
     } catch (const std::exception& e) {
         util::log_error("Failed to persist registered devices: " + std::string(e.what()));
@@ -6453,10 +6429,25 @@ void Router::load_persisted_devices() {
                 throw std::runtime_error("Unable to open " + kPersistedDevicesFile.string() + " for reading");
             }
 
-            in >> payload;
-
-            if (!payload.is_array()) {
-                throw std::runtime_error("Persisted device file must contain a JSON array");
+            try {
+                in >> payload;
+                if (!payload.is_array()) {
+                    throw std::runtime_error("Persisted device file must contain a JSON array");
+                }
+            } catch (const std::exception& parse_error) {
+                // Set the file aside: the next save would otherwise overwrite the only copy (#1688).
+                const auto stamp = std::chrono::duration_cast<std::chrono::seconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count();
+                const std::filesystem::path aside =
+                    kPersistedDevicesFile.string() + ".corrupt-" + std::to_string(stamp);
+                std::error_code rename_ec;
+                std::filesystem::rename(kPersistedDevicesFile, aside, rename_ec);
+                util::log_error(
+                    "Registered devices file is unreadable (" + std::string(parse_error.what()) + "); " +
+                    (rename_ec ? "could not set it aside: " + rename_ec.message() : "kept as " + aside.string()));
+                persisted_devices_.clear();
+                return;
             }
 
             persisted_devices_.clear();
