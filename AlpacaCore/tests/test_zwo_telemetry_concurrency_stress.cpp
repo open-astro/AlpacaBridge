@@ -584,6 +584,8 @@ TEST_CASE("ZWO a polled Park error remains on both completion properties", "[zwo
     }
     rig.driver->abort_slew();
     CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.driver->get_slewing());  // Abort clears the error; a new poll must confirm the stopped state.
+    rig.tick();
     CHECK_FALSE(rig.driver->get_slewing());
 }
 

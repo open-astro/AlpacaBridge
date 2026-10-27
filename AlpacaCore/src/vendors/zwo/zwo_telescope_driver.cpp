@@ -2130,6 +2130,10 @@ private:
             park_motion_seen_ = true;
             return ParkEvaluation::InProgress;
         }
+        // Early stationary/completed replies can precede motion; keep completion behind the startup guard.
+        if (park_command_active_ && slew_force_until_ > now && park_status != ParkStatus::Error) {
+            return ParkEvaluation::InProgress;
+        }
         auto infer_with_unavailable_park_status = [&]() -> ParkEvaluation {
             if (!park_command_active_) {
                 return parked_cached_ ? ParkEvaluation::Parked : ParkEvaluation::Unknown;
@@ -2521,7 +2525,10 @@ private:
             // Moving is evidence, but does not renew the mandatory sample's age.
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!status->stop_or_tracking) frame.status = status;
+                if (!status->stop_or_tracking) {
+                    frame.status = status;
+                    frame.status->at_home = false;
+                }
                 if (connected_.load() && snapshot_.publish(token, frame)) {
                     if (!status->stop_or_tracking) {
                         cached_status_ = status;
@@ -2563,6 +2570,12 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_.load() || token != snapshot_.begin_poll()) return;
             const auto now = clock_.now();
+            // Expiring the startup guard is not a stopped measurement; wait for a subsequent accepted pair.
+            if (slew_force_until_ > *frame.mandatory_at) frame.status->stop_or_tracking = false;
+            if (park_command_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] ||
+                !frame.status->stop_or_tracking) {
+                frame.status->at_home = false;
+            }
             if (!snapshot_.publish(token, frame)) return;
             cached_status_ = status;
             cached_equatorial_ = eq;
