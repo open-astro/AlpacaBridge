@@ -12,7 +12,7 @@
 
 #pragma once
 
-#include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/zwo/zwo_slots.h>
 
 #include <cstdint>
 #include <optional>
@@ -31,19 +31,6 @@ struct ZwoEnumeratedCamera {
     std::string serial;
 };
 
-/// A camera slot the SDK listed but would not describe.
-struct ZwoUnreadableSlot {
-    int slot{};
-    std::string error;
-};
-
-/// One readable slot: the SDK slot index it was read from, and what it said.
-template <typename Info>
-struct ZwoSlotRead {
-    int slot{};
-    Info info;
-};
-
 /// Read every SDK slot in [0, count) through `read(slot, info, error)`, which
 /// returns false and fills `error` (the SDK error name) for a slot it cannot
 /// read. One unreadable slot (a camera that dropped off the bus,
@@ -54,20 +41,7 @@ struct ZwoSlotRead {
 template <typename Info, typename Reader>
 std::vector<ZwoSlotRead<Info>> read_zwo_camera_slots(int count, Reader&& read,
                                                      std::vector<ZwoUnreadableSlot>* unreadable = nullptr) {
-    std::vector<ZwoSlotRead<Info>> result;
-    for (int slot = 0; slot < count; ++slot) {
-        Info info{};
-        std::string error;
-        if (!read(slot, info, error)) {
-            ALPACA_LOG_WARN("ZWO", "Skipping camera slot " + std::to_string(slot) + ": " + error);
-            if (unreadable != nullptr) {
-                unreadable->push_back({slot, error});
-            }
-            continue;
-        }
-        result.push_back({slot, std::move(info)});
-    }
-    return result;
+    return read_zwo_slots<Info>(count, "camera", std::forward<Reader>(read), unreadable);
 }
 
 /// Text for a connect refusal when a slot could not be read: names each slot

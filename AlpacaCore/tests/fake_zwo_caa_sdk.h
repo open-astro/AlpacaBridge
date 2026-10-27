@@ -44,6 +44,7 @@ public:
     using Info = vendor::zwo::ZWOCAARotatorInfo;
 
     int id{7};
+    int slot_index{0};
     std::string serial{"CAA-SN-1"};
     // The logical (reverse-applied) angle CAAGetDegree() reports, as in the driver.
     double degree{0.0};
@@ -51,6 +52,7 @@ public:
     bool reverse{false};
     bool fail_info{false};
     int open_calls{0};
+    int last_open_id{-1};
     int close_calls{0};
     double last_move_absolute{-1.0};
     double last_move_mechanical{-1.0};
@@ -75,7 +77,7 @@ public:
 
     std::vector<Info> enumerate_rotators() override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return {Info{id, "CAA", max_degree}};
+        return {Info{id, "CAA", max_degree, slot_index}};
     }
     bool get_rotator_info_by_id(int rotator_id, Info& info) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -85,12 +87,17 @@ public:
         info = Info{id, "CAA", max_degree};
         return true;
     }
-    bool get_rotator_info_by_index(int, Info& info) override { return get_rotator_info_by_id(id, info); }
-    void open_rotator(int) override {
+    bool get_rotator_info_by_index(int index, Info& info) override {
+        if (index != slot_index || !get_rotator_info_by_id(id, info)) return false;
+        info.slot_index = index;
+        return true;
+    }
+    void open_rotator(int rotator_id) override {
         const InFlight in_flight(*this, open_delay, open_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         ++open_calls;
+        last_open_id = rotator_id;
     }
     void close_rotator(int) override {
         if (busy.load() > 0) closed_while_busy = true;

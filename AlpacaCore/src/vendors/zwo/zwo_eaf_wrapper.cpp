@@ -13,6 +13,7 @@
 #include <EAF_focuser.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_eaf_wrapper.h>
+#include <alpacacore/vendor/zwo/zwo_slots.h>
 
 #include <iomanip>
 #include <sstream>
@@ -152,25 +153,13 @@ ZWOEAFSDKWrapper& ZWOEAFSDKWrapper::instance() {
 
 std::vector<ZWOEAFFocuserInfo> ZWOEAFSDKWrapper::enumerate_focusers() {
     const auto lock = pimpl_->table_.lock_unchecked();
-    int count = EAFGetNum();
+    const auto slots =
+        read_zwo_accessory_slots<EAF_INFO>(EAFGetNum(), "EAF", EAFGetID, EAFGetProperty, error_code_to_string);
     std::vector<ZWOEAFFocuserInfo> result;
-    if (count <= 0) {
-        return result;
-    }
-    result.reserve(static_cast<std::size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        int id = 0;
-        throw_on_error(EAFGetID(i, &id), "EAFGetID", AlpacaError::InvalidValue);
-        EAF_INFO info{};
-        EAF_ERROR_CODE code = EAFGetProperty(id, &info);
-        if (code == EAF_SUCCESS) {
-            result.push_back(convert_focuser_info(info));
-        } else {
-            ZWOEAFFocuserInfo fallback;
-            fallback.focuser_id = id;
-            fallback.max_step = 0;
-            result.push_back(std::move(fallback));
-        }
+    result.reserve(slots.size());
+    for (const auto& slot : slots) {
+        result.push_back(convert_focuser_info(slot.info));
+        result.back().slot_index = slot.slot;
     }
     return result;
 }
@@ -196,10 +185,11 @@ bool ZWOEAFSDKWrapper::get_focuser_info_by_index(int focuser_index, ZWOEAFFocuse
     EAF_INFO sdk_info{};
     code = EAFGetProperty(focuser_id, &sdk_info);
     if (code != EAF_SUCCESS) {
-        info = ZWOEAFFocuserInfo{focuser_id, std::string(), 0};
+        info = ZWOEAFFocuserInfo{focuser_id, std::string(), 0, focuser_index};
         return true;
     }
     info = convert_focuser_info(sdk_info);
+    info.slot_index = focuser_index;
     return true;
 }
 
