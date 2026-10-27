@@ -1,0 +1,2 @@
+### Changed (docs)
+- **Driver lifecycle rules cover the state lock released inside a wire call and a full lock table** (docs, issues #1729 and #1730): `driver-lifecycle.instructions.md` now says that in a converted driver a `*_locked` helper that reaches the wire can release `mutex_` partway through, so state read before the exchange is re-read after it or checked against a counter, and that a full per-thread lock table throws `DriverException` before taking any lock. Sky-Watcher does not follow the second rule yet (#1730); no code changes.

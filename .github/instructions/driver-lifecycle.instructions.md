@@ -115,6 +115,21 @@ vendor-agnostic; do them in the driver from the start.
   under `mutex_` (decisions 0006, 0010, 0016, 0020). Never acquire in reverse, and
   convert a whole driver class in one PR so the old and new order never mix in one
   class.
+- In a converted driver, a `*_locked` helper that reaches the wire can release `mutex_`
+  partway through: the wire call drops the state lock around the exchange and takes it
+  back after (OnStep's and Sky-Watcher's `Wire::call`). State read before the exchange
+  may be stale after it, because another thread can change it in the gap. Re-read it
+  after the exchange, or compare a counter that every change bumps. OnStep's `Slewing`
+  read compares `slew_epoch_` across its exchanges, and its single-read path re-checks
+  `session_generation_` under the I/O lock so a read never lands on a session that
+  ended, or started, while it waited (#1728, #1729).
+- A driver that tracks the locks it holds per thread (OnStep's and Sky-Watcher's
+  `HeldLocks` table) throws `DriverException` before it takes any lock when it cannot
+  record one. It never takes `mutex_` untracked: the wire call then cannot drop it, and
+  every exchange runs under the state lock, which rule 1 of
+  [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) rules
+  out. Sky-Watcher still logs and keeps `mutex_` held (#1730); one shared `util/` helper
+  for both drivers will throw (#1729).
 - An SDK call on a closable handle is safe only if the handle can't be closed
   underneath it. In a converted driver, `set_connected(false)` clears state under
   `mutex_` and releases it, then takes the I/O lock across the close, so the I/O
