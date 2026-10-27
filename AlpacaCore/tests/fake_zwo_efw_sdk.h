@@ -47,6 +47,7 @@ public:
     using Info = vendor::zwo::ZWOEFWInfo;
 
     int id{5};
+    int slot_index{0};
     int slot_count{7};
     int position{0};
     bool unidirectional{false};
@@ -63,6 +64,7 @@ public:
     // What get_hardware_error_code() answers.
     int hardware_error_code{0};
     int open_calls{0};
+    int last_open_id{-1};
     int close_calls{0};
     int position_calls{0};
     int set_position_calls{0};
@@ -81,7 +83,7 @@ public:
     std::vector<Info> enumerate_wheels() override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (no_wheels) return {};
-        return {Info{id, "EFW", slot_count}};
+        return {Info{id, "EFW", slot_count, slot_index}};
     }
     bool get_wheel_info_by_id(int wheel_id, Info& info) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -93,10 +95,10 @@ public:
     }
     bool get_wheel_info_by_index(int wheel_index, Info& info) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels || wheel_index != 0) {
+        if (no_wheels || wheel_index != slot_index) {
             return false;
         }
-        info = Info{id, "EFW", slot_count};
+        info = Info{id, "EFW", slot_count, slot_index};
         return true;
     }
     void open_wheel(int wheel_id) override {
@@ -106,6 +108,7 @@ public:
         check_id(wheel_id);
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         ++open_calls;
+        last_open_id = wheel_id;
     }
     void close_wheel(int wheel_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
