@@ -53,6 +53,7 @@ public:
     using Info = vendor::zwo::ZWOEAFFocuserInfo;
 
     int id{3};
+    int slot_index{0};
     std::string serial{"EAF-SN-1"};
     // A second focuser on the same SDK (issue #1500 id swap); -1 = none.
     int second_id{-1};
@@ -113,9 +114,12 @@ public:
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
         if (removed) return {};
-        std::vector<Info> focusers{Info{id, "EAF", max_step}};
+        std::vector<Info> focusers{Info{id, "EAF", max_step, slot_index}};
         if (second_id >= 0)
             focusers.insert(second_id < id ? focusers.begin() : focusers.end(), Info{second_id, "EAF", max_step});
+        if (second_id >= 0) {
+            for (std::size_t i = 0; i < focusers.size(); ++i) focusers[i].slot_index = static_cast<int>(i);
+        }
         return focusers;
     }
     bool get_focuser_info_by_id(int focuser_id, Info& info) override {
@@ -127,7 +131,16 @@ public:
         info = Info{focuser_id, "EAF", max_step};
         return true;
     }
-    bool get_focuser_info_by_index(int, Info& info) override { return get_focuser_info_by_id(id, info); }
+    bool get_focuser_info_by_index(int index, Info& info) override {
+        const auto focusers = enumerate_focusers();
+        for (const auto& entry : focusers) {
+            if (entry.slot_index == index) {
+                info = entry;
+                return true;
+            }
+        }
+        return false;
+    }
     vendor::zwo::SharedOpenTable::Opened open_focuser_link(int focuser_id) override { return table_.open(focuser_id); }
     std::optional<vendor::zwo::SharedOpenTable::Opened> open_focuser_candidate(int focuser_id) override {
         return table_.open_candidate(focuser_id);

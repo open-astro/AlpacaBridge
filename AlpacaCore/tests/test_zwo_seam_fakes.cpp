@@ -14,6 +14,7 @@
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
+#include <alpacacore/vendor/zwo/zwo_slots.h>
 
 #include <chrono>
 #include <functional>
@@ -54,6 +55,206 @@ int error_code(const std::function<void()>& fn) {
 }
 
 }  // namespace
+
+TEST_CASE("ZWO accessory enumeration - failed ID and property reads skip only their SDK slots",
+          "[zwo][unit][enumeration]") {
+    struct Info {
+        int ID{};
+        std::string name;
+    };
+    for (const std::string kind : {"EFW", "EAF", "CAA"}) {
+        CAPTURE(kind);
+        for (const int failed_slot : {0, 1, 2}) {
+            CAPTURE(failed_slot);
+            for (const bool fail_id : {true, false}) {
+                CAPTURE(fail_id);
+                std::vector<int> id_reads;
+                std::vector<int> property_reads;
+                std::vector<std::string> warnings;
+                struct SinkGuard {
+                    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+                    ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+                } guard;
+                alpacacore::logging::set_log_sink([&](auto level, auto, auto message) {
+                    if (level == alpacacore::logging::LogLevel::Warn) warnings.emplace_back(message);
+                });
+                const auto slots = zwo::read_zwo_accessory_slots<Info>(
+                    3, kind,
+                    [&](int slot, int* id) {
+                        id_reads.push_back(slot);
+                        *id = 17 + slot * 25;
+                        return fail_id && slot == failed_slot ? 5 : 0;
+                    },
+                    [&](int id, Info* info) {
+                        property_reads.push_back(id);
+                        info->ID = id;
+                        info->name = kind;
+                        return !fail_id && id == 17 + failed_slot * 25 ? 5 : 0;
+                    },
+                    [&](int) { return kind + "_ERROR_REMOVED"; });
+                REQUIRE(slots.size() == 2);
+                CHECK(id_reads == std::vector<int>{0, 1, 2});
+                std::vector<int> expected_properties;
+                std::size_t found = 0;
+                for (int slot = 0; slot < 3; ++slot) {
+                    if (!fail_id || slot != failed_slot) expected_properties.push_back(17 + slot * 25);
+                    if (slot == failed_slot) continue;
+                    CHECK(slots[found].slot == slot);
+                    CHECK(slots[found].info.ID == 17 + slot * 25);
+                    CHECK(slots[found].info.name == kind);
+                    ++found;
+                }
+                CHECK(property_reads == expected_properties);
+                REQUIRE(warnings.size() == 1);
+                CHECK(warnings[0] == "Skipping " + kind + " slot " + std::to_string(failed_slot) + ": " + kind +
+                                         (fail_id ? "GetID: " : "GetProperty: ") + kind + "_ERROR_REMOVED");
+            }
+        }
+    }
+}
+
+TEST_CASE("ZWO accessory enumeration - empty and unreadable buses return no placeholder devices",
+          "[zwo][unit][enumeration]") {
+    struct Info {
+        int ID{};
+    };
+    for (const int count : {-1, 0, 3}) {
+        CAPTURE(count);
+        for (const bool fail_id : {true, false}) {
+            CAPTURE(fail_id);
+            int id_reads = 0;
+            int property_reads = 0;
+            const auto slots = zwo::read_zwo_accessory_slots<Info>(
+                count, "EFW",
+                [&](int slot, int* id) {
+                    ++id_reads;
+                    *id = 17 + slot;
+                    return fail_id ? 5 : 0;
+                },
+                [&](int, Info*) {
+                    ++property_reads;
+                    return 5;
+                },
+                [](int) { return std::string("EFW_ERROR_REMOVED"); });
+            CHECK(slots.empty());
+            CHECK(id_reads == (count > 0 ? count : 0));
+            CHECK(property_reads == (!fail_id && count > 0 ? count : 0));
+        }
+    }
+}
+
+TEST_CASE("ZWO EFW enumeration - a configured index selects the SDK slot, not list position",
+          "[zwo][filterwheel][unit][fake-sdk][enumeration]") {
+    FakeZWOEFWSDK sdk;
+    sdk.id = 42;
+    sdk.slot_index = 1;
+    SECTION("the surviving higher slot connects") {
+        auto driver = zwo::create_zwo_efw_filterwheel_by_index(0, 1, sdk);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(sdk.last_open_id == 42);
+        CHECK(driver->get_names().size() == 7);
+        driver->set_connected(false);
+        CHECK(sdk.open_calls == sdk.close_calls);
+    }
+    SECTION("the missing slot never binds the survivor") {
+        auto driver = zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
+        CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK_FALSE(driver->get_connected());
+        CHECK(sdk.open_calls == 0);
+    }
+    SECTION("explicit ID binding does not depend on readable slots") {
+        auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+        driver->set_connected(true);
+        CHECK(sdk.last_open_id == 42);
+        zwo::ZWOEFWInfo info;
+        REQUIRE(sdk.get_wheel_info_by_id(sdk.id, info));
+        CHECK(info.slot_index == -1);
+        REQUIRE(sdk.get_wheel_info_by_index(1, info));
+        CHECK(info.slot_index == 1);
+        CHECK_FALSE(sdk.get_wheel_info_by_index(0, info));
+    }
+}
+
+TEST_CASE("ZWO EAF enumeration - a configured index selects the SDK slot, not list position",
+          "[zwo][focuser][unit][fake-sdk][enumeration]") {
+    FakeZWOEAFSDK sdk;
+    sdk.id = 42;
+    sdk.slot_index = 1;
+    SECTION("the surviving higher slot connects") {
+        auto driver = zwo::create_zwo_eaf_focuser_by_index(0, 1, sdk);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(sdk.last_open_id == 42);
+        CHECK(driver->get_max_step() == sdk.max_step);
+        driver->set_connected(false);
+        CHECK(sdk.open_calls == sdk.close_calls);
+    }
+    SECTION("the missing slot never binds the survivor") {
+        auto driver = zwo::create_zwo_eaf_focuser_by_index(0, 0, sdk);
+        CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK_FALSE(driver->get_connected());
+        CHECK(sdk.open_calls == 0);
+    }
+    SECTION("reconnect follows the bound serial when the SDK slot changes") {
+        auto driver = zwo::create_zwo_eaf_focuser_by_index(0, 1, sdk);
+        driver->set_connected(true);
+        driver->set_connected(false);
+        sdk.slot_index = 2;
+        sdk.id = 17;
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(sdk.last_open_id == 17);
+        driver->set_connected(false);
+        sdk.serial = "another-unit";
+        CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::NotConnected);
+        CHECK_FALSE(driver->get_connected());
+        CHECK(sdk.open_calls == sdk.close_calls);
+    }
+    SECTION("explicit ID binding does not depend on readable slots") {
+        auto driver = zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+        driver->set_connected(true);
+        CHECK(sdk.last_open_id == 42);
+        zwo::ZWOEAFFocuserInfo info;
+        REQUIRE(sdk.get_focuser_info_by_id(sdk.id, info));
+        CHECK(info.slot_index == -1);
+        REQUIRE(sdk.get_focuser_info_by_index(1, info));
+        CHECK(info.slot_index == 1);
+        CHECK_FALSE(sdk.get_focuser_info_by_index(0, info));
+    }
+}
+
+TEST_CASE("ZWO CAA enumeration - a configured index selects the SDK slot, not list position",
+          "[zwo][rotator][unit][fake-sdk][enumeration]") {
+    FakeZWOCAASDK sdk;
+    sdk.id = 42;
+    sdk.slot_index = 1;
+    SECTION("the surviving higher slot connects") {
+        auto driver = zwo::create_zwo_caa_rotator_by_index(0, 1, sdk);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(sdk.last_open_id == 42);
+        driver->set_connected(false);
+        CHECK(sdk.open_calls == sdk.close_calls);
+    }
+    SECTION("the missing slot never binds the survivor") {
+        auto driver = zwo::create_zwo_caa_rotator_by_index(0, 0, sdk);
+        CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK_FALSE(driver->get_connected());
+        CHECK(sdk.open_calls == 0);
+    }
+    SECTION("explicit ID binding does not depend on readable slots") {
+        auto driver = zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+        driver->set_connected(true);
+        CHECK(sdk.last_open_id == 42);
+        zwo::ZWOCAARotatorInfo info;
+        REQUIRE(sdk.get_rotator_info_by_id(sdk.id, info));
+        CHECK(info.slot_index == -1);
+        REQUIRE(sdk.get_rotator_info_by_index(1, info));
+        CHECK(info.slot_index == 1);
+        CHECK_FALSE(sdk.get_rotator_info_by_index(0, info));
+    }
+}
 
 // Falsified by: zwo_filterwheel_driver.cpp create_zwo_efw_filterwheel_by_index() passing
 // ZWOEFWSDKWrapper::instance() instead of the injected sdk (the fake sees no open, and the real
