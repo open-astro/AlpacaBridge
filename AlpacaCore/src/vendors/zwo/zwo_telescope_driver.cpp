@@ -1382,6 +1382,7 @@ public:
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
         check_writable_state();
+        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1406,6 +1407,7 @@ public:
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
         check_writable_state();
+        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1820,18 +1822,24 @@ public:
                     abandon();
                     return;
                 }
-                protocol.set_target_ra(target_ra);
-                if (goto_cancel_.load()) {
-                    abandon();
-                    return;
-                }
-                protocol.set_target_dec(target_dec);
-                if (goto_cancel_.load()) {
-                    abandon();
-                    return;
-                }
                 for (int attempt = 0; attempt < 3 && !goto_cancel_.load(); ++attempt) {
                     try {
+                        // Target registers are shared with Sync and property writes; restore both on every retry.
+                        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+                        if (goto_cancel_.load()) {
+                            abandon();
+                            return;
+                        }
+                        protocol.set_target_ra(target_ra);
+                        if (goto_cancel_.load()) {
+                            abandon();
+                            return;
+                        }
+                        protocol.set_target_dec(target_dec);
+                        if (goto_cancel_.load()) {
+                            abandon();
+                            return;
+                        }
                         if (!protocol.goto_target()) {
                             resume_poll();
                             throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
@@ -1941,7 +1949,6 @@ public:
     void sync_to_target() override {
         check_connected();
         ensure_not_parked("SyncToTarget");
-        reset_position_offsets();
 
         double target_ra = 0.0;
         double target_dec = 0.0;
@@ -1955,10 +1962,14 @@ public:
         }
 
         util::validate_ra_dec(target_ra, target_dec, "SyncToTarget");
+        // A pending setup/retry must not consume the target registers replaced by Sync.
+        cancel_and_join_goto_thread();
+        reset_position_offsets();
 
         auto& protocol = protocol_;
 
         auto attempt_sync = [&]() {
+            std::lock_guard<std::mutex> target_lock(target_write_mutex_);
             try {
                 protocol.sync_target_equatorial(target_ra, target_dec);
                 return true;
@@ -1994,6 +2005,7 @@ public:
                 // Last resort: abort again and try the set-target + :CM path.
                 protocol.abort_motion();
                 clock_.sleep_for(std::chrono::milliseconds(300));
+                std::lock_guard<std::mutex> target_lock(target_write_mutex_);
                 protocol.set_target_ra(target_ra);
                 protocol.set_target_dec(target_dec);
                 protocol.sync_target();
@@ -2881,6 +2893,8 @@ private:
     mutable std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
+    // Serializes target writes through CM/MS, never held across a join or a driver wait; getters never take it.
+    std::mutex target_write_mutex_;
     // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
     // read-back and re-send. No getter takes it. Order: set_connected_mutex_, then this, then the protocol
     // wrapper's mutex, then mutex_.

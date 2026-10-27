@@ -445,6 +445,7 @@ void configure_storm_mount(alpacacore::test::FakeZwoMount& mount) { mount.set_sl
 TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][telescope][stress]") {
     alpacacore::test::FakeZwoMount mount(alpacacore::util::default_task_clock(), "AM5");
     configure_storm_mount(mount);
+    mount.override_reply(":SMMC", "e2");  // Exercise the legacy target transaction during lifecycle races.
     REQUIRE(mount.ok());
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(mount.port()));
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
@@ -475,6 +476,8 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
         // The newly-fixed thread paths: async GOTO (goto_thread_) and pulse
         // guiding (pulse thread queue) issued while other threads disconnect.
         guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
+        guard([&] { scope.sync_to_coordinates(6.0, 25.0); });
+        guard([&] { scope.set_target_declination(30.0); });
         guard([&] { scope.pulse_guide(0, 50); });
         // open-astro#714: Connected=true on an already-connected driver takes
         // mutex_ and then pulse_mutex_ (the pulse-queue clear); pulse_guide()
