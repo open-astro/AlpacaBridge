@@ -10,9 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/vendor/zwo/zwo_efw_wrapper.h>
-#include <alpacacore/util/error_handling.h>
 #include <EFW_filter.h>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_efw_wrapper.h>
+#include <alpacacore/vendor/zwo/zwo_slots.h>
+
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -108,25 +110,13 @@ ZWOEFWSDKWrapper& ZWOEFWSDKWrapper::instance() {
 
 std::vector<ZWOEFWInfo> ZWOEFWSDKWrapper::enumerate_wheels() {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int count = EFWGetNum();
+    const auto slots =
+        read_zwo_accessory_slots<EFW_INFO>(EFWGetNum(), "EFW", EFWGetID, EFWGetProperty, error_code_to_string);
     std::vector<ZWOEFWInfo> result;
-    if (count <= 0) {
-        return result;
-    }
-    result.reserve(static_cast<std::size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        int id = 0;
-        throw_on_error(EFWGetID(i, &id), "EFWGetID");
-        EFW_INFO info{};
-        EFW_ERROR_CODE code = EFWGetProperty(id, &info);
-        if (code == EFW_SUCCESS) {
-            result.push_back(convert_wheel_info(info));
-        } else {
-            ZWOEFWInfo fallback;
-            fallback.wheel_id = id;
-            fallback.slot_count = 0;
-            result.push_back(std::move(fallback));
-        }
+    result.reserve(slots.size());
+    for (const auto& slot : slots) {
+        result.push_back(convert_wheel_info(slot.info));
+        result.back().slot_index = slot.slot;
     }
     return result;
 }
@@ -152,10 +142,11 @@ bool ZWOEFWSDKWrapper::get_wheel_info_by_index(int wheel_index, ZWOEFWInfo& info
     EFW_INFO sdk_info{};
     code = EFWGetProperty(wheel_id, &sdk_info);
     if (code != EFW_SUCCESS) {
-        info = ZWOEFWInfo{wheel_id, std::string(), 0};
+        info = ZWOEFWInfo{wheel_id, std::string(), 0, wheel_index};
         return true;
     }
     info = convert_wheel_info(sdk_info);
+    info.slot_index = wheel_index;
     return true;
 }
 

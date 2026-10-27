@@ -21,6 +21,8 @@ struct ZWOEFWInfo {
     int wheel_id{};
     std::string name;
     int slot_count{};
+    // SDK enumeration slot, not the device ID or a filter position; unknown for ID-only reads.
+    int slot_index{-1};
 };
 
 /**
