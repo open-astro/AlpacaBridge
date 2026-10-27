@@ -31,6 +31,12 @@
 // Bytes are read one at a time, so bytes after the stop condition stay in the
 // fd for the next read.
 //
+// ReadSpec::late_byte_grace keeps the old loops' rule for a reply that is
+// still arriving when its timeout runs out: the byte in flight settles it (a
+// late '#' ends its own reply instead of answering the next command). It is
+// read-loop behaviour, not policy: the wrapper still turns the outcome into
+// its own exception or latch.
+//
 // POSIX-only, like serial_link.h; callers include it inside their existing
 // `#ifndef _WIN32` branches.
 
@@ -71,6 +77,16 @@ struct ReadSpec {
     std::size_t max_len = 256;
     /// Timeout if no kept byte arrives in this window (the deadline still applies).
     std::optional<std::chrono::milliseconds> first_byte_timeout;
+    /// The byte in flight when the read times out settles it, as the last read
+    /// of a byte-at-a-time loop did (issue #1686). Once the deadline or
+    /// first_byte_timeout passes, the read waits up to this long for one more
+    /// kept byte. In a Terminator or TerminatorOrIdleGap read a terminator is
+    /// kept and ends the read (outcome Terminator), and any other byte is kept
+    /// and the outcome stays Timeout, so a whole late reply is not taken. In a
+    /// Length read each byte that comes within this long of the last is kept,
+    /// so a payload in flight is read whole (outcome Length once complete).
+    /// A hangup in that wait is LinkDead. Unset: the read ends at the deadline.
+    std::optional<std::chrono::milliseconds> late_byte_grace;
 };
 
 enum class ReadOutcome : std::uint8_t {
@@ -93,13 +109,6 @@ namespace detail {
 
 inline bool tty_hangup_errno(int e) { return e == EIO || e == ENXIO || e == ENODEV || e == EBADF; }
 inline bool socket_hangup_errno(int e) { return e == ENOTCONN || e == ECONNRESET || e == EPIPE || e == ENOTSOCK; }
-
-/// Whole milliseconds left to @p t, rounded up, so a wait never ends early.
-inline int wait_ms_until(std::chrono::steady_clock::time_point t) {
-    const auto left = t - std::chrono::steady_clock::now();
-    if (left <= std::chrono::steady_clock::duration::zero()) return 0;
-    return static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(left).count());
-}
 
 /// One byte from a socket, waiting at most @p timeout_ms: 1, 0 on timeout, -1
 /// with errno set. An orderly close by the peer is -1 / ECONNRESET.
@@ -124,6 +133,42 @@ inline ssize_t socket_read_byte(int fd, char* c, int timeout_ms) {
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
     return -1;
+}
+
+/// The wait after a timed-out read: @p grace is ReadSpec::late_byte_grace.
+/// @p res holds the timed-out read; the late byte, if any, is added to it.
+template <typename ReadByte, typename IsHangup>
+void read_late_byte(ReadByte& read_byte, IsHangup& is_hangup, const ReadSpec& spec, bool terminator_stop,
+                    std::chrono::milliseconds grace, ReadResult& res) {
+    using Clock = std::chrono::steady_clock;
+    auto until = Clock::now() + grace;
+    for (;;) {
+        char c = 0;
+        const ssize_t r = read_byte(&c, wait_ms_until(until));
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            res.err = errno;
+            if (is_hangup(res.err)) res.outcome = ReadOutcome::LinkDead;
+            return;
+        }
+        if (r == 0) {
+            if (Clock::now() >= until) return;
+            continue;
+        }
+        // A skipped byte (CR/LF) does not restart the grace, so the wait stays bounded.
+        if (spec.skip.find(c) != std::string::npos) continue;
+        res.bytes += c;
+        if (terminator_stop && spec.terminators.find(c) != std::string::npos) {
+            res.outcome = ReadOutcome::Terminator;
+            return;
+        }
+        if (spec.stop != ReadSpec::Stop::Length) return;
+        if (res.bytes.size() >= spec.length) {
+            res.outcome = ReadOutcome::Length;
+            return;
+        }
+        until = Clock::now() + grace;
+    }
 }
 
 /// The loop. @p read_byte is `ssize_t(char*, int timeout_ms)` with tty_read's contract.
@@ -163,6 +208,9 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
             }
             if (now >= limit) {
                 res.outcome = ReadOutcome::Timeout;
+                if (spec.late_byte_grace.has_value()) {
+                    read_late_byte(read_byte, is_hangup, spec, terminator_stop, *spec.late_byte_grace, res);
+                }
                 return res;
             }
             continue;
