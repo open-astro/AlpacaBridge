@@ -1754,6 +1754,7 @@ public:
             manual_axis_tracking_restore_[1] = std::nullopt;
             slew_force_until_ = clock_.now() + std::chrono::seconds(5);
             goto_active_ = true;
+            goto_setup_pending_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that retries a rejected goto must not be told the OLD goto
             // failed.
@@ -1787,7 +1788,11 @@ public:
             goto_cancel_.store(false);
         }
         goto_thread_ = std::thread([this, target_ra, target_dec, slew_epoch]() {
-            auto resume_poll = [this]() { poll_pause_.store(false); };
+            auto resume_poll = [this, slew_epoch]() {
+                std::lock_guard<std::mutex> lock(mutex_);
+                // A superseded worker must not release its replacement's setup pause.
+                if (slew_error_epoch_ == slew_epoch) poll_pause_.store(false);
+            };
             // open-astro#720: a cancelled GOTO started no slew (it exits before
             // ":MS", or after the mount rejected it), so it must not leave its
             // 5 s Slewing force window behind. A newer SlewToTargetAsync has
@@ -1798,6 +1803,7 @@ public:
                     if (slew_error_epoch_ == slew_epoch) {
                         slew_force_until_ = std::chrono::steady_clock::time_point{};
                         goto_active_ = false;
+                        goto_setup_pending_ = false;
                     }
                 }
                 resume_poll();
@@ -1833,8 +1839,16 @@ public:
                 for (int attempt = 0; attempt < 3 && !goto_cancel_.load(); ++attempt) {
                     try {
                         if (!protocol.goto_target()) {
-                            resume_poll();
                             throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            if (slew_error_epoch_ == slew_epoch) {
+                                goto_setup_pending_ = false;
+                                slew_force_until_ = clock_.now() + std::chrono::seconds(5);
+                                // A stopped sample taken before MS acceptance cannot finish this GOTO.
+                                snapshot_.write([](PolledFrame&) {});
+                            }
                         }
                         resume_poll();
                         return;
@@ -1896,6 +1910,7 @@ public:
                             std::lock_guard<std::mutex> lock(mutex_);
                             if (slew_error_epoch_ == slew_epoch) {
                                 last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
+                                goto_setup_pending_ = false;
                             }
                         }
                         resume_poll();
@@ -1917,6 +1932,7 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (slew_error_epoch_ == slew_epoch) {
                         last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
+                        goto_setup_pending_ = false;
                     }
                 }
             }
@@ -2050,6 +2066,7 @@ public:
 
     void unpark() override {
         check_connected();
+        cancel_and_join_goto_thread();
         reset_position_offsets();
         auto& protocol = protocol_;
         // Guard the poll thread's park-state warm against re-parking us: some
@@ -2572,8 +2589,8 @@ private:
             tracking_state_at_ = now;
             last_mandatory_at_ = *frame.mandatory_at;
             restored = health_.on_reply();
-            // GOTO ownership ends only with accepted final coordinates, never GU alone.
-            if (status->stop_or_tracking && slew_force_until_ <= now) goto_active_ = false;
+            // Setup/retries are not arrival; after MS acceptance, completion still needs the final pair.
+            if (!goto_setup_pending_ && status->stop_or_tracking && slew_force_until_ <= now) goto_active_ = false;
         }
         if (restored) ALPACA_LOG_INFO("ZWO", "Mount communications restored");
         // Optional fields cannot postpone mandatory publication or restore a failed mandatory poll.
@@ -2859,6 +2876,7 @@ private:
         // Taken after the reap lock is released, never nested in it.
         std::lock_guard<std::mutex> lock(mutex_);
         goto_active_ = false;
+        goto_setup_pending_ = false;
     }
 
     const int device_number_;
@@ -2935,6 +2953,7 @@ private:
     // A GOTO this driver started may still be in flight (open-astro#1274):
     // see own_goto_in_flight_locked(). Under mutex_.
     mutable bool goto_active_ = false;
+    bool goto_setup_pending_ = false;  // mutex_: retries remain setup until MS succeeds
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, logged and forgotten by the setup thread) used
     // to leave Slewing read FALSE once slew_force_until_ expired --
