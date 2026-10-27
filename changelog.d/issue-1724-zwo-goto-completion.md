@@ -1,0 +1,2 @@
+### Fixed
+- **ZWO AM: delayed GOTO setup cannot report early completion** (AlpacaCore, issue #1724): keep Slewing true through setup and retries until the mount accepts the GOTO, restart the five-second startup protection on acceptance, reject pre-acceptance completion samples, and prevent an older setup worker from releasing its replacement's poll pause. Unpark now cancels and joins pending GOTO setup before sending its command.

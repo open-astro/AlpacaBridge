@@ -32,6 +32,13 @@
 # so the nightly-build tag stays on the last green commit and the next cron
 # tries the same commit again.
 #
+# A second job builds all vendors with ASan + UBSan and runs the full suite
+# (issue #1740): ci.yml's ASan + UBSan job builds vendors OFF and its TSan job
+# runs only the [stress] and [stress-guard] tags, so most vendor tests ran
+# under no sanitizer, and none under ASan or UBSan. It does not gate the
+# .deb build: a sanitizer finding is a signal filed as its own issue, and
+# testers' nightlies keep shipping. The run still shows red.
+#
 # Upstream builds main only (the cron, or `gh workflow run nightly-build.yml
 # -f force=true`), so the public nightly-build release always names a main
 # commit. Forks never build on the cron; a manual run there builds the branch
@@ -192,6 +199,115 @@ jobs:
         with:
           path: ~/.cache/ccache
           key: ccache-nightly-optimized-${{ github.sha }}
+
+  test-sanitizers:
+    name: Test all vendors, ASan + UBSan (arm64)
+    # Follows the check job's skip: an unchanged main is not tested twice.
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Same list as ci.yml's build-vendors job, minus gcovr. libgpiod-dev is
+        # omitted on purpose: the runner ships 1.6 and the GPIO drivers need >= 2.0.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ccache g++ catch2 pkg-config \
+            libusb-1.0-0-dev libudev-dev libsystemd-dev libhidapi-dev \
+            libltdl-dev libexif-dev libjpeg-dev libraw-dev \
+            nlohmann-json3-dev zlib1g-dev libcurl4-openssl-dev
+
+      - name: Build libgpiod v2 from source
+        # The pin is read from ci.yml, the one place it lives, so a bump cannot skew this job.
+        run: |
+          set -euo pipefail
+          gpiod_ver="$(sed -n 's/^  LIBGPIOD_VER: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
+          sha="$(sed -n 's/^  LIBGPIOD_SHA256: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
+          if [ -z "${gpiod_ver}" ] || [ -z "${sha}" ]; then
+            echo "libgpiod pin not found in ci.yml"
+            exit 1
+          fi
+          cp "AlpacaCore/external/libgpiod/libgpiod-${gpiod_ver}.tar.xz" /tmp/libgpiod.tar.xz
+          echo "${sha}  /tmp/libgpiod.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/libgpiod
+          tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
+          cd /tmp/libgpiod
+          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+
+      - name: Build bundled libgphoto2
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
+      - name: Stage vendor SDK shared libraries
+        run: |
+          set -euo pipefail
+          core="AlpacaCore/external"
+          libs=(
+            "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
+            "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
+            "$core/ToupTek/toupcamsdk.20260519/linux/arm64/glibc/libtoupcam.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
+            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
+          )
+          for lib in "${libs[@]}"; do
+            if compgen -G "${lib}*" > /dev/null; then
+              echo "Staging $(basename "$lib")*"
+              sudo cp -a "${lib}"* /usr/local/lib/
+            else
+              echo "WARNING: ${lib}* not found - skipping"
+            fi
+          done
+          sudo ldconfig
+
+      - name: Restore the compiler cache
+        # Keyed per job: these objects are sanitizer-instrumented. Not
+        # `ccache-asan-` (the vendors-OFF PR job's prefix; docs-drift check 20).
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-nightly-sanitizers-${{ github.sha }}
+          restore-keys: ccache-nightly-sanitizers-
+
+      - name: Build + run tests with sanitizers (all vendors)
+        # As ci.yml's sanitizer step, with every vendor ON. CMake seeds the flags
+        # from CXXFLAGS / LDFLAGS on a fresh configure and run_all_tests.sh wipes
+        # its build tree first. -fno-sanitize-recover makes detected UB a hard failure.
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
+          ALPACACORE_ENABLE_ALL_VENDORS: "ON"
+          CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+          LDFLAGS: "-fsanitize=address,undefined"
+          ASAN_OPTIONS: "abort_on_error=1:detect_leaks=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: |
+          ccache --zero-stats
+          ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-nightly-sanitizers-${{ github.sha }}
 
   build:
     name: Build and publish the nightly .deb
