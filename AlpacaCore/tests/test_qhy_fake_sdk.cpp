@@ -320,10 +320,10 @@ TEST_CASE("FakeQHYSDK - an out-of-range readout mode name falls back, set fails"
 }
 
 TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][fake][unit]") {
-    // The decorator is 26 hand-written one-line forwards, so a transposed
+    // The decorator uses hand-written forwards, so a transposed
     // body (move_cfw calling get_cfw_position, say) compiles and would only
     // surface as a baffling failure in the [stress] follow-up, which is where
-    // LockedQHYSDK is actually load-bearing. Walk all 26 through the decorator
+    // LockedQHYSDK is actually load-bearing. Walk all methods through the decorator
     // and assert the fake's call ledger names exactly them, once each: a
     // mis-wired forward shows up as one name at 2 and another at 0.
     auto fake = make_fake();
@@ -342,6 +342,10 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
     sdk.get_param(id, control::GAIN);
     sdk.get_param_range(id, control::GAIN);
     sdk.set_param(id, control::GAIN, 10.0);
+    {
+        auto off = sdk.prepare_cooler_off(id, std::make_shared<std::atomic<bool>>(false));
+        off();
+    }
     sdk.set_resolution(id, 0, 0, 8, 8);
     sdk.set_bin_mode(id, 1, 1);
     sdk.set_bits_mode(id, 16);
@@ -381,6 +385,7 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
         "get_param",
         "get_param_range",
         "set_param",
+        "prepare_cooler_off",
         "set_resolution",
         "set_bin_mode",
         "set_bits_mode",
@@ -397,11 +402,8 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
         "set_readout_mode",
         "get_sdk_version",
     };
-    // A literal self-check on the list. It is NOT what catches the interface
-    // growing -- if QHYSDK gains a 27th method, LockedQHYSDK must gain a
-    // forward to still compile, but this list, the driven calls and
-    // fake.calls would all stay at 26 and the case would still pass, having
-    // exercised 26 of 27. That hole is closed OUTSIDE this file (issue #394):
+    // A literal self-check does not catch an added method missing from both
+    // the driven calls and this list. That hole is closed outside this file (#394):
     // scripts/check_docs_drift.py compares the interface's pure virtuals,
     // LockedQHYSDK's overrides and this very list, and separately fails on a
     // forward that does not go through locked() -- which the compiler never
@@ -409,14 +411,38 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
     // number here and the list above in the same change as the interface.
     // What this CASE catches (mutation-verified) is a forward wired to the
     // wrong inner method, or to none.
-    CHECK(methods.size() == 26);
+    CHECK(methods.size() == 27);
     for (const auto& name : methods) {
         INFO("method: " << name);
-        CHECK(fake.call_count(name.c_str()) == 1);
+        CHECK(fake.call_count(name.c_str()) == ((name == "set_param" || name == "close_camera") ? 2 : 1));
     }
     // Nothing OUTSIDE the list was hit, which is the half that catches a
     // forward wired to the wrong inner method.
     CHECK(fake.distinct_calls() == methods.size());
+}
+
+TEST_CASE("FakeQHYSDK - prepared cooler off retains ownership through close and refuses reopen", "[qhy][fake][unit]") {
+    const bool shared_with_wheel = GENERATE(false, true);
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    const std::string id = "fake-qhy-0";
+    sdk.open_camera(id);
+    if (shared_with_wheel) sdk.open_camera(id);
+    auto running = std::make_shared<std::atomic<bool>>(true);
+    auto off = sdk.prepare_cooler_off(id, running);
+    sdk.close_camera(id);
+    CHECK(fake.physical_closes == 0);
+    require_alpaca_error([&] { sdk.open_camera(id); }, AlpacaError::InvalidOperation);
+    CHECK_NOTHROW(off());
+    CHECK(fake.params[control::MANULPWM] == 0.0);
+    off = {};
+    running->store(false);
+    CHECK(fake.physical_closes == (shared_with_wheel ? 0 : 1));
+    if (shared_with_wheel) sdk.close_camera(id);
+    sdk.open_camera(id);
+    CHECK(fake.physical_opens == 2);
+    sdk.close_camera(id);
+    CHECK(fake.underflow_closes == 0);
 }
 
 TEST_CASE("FakeQHYSDK - an empty readout-mode list still accepts index 0", "[qhy][fake][unit]") {
