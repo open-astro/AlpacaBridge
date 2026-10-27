@@ -14,6 +14,7 @@
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -1897,5 +1898,51 @@ TEST_CASE("Player One Camera Driver - ImageArray before any exposure is asked to
         CHECK(e.is_asked_too_early());
         CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
     }
+    driver->set_connected(false);
+}
+
+// #1745: an exposure the driver itself ended (disconnect, AbortExposure) leaves no stored download error, even
+// when the body's download fails between the SDK stop and the session abort.
+TEST_CASE("Player One Camera Driver - Disconnect during a download stores no download error",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_hold_image_data(true);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30));
+    driver->set_connected(true);
+    driver->start_exposure(0.001, true);
+    REQUIRE(eventually([&] { return sdk.image_data_started(); }));
+
+    std::atomic<bool> disconnected{false};
+    std::thread disconnect([&] {
+        driver->set_connected(false);
+        disconnected.store(true);
+    });
+    bool raised = false;
+    while (!disconnected.load()) {
+        try {
+            static_cast<void>(driver->get_image_ready());
+        } catch (const alpacacore::AlpacaException& e) {
+            // NotConnected is the disconnect itself; only a kept download error is the defect.
+            if (e.error_code() == alpacacore::AlpacaError::DriverException) raised = true;
+        }
+        std::this_thread::yield();
+    }
+    disconnect.join();
+    CHECK_FALSE(raised);
+    CHECK(sdk.stop_count() == 1);
+}
+
+TEST_CASE("Player One Camera Driver - AbortExposure stores no download error", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    sdk.set_ready_after_stop(true);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30));
+    driver->set_connected(true);
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+
+    driver->abort_exposure();
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(driver->get_image_ready());
     driver->set_connected(false);
 }

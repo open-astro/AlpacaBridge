@@ -231,7 +231,7 @@ public:
         }
         if (exposure_started_) {
             stopped_ = true;
-            ready_ = false;
+            ready_ = ready_after_stop_.load();
             exposure_started_ = false;
             download_cv_.notify_all();
         }
@@ -467,6 +467,9 @@ public:
     int pulse_off_count() const { return pulse_off_count_.load(); }
     int stop_count() const { return stop_count_.load(); }
     int exposure_start_count() const { return exposure_start_count_.load(); }
+    // The frame looks ready again once the stop has landed, as when readiness flips just as the stop does:
+    // the body's next poll sees ready and its download then fails (#1745).
+    void set_ready_after_stop(bool on) { ready_after_stop_.store(on); }
     bool image_data_started() const { return image_data_started_.load(); }
     bool image_data_finished() const { return image_data_finished_.load(); }
     bool close_during_download() const { return close_during_download_.load(); }
@@ -545,6 +548,7 @@ private:
     std::atomic<bool> ready_on_start_{true};
     std::atomic<bool> readiness_error_{false};
     std::atomic<bool> image_data_started_{false};
+    std::atomic<bool> ready_after_stop_{false};
     std::atomic<bool> image_data_finished_{false};
     std::atomic<long> gain_{10};
     std::atomic<int> open_count_{0};

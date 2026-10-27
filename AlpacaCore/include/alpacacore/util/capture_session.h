@@ -116,6 +116,7 @@ public:
         const Saved saved{state_, image_, failure_};
         const std::uint64_t token = ++last_token_;
         owner_ = token;
+        stopping_ = false;
         state_ = State::Exposing;
         image_.reset();
         failure_.reset();
@@ -226,6 +227,15 @@ public:
         fail_locked(lock, std::move(message));
     }
 
+    /// The driver is about to stop the SDK exposure itself (a disconnect, an AbortExposure): the body stops
+    /// owning the session now, so a download the stop breaks is dropped, not kept as a failure. A later
+    /// abort() or fail() ends the exposure; set_stopping(false) hands ownership back when the stop failed
+    /// and the exposure runs on. A no-op when nothing is exposing; start() clears it.
+    void set_stopping(bool stopping) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopping_ = stopping && is_exposing_locked();
+    }
+
     /// Applies the watchdog: an exposure past start + duration + margin fails.
     CameraState camera_state() const {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -305,7 +315,7 @@ private:
     };
 
     bool is_exposing_locked() const { return state_ == State::Exposing || state_ == State::Download; }
-    bool owns_locked(std::uint64_t token) const { return owner_ == token && is_exposing_locked(); }
+    bool owns_locked(std::uint64_t token) const { return owner_ == token && is_exposing_locked() && !stopping_; }
 
     void require_startable_locked() const {
         if (!open_) {
@@ -407,6 +417,7 @@ private:
     int running_ = 0;  // bodies reserved or running
     int disconnecting_ = 0;
     bool open_ = true;
+    bool stopping_ = false;  // the driver is stopping the SDK exposure: the body no longer owns the session
     bool started_ = false;
     double duration_ = 0.0;
     std::chrono::system_clock::time_point start_time_{};
