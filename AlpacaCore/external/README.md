@@ -84,7 +84,7 @@ own redistribution terms still apply to the SDK files themselves.
 
 | Vendor SDK | Written license in tree | Status |
 |------------|------------------------|--------|
-| ZWO (ASI/EAF/CAA) | MIT (`license.txt` in the SDK tree) | Redistribution and linking fully permitted |
+| ZWO (ASI/EAF/EFW/CAA) | MIT (`license.txt` in the SDK tree) | Redistribution and linking fully permitted |
 | Player One (camera + filter wheel) | Vendor `license.txt` ("develop any products without any restrictions", keep the notice) | Permitted with notice retained |
 | QHY | None for `libqhyccd` itself; bundled Cypress `fxload` loader is GPL-2 (`COPYING` in the SDK) | Redistributed unmodified, as downloaded from QHY's official SDK page, for turnkey device support |
 | ToupTek | None in the vendored subset | Redistributed unmodified, as downloaded from ToupTek's official SDK page, for turnkey device support |
