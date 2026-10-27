@@ -15,6 +15,7 @@ Several drivers hold the driver `mutex_` across a device transaction: an SDK cal
 5. **Lock order in a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) → SDK-wrapper mutex.** The state lock is the leaf: nothing that waits on the wire is taken under it. A driver class converts in one PR, so the old and the new order never mix in one class. An unconverted driver and the cameras keep `mutex_` → operation lock → SDK-wrapper mutex. The `util::AsyncOperation` slot mutex may still nest under `mutex_` as [decision 0006](0006-async-operation-ownership.md) sets, and so may the `StateSnapshot` mutex (0010 adopters publish and `write()` under `mutex_`): each is a leaf under `mutex_`, takes no other lock and runs no I/O.
 6. **Camera exception.** `with_camera` and `with_handle` around short SDK calls stay allowed. An exposure is not a blocking transaction under `mutex_`. A camera converts only after a measurement shows a getter stall.
 7. **Defects in snapshot adopters.** [Decision 0010](0010-snapshot-served-state.md) records two paths that held `mutex_` across a device exchange: Celestron's FindHome completion check (and the up-to-three stop exchanges, then every other exchange of the driver; fixed in #1437), and Bisque's control-path ends (sync, slew complete, FindHome, Park) that sampled under `mutex_`, then every other exchange of the driver; fixed in #1438. Both broke rule 1, and this record allows neither. Each is tracked in its family's #295 slice, #1437 (Celestron) and #1438 (Bisque); the I/O lock serialises a safety stop, so it needs no `mutex_`.
+8. **A wire call that releases `mutex_` leaves no stale state and no untracked lock.** In a converted driver the wire call drops the state lock for the exchange and takes it back after, so a `*_locked` helper that reaches the wire releases `mutex_` partway through. State read before the exchange is re-read after it, or checked against a counter that every change bumps. A per-thread lock tracker that cannot record a lock throws `DriverException` before it takes any lock: a `mutex_` taken untracked is never dropped by the wire call, so every exchange under it breaks item 1.
 
 The how-to and its history stay in the [driver lifecycle instructions](../../.github/instructions/driver-lifecycle.instructions.md).
 
@@ -25,6 +26,7 @@ The how-to and its history stay in the [driver lifecycle instructions](../../.gi
 3. `Connected` is lock-free, and identity and limits are published at the end of connect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
 4. The camera drivers keep `with_camera` and `with_handle` over short SDK calls until a measurement shows a getter stall. Scope: `AlpacaCore/src/vendors/*/*camera_driver.cpp`. Checked by: review. <!-- allowed -->
 5. `AGENTS.md` and the driver lifecycle instructions state this rule and link this record. Scope: `AGENTS.md`, `.github/instructions/driver-lifecycle.instructions.md`. Checked by: review.
+6. In a converted driver, state read before a wire call that releases `mutex_` is re-read or re-validated after it, and a per-thread lock tracker that cannot record a lock throws `DriverException` before it takes any lock (item 8). Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review (a value read before a wire call and used after it with no re-read or counter check; a lock-table-full path that takes `mutex_` or only logs).
 
 ## Alternatives rejected
 
@@ -45,6 +47,6 @@ Each slice is one driver family in one PR; reverting that PR restores the old lo
 
 ## Links
 
-- Issues [#295](https://github.com/open-astro/AlpacaBridge/issues/295) (the migration), [#1390](https://github.com/open-astro/AlpacaBridge/issues/1390) (this slice), [#1449](https://github.com/open-astro/AlpacaBridge/issues/1449) (OnStep: a getter whose 2 s cache is stale takes the I/O lock for that one read).
+- Issues [#295](https://github.com/open-astro/AlpacaBridge/issues/295) (the migration), [#1390](https://github.com/open-astro/AlpacaBridge/issues/1390) (this slice), [#1449](https://github.com/open-astro/AlpacaBridge/issues/1449) (OnStep: a getter whose 2 s cache is stale takes the I/O lock for that one read), [#1729](https://github.com/open-astro/AlpacaBridge/issues/1729) and [#1730](https://github.com/open-astro/AlpacaBridge/issues/1730) (item 8: the shared lock gate and the Sky-Watcher full-table defect).
 - Rules: [driver lifecycle instructions](../../.github/instructions/driver-lifecycle.instructions.md).
 - Related: [decision 0010](0010-snapshot-served-state.md) (snapshot-served state), [decision 0006](0006-async-operation-ownership.md) (async operation ownership; the slot mutex nests under `mutex_`).
