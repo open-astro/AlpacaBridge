@@ -328,7 +328,8 @@ private:
             }
             // Bound the wait for OFF cleanup, which polls the old PID worker's
             // running flag; the OFF body never takes mutex_ or joins PID.
-            join_cooler_off_thread();
+            // These workers can all be waiting on the same SDK call; spend one reap budget.
+            const auto cleanup_deadline = clock_.now() + std::chrono::seconds(2);
             std::thread temp_to_join;
             std::thread telemetry_to_join;
             std::shared_ptr<std::atomic<bool>> temp_running_to_join;
@@ -342,8 +343,9 @@ private:
                 telemetry_running_to_join = telemetry_thread_running_;
                 telemetry_to_join = std::move(telemetry_thread_);
             }
+            join_cooler_off_thread(cleanup_deadline);
             try {
-                join_temp_thread(temp_to_join, temp_running_to_join);  // outside mutex_; bounded, may detach
+                join_worker_thread(temp_to_join, temp_running_to_join, "temp-control", cleanup_deadline);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Temp thread join failed during disconnect: " + std::string(e.what()));
             }
@@ -351,7 +353,7 @@ private:
                 // open-astro#323: bounded and may detach, like the temp
                 // worker's. This join used to be unbounded, so a telemetry
                 // poll wedged inside an SDK call hung the disconnect forever.
-                join_worker_thread(telemetry_to_join, telemetry_running_to_join, "telemetry");
+                join_worker_thread(telemetry_to_join, telemetry_running_to_join, "telemetry", cleanup_deadline);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during disconnect: " + std::string(e.what()));
             }
@@ -389,7 +391,7 @@ private:
                     ALPACA_LOG_ERROR("QHY", "Failed to prepare cooler OFF during disconnect: " + std::string(e.what()));
                 }
             }
-            join_cooler_off_thread();
+            join_cooler_off_thread(cleanup_deadline);
             std::lock_guard<std::mutex> io_lock(io_mutex_);
             if (!id.empty()) {
                 // Exposure worker cancel attempted above; join_exposure_thread()
@@ -536,6 +538,7 @@ private:
             offset_state_ = offset;
             max_bin_ = max_bin;
             cooler_off_request_->store(CoolerOffState::None);
+            cooler_off_warned_ = std::make_shared<std::atomic<bool>>(false);
             reset_exposure_state_locked();
             telemetry_ccd_temp_c_ = temperature;
             telemetry_temp_valid_ = temp_valid;
@@ -1251,7 +1254,7 @@ public:
         const auto max_bin = cache_read([&] { return max_supported_bin(sdk_, id); });
         lock.lock();
         ensure_connected();
-        if (disconnecting_) return;
+        if (disconnecting_) throw AlpacaException("Camera is disconnecting", AlpacaError::NotConnected);
         gain_state_ = applied_gain;
         offset_state_ = applied_offset;
         max_bin_ = max_bin;
@@ -2177,6 +2180,7 @@ private:
     // outlive the driver (driver-lifecycle.instructions.md) — the shared_ptr keeps this flag alive
     // independent of `this`, same pattern as pulse_guiding_ below.
     std::shared_ptr<std::atomic<bool>> cooler_off_running_{std::make_shared<std::atomic<bool>>(false)};
+    std::shared_ptr<std::atomic<bool>> cooler_off_warned_{std::make_shared<std::atomic<bool>>(false)};
     std::shared_ptr<std::atomic<CoolerOffState>> cooler_off_request_{
         std::make_shared<std::atomic<CoolerOffState>>(CoolerOffState::None)};
     // OFF acceptance and a cancelled worker's claim/retirement are indivisible.
@@ -2391,6 +2395,7 @@ private:
         if (cooler_off_thread_.joinable()) cooler_off_thread_.join();
         std::string id;
         std::shared_ptr<std::atomic<bool>> temp_running;
+        std::shared_ptr<std::atomic<bool>> warned;
         auto running = std::make_shared<std::atomic<bool>>(true);
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2398,11 +2403,12 @@ private:
             id = camera_id_.value_or("");
             temp_thread_stop_->request_stop();
             temp_running = temp_thread_running_;
+            warned = cooler_off_warned_;
             cooler_off_running_ = running;
         }
         try {
             auto action = sdk_.prepare_cooler_off(id, running);
-            cooler_off_thread_ = std::thread([action = std::move(action), running, temp_running,
+            cooler_off_thread_ = std::thread([action = std::move(action), running, temp_running, warned,
                                               request = cooler_off_request_, request_mutex = cooler_off_request_mutex_,
                                               hook = on_worker_start_, clock = &clock_]() mutable {
                 // Declared before the guard: a failed claim releases the action
@@ -2433,10 +2439,16 @@ private:
                         ALPACA_LOG_INFO("QHY",
                                         "SetQHYCCDParam(MANULPWM,0) returned OK after " + std::to_string(ms) + "ms");
                     } catch (const std::exception& e) {
-                        ALPACA_LOG_ERROR("QHY", "SetQHYCCDParam(MANULPWM,0) failed: " + std::string(e.what()));
+                        logging::log(warned->exchange(true) ? logging::LogLevel::Info : logging::LogLevel::Warn, "QHY",
+                                     "SetQHYCCDParam(MANULPWM,0) failed: " + std::string(e.what()));
+                    } catch (...) {
+                        logging::log(warned->exchange(true) ? logging::LogLevel::Info : logging::LogLevel::Warn, "QHY",
+                                     "SetQHYCCDParam(MANULPWM,0) failed: unknown exception");
                     }
                 } catch (const std::exception& e) {
                     ALPACA_LOG_ERROR("QHY", "Cooler OFF cleanup failed: " + std::string(e.what()));
+                } catch (...) {
+                    ALPACA_LOG_ERROR("QHY", "Cooler OFF cleanup failed: unknown exception");
                 }
             });
         } catch (...) {
@@ -2445,19 +2457,20 @@ private:
         }
     }
 
-    void join_cooler_off_thread() {
+    void join_cooler_off_thread(
+        std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()) {
         std::lock_guard<std::mutex> cooler_lock(cooler_off_lifecycle_mutex_);
         if (!cooler_off_thread_.joinable()) {
             return;
         }
         // Bound logical disconnect even if PID or PWM never returns. The body
         // owns its retained action and shared flags, and never accesses this.
-        auto deadline = clock_.now() + std::chrono::seconds(2);
+        deadline = std::min(deadline, clock_.now() + std::chrono::seconds(2));
         while (cooler_off_running_->load() && clock_.now() < deadline) {
             clock_.sleep_for(std::chrono::milliseconds(20));
         }
         if (cooler_off_running_->load()) {
-            ALPACA_LOG_WARN("QHY", "cooler-off worker exceeded 2s timeout; detaching");
+            ALPACA_LOG_WARN("QHY", "cooler-off worker still running at reap deadline; detaching");
             cooler_off_thread_.detach();
         } else {
             cooler_off_thread_.join();  // finished worker — instant reap
@@ -2636,16 +2649,18 @@ private:
     // worker's join was UNBOUNDED, so a poll wedged inside an SDK call would
     // hang a disconnect forever rather than degrading -- the one worker in
     // this file with no ceiling. `label` names the worker in the WARN.
-    void join_worker_thread(std::thread& t, const std::shared_ptr<std::atomic<bool>>& running_flag, const char* label) {
+    void join_worker_thread(
+        std::thread& t, const std::shared_ptr<std::atomic<bool>>& running_flag, const char* label,
+        std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()) {
         if (!t.joinable()) {
             return;
         }
-        auto deadline = clock_.now() + std::chrono::seconds(2);
+        deadline = std::min(deadline, clock_.now() + std::chrono::seconds(2));
         while (running_flag->load() && clock_.now() < deadline) {
             clock_.sleep_for(std::chrono::milliseconds(20));
         }
         if (running_flag->load()) {
-            ALPACA_LOG_WARN("QHY", std::string(label) + " thread exceeded 2s timeout; detaching");
+            ALPACA_LOG_WARN("QHY", std::string(label) + " thread still running at reap deadline; detaching");
             t.detach();
         } else {
             t.join();  // finished — instant reap
