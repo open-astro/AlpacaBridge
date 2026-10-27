@@ -494,6 +494,14 @@ if(ALPACAHTTP_BUILD_TESTS)
     file(MAKE_DIRECTORY ${TEST_ROUTER_LOG_LEVEL_DIR})
     add_test(NAME test_router_log_level COMMAND test_router_log_level WORKING_DIRECTORY ${TEST_ROUTER_LOG_LEVEL_DIR})
 
+    # open-astro#1688, #1689: settings files survive a failed write and a corrupt read.
+    # Own working directory: the router resolves config/ relative to the cwd.
+    add_executable(test_atomic_settings tests/test_atomic_settings.cpp)
+    target_link_libraries(test_atomic_settings alpacahttp)
+    set(TEST_ATOMIC_SETTINGS_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_atomic_settings_cwd)
+    file(MAKE_DIRECTORY ${TEST_ATOMIC_SETTINGS_DIR})
+    add_test(NAME test_atomic_settings COMMAND test_atomic_settings WORKING_DIRECTORY ${TEST_ATOMIC_SETTINGS_DIR})
+
     add_executable(test_yaml_comment tests/test_yaml_comment.cpp)
     target_link_libraries(test_yaml_comment alpacahttp)
     add_test(NAME test_yaml_comment COMMAND test_yaml_comment)

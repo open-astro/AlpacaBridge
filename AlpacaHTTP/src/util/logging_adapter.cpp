@@ -10,26 +10,28 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacahttp/util/logging_adapter.h>
-#include <alpacahttp/config.h>
+#include <alpacacore/util/atomic_file.h>
 #include <alpacacore/util/logging.h>
-#include <string>
-#include <mutex>
-#include <iostream>
-#include <iomanip>
-#include <chrono>
-#include <ctime>
-#include <sstream>
-#include <fstream>
-#include <filesystem>
-#include <algorithm>
-#include <cstdlib>
-#include <regex>
-#include <stdexcept>
-#include <system_error>
-#include <nlohmann/json.hpp>
+#include <alpacahttp/config.h>
+#include <alpacahttp/util/logging_adapter.h>
 #include <pwd.h>
 #include <unistd.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <nlohmann/json.hpp>
+#include <regex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <system_error>
 
 namespace alpacahttp::util {
 
@@ -559,21 +561,7 @@ void save_runtime_log_level(alpacacore::logging::LogLevel level) {
         }
         payload["LogLevel"] = core_level_to_persistent_string(level);
 
-        const auto tmp_path = kRuntimeStateFile.string() + ".tmp";
-        {
-            std::ofstream out(tmp_path, std::ios::trunc);
-            if (!out) {
-                throw std::runtime_error("unable to open " + tmp_path + " for writing");
-            }
-            out << payload.dump(2);
-            out.flush();
-        }
-        std::error_code rename_ec;
-        std::filesystem::rename(tmp_path, kRuntimeStateFile, rename_ec);
-        if (rename_ec) {
-            std::filesystem::remove(tmp_path);
-            throw std::runtime_error("rename failed: " + rename_ec.message());
-        }
+        alpacacore::util::write_file_atomic(kRuntimeStateFile, payload.dump(2));
     } catch (const std::exception& e) {
         log_warning(std::string("Failed to persist log level: ") + e.what());
     }

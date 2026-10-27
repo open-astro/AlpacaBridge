@@ -1,0 +1,3 @@
+### Fixed
+
+- **Settings files survive a crash or a full disk**, AlpacaHTTP, issues #1688 and #1689. `registered_devices.json`, `config.yaml` and `runtime_state.json` are now written through `alpacacore::util::write_file_atomic` (temp file, stream check, fsync, rename, directory fsync); a failed write keeps the old file and removes the temp file (`AlpacaCore/tests/test_atomic_file.cpp`, `AlpacaHTTP/tests/test_atomic_settings.cpp`). `PUT /management/v1/description` answers a non-zero `ErrorNumber` when `config.yaml` cannot be written. An empty or unparsable `registered_devices.json` is renamed to `registered_devices.json.corrupt-<epoch>` and logged before the server starts with no devices, so the next save no longer overwrites it.
