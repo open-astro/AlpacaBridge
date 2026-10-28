@@ -235,6 +235,7 @@ public:
     }
 
     void set_connected(bool connected) override {
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
 
         ALPACA_LOG_INFO("iOptron", "set_connected called with: " + std::string(connected ? "true" : "false"));
@@ -296,7 +297,6 @@ public:
                 "iOptron");
             {
                 ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
-                connected_ = true;
                 site_info_valid_ = false;
                 position_cache_valid_ = false;
                 altaz_cache_valid_ = false;
@@ -355,6 +355,17 @@ public:
                 sync_offset_dec_degrees_ = 0.0;
                 slew_in_progress_ = false;
                 invalidate_slew_error_locked();
+                util::UtcOffset mount_time;
+                lock.unlock();
+                try {
+                    const auto utc = protocol.get_utc_time();
+                    mount_time.set(utc, clock_.now());
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
+                }
+                lock.lock();
+                utc_offset_ = mount_time;
+                connected_ = true;
                 prefetch_mount_state_locked();
                 try {
                     mount_info_ = protocol.get_mount_info();
@@ -1279,10 +1290,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
 
-        if (!utc_offset_.valid()) {
-            utc_offset_.set(std::chrono::system_clock::now(), clock_.now());
-        }
-        return current_utc_time_locked();
+        if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
+        throw AlpacaException("UTCDate has not been established; set the mount time first",
+                              AlpacaError::InvalidOperation);
     }
     
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -2529,13 +2539,21 @@ private:
             retry_mount_command("site longitude", [&]() { protocol.set_longitude(longitude); }, &ctx);
         }
 
+        util::UtcOffset synced_time;
         if (do_clock_sync) {
             auto tz_info = compute_local_timezone_info();
             auto now_utc = std::chrono::system_clock::now();
             retry_mount_command(
                 "timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); }, &ctx);
             retry_mount_command("DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); }, &ctx);
-            retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); }, &ctx);
+            retry_mount_command(
+                "UTC clock",
+                [&]() {
+                    const auto sent_at = clock_.now();
+                    protocol.set_utc_time(now_utc);
+                    synced_time.set(now_utc, sent_at);
+                },
+                &ctx);
         }
 
         {
@@ -2562,7 +2580,7 @@ private:
                 timezone_offset_minutes_ = tz_info.offset_minutes;
                 timezone_offset_valid_ = true;
                 dst_observed_ = tz_info.dst_active;
-                utc_offset_.set(std::chrono::system_clock::now(), clock_.now());
+                if (synced_time.valid()) utc_offset_ = synced_time;
             }
         }
     }
@@ -2769,6 +2787,7 @@ private:
     // What get_connected() reads: true only once a connect has fully finished (#910).
     std::atomic<bool> published_connected_{false};
     mutable MountInfo mount_info_;
+    std::mutex transition_mutex_;
     mutable std::mutex mutex_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 

@@ -511,6 +511,18 @@ public:
      */
     virtual void set_guide_rate(const GuideRate& rate) = 0;
 
+    // Coupled-axis mounts can validate and write one property without a getter pre-read.
+    virtual void set_guide_rate_right_ascension(double value) {
+        auto rate = get_guide_rate();
+        rate.ra = value;
+        set_guide_rate(rate);
+    }
+    virtual void set_guide_rate_declination(double value) {
+        auto rate = get_guide_rate();
+        rate.dec = value;
+        set_guide_rate(rate);
+    }
+
     /**
      * @brief Get the telescope's right ascension in hours.
      */

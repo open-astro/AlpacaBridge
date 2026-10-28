@@ -3381,9 +3381,7 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
             }
             else if (request.method() == HttpMethod::PUT) {
                 double value = call.get_double("GuideRateDeclination");
-                auto guide_rate = telescope->get_guide_rate();
-                guide_rate.dec = value;
-                telescope->set_guide_rate(guide_rate);
+                telescope->set_guide_rate_declination(value);
                 return call.ok_void();
             }
         }
@@ -3394,9 +3392,7 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
             }
             else if (request.method() == HttpMethod::PUT) {
                 double value = call.get_double("GuideRateRightAscension");
-                auto guide_rate = telescope->get_guide_rate();
-                guide_rate.ra = value;
-                telescope->set_guide_rate(guide_rate);
+                telescope->set_guide_rate_right_ascension(value);
                 return call.ok_void();
             }
         }

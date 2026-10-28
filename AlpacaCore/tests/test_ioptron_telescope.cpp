@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -725,6 +726,141 @@ TEST_CASE("iOptron Telescope Driver - a far-off client UTCDate is logged once pe
     driver->set_connected(false);
 }
 
+TEST_CASE("iOptron Telescope Driver - UTCDate stays unset until time is established",
+          "[ioptron][telescope][unit][utcdate]") {
+    alpacacore::test::FakeIoptronMount server("0025", 0.0);
+    const auto invalid = GENERATE("+0000xxxxxxxxxxxxx#", "+00009999999999999#", "+00020000000000000#");
+    server.set_utc_reply(invalid);  // Site metadata remains readable; UTC payload is invalid.
+    REQUIRE(server.ok());
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, std::nullopt, std::nullopt,
+                                                                                  std::nullopt, false, clock);
+    for (int session = 0; session < 2; ++session) {
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        REQUIRE_NOTHROW(driver->get_sidereal_time());
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK(server.count(":GUT") == 2 * (session + 1));  // Clock sample and the existing site-metadata read.
+        driver->set_utc_date(std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
+        CHECK(driver->get_utc_date() == std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
+        driver->set_connected(false);
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
+    }
+}
+
+TEST_CASE("iOptron Telescope Driver - connect samples mount UTC before background sync",
+          "[ioptron][telescope][unit][utcdate]") {
+    const bool sync_time = GENERATE(false, true);
+    alpacacore::test::FakeIoptronMount mount("0025", 0.0);
+    mount.set_utc_reply("-18010000000000000#");  // UTC J2000, even with nonzero timezone and DST metadata.
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, sync_time, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto mount_utc = std::chrono::system_clock::time_point{std::chrono::seconds(946728000)};
+    CHECK(driver->get_utc_date() == mount_utc);
+    CHECK(mount.count(":GUT") == 2);  // Clock sample plus the existing site-metadata read.
+    CHECK(mount.count(":SUT") == 0);
+    CHECK(driver->get_utc_date() == mount_utc);
+    CHECK(mount.count(":GUT") == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - connect time sample does not block UTC getters or drop disconnect",
+          "[ioptron][telescope][unit][utcdate][getter-stall]") {
+    std::atomic<bool> entered{false};
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    alpacacore::test::FakeMountServer server([&](const std::string& command) {
+        if (command == ":GUT#" && !entered.exchange(true)) released.wait();
+        if (command == ":GUT#") return std::string("+00000000000000000#");
+        return alpacacore::test::FakeMountServer::default_responder()(command);
+    });
+    REQUIRE(server.ok());
+    auto conn = loopback_endpoint(server.port());
+    conn.response_timeout_ms = 2000;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, {}, {}, {}, false, clock);
+    auto connecting = std::async(std::launch::async, [&] { driver->set_connected(true); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!entered.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    const bool held = entered.load();
+    const bool published = driver->get_connected();
+    auto reader = std::async(std::launch::async, [&] {
+        try {
+            (void)driver->get_utc_date();
+            return 0;
+        } catch (const alpacacore::AlpacaException& ex) {
+            return ex.error_code();
+        }
+    });
+    const auto ready = reader.wait_for(std::chrono::milliseconds(100));
+    auto disconnecting = std::async(std::launch::async, [&] { driver->set_connected(false); });
+    release.set_value();  // Release every worker before any assertion can abort the case.
+    connecting.get();
+    disconnecting.get();
+    CHECK(held);
+    CHECK_FALSE(published);
+    CHECK(ready == std::future_status::ready);
+    CHECK(reader.get() == alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("iOptron Telescope Driver - configured UTC sync publishes only a successful time write",
+          "[ioptron][telescope][unit][utcdate]") {
+    const bool fail_write = GENERATE(false, true);
+    alpacacore::test::FakeIoptronMount mount("0025", 0.0);
+    mount.set_utc_reply("bad#");
+    REQUIRE(mount.ok());
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, {}, {}, {}, true, clock);
+    if (fail_write) {
+        alpacacore::vendor::ioptron::set_clock_sync_hook_for_testing(*driver, [] {
+            // A closed transport makes the blind write throw; silence alone is permitted by this protocol.
+            alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance().disconnect();
+        });
+    }
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto before = std::chrono::system_clock::now();
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    if (fail_write) {
+        // Three commands, each with two cancellable 750 ms retry waits.
+        for (int retry = 0; retry < 6; ++retry) {
+            REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+            clock.advance(std::chrono::milliseconds(750));
+            REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        }
+        CHECK(mount.count(":SUT") == 0);
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    } else {
+        CHECK(mount.count(":SUT") == 1);
+        CHECK(driver->get_utc_date() >= before);
+        CHECK(driver->get_utc_date() <= std::chrono::system_clock::now());
+        const auto commands = mount.commands();
+        const auto write = std::find_if(commands.begin(), commands.end(),
+                                        [](const auto& command) { return command.rfind(":SUT", 0) == 0; });
+        REQUIRE(write != commands.end());
+        const auto sent = std::chrono::system_clock::time_point{std::chrono::seconds(946728000)} +
+                          std::chrono::milliseconds(std::stoll(write->substr(4)));
+        CHECK(driver->get_utc_date() >= sent);
+        CHECK(driver->get_utc_date() < sent + std::chrono::milliseconds(1));
+    }
+    driver->set_connected(false);
+}
+
 // #1590: the UTCDate readback ages by the driver's TaskClock, not the host's steady clock.
 TEST_CASE("iOptron Telescope Driver - the UTCDate readback after a write moves by the advanced TaskClock time",
           "[ioptron][telescope][unit][taskclock]") {
@@ -1234,7 +1370,9 @@ TEST_CASE("iOptron Telescope Driver - SiderealTime follows the clock to under a 
           "[ioptron][telescope][unit][fake]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    // Do not step from the sampled mount epoch to host time during the sub-second measurement.
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);

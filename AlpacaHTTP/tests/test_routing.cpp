@@ -503,8 +503,9 @@ public:
     void set_tracking(bool) override {}
     double get_focal_length() const override { return 0.0; }
     void set_focal_length(double) override {}
-    alpacacore::GuideRate get_guide_rate() const override { return alpacacore::GuideRate{}; }
-    void set_guide_rate(const alpacacore::GuideRate&) override {}
+    alpacacore::GuideRate get_guide_rate() const override { return guide_rate; }
+    void set_guide_rate(const alpacacore::GuideRate& rate) override { guide_rate = rate; }
+    alpacacore::GuideRate guide_rate{};
     double get_right_ascension() const override { return 0.0; }
     double get_right_ascension_rate() const override { return 0.0; }
     void set_right_ascension_rate(double) override {}
@@ -1480,6 +1481,51 @@ int main() {
         EXPECT(!resp.body().empty());
     }
 
+    {
+        // case: telescope guide-rate PUT preserves the independent axis
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9777);
+        scope->guide_rate = {0.001, 0.002};
+        EXPECT(registry.register_device(scope));
+        const std::string base = "/api/v1/telescope/9777/";
+        const auto ra = route_request(router, "PUT", base + "guideraterightascension?GuideRateRightAscension=0.0005");
+        EXPECT(nlohmann::json::parse(ra.body()).at("ErrorNumber") == 0);
+        EXPECT(scope->guide_rate.ra == 0.0005 && scope->guide_rate.dec == 0.002);
+        const auto dec = route_request(router, "PUT", base + "guideratedeclination?GuideRateDeclination=0.0004");
+        EXPECT(nlohmann::json::parse(dec.body()).at("ErrorNumber") == 0);
+        EXPECT(scope->guide_rate.ra == 0.0005 && scope->guide_rate.dec == 0.0004);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9777);
+    }
+#ifdef ALPACACORE_ENABLE_ZWO
+    {
+        // case: ZWO guide-rate PUT validates before disconnected reads
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        alpacacore::catalog::DeviceConfig config;
+        config.set("connectionType", std::string("serial"));
+        config.set("portPath", std::string("/dev/null"));
+        std::shared_ptr<alpacacore::AlpacaDriver> scope =
+            router.catalog().create({"zwo", alpacacore::DeviceType::Telescope}, config, 9776);
+        EXPECT(registry.register_device(scope));
+        for (const auto& axis : {std::string("Declination"), std::string("RightAscension")}) {
+            std::string method = "guiderate" + axis;
+            std::transform(method.begin(), method.end(), method.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const std::string path = "/api/v1/telescope/9776/" + method;
+            for (const auto* value : {"50", "-50"}) {
+                const auto response = route_request(router, "PUT", path + "?GuideRate" + axis + "=" + value);
+                EXPECT(response.status_code() == 200);
+                EXPECT(nlohmann::json::parse(response.body()).at("ErrorNumber") == 0x401);
+            }
+            const auto valid = route_request(router, "PUT", path + "?GuideRate" + axis + "=0.002");
+            EXPECT(valid.status_code() == 200);
+            EXPECT(nlohmann::json::parse(valid.body()).at("ErrorNumber") == 0);
+            const auto read = route_request(router, "GET", path);
+            EXPECT(nlohmann::json::parse(read.body()).at("ErrorNumber") == 0x407);
+            EXPECT(route_request(router, "PUT", path + "?GuideRate" + axis + "=nan").status_code() == 400);
+        }
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9776);
+    }
+#endif
     {
         // case: telescope synchronous slews follow the driver's CanSlew (#775, #1660)
         // CanSlew reports the driver's value; SlewToCoordinates and

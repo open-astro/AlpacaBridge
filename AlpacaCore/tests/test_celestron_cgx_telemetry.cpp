@@ -76,7 +76,8 @@ TEST_CASE("CGX stationary telemetry shares only a bounded raw pair", "[celestron
         const int guide_ra = rig.mount.count_command(0x10, 0x27);
         const int guide_dec = rig.mount.count_command(0x11, 0x27);
         const auto state = rig.driver->get_device_state();
-        CHECK(state.size() == 13);
+        CHECK(state.size() == 12);
+        CHECK(std::none_of(state.begin(), state.end(), [](const auto& entry) { return entry.name == "UTCDate"; }));
         CHECK(rig.reads(0x10) == ra + 1);
         CHECK(rig.reads(0x11) == dec + 1);
         CHECK(rig.mount.count_command(0x10, 0x27) == guide_ra + 1);
