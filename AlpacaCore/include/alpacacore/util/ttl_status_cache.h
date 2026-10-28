@@ -48,7 +48,9 @@ namespace alpacacore::util {
  * readers share one device round trip. Lock order is driver mutex (if held)
  * -> cache mutex -> SDK mutex; the converted adopters (ZWO EAF, CAA, dew switch, ToupTek AAF, ToupTek thermal switch,
  * ZWO EFW, Player One PW, ToupTek AFW) refill under cache mutex -> io_mutex_ -> mutex_ (leaf) and hold no driver lock
- * when they call the cache. Never call get() from inside the refill.
+ * when they call the cache. Never call get() from inside the refill. fault() takes only `fault_mutex_`, a leaf under
+ * the cache mutex (cache mutex -> fault_mutex_), never held across the refill, so a getter that reads it never waits
+ * for device I/O (decision 0016).
  *
  * Clock: the TTL reads the TaskClock passed to the constructor (decision 0005), the real
  * steady clock by default; a driver on an injected clock passes it so a test ages the frame with advance().
@@ -76,7 +78,9 @@ public:
         }
         try {
             Status fresh = fetch();
-            if (health_.on_reply()) {
+            const bool restored = health_.on_reply();
+            publish_fault();
+            if (restored) {
                 ALPACA_LOG_INFO(log_component_, label_ + " communications restored");
             }
             status_ = fresh;
@@ -84,7 +88,9 @@ public:
             return fresh;
         } catch (const std::exception& e) {
             status_.reset();
-            if (const auto latched = health_.note_failure(e.what(), fault_threshold_)) {
+            const auto latched = health_.note_failure(e.what(), fault_threshold_);
+            publish_fault();
+            if (latched) {
                 ALPACA_LOG_ERROR(log_component_, label_ + " communications compromised: " + *latched);
             } else if (!health_.faulted()) {
                 ALPACA_LOG_WARN(log_component_, label_ + " status read failed: " + e.what() + " (" +
@@ -100,9 +106,10 @@ public:
 
     /// The latched fault reason, empty while the link is healthy. For writable
     /// device settings held in driver memory, which must not be served either.
+    /// Never waits on a refill: it can show the state from before a refill that is in flight.
     std::string fault() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return health_.fault();
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        return fault_;
     }
 
     /// After a write that changes device state: the next read goes to the device.
@@ -118,9 +125,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         status_.reset();
         health_.reset();
+        publish_fault();
     }
 
 private:
+    /// Copies the latched reason for fault(); the caller holds mutex_.
+    void publish_fault() {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        fault_ = health_.fault();
+    }
+
     std::string label_;
     std::string log_component_;
     const TaskClock* clock_;
@@ -130,6 +144,8 @@ private:
     std::optional<Status> status_;
     clock::time_point filled_at_{};
     PolledLinkHealth health_;
+    mutable std::mutex fault_mutex_;
+    std::string fault_;
 };
 
 }  // namespace alpacacore::util
