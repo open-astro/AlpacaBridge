@@ -12,6 +12,7 @@
 
 #ifndef _WIN32
 
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 
 #include <barrier>
@@ -180,6 +181,44 @@ TEST_CASE("ZWO mount Auto - failed discovery probes release endpoint reservation
         CHECK(automatic.get_mount_info() == "AM5");
     }
     CHECK(enumerate_zwo_mounts(candidates(server), 150).size() == 1);
+}
+
+TEST_CASE("ZWO mount Auto - repeated empty and held-only refusals log at DEBUG", "[zwo][network][auto][issue1619]") {
+    using namespace alpacacore::logging;
+    std::atomic<int> summaries{0}, warnings{0};
+    struct LogGuard {
+        LogSink previous = get_log_sink();
+        LogLevel level = get_log_level();
+        ~LogGuard() {
+            set_log_sink(previous);
+            set_log_level(level);
+        }
+    } guard;
+    set_log_level(LogLevel::Debug);
+    set_log_sink([&](LogLevel level, std::string_view component, std::string_view message) {
+        if (component != "ZWO") return;
+        if (level >= LogLevel::Warn) ++warnings;
+        if (level == LogLevel::Debug && message == "Auto-detect: no ZWO mount found on USB or WiFi") ++summaries;
+    });
+    FakeMountServer server([](const std::string&) { return std::string("AM5#"); });
+    REQUIRE(server.ok());
+    ZWOMountProtocolWrapper owner;
+    REQUIRE(owner.connect(network_info("127.0.0.1", server.port())));
+    REQUIRE(owner.get_mount_info() == "AM5");
+    ZWOMountProtocolWrapper empty(false, std::vector<ZWODeviceInfo>{}), held(false, candidates(server));
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        CHECK_FALSE(empty.connect(auto_info()));
+        CHECK_FALSE(held.connect(auto_info()));
+        CHECK_FALSE(empty.is_connected());
+        CHECK_FALSE(held.is_connected());
+    }
+    CHECK(summaries.load() == 6);
+    CHECK(warnings.load() == 0);
+    CHECK(server.accepted_connections() == 1);
+    CHECK(owner.get_mount_info() == "AM5");
+    owner.disconnect();
+    REQUIRE(held.connect(auto_info()));
+    CHECK(held.get_mount_info() == "AM5");
 }
 
 TEST_CASE("ZWO mount Auto - concurrent attempts cannot share an endpoint",
