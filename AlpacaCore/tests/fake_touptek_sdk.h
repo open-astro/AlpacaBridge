@@ -584,8 +584,10 @@ private:
         }
     }
 
-    // The real SDK rejects a read through a Set code and a write through a Get
-    // code, so the fake does too: a driver that mixes the pair up (get_position
+    // toupcam.h documents no rejection of a read through a Set code or a write
+    // through a Get code. TODO: the wrapper passes the code straight through, so
+    // the SDK may run the write. The fake throws because that is the harsher
+    // answer (ADR 0015 rule 4): a driver that mixes the pair up (get_position
     // reading SetPosition) must fail here, not round-trip by accident. Writes are
     // the Set* codes plus Halt; reads are the Get* codes plus IsMoving.
     static void require_aaf_direction(int action, bool write) {
