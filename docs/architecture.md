@@ -236,14 +236,13 @@ AlpacaBridge/
 |   |       +- zwo/ qhy/ ioptron/ ... # One directory per vendor
 |   +- src/
 |   |   +- core/                      # Base implementations, utilities
-|   |   +- drivers/                   # Base driver implementations
 |   |   +- vendors/                   # Vendor-specific implementations
 |   |   |   +- zwo/ qhy/ ioptron/    # One directory per vendor
 |   |   |   +- synscan/ celestron/
 |   |   |   +- playerone/ svbony/ touptek/ altair/
 |   |   |   +- gemini/ wandererastro/ weewx/ bisque/
 |   |   |   +- gphoto/                # libgphoto2 tarball is under external/libgphoto2; libraw is a system package
-|   |   +- management/               # Device registry, discovery
+|   |   +- management/               # Device registry
 |   +- external/                      # Vendor SDKs and protocol docs
 |   |   +- ZWO/ QHY/ PlayerOne/      # SDK libraries
 |   |   +- SVBONY/ ToupTek/ Altair/

@@ -28,13 +28,12 @@ The goal is to build a **flawlessly engineered**, **well-documented**, and **sta
 - **Build system:** **CMake**.
 - **Output:** Header + static/shared library (no executables except in `examples/`).
 - **OS targets:** Linux first, but keep it portable (macOS, Windows).  
-  No OS-specific code in `src/core` or `src/drivers`.
+  No OS-specific code in `src/core`.
 
 **Dependencies:**
 
 - Prefer **standard library only** in:
   - `src/core`
-  - `src/drivers`
 - Vendor SDKs live in `external/` and are used only in `src/vendors/**`.
 - Do **not** add large frameworks (Boost, Qt, etc.) unless:
   - Absolutely necessary, and
@@ -107,7 +106,6 @@ AlpacaCore/
 |   `-- alpacacore/                   # Official AlpacaCore SDK
 |       |-- alpaca_defs.h
 |       |-- alpaca_errors.h
-|       |-- alpaca_json.h
 |       |-- alpacadriver.h
 |       |-- managementdriver.h
 |       |-- device_capabilities.h
@@ -129,31 +127,17 @@ AlpacaCore/
 |
 |-- src/
 |   |-- core/
-|   |   |-- alpacadriver.cpp
 |   |   |-- alpaca_defs.cpp
-|   |   |-- alpaca_errors.cpp
-|   |   |-- managementdriver.cpp
 |   |   `-- util/
 |   |       |-- logging.cpp
 |   |       |-- threading.cpp
 |   |       |-- error_handling.cpp
 |   |       `-- units.cpp
 |   |
-|   |-- drivers/
-|   |   |-- camera_driver.cpp
-|   |   |-- telescope_driver.cpp
-|   |   |-- filterwheel_driver.cpp
-|   |   |-- focuser_driver.cpp
-|   |   |-- rotator_driver.cpp
-|   |   |-- dome_driver.cpp
-|   |   |-- shutter_driver.cpp
-|   |   `-- switch_driver.cpp
-|   |
 |   |-- vendors/
 |   |   `-- <vendor>/
 |   |
 |   `-- management/
-|       |-- discovery_service.cpp
 |       `-- device_registry.cpp
 |
 |-- tests/
@@ -176,7 +160,6 @@ AlpacaCore/
 - Follow ASCOM Alpaca spec naming, behavior, and error codes.
 - Device types must have:
   - **Pure virtual interface** in `include/alpacacore/`
-  - **Base implementation** in `src/drivers/`
 - Use synchronous C++ methods.
 - Provide DTO structs, e.g.:
 

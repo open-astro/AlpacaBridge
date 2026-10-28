@@ -38,7 +38,7 @@ Instead: one protocol wrapper per vendor with its own tests and fake. When two w
 
 What it is: using `nlohmann::json` (or any JSON type) in AlpacaCore, for config, the catalog or device state.
 
-Why rejected: AlpacaCore is vendor-neutral device logic with no transport. `AlpacaCore/include/alpacacore/alpaca_json.h` states that AlpacaCore holds no JSON, and `AGENTS.md` says "No HTTP/REST/sockets/JSON transport code" in AlpacaCore. JSON in the core would tie device logic to one wire format and make the layering gate (AlpacaHTTP to AlpacaCore to vendor) meaningless.
+Why rejected: AlpacaCore is vendor-neutral device logic with no transport. `AGENTS.md` says "No HTTP/REST/sockets/JSON transport code" in AlpacaCore. JSON in the core would tie device logic to one wire format and make the layering gate (AlpacaHTTP to AlpacaCore to vendor) meaningless.
 
 Instead: describe configs as typed structs with field roles in the catalog descriptors and let AlpacaHTTP bridge JSON to them in one place ([decision 0004](0004-device-catalog.md), which rejected the catalog-with-JSON alternative for this reason).
 

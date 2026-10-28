@@ -78,11 +78,7 @@ include_directories(include)
 
 # Core library sources
 set(ALPACACORE_CORE_SOURCES
-    src/core/alpacadriver.cpp
     src/core/alpaca_defs.cpp
-    src/core/alpaca_errors.cpp
-    src/core/alpaca_json.cpp
-    src/core/managementdriver.cpp
     src/core/device_capabilities.cpp
     src/core/util/logging.cpp
     src/core/util/threading.cpp
@@ -101,30 +97,14 @@ set(ALPACACORE_CORE_SOURCES
     src/catalog/device_catalog.cpp
 )
 
-# Driver sources
-set(ALPACACORE_DRIVER_SOURCES
-    src/drivers/camera_driver.cpp
-    src/drivers/telescope_driver.cpp
-    src/drivers/filterwheel_driver.cpp
-    src/drivers/focuser_driver.cpp
-    src/drivers/rotator_driver.cpp
-    src/drivers/dome_driver.cpp
-    src/drivers/switch_driver.cpp
-    src/drivers/covercalibrator_driver.cpp
-    src/drivers/observingconditions_driver.cpp
-    src/drivers/safetymonitor_driver.cpp
-)
-
 # Management sources
 set(ALPACACORE_MANAGEMENT_SOURCES
-    src/management/discovery_service.cpp
     src/management/device_registry.cpp
 )
 
 # Create the main library
 add_library(alpacacore STATIC
     ${ALPACACORE_CORE_SOURCES}
-    ${ALPACACORE_DRIVER_SOURCES}
     ${ALPACACORE_MANAGEMENT_SOURCES}
 )
 

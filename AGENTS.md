@@ -106,7 +106,7 @@ Each line is a summary; the linked topic file holds the rule and its history.
 - Call flow is always:
   - `AlpacaHTTP -> AlpacaCore driver -> vendor implementation`.
 
-Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Telescope, FilterWheel, Focuser, Rotator, Dome, Switch, CoverCalibrator, ObservingConditions, SafetyMonitor. These are exactly the 10 ASCOM Alpaca device types — do not invent new top-level device types.
+Supported device types (base driver interfaces in `AlpacaCore/include/alpacacore/`): Camera, Telescope, FilterWheel, Focuser, Rotator, Dome, Switch, CoverCalibrator, ObservingConditions, SafetyMonitor. These are exactly the 10 ASCOM Alpaca device types — do not invent new top-level device types.
 
 ## Language, Style, and Safety
 
