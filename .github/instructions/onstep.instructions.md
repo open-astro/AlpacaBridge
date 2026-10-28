@@ -446,7 +446,7 @@ it is never reachable through `router.cpp` or the web UI.
   is sent by the tick that first reads the GOTO ended past the slew grace (not during a MoveAxis or
   while a Park or FindHome is pending), under the same operation lock as its `:GU#`. Test seams:
   `set_status_poll_paused_for_testing()`, `poll_status_now_for_testing()`,
-  `set_status_poll_after_sample_hook_for_testing()`. Tests: `test_onstep_telescope_snapshot.cpp`.
+  `set_status_poll_after_sample_hook_for_testing()`, `status_poll_running_for_testing()`. Tests: `test_onstep_telescope_snapshot.cpp`.
 - **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
   #1449, the shape of Sky-Watcher's #1530). Order: `transition_mutex_` (`set_connected()` against
   `set_connected()`; no getter takes it) -> `io_mutex_` (the operation lock) -> `mutex_` (the state lock, a

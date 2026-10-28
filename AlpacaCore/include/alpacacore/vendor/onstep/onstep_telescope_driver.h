@@ -88,6 +88,8 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// One poll tick on the calling thread, paused or not; `full` reads Alt/Az and retries an unread site too.
 /// False when the connection is gone or lost.
 bool poll_status_now_for_testing(TelescopeDriver& driver, bool full = true);
+/// False once the poll body is cancelled (a disconnect has taken it), even while it is still sampling.
+bool status_poll_running_for_testing(const TelescopeDriver& driver);
 /// Runs between a tick's sample and its publish, with no driver lock held, so a case can land a client write
 /// there. Pass an empty function to clear it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);

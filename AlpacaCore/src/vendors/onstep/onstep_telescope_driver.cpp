@@ -1261,8 +1261,7 @@ public:
         // A Disconnect can land between the unlock and the start: the slot's body is then harmless, because
         // poll_status_once() checks the connection under the operation lock and the destructor joins the slot.
         // A body from an earlier pulse can take the operation lock in the same gap and run one tick before
-        // start() replaces it: its reads are valid, it re-checks before publishing, and a tracking restore it
-        // sends is one the ended GOTO owes.
+        // start() replaces it: it re-checks after its reads and sends, and changes nothing once superseded.
         start_pulse_measurement(wait);
     }
 
@@ -1683,6 +1682,9 @@ public:
     // One tick on the calling thread, paused or not (`full`: Alt/Az and the site retry too). False when the
     // connection is gone or lost.
     bool poll_status_now_for_testing(bool full) { return poll_status_once(nullptr, full ? 0 : 1); }
+
+    // False once the poll body is cancelled (the slot hands it to the joiner), while it may still be sampling.
+    bool status_poll_running_for_testing() const { return status_poll_.running(); }
 
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
@@ -2918,8 +2920,14 @@ private:
             token = snapshot_.begin_poll();
             try {
                 frame = sample_locked(previous ? previous->value : PolledFrame{}, full);
+                if (stopped()) {
+                    return false;  // superseded or cancelled mid-sample: no health note, restore or site read
+                }
                 note_read_ok_locked();
             } catch (const std::exception& ex) {
+                if (stopped()) {
+                    return false;
+                }
                 try {
                     note_read_failure_locked(ex);
                 } catch (const AlpacaException& thrown) {
@@ -2947,6 +2955,9 @@ private:
         }
         if (snapshot_.publish(token, frame)) {
             note_status_measured_locked(frame.status);
+            // The regular tick and the pulse-end tick both publish here, after the operation lock is released:
+            // a tick that sampled before this one and publishes later must not put its older frame on top.
+            drop_poll_in_flight_locked();
         }
         return true;
     }
@@ -3145,9 +3156,10 @@ private:
     util::ConnectionResolver<ConnectionInfo> connection_resolver_;
     bool connection_resolved_ = false;
     // Decision 0016: see the lock-order comment at the top of the class. Both are mutable: a const helper
-    // that reaches the wire (Wire::call) takes and drops them.
-    // set_connected() against set_connected(); no getter takes it. set_connected(false) only cancels the
-    // slots under it (cancel() never blocks), and no slot body calls set_connected().
+    // that reaches the wire (Wire::call) needs the operation lock already held and drops and retakes mutex_.
+    // set_connected() against set_connected(); no getter takes it. Under it, set_connected() joins the
+    // status-poll and pulse-end slots (stop_status_poller(), on a disconnect and a relink) and only cancels
+    // the others (cancel() never blocks). No slot body takes it or calls set_connected(), so the join ends.
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
@@ -3378,6 +3390,11 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
 bool poll_status_now_for_testing(TelescopeDriver& driver, bool full) {
     auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver);
     return onstep != nullptr && onstep->poll_status_now_for_testing(full);
+}
+
+bool status_poll_running_for_testing(const TelescopeDriver& driver) {
+    const auto* onstep = dynamic_cast<const OnStepTelescopeDriver*>(&driver);
+    return onstep != nullptr && onstep->status_poll_running_for_testing();
 }
 
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {

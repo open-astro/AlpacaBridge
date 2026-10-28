@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -64,6 +65,7 @@ struct SnapshotMount {
     std::atomic<bool> refuse_park{false};      // :hP# answers 0 and :GE# 22, "mount still in motion"
     std::atomic<bool> garble_position{false};  // :GRa# answers something that does not parse
     std::atomic<bool> garble_altaz{false};     // :GA# answers something that does not parse
+    std::atomic<bool> block_status{false};     // :GU# holds its reply until this is cleared
     std::atomic<bool> handshake_only{false};   // answers the handshake and nothing else (not :GU#, position, Alt/Az)
     std::atomic<int> alt_seconds{0};           // :GA# answers +45*00:<alt_seconds>
     std::mutex mutex;
@@ -92,6 +94,7 @@ struct SnapshotMount {
             }
         }
         if (chunk.rfind(":GU", 0) == 0) {
+            while (block_status.load()) std::this_thread::sleep_for(milliseconds(1));
             std::lock_guard<std::mutex> lock(mutex);
             return status;
         }
@@ -146,18 +149,19 @@ struct Rig {
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
 
     // Without a site in the config the connect reads the mount's (:Gt#/:Gg#).
-    explicit Rig(bool with_site = true) {
+    explicit Rig(bool with_site = true, int response_timeout_ms = 300) {
         onstep::ConnectionInfo info;
         info.type = onstep::ConnectionType::Network;
         info.host = "127.0.0.1";
         info.tcp_port = server.port();
-        info.response_timeout_ms = 300;
+        info.response_timeout_ms = response_timeout_ms;
         driver = onstep::create_onstep_telescope_with_site(
             0, info, with_site ? std::optional<double>(-33.856784) : std::nullopt,
             with_site ? std::optional<double>(151.215297) : std::nullopt, std::nullopt, false, clock);
     }
     ~Rig() {
         mount->mute = false;
+        mount->block_status = false;
         mount->latency_ms = 0;
         try {
             driver->set_connected(false);
@@ -466,6 +470,32 @@ TEST_CASE(
     }
 }
 
+// A poll body cancelled while it samples touches neither the link's health nor the mount (decision 0006 rule 6): the
+// tick that would send the GOTO's tracking restore, cancelled by a disconnect inside its :GU#, sends none.
+TEST_CASE("OnStep snapshot - a poll body cancelled mid-sample sends no tracking restore",
+          "[onstep][telescope][snapshot]") {
+    Rig rig(/*with_site=*/true, /*response_timeout_ms=*/20000);  // the held :GU# must not time out
+    rig.connect();
+    REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));  // the poll body parks for its first tick
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);    // starts with tracking on: a restore is owed
+    rig.mount->set_status("nNpEW180#");                  // the GOTO ended with tracking off
+    const auto polls = rig.mount->count(":GU#");
+    rig.mount->block_status = true;
+    rig.clock.advance(seconds(3));  // past the slew grace: the tick reads the end
+    for (int i = 0; i < 2000 && rig.mount->count(":GU#") == polls; ++i) std::this_thread::sleep_for(milliseconds(1));
+    REQUIRE(rig.mount->count(":GU#") == polls + 1);  // the tick is inside its :GU#, holding the operation lock
+
+    auto disconnect = std::async(std::launch::async, [&] { rig.driver->set_connected(false); });
+    for (int i = 0; i < 5000 && onstep::status_poll_running_for_testing(*rig.driver); ++i) {
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    REQUIRE_FALSE(onstep::status_poll_running_for_testing(*rig.driver));  // cancelled, still sampling
+    rig.mount->block_status = false;
+    REQUIRE(disconnect.wait_for(seconds(20)) == std::future_status::ready);
+    disconnect.get();
+    CHECK(rig.mount->count(":ST60") == 0);
+}
+
 TEST_CASE("OnStep snapshot - IsPulseGuiding stays true until a frame sampled after the pulse is published",
           "[onstep][telescope][snapshot]") {
     Rig rig;
@@ -624,6 +654,29 @@ TEST_CASE("OnStep snapshot - a control-path status read drops the poll sample in
         CHECK(rig.driver->get_tracking());               // the read was written through
     }
     onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
+}
+
+// The regular tick and the pulse-end tick both publish after they release the operation lock. A tick that
+// publishes drops any other sample in flight, so a stalled older tick cannot land its frame on top of it.
+TEST_CASE("OnStep snapshot - a tick's publish drops an older tick that is still between its sample and its publish",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.mount->ra_seconds = 10;  // what tick A samples
+    std::atomic<bool> once{false};
+    bool b_published = false;
+    onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [&] {
+        if (once.exchange(true)) {
+            return;  // tick B's own after-sample call
+        }
+        rig.mount->ra_seconds = 20;  // what tick B samples
+        b_published = rig.tick();    // B samples and publishes inside A's gap
+    });
+    REQUIRE(rig.tick());  // A: samples 10, then B publishes 20, then A's publish is dropped
+    onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
+    REQUIRE(b_published);
+    CHECK(std::abs(rig.driver->get_right_ascension() - (12.0 + 20.0 / 3600.0)) < 1e-6);
 }
 
 #endif  // !_WIN32
