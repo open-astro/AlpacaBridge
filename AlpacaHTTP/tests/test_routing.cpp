@@ -5158,7 +5158,8 @@ int main() {
     {
         // onstep / telescope — same mountIndex allowlist gap class as
         // ioptron/synscan above; also asserts no "network" fields leak
-        // through (OnStep is serial-only for end users in this project).
+        // through (OnStep is serial-only for end users in this project): the
+        // posted host and tcpPort are dropped (#1762).
         const auto cfg = roundtrip_config(router,
                                           {{"vendor", "onstep"},
                                            {"deviceType", "telescope"},
@@ -5166,13 +5167,16 @@ int main() {
                                            {"connectionType", "serial"},
                                            {"portPath", "/dev/ttyACM0"},
                                            {"baudRate", 9600},
-                                           {"mountIndex", 1}},
+                                           {"mountIndex", 1},
+                                           {"host", "h"},
+                                           {"tcpPort", 1}},
                                           "Telescope", 9622);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("connectionType", "") == "serial");
         EXPECT(cfg.value("portPath", "") == "/dev/ttyACM0");
         EXPECT(cfg.value("baudRate", -1) == 9600);
         EXPECT(cfg.value("mountIndex", -1) == 1);
+        EXPECT(!cfg.contains("host") && !cfg.contains("tcpPort"));
         remove_device(router, "onstep", "telescope", 9622);
     }
 #endif

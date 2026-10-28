@@ -1,0 +1,5 @@
+### Fixed
+- **OnStep telescope: a failed time sync or site read is logged** (AlpacaCore, issue #1754): a time sync at connect (`syncTimeOnConnect`) that the mount refuses or does not answer is logged at WARN with the reason instead of dropped silently; the connect still succeeds and `UTCDate` reads the mount's own clock. A site read (`:Gt#`/`:Gg#`) that fails, including the one the `SiteLatitude` and `SiteLongitude` writes make first, is logged at WARN once per connect; the write still goes out, and a write the mount refuses still throws.
+
+### Added (tests)
+- **OnStep audit follow-ups** (issue #1762): the `[stress]` storm and the destruction case now run over a fake that accepts a GOTO and a MoveAxis, so a slew really goes out and the MoveAxis re-send and Park/FindHome bodies are live at destruction; the destruction case requires every connect and is renamed for what it covers (the driver has no slew or pulse-guide thread). Connected cases for `GuideRate`, `ApertureDiameter`, `ApertureArea`, `FocalLength` and `CanMoveAxis`. The OnStep config round trip in `test_routing.cpp` posts `host` and `tcpPort` and checks they are dropped.

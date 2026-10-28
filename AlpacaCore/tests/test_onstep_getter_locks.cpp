@@ -75,6 +75,7 @@ struct HeldOnStep {
     std::atomic<bool> moving{false};
     std::atomic<bool> garble_site{false};      // :Gt#/:Gg# answer something that does not parse
     std::atomic<bool> refuse_latitude{false};  // :St# answers 0
+    std::atomic<bool> refuse_time{false};      // :SL# answers 0
     std::mutex mutex;
     std::vector<std::string> log;
     std::string status;  // non-empty: :GU# answers this (under `mutex`)
@@ -108,6 +109,10 @@ struct HeldOnStep {
         if (chunk.rfind(":GA", 0) == 0) return "+45*00:00#";
         if (chunk.rfind(":GZ", 0) == 0) return "180*00:00#";
         if (chunk.rfind(":St", 0) == 0 && refuse_latitude.load()) return "0";
+        if (chunk.rfind(":SL", 0) == 0 && refuse_time.load()) return "0";
+        if (chunk.rfind(":GL", 0) == 0) return "10:20:30#";  // the mount clock, read when no time sync landed
+        if (chunk.rfind(":GC", 0) == 0) return "10/28/26#";
+        if (chunk.rfind(":GG", 0) == 0) return "+00:00#";
         if (chunk.rfind(":Gt", 0) == 0) return garble_site.load() ? "?#" : "+40*30#";
         if (chunk.rfind(":Gg", 0) == 0) return garble_site.load() ? "?#" : "+074*00#";
         if (chunk.rfind(":Gh", 0) == 0) return "-10*#";
@@ -846,6 +851,95 @@ TEST_CASE("OnStep connect - a site write the mount refuses is logged and the con
     REQUIRE(site_warnings.size() == 1);
     CHECK(site_warnings[0].find("latitude") != std::string::npos);
     CHECK(site_warnings[0].find("Mount rejected site latitude") != std::string::npos);  // the reason
+}
+
+// Collects WARN lines that contain `needle` while it lives.
+class WarnLog {
+public:
+    explicit WarnLog(std::string needle) : needle_(std::move(needle)), previous_(alpacacore::logging::get_log_sink()) {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn && message.find(needle_) != std::string_view::npos) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    lines_.emplace_back(message);
+                }
+            });
+    }
+    ~WarnLog() { alpacacore::logging::set_log_sink(previous_); }
+    WarnLog(const WarnLog&) = delete;
+    WarnLog& operator=(const WarnLog&) = delete;
+
+    std::vector<std::string> lines() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lines_;
+    }
+
+private:
+    std::string needle_;
+    alpacacore::logging::LogSink previous_;
+    std::mutex mutex_;
+    std::vector<std::string> lines_;
+};
+
+// #1754: the connect's time sync used to sit in an empty catch, so a mount that
+// refused it connected on its own clock with nothing logged.
+TEST_CASE("OnStep connect - a time sync the mount refuses is logged and the connect still succeeds",
+          "[onstep][getter-locks]") {
+    WarnLog warnings("Time sync");
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    rig.mount->refuse_time = true;
+    rig.driver->set_connected(true);
+    CHECK(rig.driver->get_connected());
+
+    const auto lines = warnings.lines();
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0].find("Mount rejected local time") != std::string::npos);  // the reason
+    // UTCDate is then the mount's own clock (:GL#/:GC#/:GG#), not the host's.
+    using namespace std::chrono;
+    const auto mount_clock = sys_days{year{2026} / October / day{28}} + hours{10} + minutes{20} + seconds{30};
+    CHECK(rig.driver->get_utc_date() == mount_clock);
+}
+
+// #1754: the site read the setters make first (so the pair is never marked
+// valid with a default) swallowed a failure. It is logged now, once per
+// connect, and it does not refuse the write; the write's own refusal still
+// throws.
+TEST_CASE("OnStep setters - a site read that fails before a site write is logged and the write still goes out",
+          "[onstep][getter-locks]") {
+    WarnLog warnings("Could not read the site");
+    Rig rig(false, /*with_site=*/false);  // nothing pushed, so the connect reads the mount's site
+    REQUIRE(rig.server.ok());
+    rig.mount->garble_site = true;
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    REQUIRE(warnings.lines().size() == 1);  // the connect's read
+    CHECK(warnings.lines()[0].find("Invalid OnStep site info response") != std::string::npos);
+
+    // Past the retry delay, so the setter reads again; that failure is not logged a second time.
+    rig.clock.advance(milliseconds(2100));
+    const std::size_t reads_before = rig.mount->count(":Gt#");
+    CHECK_NOTHROW(rig.driver->set_site_latitude(12.5));
+    CHECK(rig.mount->count(":Gt#") == reads_before + 1);
+    CHECK(rig.mount->count(":St") >= 1);
+    CHECK(warnings.lines().size() == 1);
+
+    // The next connect logs its own failed read.
+    rig.driver->set_connected(false);
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    CHECK(warnings.lines().size() == 2);
+
+    // The write's own refusal is the client's error.
+    rig.mount->refuse_latitude = true;
+    rig.clock.advance(milliseconds(2100));
+    try {
+        rig.driver->set_site_latitude(12.5);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("Mount rejected site latitude") != std::string::npos);
+    }
 }
 
 // Wire's single read records the operation lock for the read, so a nested
