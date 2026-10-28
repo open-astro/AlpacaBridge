@@ -29,20 +29,14 @@
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_playerone_sdk.h"
 #include "fake_task_clock.h"
 #include "locked_playerone_sdk.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 template <typename Predicate>
 bool eventually(Predicate&& predicate, std::chrono::seconds timeout = std::chrono::seconds(2)) {

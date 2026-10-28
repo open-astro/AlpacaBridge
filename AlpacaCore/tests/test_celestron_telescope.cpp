@@ -24,7 +24,6 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <ctime>
 #include <functional>
 #include <limits>
@@ -39,6 +38,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "gps_status_check.h"
 #include "sidereal_time_check.h"
 
@@ -53,14 +53,10 @@ using alpacacore::DeviceType;
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::parse_timestamp;
+using alpacacore::test::require_alpaca_error;
+using alpacacore::test::time_stamp_of;
+using alpacacore::test::timed;
 
 } // namespace
 
@@ -915,37 +911,11 @@ std::unique_ptr<alpacacore::TelescopeDriver> snapshot_driver(alpacacore::test::F
     return driver;
 }
 
-template <typename Fn>
-std::chrono::microseconds snapshot_timed(Fn&& fn) {
-    const auto start = std::chrono::steady_clock::now();
-    fn();
-    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
-}
-
 bool snapshot_has_entry(const alpacacore::TelescopeDriver& driver, const std::string& name) {
     for (const auto& entry : driver.get_device_state()) {
         if (entry.name == name) return true;
     }
     return false;
-}
-
-std::chrono::system_clock::time_point snapshot_time_stamp(const alpacacore::TelescopeDriver& driver) {
-    for (const auto& entry : driver.get_device_state()) {
-        if (entry.name != "TimeStamp") continue;
-        int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
-        const auto& text = std::get<std::string>(entry.value);
-        REQUIRE(std::sscanf(text.c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h, &mi, &s, &ms) == 7);
-        std::tm tm{};
-        tm.tm_year = y - 1900;
-        tm.tm_mon = mo - 1;
-        tm.tm_mday = d;
-        tm.tm_hour = h;
-        tm.tm_min = mi;
-        tm.tm_sec = s;
-        return std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
-    }
-    FAIL("DeviceState has no TimeStamp");
-    return {};
 }
 
 }  // namespace
@@ -1096,7 +1066,7 @@ TEST_CASE("Celestron snapshot - getters and DeviceState make no mount transactio
     for (const auto& [name, read] : reads) {
         CAPTURE(name);
         const int transactions = st->transactions.load();
-        CHECK(snapshot_timed(read) < kSnapshotGetterBudget);
+        CHECK(timed(read) < kSnapshotGetterBudget);
         CHECK(st->transactions.load() == transactions);
     }
     CHECK(st->transactions.load() == before);
@@ -1161,7 +1131,7 @@ TEST_CASE("Celestron snapshot - a position the mount moved is served after the n
 
     // The TimeStamp names when the poll measured, not when DeviceState was asked.
     clock.advance(std::chrono::seconds(2));
-    const auto age = std::chrono::system_clock::now() - snapshot_time_stamp(*driver);
+    const auto age = std::chrono::system_clock::now() - parse_timestamp(time_stamp_of(*driver));
     CHECK(age > std::chrono::milliseconds(1500));
     CHECK(age < std::chrono::milliseconds(4000));
     driver->set_connected(false);
@@ -1395,9 +1365,9 @@ bool snapshot_wait_for(const std::function<bool()>& done) {
 
 // A no-device getter and a snapshot getter, each held to the budget a fake-mount exchange would overrun.
 void check_getters_do_not_wait(alpacacore::TelescopeDriver& driver) {
-    CHECK(snapshot_timed([&] { (void)driver.get_name(); }) < kSnapshotGetterBudget);
-    CHECK(snapshot_timed([&] { (void)driver.get_can_find_home(); }) < kSnapshotGetterBudget);
-    CHECK(snapshot_timed([&] { (void)driver.get_right_ascension(); }) < kSnapshotGetterBudget);
+    CHECK(timed([&] { (void)driver.get_name(); }) < kSnapshotGetterBudget);
+    CHECK(timed([&] { (void)driver.get_can_find_home(); }) < kSnapshotGetterBudget);
+    CHECK(timed([&] { (void)driver.get_right_ascension(); }) < kSnapshotGetterBudget);
 }
 
 }  // namespace
@@ -1529,9 +1499,9 @@ TEST_CASE("Celestron connect - a slow handshake does not hold Connected or Name"
     st->latency_ms = kSlowExchangeMs;
     std::thread connecting([&] { driver->set_connected(true); });
     REQUIRE(snapshot_wait_for([&] { return st->transactions.load() > 0; }));
-    CHECK(snapshot_timed([&] { CHECK_FALSE(driver->get_connected()); }) < kSnapshotGetterBudget);
-    CHECK(snapshot_timed([&] { (void)driver->get_name(); }) < kSnapshotGetterBudget);
-    CHECK(snapshot_timed([&] { (void)driver->get_can_find_home(); }) < kSnapshotGetterBudget);
+    CHECK(timed([&] { CHECK_FALSE(driver->get_connected()); }) < kSnapshotGetterBudget);
+    CHECK(timed([&] { (void)driver->get_name(); }) < kSnapshotGetterBudget);
+    CHECK(timed([&] { (void)driver->get_can_find_home(); }) < kSnapshotGetterBudget);
     connecting.join();
     st->latency_ms = 0;
     CHECK(driver->get_connected());
@@ -1557,8 +1527,8 @@ TEST_CASE("Celestron disconnect - a close behind an exchange in flight does not 
         mount.driver->set_connected(false);
     });
     REQUIRE(snapshot_wait_for([&] { return close_started.load(); }));
-    CHECK(snapshot_timed([&] { (void)mount.driver->get_name(); }) < kSnapshotGetterBudget);
-    CHECK(snapshot_timed([&] { (void)mount.driver->get_connected(); }) < kSnapshotGetterBudget);
+    CHECK(timed([&] { (void)mount.driver->get_name(); }) < kSnapshotGetterBudget);
+    CHECK(timed([&] { (void)mount.driver->get_connected(); }) < kSnapshotGetterBudget);
     setter.join();
     closing.join();
     mount.st->latency_ms = 0;

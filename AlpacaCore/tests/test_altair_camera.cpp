@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_touptek_sdk.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
@@ -32,14 +33,7 @@ using alpacacore::test::FakeToupTekSDK;
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 // An IMX178 mono camera with no cooler, as libaltaircam 60.31589 enumerates
 // the ALTAIR178M3 (USB 16d0:0d82, 3040x2048, 2.40 um, flags CMOS | MONO |

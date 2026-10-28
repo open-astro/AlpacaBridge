@@ -75,7 +75,7 @@ Each line is a summary; the linked topic file holds the rule and its history.
   ([http-integration](.github/instructions/http-integration.instructions.md#enumeration-index-fields--unique-names--auto-numbering-all-vendors)).
 - Fixing one review finding: fix every sibling site in the same commit and name them
   ([driver-lifecycle](.github/instructions/driver-lifecycle.instructions.md#when-fixing-a-review-finding-avoid-the-regression-treadmill)).
-- Every new driver ships the 8+1 required test cases and a `[stress]` registration;
+- Every new driver ships the 8+1 required test cases (cases 3 and 4, and part of case 6, come from its `contract_sweep.h` entry) and a `[stress]` registration;
   every new test case is listed under `## Falsified by` in the PR body
   ([testing](.github/instructions/testing.instructions.md)).
 - Every PR adds a `changelog.d/<branch-slug>.md` fragment and never edits

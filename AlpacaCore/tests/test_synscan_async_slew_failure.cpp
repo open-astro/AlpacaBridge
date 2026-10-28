@@ -37,6 +37,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -44,14 +45,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 struct FakeSynScanState {
     // The GOTO timer reads this clock. A case that steps the driver on a
