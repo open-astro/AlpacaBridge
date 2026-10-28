@@ -27,8 +27,7 @@ namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
 using namespace alpacacore::test;
 
-// Falsified by: require_alpaca_error() returning without throwing when the call throws the expected code
-// (the second REQUIRE of the helper removed makes this case fail).
+// Falsified by: driver_rig.h:40 `==` changed to `!=` in the code comparison (the expected code is then rejected).
 TEST_CASE("driver_rig - require_alpaca_error accepts the expected code", "[driver_rig]") {
     require_alpaca_error([] { throw AlpacaException("x", AlpacaError::NotConnected); }, AlpacaError::NotConnected);
 }

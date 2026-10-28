@@ -46,8 +46,6 @@
 #include "skywatcher_fake_clock.h"
 
 namespace {
-// Same shape as the unit file's helper: the call must throw an
-// AlpacaException carrying exactly this error code.
 using alpacacore::test::require_alpaca_error;
 // open-astro#395: pins the host-discipline probe for one case and restores
 // the real adjtimex read afterwards, whatever the case does.
