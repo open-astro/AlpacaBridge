@@ -518,8 +518,7 @@ TEST_CASE("Celestron async - one bad HC or MC status poll recovers before the fa
         } else {
             st->malformed_slew_status.store(1);
         }
-        REQUIRE(
-            advance_until(clock, [&] { return st->cancel_goto_count.load() > 0; }, std::chrono::milliseconds(250)));
+        REQUIRE(advance_until(clock, [&] { return st->cancel_goto_count.load() > 0; }, std::chrono::milliseconds(250)));
         CHECK(poll_count() - after_recovery == 3);
         std::string message;
         CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
