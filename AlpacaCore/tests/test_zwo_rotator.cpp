@@ -312,6 +312,22 @@ TEST_CASE("ZWO CAA Rotator Driver - Move applies the Sync offset", "[zwo][rotato
     require_alpaca_error([&]() { driver->move_absolute(std::nan("")); }, alpacacore::AlpacaError::InvalidValue);
 }
 
+// ASCOM Rotator: 0 <= x < wrap. A target a hair below zero must not round up to
+// exactly the wrap (360, or max_degree on a limited rotator).
+TEST_CASE("ZWO CAA Rotator Driver - A tiny negative target stays below the wrap", "[zwo][rotator][unit][fake-sdk]") {
+    for (const double wrap : {360.0, 270.0}) {
+        alpacacore::test::TempSyncOffsetDir dir;
+        FakeCAASDK sdk;
+        sdk.max_degree = wrap;
+        auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+        driver->set_connected(true);
+
+        driver->set_target_position(-1e-15);
+        CHECK(driver->get_target_position() < wrap);
+        CHECK(driver->get_target_position() >= 0.0);
+    }
+}
+
 // Falsified by: zwo_rotator_driver.cpp set_connected() dropping the
 // close_rotator() in its catch(...) (open_calls 1, close_calls 0).
 TEST_CASE("ZWO CAA Rotator Driver - Failed connect closes the handle", "[zwo][rotator][unit][fake-sdk]") {
