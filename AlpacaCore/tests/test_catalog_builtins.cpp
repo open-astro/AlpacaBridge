@@ -899,9 +899,11 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
     const auto views = catalog.describe();
     const DescriptorView* v = find_view(views, kSkyWatcherKey);
     REQUIRE(v != nullptr);
-    // Rule 1: the first word is exactly "SkyWatcher" so vendor_label() keeps
-    // "SkyWatcher support not enabled" and "Registered SkyWatcher telescope".
-    CHECK(v->display_name == "SkyWatcher direct (motor controller)");
+    // One brand spelling (#1818): the web UI shows this and the SynScan
+    // descriptor as one "Sky-Watcher" vendor entry, grouped by vendor_label,
+    // and the router's "<label> support not enabled" text says Sky-Watcher.
+    CHECK(v->display_name == "Sky-Watcher (EQMOD direct)");
+    CHECK(v->vendor_label == "Sky-Watcher");
     CHECK(v->build_option == "ALPACACORE_ENABLE_SKYWATCHER");
     CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
 
@@ -1982,7 +1984,10 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SynScan tele
     const auto views = catalog.describe();
     const DescriptorView* v = find_view(views, kSynScanKey);
     REQUIRE(v != nullptr);
-    CHECK(v->display_name == "SynScan");
+    // One brand spelling (#1818); same vendor_label as the direct driver, so
+    // the web UI groups the two under one "Sky-Watcher" entry.
+    CHECK(v->display_name == "Sky-Watcher (SynScan hand controller)");
+    CHECK(v->vendor_label == "Sky-Watcher");
     CHECK(v->build_option == "ALPACACORE_ENABLE_SYNSCAN");
     CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
 
