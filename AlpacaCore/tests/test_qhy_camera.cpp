@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
@@ -1211,12 +1212,15 @@ struct SdkGate {
 struct CoolerReviewSDK : LockedQHYSDK {
     explicit CoolerReviewSDK(FakeQHYSDK& fake) : LockedQHYSDK(fake) {}
     SdkGate* temperature_gate = nullptr;
+    SdkGate* telemetry_gate = nullptr;
     SdkGate* pwm_gate = nullptr;
+    SdkGate* pwm_return_gate = nullptr;
     SdkGate* off_release_gate = nullptr;
     std::atomic<int> regulation_calls{0};
     std::atomic<int> pwm_off_writes{0};
     std::atomic<int> pwm_writes_at_close{-1};
     std::shared_ptr<std::atomic<bool>> off_running;
+    std::atomic<bool> throw_pwm_once{false};
 
     void close_camera(const std::string& id) override {
         pwm_writes_at_close = pwm_off_writes.load();
@@ -1229,6 +1233,14 @@ struct CoolerReviewSDK : LockedQHYSDK {
             temperature_gate->hold();
         }
         LockedQHYSDK::control_temp(id, target);
+    }
+
+    double get_param(const std::string& id, int control) override {
+        const auto result = LockedQHYSDK::get_param(id, control);
+        if (control == alpacacore::vendor::qhy::control::CURTEMP && telemetry_gate != nullptr &&
+            telemetry_gate->armed.load())
+            telemetry_gate->hold();
+        return result;
     }
 
     void set_param(const std::string& id, int control, double value) override {
@@ -1249,8 +1261,10 @@ struct CoolerReviewSDK : LockedQHYSDK {
             });
         return [this, retained = std::move(retained)] {
             if (pwm_gate != nullptr) pwm_gate->hold();
+            if (throw_pwm_once.exchange(false)) throw 7;
             (*retained)();
             ++pwm_off_writes;
+            if (pwm_return_gate != nullptr) pwm_return_gate->hold();
         };
     }
 };
@@ -1258,14 +1272,14 @@ struct CoolerReviewSDK : LockedQHYSDK {
 // Collects the QHY log lines of one case (workers log from their own threads).
 struct QhyLogCapture {
     std::mutex mutex;
-    std::vector<std::string> lines;
+    std::vector<std::pair<alpacacore::logging::LogLevel, std::string>> lines;
     alpacacore::logging::LogSink previous_sink = alpacacore::logging::get_log_sink();
 
     QhyLogCapture() {
-        alpacacore::logging::set_log_sink([this](auto, auto component, auto message) {
+        alpacacore::logging::set_log_sink([this](auto level, auto component, auto message) {
             if (component == "QHY") {
                 std::lock_guard<std::mutex> lock(mutex);
-                lines.emplace_back(message);
+                lines.emplace_back(level, message);
             }
         });
     }
@@ -1273,12 +1287,21 @@ struct QhyLogCapture {
 
     std::string find(const std::string& needle) {
         std::lock_guard<std::mutex> lock(mutex);
-        for (const auto& line : lines) {
+        for (const auto& [level, line] : lines) {
             if (line.find(needle) != std::string::npos) {
                 return line;
             }
         }
         return {};
+    }
+
+    std::vector<alpacacore::logging::LogLevel> levels(const std::string& needle) {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::vector<alpacacore::logging::LogLevel> result;
+        for (const auto& [level, line] : lines) {
+            if (line.find(needle) != std::string::npos) result.push_back(level);
+        }
+        return result;
     }
 };
 
@@ -1333,6 +1356,7 @@ struct TeardownGuard {
     std::unique_ptr<alpacacore::CameraDriver>& driver;
     SdkGate* gate = nullptr;
     WorkerStartGate* worker_gate = nullptr;
+    SdkGate* other_gate = nullptr;
     ~TeardownGuard() {
         if (worker_gate != nullptr) {
             worker_gate->release();
@@ -1340,6 +1364,7 @@ struct TeardownGuard {
         if (gate != nullptr) {
             gate->release = true;
         }
+        if (other_gate != nullptr) other_gate->release = true;
         ClockPump pump(clock);
         driver.reset();
     }
@@ -2094,6 +2119,55 @@ TEST_CASE("QHY Camera Driver - disconnect clears state before waiting for config
     CHECK(disconnected_while_blocked);
     CHECK(write_error == AlpacaError::NotConnected);
     CHECK(disconnect_error == 0);
+}
+
+TEST_CASE("QHY Camera Driver - configuration publication refuses a pending disconnect",
+          "[qhy][camera][unit][disconnect-publication]") {
+    const std::string setter = GENERATE("Gain", "Offset", "ReadoutMode");
+    CAPTURE(setter);
+    FakeTaskClock clock;
+    SdkGate pid_gate;
+    SdkGate write_gate;
+    ModeSDK fake(true);
+    write_gate.arm(fake, setter == "ReadoutMode" ? "init_camera" : "set_param");
+    write_gate.armed = false;
+    CoolerReviewSDK sdk(fake);
+    sdk.temperature_gate = &pid_gate;
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard teardown{clock, driver, &pid_gate};
+    driver->set_connected(true);
+    REQUIRE(eventually([&] { return pid_gate.entered.load(); }));
+    REQUIRE(clock.wait_for_waiters(1, seconds(2)));
+    write_gate.armed = true;
+    int write_error = -1;
+    std::thread writer([&] {
+        write_error = error_code_of([&] {
+            if (setter == "Gain")
+                driver->set_gain(42);
+            else if (setter == "Offset")
+                driver->set_offset(17);
+            else
+                driver->set_readout_mode(1);
+        });
+    });
+    JoinPumped write_joiner{clock, writer, &write_gate};
+    REQUIRE(eventually([&] { return write_gate.entered.load(); }));
+    const auto waits = clock.wait_count();
+    std::thread disconnector([&] { driver->set_connected(false); });
+    JoinPumped disconnect_joiner{clock, disconnector, &write_gate};
+    REQUIRE(clock.wait_for_wait_count(waits + 1, seconds(2)));  // Disconnect is reaping the held PID.
+    REQUIRE(driver->get_connected());
+    write_gate.release = true;
+    writer.join();
+    CHECK(write_error == AlpacaError::NotConnected);
+    CHECK(driver->get_readout_mode() == 0);
+    if (setter == "ReadoutMode") {
+        CHECK(error_code_of([&] { (void)driver->get_exposure_max(); }) == AlpacaError::DriverException);
+    }
+    pid_gate.release = true;
+    ClockPump pump(clock);
+    disconnector.join();
+    CHECK_FALSE(driver->get_connected());
 }
 
 TEST_CASE("QHY Camera Driver - pulse guide returns while a readout mode transaction holds I/O",
@@ -2876,11 +2950,16 @@ TEST_CASE("QHY Camera Driver - repeated cooler off still writes physical PWM zer
 
 TEST_CASE("QHY Camera Driver - off on off stops replacement regulation while PWM zero is in flight",
           "[qhy][camera][unit][cooler-review]") {
+    const bool zero_already_written = GENERATE(false, true);
+    CAPTURE(zero_already_written);
     FakeTaskClock clock;
     SdkGate gate;
     auto fake = FakeQHYSDK::with_one_cooled_camera();
     CoolerReviewSDK sdk(fake);
-    sdk.pwm_gate = &gate;
+    if (zero_already_written)
+        sdk.pwm_return_gate = &gate;
+    else
+        sdk.pwm_gate = &gate;
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
@@ -2888,9 +2967,15 @@ TEST_CASE("QHY Camera Driver - off on off stops replacement regulation while PWM
     driver->set_cooler_on(false);
     step_until(clock, [&] { return gate.entered.load(); });
     REQUIRE(gate.entered.load());  // The old PID worker has exited; zero is already issued.
+    const int regulation_before_on = sdk.regulation_calls.load();
     driver->set_cooler_on(true);
     REQUIRE(driver->get_cooler_on());
     REQUIRE(clock.wait_for_waiters(2, seconds(2)));  // replacement PID + telemetry
+    const auto waits_before_tick = clock.wait_count();
+    clock.advance(seconds(1));
+    // OFF is deliberately held outside the clock; rendezvous only with the two pollers.
+    REQUIRE(clock.wait_for_wait_count(waits_before_tick + 2, seconds(2)));
+    CHECK(sdk.regulation_calls.load() == regulation_before_on);
     const int regulation_before_off = sdk.regulation_calls.load();
     driver->set_cooler_on(false);
     CHECK_FALSE(driver->get_cooler_on());
@@ -3005,6 +3090,124 @@ TEST_CASE("QHY Camera Driver - reconnect clears an unprepared cooler off before 
     CHECK(fake.underflow_closes == 0);
 }
 
+TEST_CASE("QHY Camera Driver - cooler handoffs respect existing reap bounds",
+          "[qhy][camera][unit][cooler-measurement]") {
+    const std::string operation = GENERATE("ON", "early OFF disconnect", "late OFF disconnect");
+    const bool stuck_telemetry = GENERATE(false, true);
+    CAPTURE(operation, stuck_telemetry);
+    FakeTaskClock clock;
+    SdkGate gate;
+    SdkGate telemetry_gate;
+    telemetry_gate.armed = false;
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    CoolerReviewSDK sdk(fake);
+    sdk.temperature_gate = &gate;
+    sdk.telemetry_gate = &telemetry_gate;
+    QhyLogCapture logs;
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard teardown{clock, driver, &gate, nullptr, &telemetry_gate};
+    driver->set_connected(true);
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(clock.wait_for_waiters(1, seconds(2)));
+    if (stuck_telemetry) {
+        // A real telemetry call can queue behind the PID's physical-handle lock.
+        telemetry_gate.armed = true;
+        clock.advance(seconds(1));
+        REQUIRE(eventually([&] { return telemetry_gate.entered.load(); }));
+    }
+    if (operation != "late OFF disconnect") driver->set_cooler_on(false);
+    const auto waits = clock.wait_count();
+    std::atomic<bool> done{false};
+    std::thread caller([&] {
+        if (operation == "ON")
+            driver->set_cooler_on(true);
+        else
+            driver->set_connected(false);
+        done = true;
+    });
+    JoinPumped joiner{clock, caller, &gate};
+    REQUIRE(clock.wait_for_wait_count(waits + 1, seconds(2)));
+    if (operation == "late OFF disconnect") driver->set_cooler_on(false);
+    CHECK_FALSE(done.load());
+    const auto spent = step_until(clock, [&] { return done.load(); });
+    INFO(operation << " elapsed virtual milliseconds: " << spent.count());
+    CHECK(done.load());
+    CHECK(spent <= milliseconds(2200));
+    caller.join();
+    gate.release = true;
+    telemetry_gate.release = true;
+    step_until(clock, [&] { return !sdk.off_running->load(); });
+    REQUIRE_FALSE(sdk.off_running->load());
+    disconnect_stepping(clock, *driver);
+}
+
+TEST_CASE("QHY Camera Driver - PWM zero failures warn once per connection", "[qhy][camera][unit][cooler-logging]") {
+    using alpacacore::logging::LogLevel;
+    const bool fails = GENERATE(false, true);
+    CAPTURE(fails);
+    FakeTaskClock clock;
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    if (fails) fake.throw_from.insert("set_param");
+    CoolerReviewSDK sdk(fake);
+    QhyLogCapture logs;
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard teardown{clock, driver};
+    for (int connection = 0; connection < 2; ++connection) {
+        driver->set_connected(true);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            driver->set_cooler_on(false);
+            step_until(clock, [&] { return !sdk.off_running->load(); });
+            REQUIRE_FALSE(sdk.off_running->load());
+        }
+        disconnect_stepping(clock, *driver);
+        REQUIRE_FALSE(driver->get_connected());
+    }
+    const auto levels = logs.levels("MANULPWM,0) failed");
+    if (fails) {
+        CHECK(levels == std::vector<LogLevel>{LogLevel::Warn, LogLevel::Info, LogLevel::Warn, LogLevel::Info});
+    } else {
+        CHECK(levels.empty());
+        CHECK(sdk.pwm_off_writes.load() == 4);
+    }
+}
+
+TEST_CASE("QHY Camera Driver - a nonstandard cooler worker exception releases cleanup and permits retry",
+          "[qhy][camera][unit][cooler-exception]") {
+    const bool from_action = GENERATE(false, true);
+    CAPTURE(from_action);
+    FakeTaskClock clock;
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    CoolerReviewSDK sdk(fake);
+    sdk.throw_pwm_once = from_action;
+    QhyLogCapture logs;
+    std::atomic<bool> throw_once{true};
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(
+        0, "fake-qhy-0", sdk,
+        [&](QHYWorker worker) {
+            if (!from_action && worker == QHYWorker::CoolerOff && throw_once.exchange(false)) throw 7;
+        },
+        seconds(60), clock);
+    TeardownGuard teardown{clock, driver};
+    driver->set_connected(true);
+    driver->set_cooler_on(false);
+    step_until(clock, [&] { return !sdk.off_running->load(); });
+    REQUIRE_FALSE(sdk.off_running->load());
+    if (from_action) {
+        CHECK(logs.levels("MANULPWM,0) failed") ==
+              std::vector<alpacacore::logging::LogLevel>{alpacacore::logging::LogLevel::Warn});
+    } else {
+        CHECK_FALSE(logs.find("Cooler OFF cleanup failed").empty());
+    }
+    CHECK(sdk.pwm_off_writes.load() == 0);
+    driver->set_cooler_on(false);
+    step_until(clock, [&] { return !sdk.off_running->load(); });
+    REQUIRE_FALSE(sdk.off_running->load());
+    CHECK(sdk.pwm_off_writes.load() == 1);
+    disconnect_stepping(clock, *driver);
+    CHECK(fake.physical_opens == fake.physical_closes);
+    CHECK(fake.underflow_closes == 0);
+}
+
 TEST_CASE("QHY Camera Driver - failed cooler off cleanup still closes the camera",
           "[qhy][camera][unit][cooler-review]") {
     const std::string failure = GENERATE("prepare_cooler_off", "set_param");
@@ -3081,7 +3284,8 @@ TEST_CASE("QHY Camera Driver - a wedged cooler-off worker is reaped after 2 s of
     step_until(clock, [&] { return gate.entered.load(); });
     REQUIRE(gate.entered.load());
 
-    const auto spent = disconnect_reaping(clock, *driver, logs, gate, "cooler-off worker exceeded 2s timeout");
+    const auto spent =
+        disconnect_reaping(clock, *driver, logs, gate, "cooler-off worker still running at reap deadline");
     CHECK(spent >= milliseconds(2000));
     CHECK(spent < milliseconds(2500));
 
@@ -3105,7 +3309,8 @@ TEST_CASE("QHY Camera Driver - a wedged temperature worker is reaped after 2 s o
     driver->set_connected(true);
     REQUIRE(eventually([&] { return gate.entered.load(); }));
 
-    const auto spent = disconnect_reaping(clock, *driver, logs, gate, "temp-control thread exceeded 2s timeout");
+    const auto spent =
+        disconnect_reaping(clock, *driver, logs, gate, "temp-control thread still running at reap deadline");
     CHECK(spent >= milliseconds(2000));
     CHECK(spent < milliseconds(2500));
 }
