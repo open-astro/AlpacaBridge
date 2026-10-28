@@ -142,7 +142,9 @@ DHCP on the fleet-wide subnet `172.24.1.0/24`; the portal is always at
 - Creates or updates the hotspot profile and immediately activates
   (`Enabled: true`) or deactivates (`Enabled: false`) it. `Enabled` also
   sets autoconnect, so an enabled hotspot returns after reboot.
-- `Band`: `"a"` = 5 GHz, `"bg"` = 2.4 GHz. `Channel: 0` lets
+- `Band`: `"a"` = 5 GHz, `"bg"` = 2.4 GHz; an omitted `Band` means `"a"`.
+  5 GHz is refused until the regulatory country is set (`PUT /management/v1/wifi/country`), so
+  set the country first or send `"Band": "bg"`. `Channel: 0` lets
   NetworkManager pick. Empty `Passphrase` keeps the existing secret.
 - A brand-new hotspot profile requires a passphrase (8–63 chars).
 - `SsidHex` may be supplied instead of `Ssid` with the same encoding and
@@ -182,7 +184,7 @@ blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
 unaffected) or the same-origin web portal. Four device endpoints take the same
 guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
-a UTCDate write steps the system clock (see the Clock section above), and
+a UTCDate write steps the system clock (see the clock sync section below), and
 `PUT /api/v1/telescope/{n}/sitelatitude`, `sitelongitude` and `siteelevation`,
 because since #444 they also rewrite the device's persisted configuration, the
 effect `configuredevice` guards. The guard also runs for any device method on

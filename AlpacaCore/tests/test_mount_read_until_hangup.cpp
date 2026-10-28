@@ -35,7 +35,8 @@
 // (NotConnected, "read failed: <errno>", decision 0009), and over TCP, a test
 // seam that is never lost, a peer that hangs up reads as a hangup at once
 // instead of a timeout. Its drain after a blind command still waits at least
-// one read slice for a stray ack, as the old loop's first read did.
+// one read slice for a stray ack, as the old loop's first read did, and on a
+// line that never goes quiet it ends at its 2 s cap (#1449).
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
@@ -75,8 +76,8 @@ using Clock = std::chrono::steady_clock;
 // with sever_on_next_command(), it severs the pty when the next bytes arrive:
 // the command has been written, the reply never comes and the line is gone.
 // Armed with trickle_after_reply_on_next_command(), it answers the next
-// command with "1#" and then sends a '0' every 20 ms until it stops, so the
-// line never goes idle after the '#'. Armed with slow_acks_on_next_command(), it
+// command with "1#" and then sends a '0' every 20 ms until it stops, or until
+// the optional time passes, so the line never goes idle after the '#'. Armed with slow_acks_on_next_command(), it
 // answers the next command with eight '1' ack bytes, 40 ms apart from 200 ms
 // on, so they straddle a 300 ms drain, and the command after it with "1#".
 class HangupMount {
@@ -93,7 +94,11 @@ public:
 
     std::string slave_path() const { return pty_.slave_path(); }
     void sever_on_next_command() { armed_.store(true); }
-    void trickle_after_reply_on_next_command() { trickle_.store(true); }
+    void trickle_after_reply_on_next_command(
+        std::chrono::milliseconds for_at_most = std::chrono::milliseconds::zero()) {
+        trickle_for_ms_.store(for_at_most.count());
+        trickle_.store(true);
+    }
     void slow_acks_on_next_command() { slow_acks_.store(true); }
 
 private:
@@ -112,7 +117,9 @@ private:
             }
             if (trickle_.load()) {
                 alpacacore::test::pty_write_bounded(pty_.master_fd(), std::string("1#"), stop_);
-                while (!stop_.load()) {
+                const auto for_ms = trickle_for_ms_.load();
+                const auto until = Clock::now() + std::chrono::milliseconds(for_ms);
+                while (!stop_.load() && (for_ms == 0 || Clock::now() < until)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                     alpacacore::test::pty_write_bounded(pty_.master_fd(), std::string("0"), stop_);
                 }
@@ -141,6 +148,7 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> armed_{false};
     std::atomic<bool> trickle_{false};
+    std::atomic<std::chrono::milliseconds::rep> trickle_for_ms_{0};
     std::atomic<bool> slow_acks_{false};
     std::atomic<bool> answer_next_{false};
     std::thread worker_;
@@ -780,6 +788,33 @@ TEST_CASE("OnStep mount - a blind-command drain waits one read slice for a stray
     }
     wrapper.disconnect();
     CHECK(next == "1");
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp drain_stale() with its old deadline, first_byte_timeout + idle_gap *
+// max_len (about 6,554 s on serial): the drain reads the whole 6 s trickle and returns after it goes quiet
+TEST_CASE("OnStep mount - a blind-command drain on a line that never goes quiet ends at its time cap",
+          "[onstep][serial][serial_read][issue1449]") {
+    OnStepReset reset;
+    HangupMount mount;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(onstep_serial_info(mount.slave_path())));
+    // A byte every 20 ms, well under the 100 ms read slice, for 6 s: three times the 2 s cap.
+    mount.trickle_after_reply_on_next_command(std::chrono::seconds(6));
+    const auto start = Clock::now();
+    std::string error;
+    try {
+        wrapper.send_command_blind(":Q#");
+    } catch (const alpacacore::AlpacaException& e) {
+        error = e.what();
+    }
+    const auto took = Clock::now() - start;
+    INFO("error: " << error);
+    INFO("took ms: " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count());
+    CHECK(error.empty());
+    CHECK(took >= std::chrono::milliseconds(1500));  // the cap ended it, not a quiet slice
+    CHECK(took < std::chrono::seconds(3));
+    CHECK(wrapper.link_alive());
+    wrapper.disconnect();
 }
 
 // Falsified by: onstep_protocol_wrapper.cpp read_response() using ReadSpec::Stop::IdleGap for the no-'#' read (the

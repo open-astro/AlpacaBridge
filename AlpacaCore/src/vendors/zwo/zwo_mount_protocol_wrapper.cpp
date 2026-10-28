@@ -752,7 +752,7 @@ public:
                     return true;
                 }
             }
-            ALPACA_LOG_WARN("ZWO", "Auto-detect: no ZWO mount found on USB or WiFi");
+            ALPACA_LOG_DEBUG("ZWO", "Auto-detect: no ZWO mount found on USB or WiFi");
             return false;
         }
 

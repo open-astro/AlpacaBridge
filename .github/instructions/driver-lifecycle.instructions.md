@@ -112,9 +112,28 @@ vendor-agnostic; do them in the driver from the start.
   slot mutex, the `StateSnapshot` mutex, the `util::PolledState` mutexes (a driver
   that composes `PolledState` for its poll-fed frame) and the `util::CaptureSession` mutex (a
   camera that composes the session; it never nests with the slot mutex) are leaves that nest
-  under `mutex_` (decisions 0006, 0010, 0016, 0020). Never acquire in reverse, and
-  convert a whole driver class in one PR so the old and new order never mix in one
-  class.
+  under `mutex_` (decisions 0006, 0010, 0016, 0020). A leaf takes no other lock and runs
+  no I/O or joins; a vendor-local leaf is named in its vendor file. Never acquire in
+  reverse, and convert a whole driver class in one PR so the old and new order never mix
+  in one class.
+- In a converted driver, a `*_locked` helper that reaches the wire can release `mutex_`
+  partway through: the wire call drops the state lock around the exchange and takes it
+  back after (OnStep's and Sky-Watcher's `Wire::call`). State read before the exchange
+  may be stale after it, because another thread can change it in the gap. Re-read it
+  after the exchange, or compare a counter that every change bumps. OnStep's `Slewing`
+  read compares `slew_epoch_` across its exchanges, and its single-read path re-checks
+  `session_generation_` under the I/O lock so a read never lands on a session that
+  ended, or started, while it waited (#1728, #1729;
+  [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) item 8).
+- A driver that tracks the locks it holds per thread (OnStep's and Sky-Watcher's
+  `HeldLocks` table) throws `DriverException` before it takes any lock when it cannot
+  record one. It never takes `mutex_` untracked: the wire call then cannot drop it, and
+  every exchange runs under the state lock, which
+  [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) items 1
+  and 8 rule out. Two deviations remain. Sky-Watcher logs and keeps `mutex_` (and
+  `io_mutex_`) held untracked (#1730). OnStep's `StateLock::lock()` throws, but its
+  single-read `Wire::call` takes `io_mutex_` before it records it and only logs on a
+  full table (#1729). One shared `util/` helper for both drivers will throw (#1729).
 - An SDK call on a closable handle is safe only if the handle can't be closed
   underneath it. In a converted driver, `set_connected(false)` clears state under
   `mutex_` and releases it, then takes the I/O lock across the close, so the I/O
