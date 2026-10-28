@@ -7,7 +7,7 @@ AlpacaHTTP is the HTTP/1.1 + JSON transport layer for AlpacaCore, implementing t
 AlpacaHTTP provides:
 - HTTP/1.1 server with keep-alive support
 - JSON request/response handling
-- Alpaca Discovery (UDP multicast)
+- Alpaca Discovery (UDP broadcast on port 32227, plus optional multicast)
 - URL routing for Alpaca API endpoints
 - Transaction ID management
 - Error mapping to Alpaca specification
@@ -16,7 +16,7 @@ AlpacaHTTP provides:
 ## Requirements
 
 - C++20 compiler
-- CMake 3.15+
+- CMake 3.20+ (AlpacaCore needs 3.20; AlpacaHTTP alone needs 3.18)
 - nlohmann/json
 - AlpacaCore library
 
@@ -41,12 +41,9 @@ cmake --build . --clean-first --parallel
 
 ## Configuration
 
-Configuration is loaded from:
-1. `config/default.yaml`
-2. User config file (optional)
-3. Environment variables (optional)
+The server reads one YAML file: the path given as its first argument, or else `config/default.yaml` in the working directory, or else `AlpacaHTTP/config/default.yaml`. The package service runs in `/var/lib/alpacabridge`, so it reads `/var/lib/alpacabridge/config/default.yaml`. The environment variables `ALPACAHTTP_PORT` and `ALPACAHTTP_DISCOVERY` then override the file.
 
-See `config/default.yaml` for available options.
+See `config/default.yaml` for available options. The `http` section also takes `max_connections` and `keep_alive_lifetime_seconds`.
 
 ## Usage
 

@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-27
+## Updated 2026-10-28
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -772,9 +772,9 @@ This document lists all hardware vendors and device types that are verified to w
 <summary><strong>iOptron Driver Notes</strong></summary>
 
 - **Protocol**: iOptron Mount RS-232 Command Language Version 3.10 (January 4th, 2021)
-- **Connection**: USB/Serial or Wi-Fi (TCP). Auto-detection supported for both — `connectionType: "auto"` scans serial ports first, then falls back to network discovery if no serial mount is found.
+- **Connection**: USB/Serial or Wi-Fi (TCP). Auto-detection supported for both, chosen by the connection type: `connectionType: "auto"` scans serial ports only, and `"network"` with a blank host runs network discovery. `auto` does not fall back to the network.
 - **Serial auto-detection**: Scans `/dev/serial/by-id/` for Prolific, FTDI, CP210x, Silicon Labs, and generic USB-serial devices and probes each with an iOptron `:MountInfo#` query at 115200 baud. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`. The 4-byte model code response (no `#` terminator) is mapped to a human-readable mount name (e.g., `0025` → HEM27) using the current INDI v3 model table.
-- **Network auto-detection**: When the connection type is set to Network/Auto, the driver runs a multi-phase discovery: (1) probes well-known iOptron Wi-Fi module addresses (`10.10.100.254`, `10.10.100.1`, `192.168.100.1`) on ports 8899 and 4030; (2) if no mount found, queries the default gateway on each local interface (iOptron mounts act as the AP gateway); (3) if still not found, scans all hosts on each local subnet (up to /24) with parallel non-blocking TCP connect probes. Each candidate is verified with a `:MountInfo#` query before being accepted.
+- **Network auto-detection**: When the connection type is Network and the host is blank, the driver runs a multi-phase discovery: (1) probes well-known iOptron Wi-Fi module addresses (`10.10.100.254`, `10.10.100.1`, `192.168.100.1`) on ports 8899 and 4030; (2) if no mount found, queries the default gateway on each local interface (iOptron mounts act as the AP gateway); (3) if still not found, scans all hosts on each local subnet (up to /24) with parallel non-blocking TCP connect probes. Each candidate is verified with a `:MountInfo#` query before being accepted.
 - **GPS status**: `Action("gps_status")` (listed in `SupportedActions` while connected) returns `{"fix":<bool>,"latitude":<deg|null>,"longitude":<deg|null>,"elevation":null}`. The fix and the receiver's site come from the `:GLS#` GPS digit (2 = valid GPS data) with no extra command; without a fix the stored site is not reported. Covered on the fake mount only (no rig run).
 - **Mount identification**: On connect, the driver queries `:MountInfo#` and maps the model code to a name displayed in `Name` (e.g., "iOptron HEM27") and server logs. The `UniqueID` is the ID stored with the configured device (a minted GUID or a kept ID; decision 0018), not the model. 60+ models supported including CEM, GEM, HEM, HAE, HAZ, and SkyHunter series.
 - **Wi-Fi reliability**: Network (TCP) connections drain stale acknowledgment bytes from blind commands to prevent buffer accumulation on the mount's Wi-Fi module. `IsPulseGuiding` uses lock-free atomics to meet the ConformU fast response target over high-latency links.
