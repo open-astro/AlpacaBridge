@@ -23,6 +23,8 @@
 # directory the alpacabridge user owns. It ends with one of
 #   === RESULT: success ...
 #   === RESULT: failure ...
+# A TERM, INT or HUP before the apt refresh returns restores the previous
+# drop-in and ends it with `RESULT: failure ... killed by SIG<name>`.
 
 set -u
 
@@ -61,11 +63,35 @@ fail() {
     exit 1
 }
 
-# Keep what was there so a failed apt-get update can put it back.
+# A stop signal (systemd sends TERM to the whole control group, apt-get too)
+# puts the previous drop-in back and deletes this run's temp files. It never
+# waits on apt. It is disarmed once apt-get update has returned.
 backup=""
+tmp=""
+backup_ready=""
+existed=0
+[ ! -e "$DROPIN" ] || existed=1
+# shellcheck disable=SC2329,SC2317 # invoked through trap
+on_signal() {
+    trap '' TERM INT HUP
+    if [ -n "$backup_ready" ]; then
+        mv -f "$backup" "$DROPIN"
+    elif [ "$existed" -eq 0 ]; then
+        rm -f "$DROPIN"
+    fi
+    rm -f "$backup" "$tmp"
+    echo "=== RESULT: failure $(stamp) killed by SIG$1"
+    exit "$((128 + $2))"
+}
+trap 'on_signal TERM 15' TERM
+trap 'on_signal INT 2' INT
+trap 'on_signal HUP 1' HUP
+
+# Keep what was there so a failed apt-get update can put it back.
 if [ -e "$DROPIN" ]; then
     backup="$(mktemp "$DROPIN_DIR/.alpacabridge-beta.XXXXXX")" || fail "mktemp"
     cp -p "$DROPIN" "$backup" || { rm -f "$backup"; fail "backup"; }
+    backup_ready=1
 fi
 
 if [ "$CHANNEL" = beta ]; then
@@ -94,6 +120,7 @@ fi
 echo "=== apt-get update"
 apt-get update -o DPkg::Lock::Timeout=120
 rc=$?
+trap - TERM INT HUP
 echo "=== apt-get update exit $rc"
 if [ "$rc" -ne 0 ]; then
     # A source apt cannot verify or reach must not stay behind: put the
