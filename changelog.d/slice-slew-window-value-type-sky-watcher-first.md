@@ -1,0 +1,3 @@
+### Changed
+
+- **Sky-Watcher slew and pulse-guide deadlines**, Sky-Watcher driver, issue #1798. The 8 s "Slewing stays true after a goto" window and the per-axis pulse-guide ownership deadline are now `util::HoldWindow` values (`AlpacaCore/include/alpacacore/util/hold_window.h`). Hold lengths and behaviour are unchanged. `Slewing` still reads true as soon as `SlewToCoordinatesAsync` returns and false when the board reports the goto landed, not when the 8 s hold ends (`AlpacaCore/tests/test_skywatcher_async.cpp`, "a short goto reports landed before the 8 s hold ends"). The type is [decision 0022](docs/decisions/0022-hold-window.md) (proposed); the other telescope drivers move to it in follow-up tickets.

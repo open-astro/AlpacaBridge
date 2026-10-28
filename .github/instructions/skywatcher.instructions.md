@@ -322,7 +322,7 @@ datagrams before each send so replies cannot get off-by-one.
   while the poll and a goto body are parked on the clock, since a getter no longer queues behind the dispatch.
 - **Slewing must be a STATE FLAG spanning the whole goto + landing refinement**
   (`goto_in_progress_`, same pattern as `parking_`/`homing_`), never a timed
-  hold: the 3 s `slew_force_until_` expired during a slow refine iteration
+  hold: the old 3 s timed slew window expired during a slow refine iteration
   (axis stop-waits take seconds), Slewing flickered false, ConformU started
   its pulse test, and the next refinement goto dragged the axes back to the
   slew target ("declination axis did not move", phantom RA drift, the
@@ -587,7 +587,7 @@ below was one of them.
   be the signal either (when this case was written, `refine_goto_landing()` burned all three
   iterations on this fake whether or not a landing coasted; since #1019 a plain landing takes one
   goto and a coasting one four, but the WARN stays the sharper signal), nor wall-clock timing (the tracking restore sits between the landing
-  and `Slewing` clearing, as the 3 s `slew_force_until_` window also did before #715). What works: coast for
+  and `Slewing` clearing, as the old 3 s timed window also did before #715). What works: coast for
   longer than `kLandingSettleTimeout` and assert the check's own give-up WARN, a string nothing
   else emits. **Rule:** before claiming a change is covered, delete it and run the suite; if it
   stays green, the seam models the wrong failure.
