@@ -39,22 +39,14 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_skywatcher_serial_board.h"
 #include "fake_task_clock.h"
 #include "skywatcher_fake_clock.h"
 
 namespace {
-// Same shape as the unit file's helper: the call must throw an
-// AlpacaException carrying exactly this error code.
-void expect_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 // open-astro#395: pins the host-discipline probe for one case and restores
 // the real adjtimex read afterwards, whatever the case does.
 struct ProbeGuard {
@@ -871,8 +863,8 @@ TEST_CASE("SkyWatcher async - SyncToCoordinates during a Dec MoveAxis jog is ref
 
     driver->move_axis(1, 1.0);
     CHECK(mount.axis_running(2));
-    expect_alpaca_error([&] { driver->sync_to_coordinates(driver->get_right_ascension(), 20.0); },
-                        alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->sync_to_coordinates(driver->get_right_ascension(), 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
     CHECK(mount.axis_running(2));  // the jog was neither stopped nor written to
     try {
         driver->sync_to_coordinates(1.0, 20.0);
@@ -894,7 +886,7 @@ TEST_CASE("SkyWatcher async - SyncToCoordinates during an RA MoveAxis jog with t
 
     driver->move_axis(0, 1.0);
     CHECK(mount.axis_running(1));
-    expect_alpaca_error([&] { driver->sync_to_coordinates(1.0, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->sync_to_coordinates(1.0, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
     CHECK(mount.axis_running(1));
     driver->move_axis(0, 0.0);
     driver->set_connected(false);
@@ -913,7 +905,7 @@ TEST_CASE("SkyWatcher async - a refused SyncToCoordinates during a Dec pulse lea
     REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     CHECK(mount.axis_running(2));
-    expect_alpaca_error([&] { driver->sync_to_coordinates(25.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->sync_to_coordinates(25.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
     CHECK(driver->get_is_pulse_guiding());  // the refusal cancelled nothing
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(5000)));
     CHECK_FALSE(mount.axis_running(2));
@@ -935,7 +927,7 @@ TEST_CASE("SkyWatcher async - a refused MoveAxis(Dec) during a Dec pulse leaves 
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     CHECK(mount.axis_running(2));
     // Above the advertised AxisRates maximum (800x sidereal, ~3.34 deg/s).
-    expect_alpaca_error([&] { driver->move_axis(1, 1000.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->move_axis(1, 1000.0); }, alpacacore::AlpacaError::InvalidValue);
     CHECK(driver->get_is_pulse_guiding());  // the refusal cancelled nothing
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(5000)));
     CHECK_FALSE(mount.axis_running(2));
@@ -1797,13 +1789,13 @@ TEST_CASE("SkyWatcher async - NaN slew is rejected before any motion command (#5
     int ra_starts_before = mount.start_count(1);
     int dec_starts_before = mount.start_count(2);
 
-    expect_alpaca_error([&] { driver->slew_to_coordinates_async(std::nan(""), 0.0); },
-                        alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(std::nan(""), 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
 
     REQUIRE_FALSE(driver->get_slewing());
     REQUIRE(mount.start_count(1) == ra_starts_before);
     REQUIRE(mount.start_count(2) == dec_starts_before);
-    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
     driver->set_connected(false);
 }
@@ -2429,10 +2421,10 @@ TEST_CASE("SkyWatcher EQM-35 - a serial link severed mid-goto is a lost connecti
 
     // Detected on the next transaction (the status poll), not by a timeout.
     REQUIRE(wait_until([&] { return !driver->get_connected(); }, 6000));
-    expect_alpaca_error([&] { driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
-    expect_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
-    expect_alpaca_error([&] { driver->slew_to_coordinates_async(target_ra, -20.0); },
-                        alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(target_ra, -20.0); },
+                         alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);  // returns: the goto body did not wedge the teardown
     CHECK_FALSE(driver->get_connected());
 }
@@ -3911,8 +3903,8 @@ TEST_CASE("SkyWatcher async - UTCDate, SiderealTime and pointing read one time s
     const double lst0 = driver->get_sidereal_time();
     const double ra0 = driver->get_right_ascension();
     if (host_disciplined) {
-        expect_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1)); },
-                            alpacacore::AlpacaError::PropertyNotImplemented);
+        require_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1)); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
     } else {
         driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1));
     }
@@ -4017,23 +4009,23 @@ TEST_CASE("SkyWatcher async - connects without a site and refuses what needs one
     CHECK(mount.start_count(2) == 0);
 
     const int invalid_operation = alpacacore::AlpacaError::InvalidOperation;
-    expect_alpaca_error([&] { driver->get_site_latitude(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_site_longitude(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_site_elevation(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_right_ascension(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_declination(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_altitude(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_azimuth(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_sidereal_time(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_side_of_pier(); }, invalid_operation);
-    expect_alpaca_error([&] { driver->get_destination_side_of_pier(5.0, 10.0); }, invalid_operation);
-    expect_alpaca_error([&] { driver->set_tracking(true); }, invalid_operation);
-    expect_alpaca_error([&] { driver->slew_to_coordinates_async(5.0, 10.0); }, invalid_operation);
-    expect_alpaca_error([&] { driver->sync_to_coordinates(5.0, 10.0); }, invalid_operation);
-    expect_alpaca_error([&] { driver->move_axis(0, 1.0); }, invalid_operation);
-    expect_alpaca_error([&] { driver->pulse_guide(0, 100); }, invalid_operation);
-    expect_alpaca_error([&] { driver->set_right_ascension_rate(0.01); }, invalid_operation);
-    expect_alpaca_error([&] { driver->set_declination_rate(1.0); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_site_latitude(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_site_longitude(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_site_elevation(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_right_ascension(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_declination(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_altitude(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_azimuth(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_sidereal_time(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_side_of_pier(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_destination_side_of_pier(5.0, 10.0); }, invalid_operation);
+    require_alpaca_error([&] { driver->set_tracking(true); }, invalid_operation);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(5.0, 10.0); }, invalid_operation);
+    require_alpaca_error([&] { driver->sync_to_coordinates(5.0, 10.0); }, invalid_operation);
+    require_alpaca_error([&] { driver->move_axis(0, 1.0); }, invalid_operation);
+    require_alpaca_error([&] { driver->pulse_guide(0, 100); }, invalid_operation);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.01); }, invalid_operation);
+    require_alpaca_error([&] { driver->set_declination_rate(1.0); }, invalid_operation);
     // Nothing the refusals above reached moved the board.
     CHECK(mount.start_count(1) == 0);
     CHECK(mount.start_count(2) == 0);
@@ -4055,7 +4047,7 @@ TEST_CASE("SkyWatcher async - connects without a site and refuses what needs one
 
     // Writing the second coordinate makes the mount usable without a reconnect.
     driver->set_site_latitude(-33.856784);
-    expect_alpaca_error([&] { driver->get_right_ascension(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_right_ascension(); }, invalid_operation);
     driver->set_site_longitude(151.215297);
     CHECK_NOTHROW(driver->get_right_ascension());
     CHECK_NOTHROW(driver->get_sidereal_time());
@@ -4063,7 +4055,7 @@ TEST_CASE("SkyWatcher async - connects without a site and refuses what needs one
     REQUIRE_NOTHROW(driver->set_tracking(true));
     CHECK(driver->get_tracking());
     // Elevation waits for its own write, not for the coordinates.
-    expect_alpaca_error([&] { driver->get_site_elevation(); }, invalid_operation);
+    require_alpaca_error([&] { driver->get_site_elevation(); }, invalid_operation);
     driver->set_site_elevation(15.0);
     CHECK(driver->get_site_elevation() == 15.0);
     driver->set_tracking(false);
@@ -4104,17 +4096,17 @@ TEST_CASE("SkyWatcher async - one configured coordinate is not enough to point (
     auto lat_only = sw::create_skywatcher_telescope(0, endpoint(mount), -33.87, std::nullopt, std::nullopt);
     REQUIRE_NOTHROW(lat_only->set_connected(true));
     CHECK(lat_only->get_site_latitude() == -33.87);
-    expect_alpaca_error([&] { lat_only->get_site_longitude(); }, invalid_operation);
-    expect_alpaca_error([&] { lat_only->get_right_ascension(); }, invalid_operation);
-    expect_alpaca_error([&] { lat_only->set_tracking(true); }, invalid_operation);
+    require_alpaca_error([&] { lat_only->get_site_longitude(); }, invalid_operation);
+    require_alpaca_error([&] { lat_only->get_right_ascension(); }, invalid_operation);
+    require_alpaca_error([&] { lat_only->set_tracking(true); }, invalid_operation);
     lat_only->set_connected(false);
 
     auto lon_only = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, 151.21, std::nullopt);
     REQUIRE_NOTHROW(lon_only->set_connected(true));
     CHECK(lon_only->get_site_longitude() == 151.21);
-    expect_alpaca_error([&] { lon_only->get_site_latitude(); }, invalid_operation);
-    expect_alpaca_error([&] { lon_only->get_sidereal_time(); }, invalid_operation);
-    expect_alpaca_error([&] { lon_only->set_tracking(true); }, invalid_operation);
+    require_alpaca_error([&] { lon_only->get_site_latitude(); }, invalid_operation);
+    require_alpaca_error([&] { lon_only->get_sidereal_time(); }, invalid_operation);
+    require_alpaca_error([&] { lon_only->set_tracking(true); }, invalid_operation);
     lon_only->set_connected(false);
 }
 
@@ -4182,14 +4174,14 @@ TEST_CASE("SkyWatcher async - target properties are independently set (#304, #39
     auto driver = connected_driver(mount);
     REQUIRE(driver->get_connected());
 
-    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
-    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // Writing RA must not unlock Dec.
     driver->set_target_right_ascension(7.25);
     CHECK(driver->get_target_right_ascension() == 7.25);
-    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
-    expect_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // Writing Dec unlocks the second property without disturbing the first.
     driver->set_target_declination(-12.5);
@@ -4202,8 +4194,8 @@ TEST_CASE("SkyWatcher async - target properties are independently set (#304, #39
     driver->set_connected(false);
 
     // Disconnected, the getters say NotConnected first, whatever was set.
-    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
-    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("SkyWatcher async - Dec written first leaves RA unset (#304)", "[skywatcher][async]") {
@@ -4212,7 +4204,7 @@ TEST_CASE("SkyWatcher async - Dec written first leaves RA unset (#304)", "[skywa
     auto driver = connected_driver(mount);
     driver->set_target_declination(41.0);
     CHECK(driver->get_target_declination() == 41.0);
-    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
     driver->set_connected(false);
 }
 
@@ -4287,8 +4279,8 @@ TEST_CASE(
         const auto readback = std::chrono::duration_cast<std::chrono::milliseconds>(driver->get_utc_date() -
                                                                                     std::chrono::system_clock::now());
         CHECK(std::abs(readback.count()) < 500);
-        expect_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now()); },
-                            alpacacore::AlpacaError::PropertyNotImplemented);
+        require_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now()); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
         driver->set_connected(false);
     }
 }

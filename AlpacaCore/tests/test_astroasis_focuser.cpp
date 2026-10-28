@@ -32,20 +32,14 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_astroasis_hid.h"
 #include "fake_task_clock.h"
 #include "locked_astroasis_hid_transport.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 using alpacacore::test::FakeHidState;
 using alpacacore::test::FakeHidTransport;

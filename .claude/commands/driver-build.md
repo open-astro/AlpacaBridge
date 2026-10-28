@@ -583,7 +583,7 @@ Every test file must include:
 
 ### Required test cases (minimum 8)
 
-All 8 are mandatory. Read the existing tests to match the exact patterns used in this project.
+All 8 are mandatory; cases 3 and 4 come from the driver's `contract_sweep.h` entry, which also covers case 6 in part (static out-of-range probes while disconnected), and the test file carries the rest, case 8 included (`.github/instructions/testing.instructions.md`). Read the existing tests to match the exact patterns used in this project.
 
 1. **Defaults** `"<Vendor> <Device> Driver - Defaults"` `[<vendor>][<device>][unit]`
    - Create driver with device number 0.

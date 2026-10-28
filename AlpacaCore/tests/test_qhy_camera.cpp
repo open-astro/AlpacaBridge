@@ -28,20 +28,14 @@
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_qhy_sdk.h"
 #include "fake_task_clock.h"
 #include "locked_qhy_sdk.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 using alpacacore::test::FakeQHYSDK;
 using alpacacore::test::LockedQHYSDK;
@@ -3494,13 +3488,7 @@ TEST_CASE("FakeQHYSDK via LockedQHYSDK - SDK version hook does not wait on an in
     }
     REQUIRE(fake.call_count("open_camera") == 1);
 
-    const auto elapsed_ms = [](auto&& fn) {
-        const auto started = std::chrono::steady_clock::now();
-        fn();
-        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
-            .count();
-    };
-    CHECK(elapsed_ms([&] { (void)driver->get_device_sdk_version(); }) < 100);
+    CHECK(alpacacore::test::timed([&] { (void)driver->get_device_sdk_version(); }) < std::chrono::milliseconds(100));
 
     connector.join();
 }

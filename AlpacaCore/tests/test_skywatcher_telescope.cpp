@@ -20,6 +20,7 @@
 #include <limits>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 using alpacacore::AlignmentMode;
 using alpacacore::DeviceType;
@@ -28,14 +29,7 @@ namespace sw = alpacacore::vendor::skywatcher;
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int device_number = 0) {
     sw::ConnectionInfo conn;

@@ -26,20 +26,14 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_qhy_sdk.h"
 #include "fake_task_clock.h"
 #include "locked_qhy_sdk.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 using alpacacore::test::FakeQHYSDK;
 using alpacacore::test::LockedQHYSDK;
