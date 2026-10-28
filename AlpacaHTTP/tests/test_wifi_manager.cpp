@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -52,11 +53,15 @@ public:
     int role_reads = 0;
     int add_calls = 0;
     int update_calls = 0;
+    int patch_calls = 0;
+    WifiSettings patched_overrides;
     std::string updated_path;
     bool add_pinned = false;
     bool update_pinned = false;
     WifiSettings added_settings;
     WifiSettings updated_settings;
+    // What NetworkManager holds per profile path; Update replaces it whole.
+    std::map<std::string, WifiSettings> stored;
 
     std::vector<Connection> wifi_connections() override {
         ++connection_reads;
@@ -77,11 +82,33 @@ public:
         if (failure == Failure::Add) throw WifiError("scripted add failure");
     }
 
+    void patch_connection(const std::string& path, const WifiSettings& overrides) override {
+        ++patch_calls;
+        updated_path = path;
+        patched_overrides = overrides;
+        for (const auto& [section, entries] : overrides) {
+            auto section_it = std::find_if(stored[path].begin(), stored[path].end(),
+                                           [&](const auto& item) { return item.first == section; });
+            if (section_it == stored[path].end()) section_it = stored[path].insert(stored[path].end(), {section, {}});
+            for (const auto& [key, value] : entries) {
+                auto key_it = std::find_if(section_it->second.begin(), section_it->second.end(),
+                                           [&](const auto& item) { return item.first == key; });
+                if (key_it == section_it->second.end()) {
+                    section_it->second.push_back({key, value});
+                } else {
+                    key_it->second = value;
+                }
+            }
+        }
+        if (failure == Failure::Update) throw WifiError("scripted update failure");
+    }
+
     void update_connection(const std::string& path, const WifiSettings& settings, bool pin_shared_ip4) override {
         ++update_calls;
         updated_path = path;
         update_pinned = pin_shared_ip4;
         updated_settings = settings;
+        stored[path] = settings;
         if (failure == Failure::Update) throw WifiError("scripted update failure");
     }
 };
@@ -190,23 +217,19 @@ int main() {
 
         const auto result = manager.save_profile(std::string("\xff", 1), "", true, 4);
         EXPECT(backend.add_calls == 0);
-        EXPECT(backend.update_calls == 1);
+        EXPECT(backend.update_calls == 0);
+        EXPECT(backend.patch_calls == 1);
         EXPECT(backend.updated_path == "/saved/exact");
-        EXPECT(!backend.update_pinned);
-        const auto& updated_id = setting(backend.updated_settings, "connection", "id");
-        EXPECT(updated_id.type == 's');
-        EXPECT(updated_id.string_value == "Custom ID");
-        const auto& connection_type = setting(backend.updated_settings, "connection", "type");
-        EXPECT(connection_type.type == 's');
-        EXPECT(connection_type.string_value == "802-11-wireless");
-        const auto& autoconnect = setting(backend.updated_settings, "connection", "autoconnect");
+        const auto& autoconnect = setting(backend.patched_overrides, "connection", "autoconnect");
         EXPECT(autoconnect.type == 'b');
         EXPECT(autoconnect.boolean_value);
-        const auto& priority = setting(backend.updated_settings, "connection", "autoconnect-priority");
+        const auto& priority = setting(backend.patched_overrides, "connection", "autoconnect-priority");
         EXPECT(priority.type == 'i');
         EXPECT(priority.integer_value == 4);
-        EXPECT(setting(backend.updated_settings, "connection", "uuid").string_value == "uuid-custom");
-        EXPECT(setting(backend.updated_settings, "802-11-wireless", "ssid").bytes == std::vector<std::uint8_t>{0xff});
+        // Identity is left as stored, never rewritten.
+        EXPECT(!has_setting(backend.patched_overrides, "connection", "id"));
+        EXPECT(!has_setting(backend.patched_overrides, "connection", "uuid"));
+        EXPECT(!has_section(backend.patched_overrides, "802-11-wireless"));
         EXPECT((result == nlohmann::json{{"Id", "Custom ID"},
                                          {"Ssid", std::string("\xff", 1)},
                                          {"SsidHex", "ff"},
@@ -221,9 +244,9 @@ int main() {
             "/saved/no-id", saved_profile(std::string("a\0b", 3), "infrastructure", std::nullopt, "uuid-no-id"));
         WifiManager manager("unused", backend);
         const auto result = manager.save_profile(std::string("a\0b", 3), "", true, 0);
-        EXPECT(backend.update_calls == 1);
-        EXPECT(connection_id(backend.updated_settings) == "Wi-Fi 610062");
-        EXPECT(setting(backend.updated_settings, "connection", "uuid").string_value == "uuid-no-id");
+        EXPECT(backend.patch_calls == 1);
+        EXPECT(connection_id(backend.patched_overrides) == "Wi-Fi 610062");
+        EXPECT(!has_setting(backend.patched_overrides, "connection", "uuid"));
         EXPECT(result["Id"] == "Wi-Fi 610062");
     }
 
@@ -241,10 +264,7 @@ int main() {
         existing_backend.connections.emplace_back("/saved/secured", std::move(secured));
         WifiManager existing_manager("unused", existing_backend);
         const auto retained_result = existing_manager.save_profile("SecureNet", "", true, 0);
-        const auto& key_mgmt = setting(existing_backend.updated_settings, "802-11-wireless-security", "key-mgmt");
-        EXPECT(key_mgmt.type == 's');
-        EXPECT(key_mgmt.string_value == "wpa-psk");
-        EXPECT(!has_setting(existing_backend.updated_settings, "802-11-wireless-security", "psk"));
+        EXPECT(!has_section(existing_backend.patched_overrides, "802-11-wireless-security"));
         EXPECT(!retained_result.contains("Passphrase"));
 
         FakeWifiProfileBackend password_backend;
@@ -268,18 +288,79 @@ int main() {
         WifiManager replacement_manager("unused", replacement_backend);
         const auto replacement_result = replacement_manager.save_profile("SecureNet", "newpassword1", true, 3);
         EXPECT(replacement_backend.add_calls == 0);
-        EXPECT(replacement_backend.update_calls == 1);
+        EXPECT(replacement_backend.patch_calls == 1);
         EXPECT(replacement_backend.updated_path == "/saved/secure");
-        EXPECT(connection_id(replacement_backend.updated_settings) == "Saved SecureNet");
-        EXPECT(setting(replacement_backend.updated_settings, "connection", "uuid").string_value == "uuid-secure");
-        const auto& replacement_key_mgmt =
-            setting(replacement_backend.updated_settings, "802-11-wireless-security", "key-mgmt");
-        EXPECT(replacement_key_mgmt.type == 's');
-        EXPECT(replacement_key_mgmt.string_value == "wpa-psk");
-        const auto& replacement_psk = setting(replacement_backend.updated_settings, "802-11-wireless-security", "psk");
+        EXPECT(!has_setting(replacement_backend.patched_overrides, "connection", "id"));
+        EXPECT(!has_setting(replacement_backend.patched_overrides, "connection", "uuid"));
+        // The stored key-mgmt stays; only the secret changes.
+        EXPECT(!has_setting(replacement_backend.patched_overrides, "802-11-wireless-security", "key-mgmt"));
+        const auto& replacement_psk = setting(replacement_backend.patched_overrides, "802-11-wireless-security", "psk");
         EXPECT(replacement_psk.type == 's');
         EXPECT(replacement_psk.string_value == "newpassword1");
         EXPECT(!replacement_result.contains("Passphrase"));
+    }
+
+    {
+        // case: WifiManager keeps every stored setting when it edits an existing profile
+        using alpacahttp::util::detail::WifiSettingSection;
+        FakeWifiProfileBackend backend;
+        auto profile = saved_profile("RealNet", "infrastructure", "Real Net", "uuid-real");
+        profile["802-11-wireless-security"] = {{"key-mgmt", "sae"}};
+        backend.connections.emplace_back("/saved/real", profile);
+        backend.stored["/saved/real"] = {
+            {"connection",
+             {{"id", WifiSettingValue::str("Real Net")},
+              {"type", WifiSettingValue::str("802-11-wireless")},
+              {"uuid", WifiSettingValue::str("uuid-real")}}},
+            {"802-11-wireless",
+             {{"ssid", WifiSettingValue::bytearr("RealNet")},
+              {"mode", WifiSettingValue::str("infrastructure")},
+              {"bssid", WifiSettingValue::str("00:11:22:33:44:55")}}},
+            {"802-11-wireless-security", {{"key-mgmt", WifiSettingValue::str("sae")}}},
+            {"ipv4", {{"method", WifiSettingValue::str("manual")}, {"gateway", WifiSettingValue::str("192.0.2.1")}}},
+            {"802-1x", {{"identity", WifiSettingValue::str("observer")}}}};
+        WifiManager manager("unused", backend);
+        manager.save_profile("RealNet", "", false, 7);
+        const auto& kept = backend.stored["/saved/real"];
+        EXPECT(setting(kept, "ipv4", "method").string_value == "manual");
+        EXPECT(setting(kept, "ipv4", "gateway").string_value == "192.0.2.1");
+        EXPECT(setting(kept, "802-11-wireless", "bssid").string_value == "00:11:22:33:44:55");
+        EXPECT(setting(kept, "802-1x", "identity").string_value == "observer");
+        EXPECT(setting(kept, "802-11-wireless-security", "key-mgmt").string_value == "sae");
+        EXPECT(setting(kept, "connection", "uuid").string_value == "uuid-real");
+        EXPECT(setting(kept, "connection", "id").string_value == "Real Net");
+        EXPECT(!setting(kept, "connection", "autoconnect").boolean_value);
+        EXPECT(setting(kept, "connection", "autoconnect-priority").integer_value == 7);
+    }
+
+    {
+        // case: WifiManager sets a new passphrase on an existing profile and keeps its other sections
+        FakeWifiProfileBackend backend;
+        auto profile = saved_profile("RealNet");
+        profile["802-11-wireless-security"] = {{"key-mgmt", "sae"}};
+        backend.connections.emplace_back("/saved/real", profile);
+        backend.stored["/saved/real"] = {
+            {"connection", {{"id", WifiSettingValue::str("Saved")}, {"uuid", WifiSettingValue::str("uuid-1")}}},
+            {"802-11-wireless-security", {{"key-mgmt", WifiSettingValue::str("sae")}}},
+            {"ipv4", {{"method", WifiSettingValue::str("manual")}}},
+            {"802-1x", {{"identity", WifiSettingValue::str("observer")}}}};
+        WifiManager manager("unused", backend);
+        manager.save_profile("RealNet", "newpassword1", true, 0);
+        const auto& kept = backend.stored["/saved/real"];
+        EXPECT(setting(kept, "802-11-wireless-security", "psk").string_value == "newpassword1");
+        EXPECT(setting(kept, "802-11-wireless-security", "key-mgmt").string_value == "sae");
+        EXPECT(setting(kept, "ipv4", "method").string_value == "manual");
+        EXPECT(setting(kept, "802-1x", "identity").string_value == "observer");
+
+        // An open profile that gains a passphrase becomes wpa-psk.
+        FakeWifiProfileBackend open_backend;
+        open_backend.connections.emplace_back("/saved/open", saved_profile("OpenNet"));
+        WifiManager open_manager("unused", open_backend);
+        open_manager.save_profile("OpenNet", "newpassword1", true, 0);
+        EXPECT(setting(open_backend.patched_overrides, "802-11-wireless-security", "key-mgmt").string_value ==
+               "wpa-psk");
+        EXPECT(setting(open_backend.patched_overrides, "802-11-wireless-security", "psk").string_value ==
+               "newpassword1");
     }
 
     {
@@ -355,7 +436,7 @@ int main() {
             EXPECT(backend.add_calls == (failure == FakeWifiProfileBackend::Failure::Add ? 1 : 0));
             EXPECT(backend.connection_reads == 1);
             EXPECT(backend.role_reads == (failure == FakeWifiProfileBackend::Failure::Connections ? 0 : 1));
-            EXPECT(backend.update_calls == 0);
+            EXPECT(backend.patch_calls == 0);
         }
         FakeWifiProfileBackend backend;
         backend.connections.emplace_back("/saved", saved_profile("Existing"));
@@ -369,7 +450,7 @@ int main() {
         }
         EXPECT(rejected);
         EXPECT(backend.add_calls == 0);
-        EXPECT(backend.update_calls == 1);
+        EXPECT(backend.patch_calls == 1);
     }
 
     {
