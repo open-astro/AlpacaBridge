@@ -15,7 +15,9 @@
 #include "../config.h"
 #include <alpacacore/util/logging.h>
 #include <string>
+#include <string_view>
 #include <functional>
+#include <cctype>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -91,6 +93,18 @@ std::size_t prune_old_log_files();
 // Stored in config/runtime_state.json relative to cwd; failures are logged at
 // warning level but do not throw — callers should never let a save error block
 // the user-visible operation that requested it.
+// The one table of log-level spellings (config file, env var, API, runtime
+// state): case-insensitive, surrounding whitespace ignored. nullopt for an
+// unknown spelling.
+std::optional<alpacacore::logging::LogLevel> parse_log_level_name(std::string_view text);
+
+// Trim leading and trailing whitespace; the result views the input.
+inline std::string_view trim_view(std::string_view s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
+    return s;
+}
+
 void save_runtime_log_level(alpacacore::logging::LogLevel level);
 
 // Read the persisted log level, if any. Returns nullopt when the state file
