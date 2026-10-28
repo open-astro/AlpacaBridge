@@ -524,19 +524,23 @@ const char* core_level_to_persistent_string(alpacacore::logging::LogLevel level)
     return "INFO";
 }
 
-std::optional<alpacacore::logging::LogLevel> persistent_string_to_core_level(std::string text) {
-    std::transform(text.begin(), text.end(), text.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    if (text == "TRACE")    return alpacacore::logging::LogLevel::Trace;
-    if (text == "DEBUG")    return alpacacore::logging::LogLevel::Debug;
-    if (text == "INFO")     return alpacacore::logging::LogLevel::Info;
-    if (text == "WARN" || text == "WARNING") return alpacacore::logging::LogLevel::Warn;
-    if (text == "ERROR")    return alpacacore::logging::LogLevel::Error;
-    if (text == "CRITICAL") return alpacacore::logging::LogLevel::Critical;
+}  // namespace
+
+std::optional<alpacacore::logging::LogLevel> parse_log_level_name(std::string_view text) {
+    using alpacacore::logging::LogLevel;
+    static constexpr std::pair<std::string_view, LogLevel> kTable[] = {
+        {"trace", LogLevel::Trace},       {"debug", LogLevel::Debug},    {"info", LogLevel::Info},
+        {"warn", LogLevel::Warn},         {"warning", LogLevel::Warn},   {"error", LogLevel::Error},
+        {"critical", LogLevel::Critical}, {"fatal", LogLevel::Critical},
+    };
+    std::string lower(trim_view(text));
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const auto& [name, level] : kTable) {
+        if (lower == name) return level;
+    }
     return std::nullopt;
 }
-
-} // namespace
 
 void save_runtime_log_level(alpacacore::logging::LogLevel level) {
     try {
@@ -586,7 +590,7 @@ std::optional<alpacacore::logging::LogLevel> load_runtime_log_level() {
         if (!level_node.is_string()) {
             return std::nullopt;
         }
-        return persistent_string_to_core_level(level_node.get<std::string>());
+        return parse_log_level_name(level_node.get<std::string>());
     } catch (const std::exception& e) {
         log_warning(std::string("Failed to read runtime log state: ") + e.what());
         return std::nullopt;

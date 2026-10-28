@@ -81,21 +81,6 @@ using alpacahttp::to_lower_copy;
 
 const std::filesystem::path kPersistedDevicesFile = std::filesystem::path("config") / "registered_devices.json";
 
-const std::array<std::pair<const char*, LogLevel>, 6> kLogLevelMap = {{
-    {"TRACE", LogLevel::Trace},
-    {"DEBUG", LogLevel::Debug},
-    {"INFO", LogLevel::Info},
-    {"WARN", LogLevel::Warn},
-    {"WARNING", LogLevel::Warn},
-    {"ERROR", LogLevel::Error},
-}};
-
-std::string normalize_level_string(std::string level) {
-    std::transform(level.begin(), level.end(), level.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    return level;
-}
-
 std::string log_level_to_string(LogLevel level) {
     switch (level) {
         case LogLevel::Trace: return "TRACE";
@@ -372,22 +357,6 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         text += '\n';
     }
     return write_config_file(config_path, text, error_message);
-}
-
-std::optional<LogLevel> parse_log_level_string(const std::string& input) {
-    std::string level = normalize_level_string(input);
-    if (level == "CRITICAL") {
-        return LogLevel::Critical;
-    }
-    for (const auto& entry : kLogLevelMap) {
-        if (level == entry.first) {
-            return entry.second;
-        }
-    }
-    if (level == "FATAL") {
-        return LogLevel::Critical;
-    }
-    return std::nullopt;
 }
 
 // The (vendor, deviceType, deviceNumber) key of a persisted-list entry, read
@@ -780,19 +749,6 @@ void apply_error_status(alpacahttp::Response& response, std::int32_t error_code)
     }
 }
 
-std::optional<std::string> get_query_param_case_insensitive(const alpacahttp::Request& request, const std::string& key) {
-    if (request.has_query_param(key)) {
-        return request.get_query_param(key);
-    }
-    const std::string target = to_lower_copy(key);
-    for (const auto& entry : request.query_params()) {
-        if (to_lower_copy(entry.first) == target) {
-            return entry.second;
-        }
-    }
-    return std::nullopt;
-}
-
 // Per-client Connected tracking (issue #160): identify the caller by its
 // Alpaca ClientID (query param on GET, form/JSON field on PUT), qualified by
 // the connection's peer address (issue #163) so two clients on different
@@ -820,8 +776,8 @@ struct ClientKey {
 ClientKey extract_client_key(const alpacahttp::Request& request) {
     ClientKey result;
     if (request.method() == alpacahttp::HttpMethod::GET) {
-        if (auto value = get_query_param_case_insensitive(request, "ClientID")) {
-            result.key = *value;
+        if (request.has_query_param("ClientID")) {
+            result.key = request.get_query_param("ClientID");
             result.has_client_id = true;
         }
     } else if (!request.body().empty()) {
@@ -3069,16 +3025,14 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 bool can_move = telescope->get_can_move_axis(axis);
                 return call.ok(can_move);
             } else if (method_name == "destinationsideofpier") {
-                auto ra_value = get_query_param_case_insensitive(request, "RightAscension");
-                if (!ra_value) {
+                if (!request.has_query_param("RightAscension")) {
                     throw_bad_request("Missing parameter: RightAscension");
                 }
-                auto dec_value = get_query_param_case_insensitive(request, "Declination");
-                if (!dec_value) {
+                if (!request.has_query_param("Declination")) {
                     throw_bad_request("Missing parameter: Declination");
                 }
-                double ra = parse_double_value(*ra_value, "RightAscension");
-                double dec = parse_double_value(*dec_value, "Declination");
+                double ra = parse_double_value(request.get_query_param("RightAscension"), "RightAscension");
+                double dec = parse_double_value(request.get_query_param("Declination"), "Declination");
                 int side = telescope->get_destination_side_of_pier(ra, dec);
                 return call.ok(side);
             } else if (method_name == "athome") {
@@ -4140,11 +4094,11 @@ Response Router::dispatch_observingconditions_method(
     const Request& request = call.request();
 
     auto parse_property_name = [&]() -> std::string {
-        if (auto value = get_query_param_case_insensitive(request, "PropertyName")) {
-            return *value;
+        if (request.has_query_param("PropertyName")) {
+            return request.get_query_param("PropertyName");
         }
-        if (auto value = get_query_param_case_insensitive(request, "SensorName")) {
-            return *value;
+        if (request.has_query_param("SensorName")) {
+            return request.get_query_param("SensorName");
         }
         if (const auto* val = call.json_field("PropertyName")) {
             if (!val->is_string()) {
@@ -5044,11 +4998,21 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
                 client_tx_id = body_client_tx;
             }
 
-            std::string requested_level;
+            const nlohmann::json* level_node = nullptr;
             if (body.contains("level")) {
-                requested_level = body["level"].get<std::string>();
+                level_node = &body["level"];
             } else if (body.contains("Level")) {
-                requested_level = body["Level"].get<std::string>();
+                level_node = &body["Level"];
+            }
+            if (level_node && !level_node->is_string()) {
+                AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                                         "'level' must be a string");
+                response.set_body(err);
+                return response;
+            }
+            std::string requested_level;
+            if (level_node) {
+                requested_level = level_node->get<std::string>();
             } else {
                 AlpacaResponse err = make_error_response(
                     client_tx_id, server_tx_id,
@@ -5059,7 +5023,7 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
                 return response;
             }
 
-            auto parsed_level = parse_log_level_string(requested_level);
+            auto parsed_level = util::parse_log_level_name(requested_level);
             if (!parsed_level.has_value()) {
                 AlpacaResponse err = make_error_response(
                     client_tx_id, server_tx_id,

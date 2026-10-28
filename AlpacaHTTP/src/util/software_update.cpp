@@ -105,17 +105,11 @@ DebianVersion split_debian_version(std::string_view v) {
     return out;
 }
 
-std::string_view trim(std::string_view s) {
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
-    return s;
-}
-
 }  // namespace
 
 int compare_debian_versions(std::string_view a, std::string_view b) {
-    const DebianVersion va = split_debian_version(trim(a));
-    const DebianVersion vb = split_debian_version(trim(b));
+    const DebianVersion va = split_debian_version(util::trim_view(a));
+    const DebianVersion vb = split_debian_version(util::trim_view(b));
     if (va.epoch != vb.epoch) return va.epoch < vb.epoch ? -1 : 1;
     if (const int r = compare_version_fragment(va.upstream, vb.upstream); r != 0) return r;
     return compare_version_fragment(va.revision, vb.revision);
@@ -148,7 +142,7 @@ std::optional<std::string> find_package_version(std::string_view packages_index,
         pos = nl == std::string_view::npos ? packages_index.size() + 1 : nl + 1;
         if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
 
-        if (trim(line).empty()) {
+        if (util::trim_view(line).empty()) {
             finish_stanza();
             continue;
         }
@@ -157,8 +151,8 @@ std::optional<std::string> find_package_version(std::string_view packages_index,
         if (std::isspace(static_cast<unsigned char>(line.front()))) continue;
         const auto colon = line.find(':');
         if (colon == std::string_view::npos) continue;
-        const std::string_view key = trim(line.substr(0, colon));
-        const std::string_view value = trim(line.substr(colon + 1));
+        const std::string_view key = util::trim_view(line.substr(0, colon));
+        const std::string_view value = util::trim_view(line.substr(colon + 1));
         if (key == "Package") {
             current_package = std::string(value);
         } else if (key == "Version") {

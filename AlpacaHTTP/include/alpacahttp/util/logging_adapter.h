@@ -12,13 +12,17 @@
 
 #pragma once
 
-#include "../config.h"
 #include <alpacacore/util/logging.h>
-#include <string>
-#include <functional>
+
+#include <cctype>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
+
+#include "../config.h"
 
 namespace alpacahttp::util {
 
@@ -86,6 +90,18 @@ void set_log_retention_days(int days);
 // before today. Safe to call repeatedly; no-op when retention is disabled.
 // Returns the number of files removed.
 std::size_t prune_old_log_files();
+
+// The one table of log-level spellings (config file, env var, API, runtime
+// state): case-insensitive, surrounding whitespace ignored. nullopt for an
+// unknown spelling.
+std::optional<alpacacore::logging::LogLevel> parse_log_level_name(std::string_view text);
+
+// Trim leading and trailing whitespace; the result views the input.
+inline std::string_view trim_view(std::string_view s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
+    return s;
+}
 
 // Persist the currently-active log level so it survives a server restart.
 // Stored in config/runtime_state.json relative to cwd; failures are logged at

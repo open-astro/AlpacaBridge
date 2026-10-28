@@ -1,0 +1,3 @@
+### Fixed
+
+- **Log level spellings, port range and loglevel type**, AlpacaHTTP, issue #1756. One case-insensitive spelling table (`util::parse_log_level_name`) now serves the config file, `ALPACAHTTP_LOG_LEVEL`, the API and the saved runtime level, so `warn` loads as WARNING, `trace` as DEBUG and `critical` or `fatal` as ERROR instead of INFO. `ALPACAHTTP_PORT` outside 1-65535 (for example `70000` or `-1`) is ignored with a warning and the file value stays. POST `/management/v1/loglevel` with a non-string `level` answers 0x401 InvalidValue instead of 0x500. Covered by `AlpacaHTTP/tests/test_loglevel_port.cpp`.
