@@ -64,7 +64,8 @@ TEST_CASE("TtlStatusCache - fault() does not wait for a refill in flight", "[uti
     refill.join();
 }
 
-// Falsified by: ttl_status_cache.h get() not copying health_.fault() into fault_ after note_failure() (fault() stays empty).
+// Falsified by: ttl_status_cache.h get() not copying health_.fault() into fault_ after note_failure() (fault() stays
+// empty).
 TEST_CASE("TtlStatusCache - fault() returns the latched text after the threshold", "[util][ttl-cache]") {
     TtlStatusCache<int> cache("Dev", 1s, 3);
     fail_refills(cache, 2);
