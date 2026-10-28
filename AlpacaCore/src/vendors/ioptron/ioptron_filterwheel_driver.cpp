@@ -484,7 +484,7 @@ private:
     // never held across a wheel exchange or the connect handshake), then the protocol wrapper's mutex.
     // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
     // latch set + :WM + restore of a move against a :WP# refill and the connect/close. Nothing calls the
-    // cache (reset/invalidate/fault) while holding io_mutex_ or mutex_.
+    // cache (reset/invalidate) while holding io_mutex_ or mutex_; fault() takes only the leaf fault_mutex_.
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
 

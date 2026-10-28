@@ -46,6 +46,7 @@ set(TEST_SOURCES
     test_zwo_shared_open_table.cpp
     test_state_snapshot.cpp
     test_task_clock.cpp
+    test_ttl_status_cache.cpp
     test_utc_offset.cpp
     test_pointing_math.cpp
     test_thermal_camera_choice.cpp
@@ -75,6 +76,7 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_zwo_rotator.cpp)
+    list(APPEND TEST_SOURCES test_zwo_rotator_reverse_stall.cpp)
     list(APPEND TEST_SOURCES test_zwo_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_plus_switch.cpp)

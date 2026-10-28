@@ -585,7 +585,8 @@ private:
     // short state reads and writes, never held across an SDK call), then the SDK wrapper's own mutex.
     // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
     // device transactions (connect, close, move, halt, set_reverse, the status refill). Never take the
-    // cache mutex (reset/invalidate/fault) while holding io_mutex_ or mutex_.
+    // cache mutex (reset/invalidate) while holding io_mutex_ or mutex_. fault() takes only the
+    // cache's leaf fault_mutex_, never waits for a refill, and is safe from a getter.
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;

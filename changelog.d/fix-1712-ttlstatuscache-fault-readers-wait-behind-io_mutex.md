@@ -1,0 +1,3 @@
+### Fixed
+
+- **A ZWO CAA rotator's `Reverse` getter no longer waits for a status refill** (AlpacaCore, issue #1712): `TtlStatusCache::fault()` read the link-health latch under the cache mutex that `get()` holds across the device refill, so `get_reverse()` took the length of a move or status read in flight (248 ms against a 20 ms budget). `fault()` now reads a copy of the latch under its own leaf mutex; it can show the state from before a refill in flight. Tests: `test_ttl_status_cache.cpp` (a blocked refill, the latched text, reset and recovery) and `test_zwo_rotator_reverse_stall.cpp` (a move and a status read in flight).
