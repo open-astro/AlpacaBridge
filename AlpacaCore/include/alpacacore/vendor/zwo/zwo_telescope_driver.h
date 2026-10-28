@@ -16,10 +16,14 @@
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 
 namespace alpacacore::vendor::zwo {
+
+/// Test-only view of the stored time: disconnected public getters must refuse even an offline anchor.
+std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(const TelescopeDriver& driver);
 
 std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,
                                                       util::TaskClock& clock = util::default_task_clock());

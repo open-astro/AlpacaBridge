@@ -922,8 +922,9 @@ public:
     }
 
     GuideRate get_guide_rate() const override {
-        check_writable_state();
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         return guide_rate_;
     }
 
@@ -1371,8 +1372,9 @@ public:
     }
 
     double get_target_declination() const override {
-        check_writable_state();
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         if (!target_dec_set_) {
             throw AlpacaException("TargetDeclination has not been set", AlpacaError::ValueNotSet);
         }
@@ -1395,8 +1397,9 @@ public:
     }
 
     double get_target_right_ascension() const override {
-        check_writable_state();
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         if (!target_ra_set_) {
             throw AlpacaException("TargetRightAscension has not been set", AlpacaError::ValueNotSet);
         }
@@ -1445,13 +1448,17 @@ public:
     }
 
     std::chrono::system_clock::time_point get_utc_date() const override {
-        check_writable_state();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
-        }
+        update_link_state();
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
+        if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
+        throw AlpacaException("UTCDate has not been established; set the mount time first",
+                              AlpacaError::InvalidOperation);
+    }
 
-        return std::chrono::system_clock::now();
+    std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return utc_offset_.current(clock_.now());
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -2405,11 +2412,15 @@ private:
     // Match Connected during the handshake; neither this gate nor a getter waits on the wire.
     void check_connected(bool safety_stop = false) const {
         update_link_state();
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked(safety_stop);
+    }
+
+    void check_connected_locked(bool safety_stop = false) const {
         if (!connected_.load() || !caches_ready_.load()) {
             throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
         }
         if (!safety_stop) {
-            std::lock_guard<std::mutex> lock(mutex_);
             const auto fault = link_fault_locked();
             if (!fault.empty()) throw AlpacaException(fault, AlpacaError::DriverException);
         }
@@ -3010,6 +3021,11 @@ private:
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
 };
+
+std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(const TelescopeDriver& driver) {
+    const auto* zwo = dynamic_cast<const ZWOTelescopeDriver*>(&driver);
+    return zwo ? zwo->utc_anchor_for_testing() : std::nullopt;
+}
 
 std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,
                                                       util::TaskClock& clock) {

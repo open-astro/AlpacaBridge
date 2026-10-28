@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -722,6 +723,77 @@ TEST_CASE("iOptron Telescope Driver - a far-off client UTCDate is logged once pe
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_utc_date(far);
     CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - UTCDate stays unset until time is established",
+          "[ioptron][telescope][unit][utcdate]") {
+    alpacacore::test::FakeIoptronMount server("0025", 0.0);
+    REQUIRE(server.ok());
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, std::nullopt, std::nullopt,
+                                                                                  std::nullopt, false, clock);
+    for (int session = 0; session < 2; ++session) {
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        REQUIRE_NOTHROW(driver->get_sidereal_time());
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        driver->set_utc_date(std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
+        CHECK(driver->get_utc_date() == std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
+        driver->set_connected(false);
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
+    }
+}
+
+TEST_CASE("iOptron Telescope Driver - configured UTC sync publishes only a successful time write",
+          "[ioptron][telescope][unit][utcdate]") {
+    const bool fail_write = GENERATE(false, true);
+    alpacacore::test::FakeIoptronMount mount("0025", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, {}, {}, {}, true, clock);
+    if (fail_write) {
+        alpacacore::vendor::ioptron::set_clock_sync_hook_for_testing(*driver, [] {
+            // A closed transport makes the blind write throw; silence alone is permitted by this protocol.
+            alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance().disconnect();
+        });
+    }
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto before = std::chrono::system_clock::now();
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    if (fail_write) {
+        // Three commands, each with two cancellable 750 ms retry waits.
+        for (int retry = 0; retry < 6; ++retry) {
+            REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+            clock.advance(std::chrono::milliseconds(750));
+            REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        }
+        CHECK(mount.count(":SUT") == 0);
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    } else {
+        CHECK(mount.count(":SUT") == 1);
+        CHECK(driver->get_utc_date() >= before);
+        CHECK(driver->get_utc_date() <= std::chrono::system_clock::now());
+        const auto commands = mount.commands();
+        const auto write = std::find_if(commands.begin(), commands.end(),
+                                        [](const auto& command) { return command.rfind(":SUT", 0) == 0; });
+        REQUIRE(write != commands.end());
+        const auto sent = std::chrono::system_clock::time_point{std::chrono::seconds(946728000)} +
+                          std::chrono::milliseconds(std::stoll(write->substr(4)));
+        CHECK(driver->get_utc_date() >= sent);
+        CHECK(driver->get_utc_date() < sent + std::chrono::milliseconds(1));
+    }
     driver->set_connected(false);
 }
 

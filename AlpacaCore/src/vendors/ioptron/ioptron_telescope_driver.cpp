@@ -1279,10 +1279,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
 
-        if (!utc_offset_.valid()) {
-            utc_offset_.set(std::chrono::system_clock::now(), clock_.now());
-        }
-        return current_utc_time_locked();
+        if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
+        throw AlpacaException("UTCDate has not been established; set the mount time first",
+                              AlpacaError::InvalidOperation);
     }
     
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -2529,13 +2528,21 @@ private:
             retry_mount_command("site longitude", [&]() { protocol.set_longitude(longitude); }, &ctx);
         }
 
+        util::UtcOffset synced_time;
         if (do_clock_sync) {
             auto tz_info = compute_local_timezone_info();
             auto now_utc = std::chrono::system_clock::now();
             retry_mount_command(
                 "timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); }, &ctx);
             retry_mount_command("DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); }, &ctx);
-            retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); }, &ctx);
+            retry_mount_command(
+                "UTC clock",
+                [&]() {
+                    const auto sent_at = clock_.now();
+                    protocol.set_utc_time(now_utc);
+                    synced_time.set(now_utc, sent_at);
+                },
+                &ctx);
         }
 
         {
@@ -2562,7 +2569,7 @@ private:
                 timezone_offset_minutes_ = tz_info.offset_minutes;
                 timezone_offset_valid_ = true;
                 dst_observed_ = tz_info.dst_active;
-                utc_offset_.set(std::chrono::system_clock::now(), clock_.now());
+                if (synced_time.valid()) utc_offset_ = synced_time;
             }
         }
     }
