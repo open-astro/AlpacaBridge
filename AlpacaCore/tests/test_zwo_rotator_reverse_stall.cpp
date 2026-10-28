@@ -61,7 +61,7 @@ TEST_CASE("ZWO CAA Rotator Driver - get_reverse answers while a refill is queued
         REQUIRE(wait_for_flag(sdk.read_entered));
     }
 
-    CHECK(time_call([&] { (void)driver->get_reverse(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_reverse(); }) < kGetterBudget);
 
     if (holder.joinable()) holder.join();
     reader.join();
