@@ -129,6 +129,14 @@ fi
 # without a code change. The BUILD stays at nproc below: compiling is CPU-bound.
 CTEST_PARALLEL="${CTEST_PARALLEL:-$((PARALLEL * 2))}"
 
+# Per-test timeout, so one hang fails that test by name instead of burning the
+# job's whole time limit (issue #1796). Measured on the nightly ASan + UBSan
+# job (all vendors, 3718 cases, 4 cores, CI run 40665928481): the slowest
+# passing test took 274.85 s ("OnStep telescope - Park and FindHome race the
+# getters and a reconnect") and test_routing was at 299.67 s when a leak
+# aborted it. 900 s is 3x the slowest of them. CTEST_TIMEOUT overrides.
+CTEST_TIMEOUT="${CTEST_TIMEOUT:-900}"
+
 # One tree builds both suites (issue #1251). AlpacaHTTP adds AlpacaCore as a
 # subdirectory (AlpacaHTTP/CMakeLists.txt), so configuring it with
 # ALPACACORE_BUILD_TESTS=ON also adds AlpacaCore/tests under
@@ -155,4 +163,4 @@ check_http_floor "AlpacaHTTP (vendors ${CORE_VENDORS})" "${BUILD_DIR}" "${CORE_B
 # ci_preflight.sh alike (issue #586). Requires CMake >= 3.18. It catches only an
 # EMPTY tree; the floors above catch a shrunken suite (issue #592). One ctest
 # over the whole tree runs both suites in one parallel pool.
-ctest --test-dir "${BUILD_DIR}" --output-on-failure --no-tests=error -j "${CTEST_PARALLEL}"
+ctest --test-dir "${BUILD_DIR}" --output-on-failure --no-tests=error --timeout "${CTEST_TIMEOUT}" -j "${CTEST_PARALLEL}"
