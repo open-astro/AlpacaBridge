@@ -367,6 +367,12 @@ private:
     // The poll's one exchange, on the poll thread with no driver lock held
     // (the protocol wrapper serialises it).
     StateFrame probe() {
+        // A HID error already lost the link: release the transport and stop writing to the dead node
+        // (decision 0009, point 3). disconnect() keeps the latch, so link_alive() stays false.
+        if (!protocol_.link_alive()) {
+            protocol_.disconnect();
+            throw AlpacaException("HID transport error", AlpacaError::NotConnected);
+        }
         const auto status = protocol_.get_status();
         StateFrame frame;
         frame.position = status.position;
