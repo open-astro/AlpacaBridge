@@ -42,6 +42,7 @@ case "$1" in
         # our packaged 99-zwo-asiair-plus.rules targets): without it the rule's
         # GROUP="gpio" silently falls back to root and the service user gets
         # EACCES at connect ("Failed to open ..."). Mirrors build_and_run.sh.
+        # The gpio group is kept on purge on purpose: other software may use it.
         groupadd -f --system gpio || true
         usermod -aG gpio alpacabridge || true
 
