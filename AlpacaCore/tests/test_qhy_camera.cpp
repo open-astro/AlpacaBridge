@@ -81,7 +81,7 @@ public:
             }
             held_ = true;
             cv_.notify_all();
-            cv_.wait(lock, [this] { return released_; });
+            cv_.wait_for(lock, std::chrono::seconds(30), [this] { return released_; });
         };
     }
 
@@ -1192,7 +1192,9 @@ struct SdkGate {
 
     void hold() {
         entered = true;
-        while (!release.load()) {
+        // Bounded: a case that never releases fails its checks instead of hanging the job.
+        const auto deadline = std::chrono::steady_clock::now() + seconds(30);
+        while (!release.load() && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(milliseconds(1));
         }
     }
@@ -1403,6 +1405,29 @@ milliseconds disconnect_stepping(FakeTaskClock& clock, alpacacore::CameraDriver&
     });
     JoinPumped joiner{clock, t};
     return step_until(clock, [&] { return done.load(); }, milliseconds(10));
+}
+
+// set_cooler_on(true) on a helper thread while virtual time steps. The ON path
+// reaps the stopped PID worker with a sleep on the fake clock; a PID that exits
+// just after the first running check leaves that sleep with nobody to wake it
+// (the coverage-job hang, issue #1773). The steps are bounded, so a failure
+// returns instead of hanging; the call's exception is rethrown here.
+void cooler_on_stepping(FakeTaskClock& clock, alpacacore::CameraDriver& driver) {
+    std::atomic<bool> done{false};
+    std::exception_ptr error;
+    std::thread t([&] {
+        try {
+            driver.set_cooler_on(true);
+        } catch (...) {
+            error = std::current_exception();
+        }
+        done = true;
+    });
+    {
+        JoinPumped joiner{clock, t};
+        step_until(clock, [&] { return done.load(); }, milliseconds(10));
+    }
+    if (error) std::rethrow_exception(error);
 }
 
 // Disconnects a driver with a wedged worker: steps virtual time until the
@@ -2908,7 +2933,7 @@ TEST_CASE("QHY Camera Driver - newer cooler on supersedes an off worker before i
     driver->set_cooler_on(false);
     REQUIRE(gate.wait_until_held());
     CHECK_FALSE(driver->get_cooler_on());
-    driver->set_cooler_on(true);
+    cooler_on_stepping(clock, *driver);
     REQUIRE(driver->get_cooler_on());
 
     gate.release();
@@ -2968,7 +2993,7 @@ TEST_CASE("QHY Camera Driver - off on off stops replacement regulation while PWM
     step_until(clock, [&] { return gate.entered.load(); });
     REQUIRE(gate.entered.load());  // The old PID worker has exited; zero is already issued.
     const int regulation_before_on = sdk.regulation_calls.load();
-    driver->set_cooler_on(true);
+    cooler_on_stepping(clock, *driver);
     REQUIRE(driver->get_cooler_on());
     REQUIRE(clock.wait_for_waiters(2, seconds(2)));  // replacement PID + telemetry
     const auto waits_before_tick = clock.wait_count();
@@ -2987,7 +3012,7 @@ TEST_CASE("QHY Camera Driver - off on off stops replacement regulation while PWM
     CHECK(sdk.regulation_calls.load() == regulation_before_off);
     CHECK_FALSE(driver->get_cooler_on());
 
-    driver->set_cooler_on(true);
+    cooler_on_stepping(clock, *driver);
     REQUIRE(eventually([&] { return sdk.regulation_calls.load() > regulation_before_off; }));
     CHECK(driver->get_cooler_on());
     disconnect_stepping(clock, *driver);
@@ -3008,7 +3033,7 @@ TEST_CASE("QHY Camera Driver - cooler off during cancelled worker retirement sti
     REQUIRE(clock.wait_for_waiters(2, seconds(2)));
     driver->set_cooler_on(false);
     REQUIRE(start_gate.wait_until_held());
-    driver->set_cooler_on(true);
+    cooler_on_stepping(clock, *driver);
     REQUIRE(driver->get_cooler_on());
     start_gate.release();
     step_until(clock, [&] { return release_gate.entered.load(); });
