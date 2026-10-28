@@ -668,8 +668,7 @@ TEST_CASE("Gemini PDH Switch Driver - Connect with empty serial port names portP
 
 // Falsified by: gemini_pdh_switch_driver.cpp set_async/set_async_value return instead of throwing
 //   MethodNotImplemented, or get_state_change_complete returns false.
-TEST_CASE("Gemini PDH Switch Driver - Connected async pair and out-of-range ids",
-          "[gemini][switch][unit][fake]") {
+TEST_CASE("Gemini PDH Switch Driver - Connected async pair and out-of-range ids", "[gemini][switch][unit][fake]") {
     FakeGeminiPdh hub;
     auto driver = connect_fake_hub(hub);
 

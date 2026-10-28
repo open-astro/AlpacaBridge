@@ -147,8 +147,7 @@ TEST_CASE("ToupTek Thermal Switch Driver - Connect fails on invalid camera index
 
 // Falsified by: touptek_thermal_switch_driver.cpp get_switch_description drops the " (<camera name>)" suffix,
 //   set_switch_name writes the wrong element, or get_state_change_complete returns false.
-TEST_CASE("ToupTek Thermal Switch Driver - Connected names, descriptions and state change",
-          "[touptek][switch][unit]") {
+TEST_CASE("ToupTek Thermal Switch Driver - Connected names, descriptions and state change", "[touptek][switch][unit]") {
     alpacacore::test::FakeToupTekSDK fake;
     fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
     auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
@@ -170,7 +169,8 @@ TEST_CASE("ToupTek Thermal Switch Driver - Connected names, descriptions and sta
     CHECK(driver->get_switch_description(1) == "ToupTek camera radiator fan speed (FakeCam One)");
 
     for (const int id : {-1, 3}) {
-        require_alpaca_error([&]() { (void)driver->get_switch_description(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_switch_description(id); },
+                             alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&]() { driver->set_switch_name(id, "x"); }, alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&]() { (void)driver->get_state_change_complete(id); },
                              alpacacore::AlpacaError::InvalidValue);

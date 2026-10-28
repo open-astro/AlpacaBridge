@@ -427,8 +427,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Connected async pair and out-of-ran
 
 // Falsified by: wandererastro_box_switch_driver.cpp set_switch_name writes switch_names_[0] whatever the id,
 //   or get_switch_description returns the name instead of the table description.
-TEST_CASE("WandererAstro Box Switch Driver - Connected names and descriptions",
-          "[wandererastro][switch][unit][fake]") {
+TEST_CASE("WandererAstro Box Switch Driver - Connected names and descriptions", "[wandererastro][switch][unit][fake]") {
     alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
     driver->set_connected(true);
