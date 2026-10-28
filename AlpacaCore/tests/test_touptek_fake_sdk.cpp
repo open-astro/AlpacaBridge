@@ -487,7 +487,7 @@ TEST_CASE("ToupTek focuser - position round-trips through the AAF Set/Get pair",
     driver->set_connected(false);
 }
 
-TEST_CASE("ToupTek fake SDK - AAF rejects a Set code on a read and a Get code on a write",
+TEST_CASE("FakeToupTekSDK - AAF rejects a Set code on a read and a Get code on a write",
           "[touptek][focuser][unit][fakesdk]") {
     namespace ToupAAF = alpacacore::vendor::touptek::ToupAAF;
     FakeToupTekSDK fake;
