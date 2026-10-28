@@ -17,6 +17,7 @@
 
 #include <alpacahttp/software_update.h>
 #include <alpacahttp/util/error_mapping.h>
+#include <sys/wait.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -31,8 +32,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <sys/wait.h>
 
 #include "test_assert.h"
 
@@ -937,8 +936,8 @@ int main() {
         const fs::path dropin = dropin_dir / "alpacabridge-beta.sources";
         const fs::path log = dir / "channel.log";
         const fs::path helper = dir / "helper.sh";
-        std::ofstream(helper)
-            << replace_line(replace_line(text, "DROPIN_DIR=", dropin_dir.string()), "LOG=", log.string());
+        std::ofstream(helper) << replace_line(replace_line(text, "DROPIN_DIR=", dropin_dir.string()),
+                                              "LOG=", log.string());
         const auto stub = [&](const char* body) {
             std::ofstream(dir / "bin" / "apt-get") << "#!/bin/bash\n" << body << "\n";
             fs::permissions(dir / "bin" / "apt-get", fs::perms::owner_all);
