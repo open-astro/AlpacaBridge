@@ -333,11 +333,12 @@ private:
     };
 
     // The single fault text (decision 0009, point 5): the latched poll fault,
-    // kept after the link is lost so the management listing says why.
+    // kept after the link is lost so the management listing says why. A HID error comes first:
+    // probe() keeps failing after it, and that poll fault must not replace the transport text.
     std::string get_link_fault() const override {
+        if (connected_.load() && !protocol_.link_alive()) return "HID transport error";
         auto fault = state_.fault();
         if (!fault.empty()) return fault;
-        if (connected_.load() && !protocol_.link_alive()) return "HID transport error";
         return state_.link_lost() ? "no answer to the state poll" : std::string();
     }
 

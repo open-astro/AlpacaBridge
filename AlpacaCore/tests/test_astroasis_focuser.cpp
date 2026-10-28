@@ -350,7 +350,8 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
 }
 
 // Falsified by: astroasis_protocol_wrapper.cpp send_command() drop the link_lost_ latch on a failed hid write;
-// astroasis_focuser_driver.cpp probe() drop the !link_alive() release.
+// astroasis_focuser_driver.cpp probe() drop the !link_alive() release;
+// astroasis_focuser_driver.cpp get_link_fault() move the HID transport check after state_.fault().
 TEST_CASE("Astroasis Focuser Driver - a removed transport drops Connected at once, not after the staleness bound",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -374,6 +375,11 @@ TEST_CASE("Astroasis Focuser Driver - a removed transport drops Connected at onc
         std::lock_guard<std::mutex> lock(state->mutex);
         CHECK(state->closes >= 1);
     }
+    // Further failed polls latch the poll fault, which must not replace the transport text (decision 0009, point 5).
+    tick(clock);
+    tick(clock);
+    tick(clock);
+    CHECK(driver->get_link_fault() == "HID transport error");
 
     // Connected=true over the dead link reconnects instead of taking the idempotency return.
     {
