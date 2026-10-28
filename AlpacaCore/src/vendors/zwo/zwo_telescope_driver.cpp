@@ -1979,6 +1979,7 @@ public:
 
         util::validate_ra_dec(target_ra, target_dec, "SyncToTarget");
         // A pending setup/retry must not consume the target registers replaced by Sync.
+        // This clears setup ownership/errors, not an accepted physical slew; moving-response recovery below stops it.
         cancel_and_join_goto_thread();
         reset_position_offsets();
 

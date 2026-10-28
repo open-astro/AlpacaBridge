@@ -155,6 +155,40 @@ int setup_sent_after_return(const FakeZwoMount& mount, int at_return) {
 
 }  // namespace
 
+TEST_CASE("ZWO rejected Sync preserves an active guide pulse and its position offset",
+          "[zwo][telescope][async][sync-fence]") {
+    const int targets = GENERATE(0, 1, 2);
+    const int direction = GENERATE(0, 2);
+    Rig rig;
+    rig.connect();
+    if (targets == 1) rig.driver->set_target_right_ascension(6.0);
+    if (targets == 2) rig.driver->set_target_declination(30.0);
+
+    const double ra = rig.driver->get_right_ascension();
+    const double dec = rig.driver->get_declination();
+    rig.driver->pulse_guide(direction, 2000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.driver->get_is_pulse_guiding());
+    const double guided_ra = rig.driver->get_right_ascension();
+    const double guided_dec = rig.driver->get_declination();
+    REQUIRE((direction == 0 ? guided_dec - dec : guided_ra - ra) > 0.0);
+    const int writes = setup_count(rig.mount);
+
+    try {
+        rig.driver->sync_to_target();
+        FAIL("Sync with incomplete targets must fail");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::ValueNotSet);
+    }
+
+    CHECK(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.driver->get_right_ascension() == guided_ra);
+    CHECK(rig.driver->get_declination() == guided_dec);
+    CHECK(setup_count(rig.mount) == writes);
+    CHECK(rig.mount.count(":SMMC") == 0);
+    CHECK(rig.mount.count(":CM") == 0);
+}
+
 TEST_CASE("ZWO Sync cancels a pending GOTO retry before changing the target", "[zwo][telescope][async][sync-fence]") {
     const bool target_form = GENERATE(false, true);
     const bool fallback = GENERATE(false, true);
