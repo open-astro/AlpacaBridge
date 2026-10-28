@@ -383,8 +383,8 @@ constexpr const char* kSerialOwner = "ZWO mount";
 // Explicit pairs keep their existing sharing policy; Auto and probes require an unused endpoint.
 class NetworkEndpointClaim {
 public:
-    enum class Kind { Probe, AutoLink, ExplicitLink };
-    enum class Result { Acquired, Held, TimedOut, Cancelled };
+    enum class Kind : std::uint8_t { Probe, AutoLink, ExplicitLink };
+    enum class Result : std::uint8_t { Acquired, Held, TimedOut, Cancelled };
     ~NetworkEndpointClaim() {
         auto& reg = registry();
         {
