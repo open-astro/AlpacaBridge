@@ -10,6 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/atomic_file.h>
 #include <alpacacore/util/flat_number_file.h>
 #include <alpacacore/util/logging.h>
 
@@ -134,27 +135,17 @@ void write_flat_number_file(const std::string& path, const std::map<std::string,
     if (p.has_parent_path()) {
         std::filesystem::create_directories(p.parent_path(), ec);
     }
-    const std::string tmp = path + ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) {
-            throw std::runtime_error("cannot open " + tmp);
-        }
-        char num[64];
-        out << "{\n";
-        bool first = true;
-        for (const auto& [k, v] : m) {
-            std::snprintf(num, sizeof(num), "%.17g", v);
-            out << (first ? "" : ",\n") << "  \"" << escape(k) << "\": " << num;
-            first = false;
-        }
-        out << "\n}\n";
-        out.flush();
-        if (!out) {
-            throw std::runtime_error("write failed for " + tmp);
-        }
+    char num[64];
+    std::ostringstream out;
+    out << "{\n";
+    bool first = true;
+    for (const auto& [k, v] : m) {
+        std::snprintf(num, sizeof(num), "%.17g", v);
+        out << (first ? "" : ",\n") << "  \"" << escape(k) << "\": " << num;
+        first = false;
     }
-    std::filesystem::rename(tmp, p);
+    out << "\n}\n";
+    write_file_atomic(p, out.str());
 }
 
 }  // namespace alpacacore::util

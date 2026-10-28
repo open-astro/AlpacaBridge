@@ -34,8 +34,8 @@ struct WifiManagerTestAccess {
 namespace {
 
 using alpacahttp::util::WifiError;
-using alpacahttp::util::WifiManagerTestAccess;
 using alpacahttp::util::WifiManager;
+using alpacahttp::util::WifiManagerTestAccess;
 using alpacahttp::util::detail::WifiDeviceRoles;
 using alpacahttp::util::detail::WifiProfileBackend;
 using alpacahttp::util::detail::WifiSettings;

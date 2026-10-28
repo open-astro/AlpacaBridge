@@ -10,6 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/atomic_file.h>
 #include <alpacacore/util/flat_number_file.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/power_port_state_store.h>
@@ -237,16 +238,7 @@ bool PowerPortStateStore::begin_server_start() {
         if (p.has_parent_path()) {
             std::filesystem::create_directories(p.parent_path(), ec);
         }
-        const std::string tmp = path + ".tmp";
-        {
-            std::ofstream out(tmp, std::ios::trunc);
-            out << current << "\n";
-            out.flush();
-            if (!out) {
-                throw std::runtime_error("write failed for " + tmp);
-            }
-        }
-        std::filesystem::rename(tmp, p);
+        write_file_atomic(p, current + "\n");
     } catch (const std::exception& e) {
         // The next start will see a new boot again and apply "off" once more.
         ALPACA_LOG_WARN(kTag, std::string("Could not record the boot ID in ") + path + ": " + e.what());

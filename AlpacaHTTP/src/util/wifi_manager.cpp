@@ -12,6 +12,7 @@
 
 #include "alpacahttp/wifi_manager.h"
 
+#include <alpacacore/util/atomic_file.h>
 #include <alpacacore/util/serial_io.h>
 #include <linux/genetlink.h>
 #include <linux/netlink.h>
@@ -1366,9 +1367,11 @@ void WifiManager::set_country(const std::string& alpha2) {
 void WifiManager::persist_country(const std::string& alpha2) {
     std::error_code ec;
     std::filesystem::create_directories(state_dir_, ec);
-    std::ofstream f(country_file(), std::ios::trunc);
-    if (!f) throw WifiError("country applied but could not persist to " + country_file());
-    f << alpha2 << "\n";
+    try {
+        alpacacore::util::write_file_atomic(country_file(), alpha2 + "\n");
+    } catch (const std::exception& e) {
+        throw WifiError("country applied but could not persist to " + country_file() + ": " + e.what());
+    }
 }
 
 void WifiManager::apply_persisted_country() {
