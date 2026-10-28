@@ -18,6 +18,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/pointing.h>
@@ -273,106 +274,14 @@ class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::
     // takes mutex_ alone, so it waits at most for the few state writes between two exchanges. The wrapper's
     // own per-link lock serialises the wire itself.
     //
-    // Which locks this thread holds is recorded per driver in a thread-local table, so Wire, called from
-    // helpers that were handed no lock object, knows whether to drop mutex_ (and which lock to re-take).
-    struct HeldLocks {
-        const void* driver = nullptr;
-        bool state = false;
-        bool io = false;
-    };
-    static HeldLocks* held_locks(const void* driver, bool create) {
-        thread_local HeldLocks table[8];
-        HeldLocks* free_slot = nullptr;
-        for (auto& slot : table) {
-            if (slot.driver == driver) {
-                return &slot;
-            }
-            if (slot.driver == nullptr && free_slot == nullptr) {
-                free_slot = &slot;
-            }
-        }
-        if (create && free_slot != nullptr) {
-            free_slot->driver = driver;
-            return free_slot;
-        }
-        if (create) {
-            // More than eight drivers locked at once on this thread: Wire cannot tell it to drop the state
-            // lock, so an exchange would hold it. Never expected; say so rather than stall silently.
-            ALPACA_LOG_ERROR("SkyWatcher",
-                             "Lock table full on this thread; the state lock stays held across exchanges");
-            assert(false && "SkyWatcher lock table full on this thread");  // debug and test builds only
-        }
-        return nullptr;
-    }
-    static void release_slot(HeldLocks* slot) {
-        if (slot != nullptr && !slot->state && !slot->io) {
-            slot->driver = nullptr;
-        }
-    }
+    // The gate itself (which locks this thread holds, StateLock's two modes, dropping mutex_ around an exchange)
+    // is util::LockGate (lock_gate.h, #1729). A full lock table refuses the StateLock with DriverException
+    // before it takes any lock (decision 0016 Rule 6, #1730).
 
 public:
-    // The driver's state lock, with the operation lock above it in Mode::Io. unique_lock-shaped: lock(),
-    // unlock() (releases both) and owns_lock() mean what they meant when this was a unique_lock on mutex_,
-    // so a release point (a sleep, a join) still lets every other command in. Mode::State is for members
-    // that touch no wire: the getters, the set_connected() link probe, restart_duty_worker_if_armed().
-    class StateLock {
-    public:
-        enum class Mode : std::uint8_t { State, Io };
-
-        explicit StateLock(const SkyWatcherTelescopeDriver& driver, Mode mode = Mode::Io)
-            : driver_(&driver), mode_(mode) {
-            lock();
-        }
-        StateLock(const SkyWatcherTelescopeDriver& driver, Mode mode, std::defer_lock_t)
-            : driver_(&driver), mode_(mode) {}
-        StateLock(const StateLock&) = delete;
-        StateLock& operator=(const StateLock&) = delete;
-        StateLock(StateLock&& other) noexcept : driver_(other.driver_), mode_(other.mode_), owned_(other.owned_) {
-            other.owned_ = false;
-        }
-        StateLock& operator=(StateLock&&) = delete;
-        ~StateLock() {
-            if (owned_) {
-                unlock();
-            }
-        }
-
-        void lock() {
-            HeldLocks* held = held_locks(driver_, true);
-            if (mode_ == Mode::Io) {
-                driver_->io_mutex_.lock();
-                if (held != nullptr) {
-                    held->io = true;
-                }
-            }
-            driver_->mutex_.lock();
-            if (held != nullptr) {
-                held->state = true;
-            }
-            owned_ = true;
-        }
-        void unlock() {
-            HeldLocks* held = held_locks(driver_, false);
-            if (held != nullptr) {
-                held->state = false;
-            }
-            driver_->mutex_.unlock();
-            if (mode_ == Mode::Io) {
-                if (held != nullptr) {
-                    held->io = false;
-                }
-                driver_->io_mutex_.unlock();
-            }
-            release_slot(held);
-            owned_ = false;
-        }
-        bool owns_lock() const { return owned_; }
-
-    private:
-        const SkyWatcherTelescopeDriver* driver_;
-        Mode mode_;
-        bool owned_ = false;
-    };
+    // The driver's state lock, with the operation lock above it in Mode::Io (util::StateLock). Mode::State is
+    // for members that touch no wire: the getters, the set_connected() link probe, restart_duty_worker_if_armed().
+    using StateLock = util::StateLock;
 
 private:
     // Every exchange with the motor board goes through this gate. A caller that holds the state lock
@@ -385,26 +294,11 @@ private:
 
         template <typename F>
         decltype(auto) call(F&& f) const {
-            HeldLocks* held = held_locks(&driver_, false);
-            if (held == nullptr || !held->state) {
-                return f(*driver_.protocol_);
-            }
             // Dropping mutex_ is only safe under the operation lock: without it a second command could
             // interleave with this exchange. Every caller that holds mutex_ without io_mutex_ is Mode::State
             // (the getters, the set_connected() link probe, restart_duty_worker_if_armed()), and none of them
-            // reaches the wire.
-            assert(held->io && "Wire::call dropped mutex_ on a thread that does not hold io_mutex_");
-            held->state = false;
-            driver_.mutex_.unlock();
-            struct Restore {
-                const SkyWatcherTelescopeDriver& driver;
-                HeldLocks* held;
-                ~Restore() {
-                    driver.mutex_.lock();
-                    held->state = true;
-                }
-            } restore{driver_, held};
-            return f(*driver_.protocol_);
+            // reaches the wire; the gate asserts it.
+            return driver_.lock_gate_.exchange([&]() -> decltype(auto) { return f(*driver_.protocol_); });
         }
 
         bool connect(const ConnectionInfo& info) const {
@@ -635,7 +529,7 @@ public:
         std::lock_guard<std::mutex> transition(transition_mutex_);
         bool relink = false;
         if (connected) {
-            StateLock lock(*this, StateLock::Mode::State);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
             relink = connected_ && link_lost_locked();
         }
         if (!connected || relink) {
@@ -644,7 +538,7 @@ public:
             // the lost link must not resume against the new one.
             cancel_async_tasks();
         }
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         if (connected && !relink && connected_ && link_lost_locked()) {
             // The loss became visible after the probe above, so the tasks were
             // not cancelled. A slew task blocked on mutex_ would wake to the
@@ -888,7 +782,7 @@ public:
 
     std::string command_blind(std::string_view command, bool raw) override {
         (void)raw;
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         wire().send_raw_command(std::string(command) + "\r");
         return "";
@@ -896,7 +790,7 @@ public:
 
     bool command_bool(std::string_view command, bool raw) override {
         (void)raw;
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         std::string reply = wire().send_raw_command(std::string(command) + "\r");
         return !reply.empty() && reply[0] == '=';
@@ -904,7 +798,7 @@ public:
 
     std::string command_string(std::string_view command, bool raw) override {
         (void)raw;
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         return wire().send_raw_command(std::string(command) + "\r");
     }
@@ -916,7 +810,7 @@ public:
     }
 
     double get_altitude() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         require_site_locked();
         serve_position_locked();
@@ -943,21 +837,21 @@ public:
     double get_aperture_area() const override { return aperture_area_m2_; }
 
     bool get_at_home() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return at_home_;
     }
 
     bool get_at_park() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return parked_;
     }
 
     double get_azimuth() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         require_site_locked();
         serve_position_locked();
@@ -971,7 +865,7 @@ public:
     bool get_can_pulse_guide() const override { return true; }
 
     bool get_is_pulse_guiding() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         const auto now = clock_.now();
@@ -1003,7 +897,7 @@ public:
     bool get_can_unpark() const override { return true; }
 
     double get_declination() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         require_site_locked();
         serve_position_locked();
@@ -1013,7 +907,7 @@ public:
     }
 
     double get_declination_rate() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return dec_rate_arcsec_per_sec_;
@@ -1029,7 +923,7 @@ public:
         {
             // Idempotence check BEFORE reaping: a same-value rewrite must not
             // tear down a running duty worker it would never restart.
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             require_site_locked();  // the Dec sign reads the hemisphere
             if (tracking_rate_ != 0) {
@@ -1043,7 +937,7 @@ public:
         stop_duty_worker();
         bool need_duty = false;
         try {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             if (tracking_rate_ != 0) {
                 throw AlpacaException("DeclinationRate can only be set at the Sidereal drive rate",
@@ -1080,7 +974,7 @@ public:
     }
 
     bool get_tracking() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         // Kept as a write under the state lock, not moved into the poll's publish (#1600): the settle
@@ -1097,7 +991,7 @@ public:
         bool need_duty = false;
         bool started = false;
         {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             if (tracking) {
                 check_not_parked_locked("Tracking");
@@ -1151,7 +1045,7 @@ public:
     void restart_duty_worker_if_armed() {
         bool need_duty = false;
         {
-            StateLock lock(*this, StateLock::Mode::State);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
             need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
         }
         if (need_duty) {
@@ -1169,7 +1063,7 @@ public:
     }
 
     GuideRate get_guide_rate() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         return guide_rate_;
     }
 
@@ -1177,7 +1071,7 @@ public:
         if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
             throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
         }
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         double ra_fraction = rate.ra / kSiderealDegPerSec;
         double dec_fraction = rate.dec / kSiderealDegPerSec;
@@ -1188,7 +1082,7 @@ public:
     }
 
     double get_right_ascension() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         require_site_locked();
         serve_position_locked();
@@ -1198,7 +1092,7 @@ public:
     }
 
     double get_right_ascension_rate() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return ra_rate_sec_per_sidereal_sec_;
@@ -1209,7 +1103,7 @@ public:
     // (RA = LST - HA), so the offset is SUBTRACTED; a large offset reverses
     // the axis, which needs a stop-and-restart (":I" cannot change direction).
     void set_right_ascension_rate(double rate) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         require_site_locked();  // the RA drive direction reads the hemisphere
         if (tracking_rate_ != 0) {
@@ -1257,7 +1151,7 @@ public:
     }
 
     int get_side_of_pier() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         require_site_locked();           // the home-term sign k = s * eps reads the hemisphere
@@ -1281,7 +1175,7 @@ public:
 
     int get_destination_side_of_pier(double ra, double dec) const override {
         util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         require_site_locked();
         double lst = local_sidereal_hours();
@@ -1384,7 +1278,7 @@ public:
         bool crossing = false;
         {
             // Io mode: a command in flight reads the hemisphere between its exchanges and must see one value.
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             crossing = connected_ && tracking_ && hemisphere_south_locked() != (latitude < 0.0) &&
                        !(axis_busy_locked(kAxisRa) && axis_busy_locked(kAxisDec));
             if (crossing) {
@@ -1398,7 +1292,7 @@ public:
         stop_duty_worker();
         bool need_duty = false;
         try {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             // Re-checked under the new lock: another thread may have stopped
             // tracking or taken the axes while the mutex was released.
             const bool ra_busy = axis_busy_locked(kAxisRa);
@@ -1454,14 +1348,14 @@ public:
     void set_site_longitude(double longitude) override {
         util::validate_longitude(longitude);
         // Io mode: a command in flight reads the longitude between its exchanges and must see one value.
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         std::lock_guard<std::mutex> clock_lock(client_clock_mutex_);
         client_clock_.site_longitude = longitude;
         client_clock_.site_longitude_set = true;
     }
 
     bool get_slewing() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         // open-astro#882: commanded state (a park, a MoveAxis, the force
         // window) must not answer for a mount whose link is down.
@@ -1480,7 +1374,7 @@ public:
     // them), and the getters answer NotConnected before ValueNotSet like
     // every other property here.
     double get_target_declination() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
@@ -1490,13 +1384,13 @@ public:
 
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
@@ -1506,20 +1400,20 @@ public:
 
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
 
     int get_tracking_rate() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return tracking_rate_;
     }
 
     void set_tracking_rate(int rate) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         if (rate < 0 || rate > 2) {
             throw AlpacaException("Unsupported tracking rate", AlpacaError::InvalidValue);
@@ -1549,7 +1443,7 @@ public:
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         // Decision 0001 (#1472): a host the kernel reports as NTP-disciplined
         // has a better clock than the client, and the router has already
@@ -1593,7 +1487,7 @@ public:
         {
             // Validate before claiming the slot: a refused FindHome during
             // Park must not cancel the park task.
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             check_not_parked_locked("FindHome");
             if (homing_) {
@@ -1607,7 +1501,7 @@ public:
         bool displaced = false;
         uint64_t home_error_epoch = 0;
         {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             check_not_parked_locked("FindHome");
             if (homing_) {
@@ -1635,7 +1529,7 @@ public:
         start_slew_body(
             [this, home_error_epoch](util::OperationContext& ctx) {
                 BodyScope scope(ctx);
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                     if (owns_slew_state_locked(ctx)) {
                         homing_ = false;
@@ -1715,7 +1609,7 @@ public:
             // park in flight (its body then leaves parking_ to the newer
             // operation), so a second Park would restart the slew instead of
             // being the documented no-op.
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             if (parked_ || parking_) {
                 return;  // calling Park twice (or while parking) is harmless
@@ -1727,7 +1621,7 @@ public:
         bool displaced = false;
         uint64_t park_error_epoch = 0;
         {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             if (parked_ || parking_) {
                 return;  // calling Park twice is harmless
@@ -1759,7 +1653,7 @@ public:
         start_slew_body(
             [this, target_ra_axis, target_dec_axis, park_error_epoch](util::OperationContext& ctx) {
                 BodyScope scope(ctx);
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                     if (owns_slew_state_locked(ctx)) {
                         parking_ = false;
@@ -1817,7 +1711,7 @@ public:
         double ra_restore_rate_deg_per_sec = kSiderealDegPerSec;
         std::uint64_t my_seq = 0;  // this pulse's pulse_seq_[axis-1], taken under the dispatch lock
         {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             check_not_parked_locked("PulseGuide");
             if (duration < 0) {
@@ -1966,7 +1860,7 @@ public:
                 std::string last_error;
                 for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
                     try {
-                        StateLock lock(*this);
+                        StateLock lock(lock_gate_);
                         const double restore_rate = effective_ra_rate_locked();
                         const Wire proto = wire();
                         if ((restore_rate > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0)) {
@@ -1998,7 +1892,7 @@ public:
                                      " times: RA may be running at the guide rate: " + last_error);
             };
             try {
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 // An in-place RA pulse never goes through a stop-wait: reap a
                 // pending RightAscensionRate check here so it cannot sample
                 // the pulse rate and "restore" the tracking rate mid-pulse.
@@ -2059,13 +1953,13 @@ public:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
                 recover_ra_drive_rate();
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 release_pulse_locked(lock);
                 return;
             } catch (...) {
                 ALPACA_LOG_WARN("SkyWatcher", "PulseGuide dispatch failed with unknown exception");
                 recover_ra_drive_rate();
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 release_pulse_locked(lock);
                 return;
             }
@@ -2117,7 +2011,7 @@ public:
                 verify_elapsed = clock_.now() - verify_start;
                 // A West pulse runs faster than the drive rate, so a stopped
                 // axis reads nearer the old rate and the check resends.
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 stop_ra_if_tracking_off_locked();
             }
             // What stop_axis() actually restored, for the post-stop verify
@@ -2146,7 +2040,7 @@ public:
                 // restore never restarts an axis the client switched off.
                 bool restore = restore_tracking;
                 if (restore) {
-                    StateLock lock(*this);
+                    StateLock lock(lock_gate_);
                     restore = tracking_effectively_on_locked();
                     restore_still_wanted = restore;
                 }
@@ -2159,14 +2053,14 @@ public:
                 // a Tracking=false after the read is the setter's stop to make
                 // (#770), not undone by this restart.
                 if (!restore && axis == kAxisRa) {
-                    StateLock lock(*this);
+                    StateLock lock(lock_gate_);
                     if (tracking_effectively_on_locked()) {
                         apply_ra_drive_locked(lock);
                         return;
                     }
                 }
                 if (restore) {
-                    StateLock lock(*this);
+                    StateLock lock(lock_gate_);
                     ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
                     applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
                     // An in-place ":I" changes the PERIOD only; direction is
@@ -2189,7 +2083,7 @@ public:
                     if (live_rate_relatch_) {
                         proto.start_motion(kAxisRa);
                     }
-                    StateLock lock(*this);
+                    StateLock lock(lock_gate_);
                     // Fold the pulse rate into the model up to now first: a
                     // rate change applied from an older anchor (one the limit
                     // guard takes mid-pulse) drops the pulse distance driven
@@ -2216,7 +2110,7 @@ public:
                 } else if (restore) {
                     // Reversed pulse, or a hemisphere change mid-pulse: full
                     // stop-and-restart back to the drive rate.
-                    StateLock lock(*this);
+                    StateLock lock(lock_gate_);
                     applied_ra_restore_rate = restart_ra_in_current_direction_locked(lock);
                 } else {
                     proto.stop_motion(axis);
@@ -2224,7 +2118,7 @@ public:
                     // stop_axis_and_wait_locked, and a stale rate kept the
                     // reads drifting after the pulse ended (ConformU 4.5 pulse
                     // displacement tests read phantom motion).
-                    StateLock lock(*this);
+                    StateLock lock(lock_gate_);
                     // Fold the motion since the last anchor into the model first: with the rate
                     // zeroed the getters serve the cached angle until the next status poll, and
                     // an anchor up to the cache TTL old made ConformU's read at the end of the
@@ -2264,7 +2158,7 @@ public:
                 // step-period restore landing mid-goto corrupted the next
                 // operation (ConformU: "declination axis did not move" on the
                 // first pulse after a slew).
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 end_pulse_locked();
                 return;
             }
@@ -2311,7 +2205,7 @@ public:
                 // for false and then wrote DeclinationRate/RightAscensionRate
                 // took the busy-axis deferral and waited on a restore this
                 // task had already run: the write was stranded.
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 // open-astro#770: Tracking=false after the restore, either
                 // during the rate check above or between stop_axis()'s
                 // tracking_ read and its unlocked ":I"+":J".
@@ -2324,7 +2218,7 @@ public:
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
                                                    " attempts on axis " + std::to_string(axis) +
                                                    " — axis may still be moving (mount runaway risk): " + last_error);
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 end_pulse_locked();
                 if (connected_) {
                     manual_axis_slewing_[axis - 1] = true;
@@ -2336,7 +2230,7 @@ public:
         } catch (...) {
             // Nothing was dispatched: release the property the dispatch lock
             // published, unless a newer pulse owns it.
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             if (pulse_seq_[ai] == my_seq) {
                 pulse_axis_active_[ai] = false;
                 pulse_axis_in_motion_[ai] = false;
@@ -2346,7 +2240,7 @@ public:
     }
 
     void set_park() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         refresh_position_cache_locked(true);
         park_ra_axis_deg_ = cached_ra_axis_deg_;
@@ -2428,7 +2322,7 @@ public:
         start_goto(
             "SlewToCoordinatesAsync", ra, dec, [this, ra, dec](util::OperationContext& ctx, uint64_t slew_epoch) {
                 BodyScope scope(ctx);
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                     // Stopped before it dispatched (a newer Park/FindHome/slew,
                     // AbortSlew, disconnect): drop the initiator's window with it,
@@ -2472,7 +2366,7 @@ public:
     // Snapshot of the target pair, taken under mutex_ and released before the
     // motion call, which takes the same lock itself (open-astro#391).
     std::pair<double, double> target_or_throw() const {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
@@ -2505,7 +2399,7 @@ public:
         {
             // A refused sync must not cancel a pulse in flight (open-astro#630),
             // so gate BEFORE reaping (the copies below re-check after it).
-            StateLock gate(*this);
+            StateLock gate(lock_gate_);
             check_writable_locked();
             check_not_parked_locked("SyncToCoordinates");
             util::validate_ra_dec(ra, dec, "SyncToCoordinates");
@@ -2513,7 +2407,7 @@ public:
             refuse_sync_during_move_axis_locked();
         }
         stop_pulse_ops();
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         check_not_parked_locked("SyncToCoordinates");
         util::validate_ra_dec(ra, dec, "SyncToCoordinates");
@@ -2594,14 +2488,14 @@ public:
         // parked_ = true assignment.
         bool was_parking = false;
         {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             was_parking = parking_;
         }
         if (was_parking) {
             slew_.cancel_all_and_join();
         }
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         if (was_parking) {
             // The park slew may still be moving the axes; stop them.
@@ -2651,7 +2545,7 @@ public:
             // task leaves its axis to the reaper, so a refused MoveAxis, or a
             // MoveAxis(axis, 0) with no manual motion (which commands
             // nothing), must not cancel a pulse it will never stop.
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             check_not_parked_locked("MoveAxis");
             validate_move_axis(axis, rate);
@@ -2671,7 +2565,7 @@ public:
         uint64_t stop_task_generation = 0;
         int channel = kAxisRa;
         {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             check_writable_locked();
             check_not_parked_locked("MoveAxis");
             validate_move_axis(axis, rate);
@@ -2761,7 +2655,7 @@ public:
                         return;  // cancelled by disconnect or AbortSlew, or superseded by a newer command on this axis
                     }
                 }
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                     return;
                 }
@@ -2831,7 +2725,7 @@ public:
             // No body will run the tail: the axis was stopped above, so end the
             // manual motion here and let the caller see why (a slot refusal is
             // an AlpacaException).
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             manual_axis_slewing_[axis] = false;
             throw;
         }
@@ -2862,7 +2756,7 @@ public:
         // and the refine loop exits promptly -- without this, the refinement
         // re-slews after the abort's stop).
         slew_.cancel();
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_writable_locked();
         check_not_fully_parked_locked("AbortSlew");
         // open-astro#1341: a MoveAxis(axis, 0) stop body still polling would
@@ -2952,8 +2846,7 @@ private:
         // A connect in progress is not a connection to a client; the connect's own thread (it holds the
         // operation lock, which no getter holds) still passes, since it drives the board before it is done.
         if (session_connecting_.load()) {
-            const HeldLocks* held = held_locks(this, false);
-            if (held == nullptr || !held->io) {
+            if (!lock_gate_.holds_io()) {
                 throw AlpacaException("Not connected to Sky-Watcher mount", AlpacaError::NotConnected);
             }
         }
@@ -4036,7 +3929,7 @@ private:
             // mutex_, so never while a connect writes them. The publish below
             // takes both too: a frame is adopted between two commands, never
             // inside one (a getter takes mutex_ alone and is never behind it).
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                 return false;
             }
@@ -4064,7 +3957,7 @@ private:
             return true;
         }
         run_status_poll_after_sample_hook();
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
             return false;
         }
@@ -4327,7 +4220,7 @@ private:
             // Same preset the dispatch computed (slow mode: a live change never
             // switches speed mode). step_period_for_locked reads axis_params_
             // under the state lock taken just below.
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             if (!may_resend_locked()) {
                 return;  // a reaper owns the axis now
             }
@@ -4630,7 +4523,7 @@ private:
         while (ctx.stop_reason() == util::StopReason::None) {
             bool any_rate = false;
             try {
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 for (int i = 0; i < 2; ++i) {
                     const int channel = i + 1;
                     double rate = duty_rate_locked(channel);
@@ -4726,7 +4619,7 @@ private:
         // owns: the replacement's own bursts carry a newer motion generation.
         const bool superseded = ctx.stop_reason() == util::StopReason::Superseded;
         try {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             for (int channel = 1; channel <= 2; ++channel) {
                 if (superseded) {
                     if (ax[channel - 1].bursting && motion_generation_ == ax[channel - 1].gen && connected_) {
@@ -5949,7 +5842,7 @@ private:
             bool stop_dec = false;
             bool stop_tracking = false;
             {
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 // Superseded or cancelled: the newer body (or the
                 // disconnect) owns the baseline now.
                 if (ctx.stop_reason() != util::StopReason::None) {
@@ -6022,7 +5915,7 @@ private:
                 stop(stop_tracking, [this] { set_tracking(false); });
                 stop(stop_ra, [this] { move_axis(0, 0.0); });
                 if (all_stopped) {
-                    StateLock lock(*this);
+                    StateLock lock(lock_gate_);
                     // Not when a sync, goto or newer body has reset or taken
                     // the baseline since the decision.
                     if (ctx.stop_reason() == util::StopReason::None && limit_guard_baseline_) {
@@ -6155,7 +6048,7 @@ private:
         try {
             slew_.start(std::move(body));
         } catch (...) {
-            StateLock lock(*this);
+            StateLock lock(lock_gate_);
             rollback_locked();
             if (displaced) {
                 stop_axes_after_refused_start_locked();
@@ -6308,7 +6201,7 @@ private:
         {
             // A refused goto must not cancel a goto, park or pulse in flight,
             // so gate BEFORE touching them (the copy below re-checks).
-            StateLock gate(*this);
+            StateLock gate(lock_gate_);
             check_request_locked();
         }
         if (!body) {
@@ -6316,7 +6209,7 @@ private:
         }
         // A stale pulse timer firing mid-goto corrupts the slew.
         stop_pulse_ops();
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_request_locked();
         if (!body) {
             return lock;
@@ -6441,6 +6334,8 @@ private:
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
+    // Which of the two this thread holds, and the exchanges that drop mutex_ (#1729).
+    util::LockGate lock_gate_{io_mutex_, mutex_, "SkyWatcher"};
     // Lock-free (decision 0016 rule 3): Connected reads it without a lock. Written under mutex_.
     std::atomic<bool> connected_{false};
     // True from the moment a connect opens the session until it returns (also on failure).
