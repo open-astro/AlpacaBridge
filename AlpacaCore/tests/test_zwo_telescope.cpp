@@ -89,8 +89,8 @@ TEST_CASE("ZWO Mount Telescope Driver - Target Validation", "[zwo][telescope][un
 
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(1, conn);
 
-    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
 
     require_alpaca_error([&]() { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
@@ -100,16 +100,21 @@ TEST_CASE("ZWO Mount Telescope Driver - Target Validation", "[zwo][telescope][un
     require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
     REQUIRE_NOTHROW(driver->set_target_declination(45.0));
 
-    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 12.0);
-    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 45.0);
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Target Coordinate Set Tracking", "[zwo][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
     alpacacore::vendor::zwo::ConnectionInfo conn;
-    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
-    conn.port_path = "/dev/null";
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
 
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(4, conn);
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(4, conn, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
 
     REQUIRE_NOTHROW(driver->set_target_right_ascension(3.0));
     ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 3.0);
@@ -117,6 +122,7 @@ TEST_CASE("ZWO Mount Telescope Driver - Target Coordinate Set Tracking", "[zwo][
 
     REQUIRE_NOTHROW(driver->set_target_declination(-20.0));
     ALPACA_REQUIRE_APPROX(driver->get_target_declination(), -20.0);
+    driver->set_connected(false);
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Disconnected Behavior", "[zwo][telescope][unit]") {

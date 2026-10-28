@@ -207,6 +207,7 @@ TEST_CASE("SynScan snapshot - getters and DeviceState make no handset transactio
     auto driver = connected_driver(server, clock);
     REQUIRE(driver->get_connected());
     REQUIRE(clock.wait_for_waiters(1, milliseconds(2000)));  // the poll is parked: the connect's reads are over
+    driver->set_utc_date(std::chrono::system_clock::time_point{seconds(1800000000)});
 
     st->latency_ms = static_cast<int>(kLatency.count());
     const int before = st->transactions.load();
