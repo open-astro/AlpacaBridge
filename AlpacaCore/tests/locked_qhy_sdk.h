@@ -301,7 +301,7 @@ public:
     /// True when the members are declared fake, decorator, driver, so they
     /// destroy driver first. Members of one access level sit at rising
     /// addresses in declaration order, so this fails the reversed order
-    /// without ASan (the CI sanitizer jobs build vendors OFF).
+    /// without ASan (the CI ASan job builds vendors OFF).
     bool destroys_driver_first() const {
         const auto at = [](const auto& member) { return reinterpret_cast<std::uintptr_t>(&member); };
         return at(fake_) < at(sdk_) && at(sdk_) < at(driver_);
