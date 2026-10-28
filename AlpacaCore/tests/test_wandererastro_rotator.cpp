@@ -275,8 +275,7 @@ TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro
 
 // ASCOM Rotator: Position and MechanicalPosition are 0 <= x < 360. A target a
 // hair below zero must not round up to exactly 360.
-TEST_CASE("WandererAstro Rotator Driver - A tiny negative target stays below 360",
-          "[wandererastro][rotator][unit]") {
+TEST_CASE("WandererAstro Rotator Driver - A tiny negative target stays below 360", "[wandererastro][rotator][unit]") {
     alpacacore::test::TempSyncOffsetDir dir;
     SilentMotorRotator rotator;
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());

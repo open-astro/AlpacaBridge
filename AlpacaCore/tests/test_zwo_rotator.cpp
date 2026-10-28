@@ -314,8 +314,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Move applies the Sync offset", "[zwo][rotato
 
 // ASCOM Rotator: 0 <= x < wrap. A target a hair below zero must not round up to
 // exactly the wrap (360, or max_degree on a limited rotator).
-TEST_CASE("ZWO CAA Rotator Driver - A tiny negative target stays below the wrap",
-          "[zwo][rotator][unit][fake-sdk]") {
+TEST_CASE("ZWO CAA Rotator Driver - A tiny negative target stays below the wrap", "[zwo][rotator][unit][fake-sdk]") {
     for (const double wrap : {360.0, 270.0}) {
         alpacacore::test::TempSyncOffsetDir dir;
         FakeCAASDK sdk;
