@@ -1065,14 +1065,14 @@ TEST_CASE("SkyWatcher limits - a MoveAxis started from rest takes no baseline fr
 }
 
 // Tracking on, then MoveAxis on the Dec axis across a floor 1.5 deg below the
-// start, with every ":K" from here on ramping for 7 s: longer than the 5 s the
-// tracking stop waits for the RA axis, so that stop always times out.
+// start, with every ":K" from here on ramping for `ramp_ms` (default 7 s): longer
+// than the 5 s the tracking stop waits for the RA axis, so that stop always times out.
 // Returns the Dec and RA stop counts at the moment the Dec axis started.
 std::pair<int, int> start_guarded_move_with_slow_stops(FakeTaskClock& clock, FakeSkyWatcherMount& mount,
-                                                       alpacacore::TelescopeDriver& driver) {
+                                                       alpacacore::TelescopeDriver& driver, int ramp_ms = 7000) {
     pumped(clock, mount, [&] { driver.set_tracking(true); });
     REQUIRE(follow_until(clock, [&] { return mount.axis_running(1); }, std::chrono::milliseconds(2000)));
-    mount.set_stop_ramp_ms(7000);
+    mount.set_stop_ramp_ms(ramp_ms);
     driver.move_axis(1, -kMaxMoveAxisRate);
     REQUIRE(follow_until(clock, [&] { return mount.axis_running(2); }, std::chrono::milliseconds(2000)));
     return {mount.stop_count(2), mount.stop_count(1)};
@@ -1102,12 +1102,12 @@ TEST_CASE("SkyWatcher limits - a guard stop that fails is retried on the next po
     REQUIRE(mount.ok());
     mount.jump_axis_degrees(2, kGuardDecAxisDeg);
     auto driver = clocked_driver(mount, clock, floor_deg(kGuardAltitudeDeg - 1.5));
-    const auto [dec_stops, ra_stops] = start_guarded_move_with_slow_stops(clock, mount, *driver);
+    const auto [dec_stops, ra_stops] = start_guarded_move_with_slow_stops(clock, mount, *driver, 60000);
     static_cast<void>(dec_stops);
 
     // The first tracking stop has reached the RA axis and will time out on
-    // its 7 s ramp. A stop sent from now on lands at once, so only a retry
-    // can turn tracking off.
+    // its 60 s ramp, far past the 12 s below. A stop sent from now on lands
+    // at once, so only a retry can turn tracking off.
     REQUIRE(pump_until(clock, mount, [&] { return mount.stop_count(1) > ra_stops; }, std::chrono::seconds(4)));
     mount.set_stop_ramp_ms(0);
     CHECK(pump_until(clock, mount, [&] { return !driver->get_tracking(); }, std::chrono::seconds(12)));
