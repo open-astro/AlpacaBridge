@@ -17,6 +17,7 @@
 
 #include <alpacahttp/software_update.h>
 #include <alpacahttp/util/error_mapping.h>
+#include <sys/wait.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -914,6 +915,95 @@ int main() {
         EXPECT(after_apt.find("exit \"$rc\"") != std::string::npos);
         EXPECT(after_apt.find("mv -f \"$backup\" \"$DROPIN\"") != std::string::npos);
         EXPECT(after_apt.find("=== RESULT: failure") < after_apt.find("=== RESULT: success"));
+    }
+
+    if (std::system("command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1") == 0) {
+        // case: a stop signal during the apt-get update puts the previous drop-in back and leaves no temp file
+        // Falsified by: SystemSoftwareUpdateBackend::read_channel (software_update.cpp) always returning Beta fails
+        // the Stable expectations; removing the trap from the helper also fails it (the beta drop-in stays behind,
+        // the backup file stays, and no `killed by` line is written).
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "alpacabridge-channel-trap-test";
+        fs::remove_all(dir);
+        fs::create_directories(dir / "bin");
+        const std::string text = read_file((repo_root / "debian" / "alpacabridge-set-update-channel").string());
+        const auto replace_line = [&](std::string body, const std::string& prefix, const std::string& value) {
+            const auto at = body.find("\n" + prefix);
+            EXPECT(at != std::string::npos);
+            const auto end = body.find('\n', at + 1);
+            return body.replace(at + 1, end - at - 1, prefix + value);
+        };
+        const fs::path dropin_dir = dir / "sources.list.d";
+        const fs::path dropin = dropin_dir / "alpacabridge-beta.sources";
+        const fs::path log = dir / "channel.log";
+        const fs::path helper = dir / "helper.sh";
+        std::ofstream(helper) << replace_line(replace_line(text, "DROPIN_DIR=", dropin_dir.string()),
+                                              "LOG=", log.string());
+        const auto stub = [&](const char* body) {
+            std::ofstream(dir / "bin" / "apt-get") << "#!/bin/bash\n" << body << "\n";
+            fs::permissions(dir / "bin" / "apt-get", fs::perms::owner_all);
+        };
+        const auto leftovers = [&] {
+            int n = 0;
+            for (const auto& e : fs::directory_iterator(dropin_dir)) {
+                if (e.path().filename().string().rfind(".alpacabridge-beta.", 0) == 0) ++n;
+            }
+            return n;
+        };
+        const auto switch_to = [&](const char* channel, const char* previous, bool kill) {
+            fs::remove_all(dropin_dir);
+            fs::create_directories(dropin_dir);
+            if (previous != nullptr) std::ofstream(dropin) << previous;
+            // GNU timeout signals the whole process group, as systemd does for the unit.
+            const std::string cmd = std::string("PATH=") + (dir / "bin").string() + ":$PATH " +
+                                    (kill ? "timeout -s TERM 2 " : "") + "bash " + helper.string() + " " + channel +
+                                    " >/dev/null 2>&1";
+            const int status = std::system(cmd.c_str());
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        };
+        const auto ends_with = [&](const std::string& tail) {
+            const std::string t = read_file(log.string());
+            const auto last = t.rfind("=== RESULT:");
+            return last != std::string::npos && t.find(tail, last) != std::string::npos;
+        };
+        alpacahttp::util::SystemSoftwareUpdateBackend backend("alpacabridge-update.service", (dir / "u.log").string(),
+                                                              dropin.string(), (dir / "c.log").string());
+        const char* beta = channel_name(UpdateChannel::Beta);
+        const char* stable = channel_name(UpdateChannel::Stable);
+        const char* kBeta = "Types: deb\nURIs: https://beta.example.invalid\nComponents: beta\n";
+
+        stub("sleep 30");
+        EXPECT(switch_to(beta, nullptr, true) != 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Stable);
+        EXPECT(!fs::exists(dropin));
+        EXPECT(leftovers() == 0);
+        EXPECT(ends_with("RESULT: failure"));
+        EXPECT(ends_with("killed by SIGTERM"));
+
+        EXPECT(switch_to(stable, kBeta, true) != 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Beta);
+        EXPECT(read_file(dropin.string()) == kBeta);
+        EXPECT(leftovers() == 0);
+        EXPECT(ends_with("killed by SIGTERM"));
+
+        EXPECT(switch_to(beta, kBeta, true) != 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Beta);
+        EXPECT(read_file(dropin.string()) == kBeta);
+        EXPECT(leftovers() == 0);
+        EXPECT(ends_with("killed by SIGTERM"));
+
+        // A finished switch keeps its result: the trap is gone once apt-get update has returned.
+        stub("exit 0");
+        EXPECT(switch_to(beta, nullptr, false) == 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Beta);
+        EXPECT(fs::exists(dropin));
+        EXPECT(leftovers() == 0);
+        EXPECT(ends_with("RESULT: success"));
+        EXPECT(switch_to(stable, kBeta, false) == 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Stable);
+        EXPECT(!fs::exists(dropin));
+        EXPECT(leftovers() == 0);
+        fs::remove_all(dir);
     }
 
     {

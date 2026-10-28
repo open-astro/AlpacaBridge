@@ -7,6 +7,10 @@ case "$1" in
         rm -rf /var/lib/alpacabridge
         # The beta apt source the web UI's channel switch wrote (not owned by dpkg)
         rm -f /etc/apt/sources.list.d/alpacabridge-beta.sources
+        # Log directories of the units (systemd LogsDirectory=): not owned by
+        # dpkg, so Debian Policy 10.8 leaves their removal to purge
+        rm -rf /var/log/AlpacaBridge /var/log/alpacabridge-update
+        # The gpio group stays on purpose: other software may use it
         # Remove the system user created during install
         if getent passwd alpacabridge > /dev/null 2>&1; then
             deluser --system alpacabridge || true
