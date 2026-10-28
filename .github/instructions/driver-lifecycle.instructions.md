@@ -129,8 +129,10 @@ vendor-agnostic; do them in the driver from the start.
   record one. It never takes `mutex_` untracked: the wire call then cannot drop it, and
   every exchange runs under the state lock, which
   [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) items 1
-  and 8 rule out. Sky-Watcher still logs and keeps `mutex_` held (#1730); one shared `util/` helper
-  for both drivers will throw (#1729).
+  and 8 rule out. Two deviations remain. Sky-Watcher logs and keeps `mutex_` (and
+  `io_mutex_`) held untracked (#1730). OnStep's `StateLock::lock()` throws, but its
+  single-read `Wire::call` takes `io_mutex_` before it records it and only logs on a
+  full table (#1729). One shared `util/` helper for both drivers will throw (#1729).
 - An SDK call on a closable handle is safe only if the handle can't be closed
   underneath it. In a converted driver, `set_connected(false)` clears state under
   `mutex_` and releases it, then takes the I/O lock across the close, so the I/O
