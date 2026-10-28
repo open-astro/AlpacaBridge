@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -30,7 +31,7 @@ namespace alpacacore::vendor::touptek {
 template <class Handle>
 class SharedOpenRefs {
 public:
-    enum class Release {
+    enum class Release : std::uint8_t {
         Untracked,  // handle not open (a double close): the caller must not Close it
         StillHeld,  // another holder remains: the caller must not Close it
         Last,       // final release: the caller must Close the handle now

@@ -544,14 +544,15 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     // before the client's first DeviceState poll, (2) issue NO thermal SDK
     // call while exposure_active_, while the getters still answer from the
     // cache, and (3) resume once the exposure ends.
+    alpacacore::test::FakeTaskClock clock;
     auto fake = make_fake_with_camera();
-    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    // (1) The first poller tick runs as soon as set_connected releases mutex_,
-    // well inside the 1 s poll interval: the wait below is shorter than the
-    // interval, so a priming tick that waited a full interval would miss it.
+    // (1) The first poller tick runs as soon as set_connected releases mutex_.
+    // The task clock is not advanced yet, so a priming tick that waited a full
+    // interval would never run and the wait below would time out.
     auto wait_until = [](const std::function<bool()>& pred, std::chrono::milliseconds limit) {
         const auto deadline = std::chrono::steady_clock::now() + limit;
         while (!pred() && std::chrono::steady_clock::now() < deadline) {
@@ -563,7 +564,7 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     // voltages after, so waiting on the temperature alone let the checks below
     // run mid-tick, which the slow -O0 coverage build did (0 >= 1).
     REQUIRE(
-        wait_until([&] { return fake.call_count("get_tec_voltage_max_deciV") >= 1; }, std::chrono::milliseconds(500)));
+        wait_until([&] { return fake.call_count("get_tec_voltage_max_deciV") >= 1; }, std::chrono::milliseconds(5000)));
     CHECK(fake.call_count("get_temperature_deciC") >= 1);
     CHECK(fake.call_count("get_tec_voltage_deciV") >= 1);  // default fake camera supports the cooler
     CHECK(fake.call_count("get_tec_voltage_max_deciV") == 1);
@@ -574,7 +575,12 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     REQUIRE(wait_until([&] { return fake.call_count("wait_image") >= 1; }, std::chrono::milliseconds(2000)));
     const int temp_calls = fake.call_count("get_temperature_deciC");
     const int tec_calls = fake.call_count("get_tec_voltage_deciV");
-    std::this_thread::sleep_for(std::chrono::milliseconds(2300));
+    // Two poll intervals pass on the task clock; each tick is skipped.
+    for (int i = 0; i < 2; ++i) {
+        const auto waits = clock.wait_count();
+        clock.advance(std::chrono::milliseconds(1000));
+        REQUIRE(clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));
+    }
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
     // Getters answer from the cache (no SDK traffic) while exposing.
     CHECK_NOTHROW(driver->get_ccd_temperature());
@@ -588,6 +594,7 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     REQUIRE(wait_until(
         [&] { return !driver->get_connected() || driver->get_camera_state() == alpacacore::CameraState::Idle; },
         std::chrono::milliseconds(3000)));
+    clock.advance(std::chrono::milliseconds(1000));
     REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") > temp_calls; },
                        std::chrono::milliseconds(3000)));
 
