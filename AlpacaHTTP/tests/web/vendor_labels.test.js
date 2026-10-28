@@ -40,7 +40,9 @@ test('the gphoto configuration heading uses the same name', () => {
 });
 
 test('no visible option, heading, label or help text names gphoto2 or libgphoto2', () => {
-    const visible = [...html.matchAll(/<(option|h[1-6]|label|small|p)[^>]*>([^<]*)</g)].map((m) => m[2]);
+    // Whole inner text with inline tags (code, span, strong) stripped.
+    const visible = [...html.matchAll(/<(option|h[1-6]|label|small|p)\b[^>]*>([\s\S]*?)<\/\1>/g)]
+        .map((m) => m[2].replace(/<[^>]*>/g, ''));
     const leaks = visible.filter((t) => /gphoto/i.test(t));
     assert.deepStrictEqual(leaks, [], `visible text names the library: ${JSON.stringify(leaks)}`);
 });

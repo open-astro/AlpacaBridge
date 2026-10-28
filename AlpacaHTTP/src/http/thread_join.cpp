@@ -53,6 +53,7 @@ std::vector<std::thread>& abandoned_threads() {
 std::mutex g_hook_mutex;
 ScopedJoinHooksForTest::Hook g_test_joiner;
 ScopedJoinHooksForTest::Hook g_test_detacher;
+std::function<void()> g_worker_start_hook;
 #endif
 
 }  // namespace
@@ -123,6 +124,27 @@ ScopedJoinHooksForTest::~ScopedJoinHooksForTest() {
     std::lock_guard<std::mutex> guard(g_hook_mutex);
     g_test_joiner = nullptr;
     g_test_detacher = nullptr;
+}
+
+ScopedWorkerStartHookForTest::ScopedWorkerStartHookForTest(std::function<void()> hook) {
+    std::lock_guard<std::mutex> guard(g_hook_mutex);
+    g_worker_start_hook = std::move(hook);
+}
+
+ScopedWorkerStartHookForTest::~ScopedWorkerStartHookForTest() {
+    std::lock_guard<std::mutex> guard(g_hook_mutex);
+    g_worker_start_hook = nullptr;
+}
+
+void run_worker_start_hook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> guard(g_hook_mutex);
+        hook = g_worker_start_hook;
+    }
+    if (hook) {
+        hook();
+    }
 }
 #endif  // ALPACAHTTP_ENABLE_TEST_HOOKS
 

@@ -70,6 +70,23 @@ public:
     ScopedJoinHooksForTest(const ScopedJoinHooksForTest&) = delete;
     ScopedJoinHooksForTest& operator=(const ScopedJoinHooksForTest&) = delete;
 };
+
+// Test-only. Installs a process-wide hook that every Server worker thread
+// calls as its first action, before it touches any Server state, so a test
+// can hold new workers there (a stop() that lands before a worker has
+// executed an instruction). Must be destroyed before any Server whose
+// workers may still be starting.
+class ScopedWorkerStartHookForTest {
+public:
+    explicit ScopedWorkerStartHookForTest(std::function<void()> hook);
+    ~ScopedWorkerStartHookForTest();
+
+    ScopedWorkerStartHookForTest(const ScopedWorkerStartHookForTest&) = delete;
+    ScopedWorkerStartHookForTest& operator=(const ScopedWorkerStartHookForTest&) = delete;
+};
+
+// Runs the installed worker-start hook, if any. Called by Server's worker.
+void run_worker_start_hook();
 #endif  // ALPACAHTTP_ENABLE_TEST_HOOKS
 
 }  // namespace alpacahttp::detail

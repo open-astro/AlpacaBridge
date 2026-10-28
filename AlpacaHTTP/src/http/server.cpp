@@ -1213,6 +1213,9 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
 }
 
 void Server::worker_thread(std::uint64_t generation) {
+#ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
+    detail::run_worker_start_hook();
+#endif
     // Counted by run_server() at spawn; this thread only ever decrements.
     while (true) {
         ConnectionPtr conn;
