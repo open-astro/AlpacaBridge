@@ -351,7 +351,10 @@ private:
             // hid_read_timeout returns -1 on an error (a removed hidraw node), 0 on a timeout.
             link_lost_.store(true);
         }
-        if (bytes_read <= 0) {
+        if (bytes_read < 0) {
+            throw AlpacaException("Astroasis HID read failed", AlpacaError::DriverException);
+        }
+        if (bytes_read == 0) {
             throw AlpacaException("Astroasis HID read timed out", AlpacaError::DriverException);
         }
         // hidraw delivers full 64-byte reports today, but guard against a

@@ -392,7 +392,8 @@ TEST_CASE("Astroasis Focuser Driver - a removed transport drops Connected at onc
     driver->set_connected(false);
 }
 
-// Falsified by: polled_state.h:233 note_failure() delete the lost_.exchange(true) latch past kLinkStalenessBound.
+// Falsified by: polled_state.h:206 latch_lost() (note_failure() calls it, :253) drop the
+// lost_.exchange(true) latch past kLinkStalenessBound.
 TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound drops Connected",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
