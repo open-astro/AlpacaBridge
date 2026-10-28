@@ -2587,14 +2587,14 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_.load() || token != snapshot_.begin_poll()) return;
             const auto now = clock_.now();
-            // Expiring the startup guard is not a stopped measurement; wait for a subsequent accepted pair.
+            // Frame, GOTO completion and Park evaluation must all use this mandatory sample's guard deadline.
             if (slew_force_until_ > *frame.mandatory_at) frame.status->stop_or_tracking = false;
             if (park_command_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] ||
                 !frame.status->stop_or_tracking) {
                 frame.status->at_home = false;
             }
             if (!snapshot_.publish(token, frame)) return;
-            cached_status_ = status;
+            cached_status_ = status;  // Control paths keep raw telemetry, not the guarded client frame.
             cached_equatorial_ = eq;
             cached_equatorial_at_ = now;
             tracking_state_cached_ = *frame.tracking;
@@ -2603,7 +2603,8 @@ private:
             last_mandatory_at_ = *frame.mandatory_at;
             restored = health_.on_reply();
             // Setup/retries are not arrival; after MS acceptance, completion still needs the final pair.
-            if (!goto_setup_pending_ && status->stop_or_tracking && slew_force_until_ <= now) goto_active_ = false;
+            if (!goto_setup_pending_ && status->stop_or_tracking && slew_force_until_ <= *frame.mandatory_at)
+                goto_active_ = false;
         }
         if (restored) ALPACA_LOG_INFO("ZWO", "Mount communications restored");
         // Optional fields cannot postpone mandatory publication or restore a failed mandatory poll.

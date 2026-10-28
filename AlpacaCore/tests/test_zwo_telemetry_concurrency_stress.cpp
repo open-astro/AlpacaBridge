@@ -384,7 +384,7 @@ TEST_CASE("ZWO mandatory telemetry alone controls fault recovery and loss", "[zw
     REQUIRE(rig.driver->get_slewing());
     rig.driver->slew_to_coordinates_async(6.0, 20.0);
     REQUIRE(eventually([&] { return rig.mount.count(":MS") > 0; }));
-    rig.driver->command_string(":GVP", false);
+    rig.driver->command_string(":GVP", false);  // Drain the MS exchange before advancing virtual time.
     // A completed wire exchange does not prove the GOTO worker has resumed the poll loop.
     const int paused_polls = rig.mount.count(":GU");
     for (int step = 0; step < 2000 && !rig.mount.wait_for_count(":GU", paused_polls + 1, 1ms); ++step) rig.tick(50ms);
