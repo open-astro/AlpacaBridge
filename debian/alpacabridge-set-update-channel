@@ -71,7 +71,7 @@ tmp=""
 backup_ready=""
 existed=0
 [ ! -e "$DROPIN" ] || existed=1
-# shellcheck disable=SC2329 # invoked through trap
+# shellcheck disable=SC2329,SC2317 # invoked through trap
 on_signal() {
     trap '' TERM INT HUP
     if [ -n "$backup_ready" ]; then
