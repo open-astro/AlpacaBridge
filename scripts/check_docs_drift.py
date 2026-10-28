@@ -57,6 +57,8 @@ Checks:
      docs/failures/ and docs/decisions/
      inline code spans (`` `AlpacaCore/...` ``, `` `scripts/...` ``,
      `` `docs/...` ``, etc.) that looks like a real repo path actually exists.
+     A `<vendor>`-style placeholder span under AlpacaCore/src/vendors/ or
+     AlpacaCore/src/catalog/ must match at least one tracked file.
      First-party code-comment references to a failure or decision record must
      resolve too.
   8. The TSan job's filtered runs are identical between ci.yml and
@@ -1026,6 +1028,7 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
                 "the path-reference check cannot pair code spans reliably" % doc], 0
     seen = set()
     tracked, tracked_dirs = _tracked_paths(root)
+    tracked_all = tracked | tracked_dirs
 
     checked = 0
     for m in CODE_SPAN_RE.finditer(text):
@@ -1044,18 +1047,20 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
         # the file itself; line numbers in a resolved snapshot need not stay
         # current as code moves.
         path = re.sub(r":\d+(?:-\d+)?$", "", path)
-        # Markdown anchors / fragments (`docs/x.md#section`), glob patterns,
-        # and template placeholders (`AlpacaCore/src/vendors/<vendor>/...`)
+        # Markdown anchors / fragments (`docs/x.md#section`) and glob patterns
         # aren't real filesystem paths.
+        if "#" in path or "*" in path:
+            continue
+        # A template placeholder (`<vendor>`) is skipped, except under the
+        # descriptor trees: there `.../<vendor>/<vendor>_fields.h` must match
+        # at least one tracked file, `<x>` standing for one name.
         if "<" in path and path.startswith(DESCRIPTOR_TEMPLATE_PREFIXES):
-            # A descriptor template (`.../<vendor>/<vendor>_fields.h`) must
-            # match at least one tracked file, `<x>` standing for one name.
             pattern = re.compile(re.sub(r"<[^<>/]+>", "[^/]+", re.escape(path)) + "/?")
-            if path not in seen and not any(pattern.fullmatch(t) for t in tracked | tracked_dirs):
+            if path not in seen and not any(pattern.fullmatch(t) for t in tracked_all):
                 failures.append("%s references a descriptor path that matches no tracked file: %s" % (doc, path))
             seen.add(path)
             continue
-        if "#" in path or "*" in path or "<" in path or ">" in path:
+        if "<" in path or ">" in path:
             continue
         if path in seen:
             continue
@@ -3231,6 +3236,14 @@ def self_test():
                 f.write("See `scripts/<x>_nope.py`.\n")
             found = run_check(tmpl_other)
             check("agents md check: a templated span outside the descriptor trees stays skipped",
+                  found is not None and found == [])
+
+            tmpl_glob = repo_fixture("tmpl_glob", extra=tmpl_files)
+            with open(tmpl_glob / ".github/instructions/a.instructions.md", "a", encoding="utf-8") as f:
+                f.write("See `AlpacaCore/src/vendors/<vendor>/*.cpp` and "
+                        "`AlpacaCore/src/catalog/<kind>.md#fields`.\n")
+            found = run_check(tmpl_glob)
+            check("agents md check: a templated descriptor span with a glob or fragment stays skipped",
                   found is not None and found == [])
 
             gone = repo_fixture("gone")
