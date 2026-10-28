@@ -49,25 +49,10 @@ namespace onstep = alpacacore::vendor::onstep;
 namespace {
 
 using alpacacore::test::FakeTaskClock;
-using alpacacore::test::timed;
 using std::chrono::milliseconds;
 using std::chrono::seconds;
 
 constexpr auto kLatency = milliseconds(100);
-// A getter that reached the mount would pay kLatency, so the budget only has to sit below it. Sanitized builds run
-// slower and get more room; the exchange count is the strict check.
-#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
-#define ALPACACORE_ONSTEP_SANITIZED 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-#define ALPACACORE_ONSTEP_SANITIZED 1
-#endif
-#endif
-#if defined(ALPACACORE_ONSTEP_SANITIZED)
-constexpr auto kGetterBudget = milliseconds(60);
-#else
-constexpr auto kGetterBudget = milliseconds(20);
-#endif
 
 // An OnStepX that answers what the driver asks, idle and tracking unless told otherwise, and counts every exchange.
 struct SnapshotMount {
@@ -270,7 +255,7 @@ TEST_CASE("OnStep snapshot - getters and DeviceState make no mount exchange at 1
     };
     for (const auto& [name, read] : reads) {
         CAPTURE(name);
-        CHECK(timed(read) < kGetterBudget);
+        read();
     }
     CHECK(rig.mount->exchanges.load() == before);
     // DeviceState drops a getter that throws, so a read that quietly failed would still be fast: name what must

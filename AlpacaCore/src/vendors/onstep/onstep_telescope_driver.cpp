@@ -1260,6 +1260,9 @@ public:
         lock.unlock();
         // A Disconnect can land between the unlock and the start: the slot's body is then harmless, because
         // poll_status_once() checks the connection under the operation lock and the destructor joins the slot.
+        // A body from an earlier pulse can take the operation lock in the same gap and run one tick before
+        // start() replaces it: its reads are valid, it re-checks before publishing, and a tracking restore it
+        // sends is one the ended GOTO owes.
         start_pulse_measurement(wait);
     }
 
@@ -3001,7 +3004,9 @@ private:
                 }
             });
         } catch (const std::exception& e) {
-            ALPACA_LOG_ERROR("OnStep", std::string("Pulse-end measurement did not start: ") + e.what());
+            // A burst of PulseGuide calls can cause this (decision 0007 rule 9: INFO); IsPulseGuiding still ends at
+            // kPulseMeasureBound and the 1 s ticks go on.
+            ALPACA_LOG_INFO("OnStep", std::string("Pulse-end measurement did not start: ") + e.what());
         }
     }
 
