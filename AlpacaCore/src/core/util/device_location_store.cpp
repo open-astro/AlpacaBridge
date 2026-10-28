@@ -10,6 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/atomic_file.h>
 #include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
@@ -121,28 +122,22 @@ std::string escape(const std::string& s) {
     return r;
 }
 
-// Writes @p m to @p path (temp file + rename). Throws on failure. Caller holds store_mutex().
+// Writes @p m to @p path (write_file_atomic). Throws on failure. Caller holds store_mutex().
 void write_all_locked(const std::string& path, const std::map<std::string, std::string>& m) {
     const std::filesystem::path p(path);
     std::error_code ec;
     if (p.has_parent_path()) {
         std::filesystem::create_directories(p.parent_path(), ec);
     }
-    const std::string tmp = path + ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) throw std::runtime_error("cannot open " + tmp);
-        out << "{\n";
-        bool first = true;
-        for (const auto& [k, v] : m) {
-            out << (first ? "" : ",\n") << "  \"" << escape(k) << "\": \"" << escape(v) << "\"";
-            first = false;
-        }
-        out << "\n}\n";
-        out.flush();
-        if (!out) throw std::runtime_error("write failed for " + tmp);
+    std::ostringstream out;
+    out << "{\n";
+    bool first = true;
+    for (const auto& [k, v] : m) {
+        out << (first ? "" : ",\n") << "  \"" << escape(k) << "\": \"" << escape(v) << "\"";
+        first = false;
     }
-    std::filesystem::rename(tmp, p);
+    out << "\n}\n";
+    write_file_atomic(p, out.str());
 }
 
 }  // namespace

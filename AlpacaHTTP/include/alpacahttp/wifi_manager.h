@@ -209,6 +209,9 @@ private:
     void ensure_bus_locked();
     detail::WifiProfileBackend& profile_backend_locked();
     std::string country_file() const;
+    // Persist step of set_country; split out so tests reach it without CAP_NET_ADMIN.
+    void persist_country(const std::string& alpha2);
+    friend struct WifiManagerTestAccess;
 };
 
 }  // namespace alpacahttp::util
