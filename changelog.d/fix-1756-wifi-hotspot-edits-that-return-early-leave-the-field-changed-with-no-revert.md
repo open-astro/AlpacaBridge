@@ -1,0 +1,3 @@
+### Fixed
+
+- **A hotspot edit that cannot be applied now puts the field back** (WiFi web UI, issue #1756): when the hotspot is busy, the name is empty, 5 GHz has no country, or an unconfigured hotspot has no password, the edited name, password or band returns to its previous value and the hotspot toggle returns to its previous position, instead of looking saved. Tests in `wifi-confirm.test.js` ("hotspot name edit while busy", "hotspot toggle while busy", "hotspot name emptied", "hotspot edit on 5 GHz with no country", "hotspot toggled off on 5 GHz with no country", "hotspot not configured, no password") assert the restored value and no PUT.

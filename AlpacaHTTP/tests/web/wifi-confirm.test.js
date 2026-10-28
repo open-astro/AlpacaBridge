@@ -43,7 +43,7 @@ async function setup({ apOn, confirmAnswer, host = 'pi.local', status }) {
         'wifi-ap-toggle': makeEl({ checked: apOn }),
         'wifi-ap-ssid': makeEl({ value: 'Old Name' }),
         'wifi-ap-pass': makeEl({ value: '' }),
-        'wifi-country': makeEl({ value: 'US', options: [1] }),
+        'wifi-country': makeEl({ value: 'US', options: [1], focus() {} }),
         'wifi-message': makeEl(),
     };
     const bands = [makeEl({ dataset: { band: 'bg' } }), makeEl({ dataset: { band: 'a' } })];
