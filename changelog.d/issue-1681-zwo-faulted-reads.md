@@ -6,4 +6,5 @@
 - **ZWO AM refuses faulted site-coordinate caches** (AlpacaCore, issue #1681): both site getters use the existing link-health and loss checks without device I/O; for changed read behavior, see Breaking changes.
 
 ### Added (tests)
+- **ZWO GOTO tests wait for setup publication** (AlpacaCore, issue #1681 validation): retarget and position-feedback tests wait for polling to resume before advancing the fake clock past arrival, avoiding scheduler-dependent sanitizer failures.
 - **ZWO AM commanded-state fault coverage** (AlpacaCore, issue #1681): fake-mount regressions cover pulse and rate reads, an active guide overlapping an in-flight failed poll, site recovery, motion shortcuts, safety stops, and getter-triggered loss at the 30-second deadline with held I/O.

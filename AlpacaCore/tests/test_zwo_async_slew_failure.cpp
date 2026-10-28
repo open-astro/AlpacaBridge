@@ -467,6 +467,7 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
         REQUIRE_NOTHROW(driver->command_string(":GVP", false));
         CHECK(driver->get_slewing());
         mount.override_reply(rejected, "", 0);
+        rig.await_poll_resumed();
         rig.tick(std::chrono::milliseconds(5500));
         REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 8000));
         CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-9);  // the retarget's landing, as the mount reports
@@ -977,6 +978,7 @@ TEST_CASE("ZWO async - position reports mount feedback after GOTO", "[zwo][teles
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 22.0));
     REQUIRE(wait_until([&] { return mount.count(":MS") == 1; }, 5000));
     REQUIRE_NOTHROW(driver->command_string(":GVP", false));
+    rig.await_poll_resumed();
     rig.tick(std::chrono::milliseconds(5500));
     REQUIRE_FALSE(driver->get_slewing());
 
@@ -996,7 +998,15 @@ TEST_CASE("ZWO blocking slew - position reports mount feedback after GOTO", "[zw
     auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates(4.0, -12.0); });
     const bool sent = wait_until([&] { return mount.count(":MS") == 1; }, 5000);
     CHECK(sent);
-    CHECK_NOTHROW(driver->command_string(":GVP", false));  // Finish GOTO setup before moving its deadlines.
+    CHECK_NOTHROW(driver->command_string(":GVP", false));
+    try {
+        rig.await_poll_resumed();
+    } catch (...) {
+        driver->set_connected(false);
+        static_cast<void>(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        clock.advance(std::chrono::seconds(1));
+        throw;
+    }
     bool settled = true;
     for (int step = 0; step < 2 && slew.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++step) {
         // The telemetry worker and synchronous slew each park on the fake clock.
