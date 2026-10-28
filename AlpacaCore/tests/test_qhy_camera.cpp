@@ -1011,6 +1011,46 @@ TEST_CASE("QHY Camera Driver - a watchdog timeout is raised by ImageReady and Im
     driver->set_connected(false);
 }
 
+TEST_CASE("QHY Camera Driver - AbortExposure cancels the SDK exposure behind a watchdog failure",
+          "[qhy][camera][unit]") {
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool download_entered = false;
+    bool release_download = false;
+    auto fake = make_fake();
+    fake.before_call = [&](const std::string& fn) {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        if (fn == "get_single_frame") {
+            download_entered = true;
+            gate_cv.notify_all();
+            gate_cv.wait(lock, [&] { return release_download; });
+        } else if (fn == "cancel_exposure") {
+            release_download = true;
+            gate_cv.notify_all();
+        }
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, std::chrono::seconds(1));
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return download_entered; }));
+    }
+    // The frame call stays blocked past the deadline: the watchdog marks the
+    // exposure Failed while the worker still runs.
+    REQUIRE(eventually(
+        [&] {
+            return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+        },
+        std::chrono::seconds(5)));
+    driver->abort_exposure();
+    CHECK(fake.call_count("cancel_exposure") == 1);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(driver->get_image_ready());
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - StopExposure is not supported and AbortExposure keeps a finished frame",
           "[qhy][camera][unit]") {
     auto fake = make_fake();
