@@ -1061,16 +1061,8 @@ TEST_CASE("OnStep link loss - a fault latched on status reads serves no fresh po
     (void)driver->get_tracking();
     CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);  // the third latches
     REQUIRE_FALSE(driver->get_link_fault().empty());
-    const auto require_driver_error = [](const std::function<void()>& fn) {
-        try {
-            fn();
-            FAIL("a fresh cache was served during a fault");
-        } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-        }
-    };
-    require_driver_error([&] { (void)driver->get_right_ascension(); });
-    require_driver_error([&] { (void)driver->get_altitude(); });
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
 }
 

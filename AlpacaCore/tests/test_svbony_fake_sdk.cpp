@@ -948,23 +948,15 @@ TEST_CASE("SVBONY Camera - active exposure rejects sensor writes including auto-
     REQUIRE(sdk.wait_for_video_data(2s));
     const int writes_before = sdk.call_count("set_control_value");
     const int speed_writes_before = sdk.call_count("set_control_value.FrameSpeedMode");
-    const auto expect_invalid_operation = [](auto&& operation) {
-        try {
-            operation();
-            FAIL("sensor configuration write should be rejected during exposure");
-        } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
-        }
-    };
-    expect_invalid_operation([&] { camera->set_gain(20); });
-    expect_invalid_operation([&] { camera->set_offset(20); });
-    expect_invalid_operation([&] { camera->set_num_x(8); });
-    expect_invalid_operation([&] { camera->set_num_y(4); });
-    expect_invalid_operation([&] { camera->set_start_x(1); });
-    expect_invalid_operation([&] { camera->set_start_y(1); });
-    expect_invalid_operation([&] { camera->set_bin_x(2); });
-    expect_invalid_operation([&] { camera->set_bin_y(2); });
-    expect_invalid_operation([&] { camera->set_fast_readout(true); });
+    require_alpaca_error([&] { camera->set_gain(20); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->set_offset(20); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->set_num_x(8); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->set_num_y(4); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->set_start_x(1); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->set_start_y(1); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->set_bin_x(2); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->set_bin_y(2); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { camera->set_fast_readout(true); }, alpacacore::AlpacaError::InvalidOperation);
     CHECK(sdk.call_count("set_control_value") == writes_before);
     CHECK(sdk.call_count("set_control_value.FrameSpeedMode") == speed_writes_before);
 
