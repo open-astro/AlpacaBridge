@@ -74,9 +74,7 @@ TEST_CASE("path_exists never throws and treats unreachable paths as absent", "[s
     // Traversing through a regular file as if it were a directory is the
     // error case that makes the throwing exists() overload abort a scan.
     REQUIRE_FALSE(path_exists("/etc/hostname/not-a-directory"));
-}
 
-TEST_CASE("path_exists treats a permission error as absent instead of throwing", "[serial_by_id_scan]") {
     // EACCES on a parent directory is the only errno for which the throwing
     // exists() overload throws (libstdc++ maps ENOENT and ENOTDIR to
     // not_found). Root ignores mode bits, so the probe is skipped there.
