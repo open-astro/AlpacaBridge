@@ -43,6 +43,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZwoMount;
+using alpacacore::test::timed;
 
 alpacacore::vendor::zwo::ConnectionInfo endpoint(int port) {
     alpacacore::vendor::zwo::ConnectionInfo conn;
@@ -134,12 +135,6 @@ SlewingRead read_slewing(alpacacore::TelescopeDriver& driver, std::string* messa
 
 // ConformU's STANDARD response target for an initiator.
 constexpr auto kInitiatorBudget = std::chrono::milliseconds(1000);
-
-std::chrono::milliseconds timed(const std::function<void()>& call) {
-    const auto start = Clock::now();
-    call();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
-}
 
 // Whether a ":MS" followed the initiator: the setup is a straight run of wire exchanges, so a GOTO that was going to
 // go out does within this real-time bound.
@@ -803,7 +798,7 @@ TEST_CASE("ZWO async - a MoveAxis during GOTO setup owns the error slot (#575)",
     mount.reject_goto("2");
     mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    std::chrono::milliseconds elapsed{0};
+    std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 1.0); }));
     CHECK(elapsed < kInitiatorBudget);
     CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 500));
@@ -829,7 +824,7 @@ TEST_CASE("ZWO async - Park during GOTO setup cancels the pending GOTO (#720)",
     mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
-    std::chrono::milliseconds elapsed{0};
+    std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->park(); }));
     const int setup_at_return = setup_count(mount);
     CHECK(elapsed < kInitiatorBudget);
@@ -850,7 +845,7 @@ TEST_CASE("ZWO async - FindHome during GOTO setup cancels the pending GOTO (#720
 
     mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    std::chrono::milliseconds elapsed{0};
+    std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->find_home(); }));
     CHECK(elapsed < kInitiatorBudget);
     CHECK_FALSE(goto_sent_within_setup_window(mount));
@@ -868,7 +863,7 @@ TEST_CASE("ZWO async - MoveAxis stop during GOTO setup cancels the pending GOTO 
 
     mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    std::chrono::milliseconds elapsed{0};
+    std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 0.0); }));
     CHECK(elapsed < kInitiatorBudget);
     CHECK_FALSE(goto_sent_within_setup_window(mount));
@@ -935,7 +930,7 @@ TEST_CASE("ZWO async - Disconnect during GOTO setup cancels the pending GOTO (#7
     mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
-    std::chrono::milliseconds elapsed{0};
+    std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
     const int setup_at_return = setup_count(mount);
     CHECK(elapsed < kInitiatorBudget);
@@ -959,7 +954,7 @@ TEST_CASE("ZWO async - Disconnect during the GOTO's site/time sync sends no targ
     const int smti_before = mount.count(":SMTI");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return mount.count(":SMTI") > smti_before; }, 5000));
-    std::chrono::milliseconds elapsed{0};
+    std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
     const int setup_at_return = setup_count(mount);
     CHECK(elapsed < kInitiatorBudget);

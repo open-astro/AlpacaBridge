@@ -199,7 +199,7 @@ The build and test gates are reported `[SKIP]` in that run, because CI runs them
 
 ## Writing tests
 
-Every driver requires at minimum **8 test cases** and **30+ assertions** using Catch2. Tests live in `AlpacaCore/tests/`.
+Every driver requires at minimum **8 test cases** and **30+ assertions** using Catch2; cases 3, 4, 6 and 8 come from its `contract_sweep.h` entry ([testing rules](../.github/instructions/testing.instructions.md)). Tests live in `AlpacaCore/tests/`.
 
 ### Required test cases
 
