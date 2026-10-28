@@ -28,20 +28,14 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_zwo_caa_sdk.h"
 #include "getter_stall_probe.h"
 #include "rotator_sync_offset_test_dir.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 using FakeCAASDK = alpacacore::test::FakeZWOCAASDK;
 
@@ -528,8 +522,8 @@ TEST_CASE("ZWO CAA Rotator Driver - Name and UniqueID answer while a connect hol
     driver->connect();
     REQUIRE(wait_for_flag(sdk.open_entered));
 
-    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
-    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
     CHECK(driver->get_connecting());  // the open is still in flight, so the timings above are not vacuous
 
     REQUIRE(wait_until_connected(*driver));
@@ -557,9 +551,9 @@ TEST_CASE("ZWO CAA Rotator Driver - Identity answers while a status read is in f
     });
     REQUIRE(wait_for_flag(sdk.read_entered));
 
-    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
-    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
-    CHECK(time_call([&] { CHECK(driver->get_can_reverse()); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(timed([&] { CHECK(driver->get_can_reverse()); }) < kGetterBudget);
     CHECK(sdk.busy.load() > 0);  // the refill is still in flight
 
     reader.join();
@@ -640,7 +634,7 @@ TEST_CASE("ZWO CAA Rotator Driver - A disconnect waits for the exchange in fligh
         REQUIRE(wait_for_flag(sdk.move_entered));
     }
 
-    CHECK(time_call([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    CHECK(timed([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
     worker.join();
     CHECK_FALSE(sdk.closed_while_busy.load());
     CHECK_FALSE(driver->get_connected());

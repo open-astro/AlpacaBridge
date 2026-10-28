@@ -12,7 +12,7 @@ Grammar: `- "<case name>": <path>:<line> <change>`. `<path>` must exist in the
 checkout and be production code (`AlpacaCore/src|include`, `AlpacaHTTP/src|web`).
 A test-helper path (`AlpacaCore/tests`, `AlpacaHTTP/tests`) is accepted only when
 the case's own name or tags say the helper is the subject (`Fake*`, `PtyPair`,
-`StressCallGuard`, `[stress-guard]`). `<change>` has at least 3 words.
+`StressCallGuard`, `[stress-guard]`, `[driver_rig]`). `<change>` has at least 3 words.
 
 What counts as a new case (read from `git diff <merge-base>...HEAD`):
   * Catch2: a registration macro (the `CATCH_TEST_MACROS` tuple of
@@ -72,7 +72,7 @@ PRODUCTION_PREFIXES = (
 )
 HELPER_PREFIXES = ("AlpacaCore/tests/", "AlpacaHTTP/tests/")
 HELPER_SUBJECT_RE = re.compile(
-    r"\bFake[A-Za-z0-9_]*|\bPtyPair\b|\bStressCallGuard\b|\[stress-guard\]"
+    r"\bFake[A-Za-z0-9_]*|\bPtyPair\b|\bStressCallGuard\b|\[stress-guard\]|\[driver_rig\]"
 )
 
 HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*|__)?\s*falsified by\s*:?\s*(?:\*\*|__)?\s*:?\s*$",
@@ -617,7 +617,7 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     errs = evaluate({"A": set()}, [("A", "AlpacaCore/tests/t.cpp", "x y z")], [], always)
     check("helper path rejected for plain case", len(errs) == 1 and "test helper" in errs[0])
     for nm, tg in [("FakeSdk throws", set()), ("PtyPair closes", set()), ("StressCallGuard counts", set()),
-                   ("Harness self-test", {"stress-guard"})]:
+                   ("Harness self-test", {"stress-guard"}), ("Shared helper", {"driver_rig"})]:
         errs = evaluate({nm: tg}, [(nm, "AlpacaCore/tests/fake.h", "x y z")], [], always)
         check("helper path accepted: " + nm, not errs)
     for nm, tg in [("Driver connects over the fake", set()), ("Camera connect", {"fakesdk"}),

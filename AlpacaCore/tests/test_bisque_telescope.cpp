@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_bisque_mount.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
@@ -38,14 +39,7 @@ using alpacacore::DeviceType;
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 alpacacore::vendor::bisque::ConnectionInfo loopback(int port) {
     alpacacore::vendor::bisque::ConnectionInfo info;

@@ -40,6 +40,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -305,24 +306,18 @@ TEST_CASE("Celestron Telescope Driver - all four equatorial slews are refused wh
     REQUIRE_FALSE(driver->get_tracking());
     const double ra = no_flip_ra_hours();
 
-    const auto require_code = [](const std::function<void()>& call, int code) {
-        try {
-            call();
-            FAIL("Expected an AlpacaException");
-        } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == code);
-        }
-    };
+    using alpacacore::test::require_alpaca_error;
     // Argument validation comes first: a bad Dec is InvalidValue even with Tracking off.
-    require_code([&] { driver->slew_to_coordinates(ra, 95.0); }, alpacacore::AlpacaError::InvalidValue);
-    require_code([&] { driver->slew_to_coordinates_async(ra, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->slew_to_coordinates(ra, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(ra, 95.0); }, alpacacore::AlpacaError::InvalidValue);
 
-    require_code([&] { driver->slew_to_coordinates(ra, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
-    require_code([&] { driver->slew_to_coordinates_async(ra, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->slew_to_coordinates(ra, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(ra, 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
     driver->set_target_right_ascension(ra);
     driver->set_target_declination(20.0);
-    require_code([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
-    require_code([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
 
     // Nothing reached the mount, and the driver is not slewing.
     CHECK_FALSE(wait_until([&] { return st->goto_count.load() != 0; }, 300));

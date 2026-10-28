@@ -46,6 +46,7 @@
 #include <utility>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
 #include "skywatcher_fake_clock.h"
@@ -177,14 +178,7 @@ std::string require_below_floor_refusal(const std::function<void()>& fn) {
     return {};
 }
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected an AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 }  // namespace
 

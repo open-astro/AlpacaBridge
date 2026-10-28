@@ -24,19 +24,13 @@
 
 #include "../src/vendors/zwo/zwo_fields.h"
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_zwo_sdk.h"
 #include "getter_stall_probe.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 } // namespace
 
@@ -363,8 +357,8 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Name and UniqueID answer while a conne
     driver->connect();
     REQUIRE(wait_for_flag(sdk.open_entered));
 
-    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
-    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
     CHECK(driver->get_connecting());  // the open is still in flight, so the timings above are not vacuous
 
     REQUIRE(wait_until_connected(*driver));
@@ -390,10 +384,10 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Identity and names answer while a stat
     });
     REQUIRE(wait_for_flag(sdk.read_entered));
 
-    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
-    CHECK(time_call([&] { CHECK(driver->get_switch_name(0) == "DewHeater"); }) < kGetterBudget);
-    CHECK(time_call([&] { (void)driver->get_switch_description(0); }) < kGetterBudget);
-    CHECK(time_call([&] { CHECK(driver->get_max_switch_value(0) == 100.0); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(timed([&] { CHECK(driver->get_switch_name(0) == "DewHeater"); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_switch_description(0); }) < kGetterBudget);
+    CHECK(timed([&] { CHECK(driver->get_max_switch_value(0) == 100.0); }) < kGetterBudget);
     CHECK(sdk.busy.load() > 0);  // the refill is still in flight
 
     reader.join();
@@ -432,7 +426,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - A disconnect waits for the exchange in
         REQUIRE(wait_for_flag(sdk.write_entered));
     }
 
-    CHECK(time_call([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    CHECK(timed([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
     worker.join();
     CHECK_FALSE(sdk.closed_while_busy.load());
     CHECK_FALSE(driver->get_connected());

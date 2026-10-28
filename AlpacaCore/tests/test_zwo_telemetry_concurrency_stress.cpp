@@ -29,6 +29,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_mount.h"
@@ -37,6 +38,7 @@
 namespace {
 using namespace std::chrono_literals;
 using namespace alpacacore;
+using alpacacore::test::time_stamp_of;
 
 bool eventually(const std::function<bool()>& predicate) {
     const auto deadline = std::chrono::steady_clock::now() + 5s;
@@ -542,12 +544,7 @@ TEST_CASE("ZWO a long pulse pause preserves the link without renewing measuremen
     rig.mount.set_moving(moving);
     rig.connect();
     const int pairs = rig.mount.count(":GR");
-    const auto measured_stamp = [&] {
-        for (const auto& item : rig.driver->get_device_state())
-            if (item.name == "TimeStamp") return std::get<std::string>(item.value);
-        return std::string{};
-    };
-    const auto before = measured_stamp();
+    const auto before = time_stamp_of(*rig.driver);
     REQUIRE_FALSE(before.empty());
     if (between_status_and_pair) {
         rig.mount.hold_reply(":GU");
@@ -572,7 +569,7 @@ TEST_CASE("ZWO a long pulse pause preserves the link without renewing measuremen
     CHECK(rig.driver->get_slewing() == moving);
     CHECK(rig.mount.count(":GR") == pairs);
     // Wall UTC did not advance with the fake clock: an older stamp proves the age was not renewed.
-    CHECK(measured_stamp() < before);
+    CHECK(time_stamp_of(*rig.driver) < before);
     REQUIRE(rig.mount.drop_link());
     // Even during the pause, a failed guide write or an explicit exchange observes transport loss.
     CHECK_THROWS_AS(rig.driver->command_string(":GVP", false), AlpacaException);

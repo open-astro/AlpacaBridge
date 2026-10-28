@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_celestron_cgx_mount.h"
 
 namespace {
@@ -407,25 +408,18 @@ TEST_CASE("Celestron CGX AUX wrapper - exposes typed position, home and slew ope
 TEST_CASE("Celestron CGX AUX wrapper - slow GOTO preserves validation and ambiguous timeout",
           "[celestron][cgx][protocol][integration]") {
     using namespace std::chrono_literals;
+    using alpacacore::test::require_alpaca_error;
     using alpacacore::vendor::celestron::CelestronCgxProtocol;
     using alpacacore::vendor::celestron::CgxAxis;
-    const auto require_error = [](auto&& call, int expected) {
-        try {
-            call();
-            FAIL("Expected AlpacaException");
-        } catch (const alpacacore::AlpacaException& error) {
-            REQUIRE(error.error_code() == expected);
-        }
-    };
     CelestronCgxProtocol disconnected;
-    require_error([&] { disconnected.goto_axis_slow(CgxAxis::RightAscension, 0x1000000); },
-                  alpacacore::AlpacaError::InvalidValue);
-    require_error([&] { disconnected.goto_axis_slow(static_cast<CgxAxis>(0x12), 0); },
-                  alpacacore::AlpacaError::InvalidValue);
-    require_error([&] { disconnected.goto_axis_slow(CgxAxis::RightAscension, 0, 0ms); },
-                  alpacacore::AlpacaError::InvalidValue);
-    require_error([&] { disconnected.goto_axis_slow(CgxAxis::RightAscension, 0); },
-                  alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { disconnected.goto_axis_slow(CgxAxis::RightAscension, 0x1000000); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { disconnected.goto_axis_slow(static_cast<CgxAxis>(0x12), 0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { disconnected.goto_axis_slow(CgxAxis::RightAscension, 0, 0ms); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { disconnected.goto_axis_slow(CgxAxis::RightAscension, 0); },
+                         alpacacore::AlpacaError::NotConnected);
     for (const bool applied : {false, true}) {
         alpacacore::test::FakeCelestronCgxMount mount;
         REQUIRE(mount.ok());
@@ -436,15 +430,15 @@ TEST_CASE("Celestron CGX AUX wrapper - slow GOTO preserves validation and ambigu
         // fail without replaying the destination or reporting completion.
         mount.drop_next_reply(0x10, 0x17, applied);
         const auto started = std::chrono::steady_clock::now();
-        require_error([&] { protocol.goto_axis_slow(CgxAxis::RightAscension, 0x123456, 50ms); },
-                      alpacacore::AlpacaError::DriverException);
+        require_alpaca_error([&] { protocol.goto_axis_slow(CgxAxis::RightAscension, 0x123456, 50ms); },
+                             alpacacore::AlpacaError::DriverException);
         CHECK(std::chrono::steady_clock::now() - started < 500ms);
         CHECK(mount.count_command(0x10, 0x17) == 1);
         CHECK(mount.count_command(0x10, 0x02) == 0);
         CHECK_FALSE(protocol.is_healthy());
         CHECK(protocol.session_generation() != generation);
-        require_error([&] { protocol.goto_axis_slow(CgxAxis::RightAscension, 0x123456); },
-                      alpacacore::AlpacaError::DriverException);
+        require_alpaca_error([&] { protocol.goto_axis_slow(CgxAxis::RightAscension, 0x123456); },
+                             alpacacore::AlpacaError::DriverException);
         CHECK(mount.count_command(0x10, 0x17) == 1);
     }
 }

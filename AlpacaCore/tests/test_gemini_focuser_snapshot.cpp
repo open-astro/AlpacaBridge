@@ -29,6 +29,7 @@
 #include <variant>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_gemini_focuser.h"
 #include "fake_task_clock.h"
 
@@ -281,17 +282,10 @@ TEST_CASE("Gemini Focuser Snapshot - a fault that stands past the link-loss boun
     clock.advance(31s);
     REQUIRE(clock.wait_for_woken_settled(kBound));
     CHECK(driver->get_connected() == false);
-    const auto expect_not_connected = [](const std::function<void()>& call) {
-        try {
-            call();
-            FAIL("expected NotConnected");
-        } catch (const alpacacore::AlpacaException& e) {
-            CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
-        }
-    };
-    expect_not_connected([&] { (void)driver->get_position(); });
-    expect_not_connected([&] { (void)driver->get_is_moving(); });
-    expect_not_connected([&] { driver->move(500); });
+    using alpacacore::test::require_alpaca_error;
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->move(500); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_device_state().empty());
     // on_lost() released the transport.
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(fake.slave_path()));

@@ -19,17 +19,11 @@
 #include <functional>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 // Synthetic >G# frame in the vendor driver's positional layout (tag letters
 // are only split points, so any letter from the D/U/A/T/M/B/C/S/H/V/P set

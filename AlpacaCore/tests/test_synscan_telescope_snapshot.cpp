@@ -39,6 +39,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -162,13 +163,6 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver_without_site(alpac
     return driver;
 }
 
-template <typename Fn>
-std::chrono::microseconds timed(Fn&& fn) {
-    const auto start = std::chrono::steady_clock::now();
-    fn();
-    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
-}
-
 bool has_entry(const alpacacore::TelescopeDriver& driver, const std::string& name) {
     for (const auto& entry : driver.get_device_state()) {
         if (entry.name == name) return true;
@@ -176,25 +170,9 @@ bool has_entry(const alpacacore::TelescopeDriver& driver, const std::string& nam
     return false;
 }
 
-std::string time_stamp_of(const alpacacore::TelescopeDriver& driver) {
-    for (const auto& entry : driver.get_device_state()) {
-        if (entry.name == "TimeStamp") return std::get<std::string>(entry.value);
-    }
-    return {};
-}
-
-std::chrono::system_clock::time_point parse_timestamp(const std::string& text) {
-    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
-    REQUIRE(std::sscanf(text.c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h, &mi, &s, &ms) == 7);
-    std::tm tm{};
-    tm.tm_year = y - 1900;
-    tm.tm_mon = mo - 1;
-    tm.tm_mday = d;
-    tm.tm_hour = h;
-    tm.tm_min = mi;
-    tm.tm_sec = s;
-    return std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
-}
+using alpacacore::test::parse_timestamp;
+using alpacacore::test::time_stamp_of;
+using alpacacore::test::timed;
 
 }  // namespace
 

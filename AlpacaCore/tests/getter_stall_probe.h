@@ -18,8 +18,11 @@
 #include <chrono>
 #include <thread>
 
+#include "driver_rig.h"
+
 // Helpers for the getters-never-wait tests (decision 0016): a fake holds one device call open,
-// the test waits until that call is in flight, then times a getter that needs no device access.
+// the test waits until that call is in flight, then times a getter that needs no device access
+// (`timed` from driver_rig.h).
 namespace alpacacore::test {
 
 // Budget a no-I/O getter must meet while a device transaction of 200 ms or more is in flight.
@@ -27,14 +30,6 @@ inline constexpr std::chrono::milliseconds kGetterBudget{20};
 
 // How long a fake holds a device call open: well past kGetterBudget, well under the settle budgets.
 inline constexpr std::chrono::milliseconds kHoldOpen{300};
-
-/// How long `fn` takes to return.
-template <typename Fn>
-std::chrono::milliseconds time_call(Fn&& fn) {
-    const auto start = std::chrono::steady_clock::now();
-    fn();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
-}
 
 /// Polls `flag` until it is set or `budget` runs out; false means the fake call never started.
 inline bool wait_for_flag(const std::atomic<bool>& flag, std::chrono::milliseconds budget = std::chrono::seconds(2)) {
