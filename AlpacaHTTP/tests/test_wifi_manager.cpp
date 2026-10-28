@@ -25,10 +25,17 @@
 #include <vector>
 
 #include "test_assert.h"
+namespace alpacahttp::util {
+struct WifiManagerTestAccess {
+    static void persist_country(WifiManager& manager, const std::string& alpha2) { manager.persist_country(alpha2); }
+};
+}  // namespace alpacahttp::util
+
 namespace {
 
 using alpacahttp::util::WifiError;
 using alpacahttp::util::WifiManager;
+using alpacahttp::util::WifiManagerTestAccess;
 using alpacahttp::util::detail::WifiDeviceRoles;
 using alpacahttp::util::detail::WifiProfileBackend;
 using alpacahttp::util::detail::WifiSettings;
@@ -394,6 +401,26 @@ int main() {
         EXPECT(backend.role_reads == 0);
         EXPECT(backend.add_calls == 0);
         EXPECT(backend.update_calls == 0);
+    }
+
+    {
+        // case: WifiManager persist_country replaces the file atomically and reports a failed write
+        TemporaryDirectory dir;
+        FakeWifiProfileBackend backend;
+        WifiManager manager(dir.path(), backend);
+        const auto country = std::filesystem::path(dir.path()) / "wifi_country";
+        std::filesystem::create_symlink("/dev/full", country);
+        bool threw = false;
+        try {
+            WifiManagerTestAccess::persist_country(manager, "US");
+        } catch (const WifiError&) {
+            threw = true;
+        }
+        // Bounded read: before the fix the path is still the /dev/full symlink, which reads as endless NULs.
+        char stored[3] = {};
+        std::ifstream in(country);
+        in.read(stored, 2);
+        EXPECT(threw || std::string(stored) == "US");
     }
 
     std::cout << "Wi-Fi profile backend tests passed\n";
