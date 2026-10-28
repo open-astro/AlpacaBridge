@@ -97,7 +97,8 @@ public:
     PolledState& operator=(const PolledState&) = delete;
     ~PolledState() { stop_and_join(); }
 
-    /// At connect, with no driver lock held (AsyncOperation rule 10).
+    /// At connect, with no driver lock held (AsyncOperation rule 10). False when no frame was
+    /// published or the poll did not start.
     bool start() {
         poll_once();
         if (!snapshot_.read().has_value()) {
@@ -109,7 +110,9 @@ public:
         try {
             slot_.start([this](OperationContext& ctx) { run(ctx); });
         } catch (const std::exception&) {
+            // Connected with no poll would serve the connect-time frame forever: fail the connect.
             ALPACA_LOG_ERROR(config_.log_tag, "State poll did not start");
+            return false;
         }
         return true;
     }
