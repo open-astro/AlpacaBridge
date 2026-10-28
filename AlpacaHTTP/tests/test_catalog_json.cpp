@@ -230,13 +230,21 @@ int main() {
         first.display_name = "First Switch";
         first.build_option = "ALPACACORE_ENABLE_AAA";
         catalog.add(first);
+        // Same vendor as the focuser, a device type that sorts before it,
+        // added after it: pins the device-type tie-break within one vendor.
+        alpacacore::catalog::Schema camera = tc::make_schema();
+        camera.key = alpacacore::catalog::DeviceKey{"zzz", alpacacore::DeviceType::Camera};
+        camera.display_name = "Test Camera";
+        camera.build_option = "ALPACACORE_ENABLE_ZZZ";
+        catalog.add(camera);
 
         nlohmann::json described = cj::describe_json(catalog);
-        EXPECT(described.is_array() && described.size() == 2);
+        EXPECT(described.is_array() && described.size() == 3);
         EXPECT(described[0].at("vendor") == "aaa" && described[0].at("deviceType") == "switch");
-        EXPECT(described[1].at("vendor") == "zzz" && described[1].at("deviceType") == "focuser");
+        EXPECT(described[1].at("vendor") == "zzz" && described[1].at("deviceType") == "camera");
+        EXPECT(described[2].at("vendor") == "zzz" && described[2].at("deviceType") == "focuser");
 
-        const nlohmann::json& zzz = described[1];
+        const nlohmann::json& zzz = described[2];
         const std::set<std::string> descriptor_keys{"vendor",    "deviceType",  "displayName",
                                                     "available", "buildOption", "fields"};
         EXPECT(keys_of(zzz) == descriptor_keys);
@@ -293,8 +301,8 @@ int main() {
         // comparison below reads it.
         catalog.add(tc::make_factory());
         const nlohmann::json described_with_factory = cj::describe_json(catalog);
-        EXPECT(described_with_factory[1].at("available") == true);
-        EXPECT(described_with_factory[1].at("fields") == zzz.at("fields"));
+        EXPECT(described_with_factory[2].at("available") == true);
+        EXPECT(described_with_factory[2].at("fields") == zzz.at("fields"));
     }
 
     // 6. An int64 extreme bound: Field::ref() widens INT64_MAX to the double 2^63,

@@ -273,6 +273,20 @@ TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro
     restarted->set_connected(false);
 }
 
+// ASCOM Rotator: Position and MechanicalPosition are 0 <= x < 360. A target a
+// hair below zero must not round up to exactly 360.
+TEST_CASE("WandererAstro Rotator Driver - A tiny negative target stays below 360", "[wandererastro][rotator][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+
+    driver->set_target_position(-1e-15);
+    CHECK(driver->get_target_position() < 360.0);
+    CHECK(driver->get_target_position() >= 0.0);
+    driver->set_connected(false);
+}
+
 // A client may connect before the router's upgrade-start adopt runs; the adopt
 // then refreshes Position, not only the file (review of #1493).
 TEST_CASE("WandererAstro Rotator Driver - adopt_legacy_state while connected refreshes Position",
