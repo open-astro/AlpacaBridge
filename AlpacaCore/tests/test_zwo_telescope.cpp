@@ -773,8 +773,8 @@ TEST_CASE("ZWO Mount Telescope Driver - Name and UniqueID answer while a connect
     driver->connect();
     REQUIRE(mount.wait_until_held(std::chrono::seconds(2)));
 
-    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
-    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
     CHECK(driver->get_connecting());  // the reply is still held, so the timings above are not vacuous
 
     mount.release();
@@ -828,9 +828,9 @@ TEST_CASE("ZWO Mount Telescope Driver - Name answers while a site write is in fl
     });
     REQUIRE(mount.wait_until_held(std::chrono::seconds(2)));
 
-    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
-    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
-    CHECK(time_call([&] { (void)driver->get_aperture_diameter(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_aperture_diameter(); }) < kGetterBudget);
 
     mount.release();
     writer.join();
@@ -940,7 +940,7 @@ TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange i
     });
     REQUIRE(mount.wait_until_held(std::chrono::seconds(2)));
 
-    CHECK(time_call([&] { driver->set_connected(false); }) < kHoldOpen / 3);  // well under the hold, inside 5 s
+    CHECK(timed([&] { driver->set_connected(false); }) < kHoldOpen / 3);  // well under the hold, inside 5 s
     mount.release();
     worker.join();
     CHECK_FALSE(driver->get_connected());

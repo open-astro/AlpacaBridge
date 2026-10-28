@@ -61,15 +61,15 @@ void wait_entered(const std::atomic<bool>& entered) {
     REQUIRE(entered.load());
 }
 
+// `timed` that swallows an AlpacaException: only the latency matters here.
 template <typename Fn>
-std::chrono::milliseconds elapsed_of(Fn&& fn) {
-    const auto start = std::chrono::steady_clock::now();
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
-        // Only the latency matters here.
-    }
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+std::chrono::microseconds elapsed_of(Fn&& fn) {
+    return alpacacore::test::timed([&] {
+        try {
+            fn();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        }
+    });
 }
 
 // The error code a call ends with: 0 when it succeeds, else the AlpacaException code. A disconnect racing

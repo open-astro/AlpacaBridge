@@ -3488,13 +3488,7 @@ TEST_CASE("FakeQHYSDK via LockedQHYSDK - SDK version hook does not wait on an in
     }
     REQUIRE(fake.call_count("open_camera") == 1);
 
-    const auto elapsed_ms = [](auto&& fn) {
-        const auto started = std::chrono::steady_clock::now();
-        fn();
-        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
-            .count();
-    };
-    CHECK(elapsed_ms([&] { (void)driver->get_device_sdk_version(); }) < 100);
+    CHECK(alpacacore::test::timed([&] { (void)driver->get_device_sdk_version(); }) < std::chrono::milliseconds(100));
 
     connector.join();
 }
