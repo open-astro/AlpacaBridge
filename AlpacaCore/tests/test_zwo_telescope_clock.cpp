@@ -334,6 +334,77 @@ TEST_CASE("ZWO telescope clock - a sync refused twice falls back to :CM after a 
     CHECK(rig.mount.count(":CM") == 1);
 }
 
+TEST_CASE("ZWO last-resort Sync fences an older GOTO and serializes its target writes",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.reject_goto("e3", 1);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":Q", 1, kReal));
+    REQUIRE(rig.clock.wait_for_waiters(2, kReal));
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();
+    rig.advance_until([&] { return rig.mount.count(":SMMC") == 2; }, 200ms, 1200ms);
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 2, kReal));
+    rig.wait_for_blocked_caller();
+    rig.mount.hold_reply(":Sr");
+    rig.clock.advance(300ms);  // do not wait for the caller to settle while its wire reply is held
+    REQUIRE(rig.mount.wait_until_held(kReal));
+    auto& setter = rig.call([&] { rig.driver->set_target_right_ascension(7.0); });
+    const bool finished_early = ready(setter);
+    CHECK(rig.driver->get_target_right_ascension() == 6.0);
+    rig.mount.release();
+    REQUIRE(ready(setter, kReal));
+    REQUIRE(ready(sync, kReal));
+    setter.get();
+    sync.get();
+    CHECK_FALSE(finished_early);
+    CHECK(rig.mount.count(":CM") == 1);
+    CHECK(rig.mount.count(":MS") == 1);  // only the rejected attempt, never an old retry
+}
+
+TEST_CASE("ZWO a new GOTO during Sync settling keeps its own target across a retry",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();
+    rig.advance(200ms);
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 2, kReal));
+    rig.wait_for_blocked_caller();
+    rig.advance(100ms);  // Sync's last-resort deadline is 200 ms away; the new GOTO's retry will be later.
+    rig.mount.reject_goto("e3", 1);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    REQUIRE(rig.mount.wait_for_count(":Q", 3, kReal));
+    REQUIRE(rig.clock.wait_for_waiters(3, kReal));
+    rig.advance(200ms);
+    REQUIRE(ready(sync, kReal));
+    sync.get();
+    CHECK(rig.mount.count(":MS") == 1);
+    rig.advance(100ms);
+    REQUIRE(rig.mount.wait_for_count(":MS", 2, kReal));
+    rig.driver->abort_slew();
+    std::string ra, dec;
+    for (const auto& command : rig.mount.commands()) {
+        if (command.starts_with(":Sr")) ra = command;
+        if (command.starts_with(":Sd")) dec = command;
+        if (command == ":CM") {
+            CHECK(ra == ":Sr06:00:00");
+            CHECK(dec == ":Sd-15:00:00");
+        }
+        if (command == ":MS") {
+            CHECK(ra == ":Sr05:30:00");
+            CHECK(dec == ":Sd+20:00:00");
+        }
+    }
+    CHECK(rig.mount.count(":CM") == 1);
+}
+
 TEST_CASE("ZWO telescope clock - FindHome reports Slewing for the 5 s forced window and not after",
           "[zwo][telescope][unit][clock]") {
     Rig rig;

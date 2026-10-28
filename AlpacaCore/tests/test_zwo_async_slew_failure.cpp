@@ -155,6 +155,156 @@ int setup_sent_after_return(const FakeZwoMount& mount, int at_return) {
 
 }  // namespace
 
+TEST_CASE("ZWO rejected Sync preserves an active guide pulse and its position offset",
+          "[zwo][telescope][async][sync-fence]") {
+    const int targets = GENERATE(0, 1, 2);
+    const int direction = GENERATE(0, 2);
+    Rig rig;
+    rig.connect();
+    if (targets == 1) rig.driver->set_target_right_ascension(6.0);
+    if (targets == 2) rig.driver->set_target_declination(30.0);
+
+    const double ra = rig.driver->get_right_ascension();
+    const double dec = rig.driver->get_declination();
+    rig.driver->pulse_guide(direction, 2000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.driver->get_is_pulse_guiding());
+    const double guided_ra = rig.driver->get_right_ascension();
+    const double guided_dec = rig.driver->get_declination();
+    REQUIRE((direction == 0 ? guided_dec - dec : guided_ra - ra) > 0.0);
+    const int writes = setup_count(rig.mount);
+
+    try {
+        rig.driver->sync_to_target();
+        FAIL("Sync with incomplete targets must fail");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::ValueNotSet);
+    }
+
+    CHECK(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.driver->get_right_ascension() == guided_ra);
+    CHECK(rig.driver->get_declination() == guided_dec);
+    CHECK(setup_count(rig.mount) == writes);
+    CHECK(rig.mount.count(":SMMC") == 0);
+    CHECK(rig.mount.count(":CM") == 0);
+}
+
+TEST_CASE("ZWO Sync cancels a pending GOTO retry before changing the target", "[zwo][telescope][async][sync-fence]") {
+    const bool target_form = GENERATE(false, true);
+    const bool fallback = GENERATE(false, true);
+    CAPTURE(target_form, fallback);
+    Rig rig;
+    rig.connect();
+    rig.mount.reject_goto("e3", 1);
+    if (fallback) rig.mount.override_reply(":SMMC", "e2");
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.mount.wait_for_count(":Q", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+
+    if (target_form) {
+        REQUIRE_NOTHROW(rig.driver->sync_to_target());
+    } else {
+        REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(6.0, -15.0));
+    }
+    REQUIRE(rig.mount.count(":CM") == (fallback ? 1 : 0));
+    // The old retry must not start a slew using the target registers Sync just replaced.
+    rig.tick(std::chrono::milliseconds(300));
+    CHECK_FALSE(rig.mount.wait_for_count(":MS", 2, std::chrono::milliseconds(500)));
+    CHECK_FALSE(rig.mount.slewing());
+}
+
+TEST_CASE("ZWO GOTO retries retain their captured target after target property writes",
+          "[zwo][telescope][async][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.reject_goto("e3", 1);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.mount.wait_for_count(":Q", 1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
+    rig.driver->set_target_right_ascension(6.0);
+    rig.driver->set_target_declination(-15.0);
+    rig.tick(std::chrono::milliseconds(300));
+    REQUIRE(rig.mount.wait_for_count(":MS", 2, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+    rig.tick(std::chrono::seconds(6));
+    CHECK(rig.mount.ra_hours() == 5.5);
+    CHECK(rig.mount.dec_degrees() == 20.0);
+}
+
+TEST_CASE("ZWO target property writes wait for a complete Sync or GOTO target transaction",
+          "[zwo][telescope][async][sync-fence]") {
+    const bool sync_owner = GENERATE(false, true);
+    const bool ra_write = GENERATE(false, true);
+    CAPTURE(sync_owner, ra_write);
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e2");
+    rig.mount.hold_reply(":Sr");
+    std::future<void> sync;
+    if (sync_owner) {
+        sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(5.5, 20.0); });
+    } else {
+        rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    }
+    const bool held = rig.mount.wait_until_held(std::chrono::seconds(5));
+    auto setter = std::async(std::launch::async, [&] {
+        if (ra_write) {
+            rig.driver->set_target_right_ascension(7.0);
+        } else {
+            rig.driver->set_target_declination(-30.0);
+        }
+    });
+    // Getters stay responsive, but a competing setter cannot publish halfway through the transaction.
+    const bool replaced = wait_until(
+        [&] {
+            return ra_write ? rig.driver->get_target_right_ascension() != 5.5
+                            : rig.driver->get_target_declination() != 20.0;
+        },
+        50);
+    rig.mount.release();  // release before any fatal assertion or future join
+    setter.get();
+    if (sync.valid()) {
+        sync.get();
+    } else {
+        REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+        rig.driver->abort_slew();
+    }
+    REQUIRE(held);
+    CHECK_FALSE(replaced);
+    std::string ra, dec;
+    for (const auto& command : rig.mount.commands()) {
+        if (command.starts_with(":Sr")) ra = command;
+        if (command.starts_with(":Sd")) dec = command;
+        if (command == (sync_owner ? ":CM" : ":MS")) {
+            CHECK(ra == ":Sr05:30:00");
+            CHECK(dec == ":Sd+20:00:00");
+        }
+    }
+    CHECK(rig.mount.count(sync_owner ? ":CM" : ":MS") == 1);
+}
+
+TEST_CASE("ZWO failed Sync target transactions stop and release the next command",
+          "[zwo][telescope][async][sync-fence]") {
+    const std::string rejected = GENERATE(std::string(":Sr"), std::string(":Sd"), std::string(":CM"));
+    CAPTURE(rejected);
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e2");
+    rig.mount.override_reply(rejected, "e2", 1);
+    try {
+        rig.driver->sync_to_coordinates(6.0, -15.0);
+        FAIL("Expected the rejected Sync transaction to throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidValue);
+    }
+    CHECK(rig.mount.count(":Sd") == (rejected == ":Sr" ? 0 : 1));
+    CHECK(rig.mount.count(":CM") == (rejected == ":CM" ? 1 : 0));
+    REQUIRE_NOTHROW(rig.driver->sync_to_coordinates(5.5, 20.0));
+    CHECK(rig.mount.count(":CM") == (rejected == ":CM" ? 2 : 1));
+}
+
 TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking is false",
           "[zwo][telescope][async][tracking-guard]") {
     Rig rig;
