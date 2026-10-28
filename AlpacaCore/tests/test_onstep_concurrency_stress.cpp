@@ -16,11 +16,15 @@
 // .github/instructions/onstep.instructions.md), but
 // the protocol wrapper's ConnectionType::Network branch exists purely as a
 // test seam so this suite can drive the driver into the CONNECTED state
-// through a FakeMountServer without real hardware — a canned "0#" responder
-// answers every '#'-framed LX200 command, which is enough to exercise the
-// driver's connect/disconnect/operate/destroy paths on a hardware-free host.
-// Operations racing a disconnect are EXPECTED to throw; what must never
-// happen is a crash, hang, or TSan report.
+// through a FakeMountServer without real hardware. The fake (AcceptingOnStep)
+// answers what the driver asks and accepts a GOTO, so a slew really goes out
+// (#1762). The driver has no slew or pulse-guide thread: a GOTO and a pulse
+// guide are one command each (the mount times the pulse). Its background work
+// is two util::AsyncOperation slots, the MoveAxis re-send (#1378) and the
+// Park/FindHome tail that waits for a moving mount to stop (#1430), and those
+// are what the cases below keep running against connect, disconnect and
+// destruction. Operations racing a disconnect are EXPECTED to throw; what must
+// never happen is a crash, hang, or TSan report.
 
 #ifndef _WIN32
 
@@ -32,6 +36,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -55,6 +60,61 @@ alpacacore::vendor::onstep::ConnectionInfo onstep_endpoint(int port) {
     return info;
 }
 
+// An OnStepX that tracks and accepts a GOTO (:Sr#/:Sd# answer 1, :MS# 0), so
+// a slew is not refused at the target write as it was under the canned "0#"
+// fake (#1762). While a :Mn#-style move runs, :GU# shows the guide move ('g');
+// a stop ends it, unless `ignore_stops` (the mount brakes for ever), which
+// keeps a Park's background part waiting for the mount to be still. Shared by
+// the connections a reconnect opens, so the state is atomic.
+struct AcceptingOnStep {
+    std::atomic<bool> moving{false};
+    std::atomic<bool> ignore_stops{false};
+    std::atomic<int> gotos{0};  // :MS# answered "accepted"
+    std::atomic<int> moves{0};  // :Mn#/:Ms#/:Me#/:Mw# (MoveAxis and its re-send)
+    std::atomic<int> parks{0};  // :hP#
+
+    std::string reply(const std::string& chunk) {
+        if (chunk.rfind(":GVP", 0) == 0) return "OnStep#";
+        if (chunk.rfind(":GVN", 0) == 0) return "10.23a#";
+        if (chunk.rfind(":GXEE", 0) == 0) return "1";
+        if (chunk.rfind(":GU", 0) == 0) return moving.load() ? "NpgEW180#" : "NpEW180#";  // tracking, no GOTO
+        if (chunk.rfind(":GRa", 0) == 0) return "12:00:00.0000#";
+        if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
+        if (chunk.rfind(":GA", 0) == 0) return "+45*00:00#";
+        if (chunk.rfind(":GZ", 0) == 0) return "180*00:00#";
+        if (chunk.rfind(":Gt", 0) == 0) return "+40*30#";
+        if (chunk.rfind(":Gg", 0) == 0) return "+074*00#";
+        if (chunk.rfind(":Gh", 0) == 0) return "-10*#";
+        if (chunk.rfind(":Go", 0) == 0) return "90*#";
+        if (chunk.rfind(":GL", 0) == 0) return "10:20:30#";
+        if (chunk.rfind(":GC", 0) == 0) return "10/28/26#";
+        if (chunk.rfind(":GG", 0) == 0) return "+00:00#";
+        if (chunk.rfind(":GE", 0) == 0) return "00#";
+        if (chunk.rfind(":CM", 0) == 0) return "N/A#";
+        if (chunk.rfind(":MS", 0) == 0) {
+            ++gotos;
+            return "0";  // GOTO accepted (bare digit)
+        }
+        if (chunk.rfind(":Mg", 0) == 0) return "";  // pulse guide: no reply
+        if (chunk.rfind(":M", 0) == 0) {
+            ++moves;
+            moving = true;
+            return "";
+        }
+        if (chunk.rfind(":Q", 0) == 0) {
+            if (!ignore_stops.load()) moving = false;
+            return "";
+        }
+        if (chunk.rfind(":R", 0) == 0 || chunk.rfind(":hC", 0) == 0) return "";
+        if (chunk.rfind(":hP", 0) == 0) {
+            ++parks;
+            return "1";
+        }
+        if (chunk.rfind(":S", 0) == 0 || chunk.rfind(":h", 0) == 0) return "1";  // :Sr, :Sd, :ST, :SL, :hR ...
+        return "0#";
+    }
+};
+
 void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
     guard([&] { scope.set_target_right_ascension(5.0); });
@@ -69,15 +129,27 @@ void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
     guard([&] { static_cast<void>(scope.get_slewing()); });
     guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
     guard([&] { scope.pulse_guide(0, 50); });
+    guard([&] { scope.move_axis(0, 1.0); });  // starts the MoveAxis re-send slot
+    guard([&] { scope.park(); });             // stops the move; the Park/FindHome slot waits for it
+    guard([&] { scope.unpark(); });
     guard([&] { scope.abort_slew(); });
 }
 
 }  // namespace
 
 TEST_CASE("OnStep telescope - concurrent connect/disconnect/slew/pulse stress", "[onstep][telescope][stress]") {
-    alpacacore::test::FakeMountServer server;
+    auto mount = std::make_shared<AcceptingOnStep>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, onstep_endpoint(server.port()));
+    // The fake accepts a slew and a MoveAxis, so the storm runs them and not
+    // only their refusals (#1762).
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.0, 20.0));
+    REQUIRE(mount->gotos.load() == 1);
+    REQUIRE_NOTHROW(driver->abort_slew());
+    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
+    REQUIRE(mount->moves.load() >= 1);
 
     // open-astro#326: one guard per call, replacing no isolation at all --
     // run_lifecycle_stress wraps the WHOLE callback in one try/catch, so a
@@ -100,9 +172,10 @@ TEST_CASE("OnStep telescope - concurrent connect/disconnect/slew/pulse stress", 
     // to be named. A real driver defect would show up as a code outside this
     // set, and guard.report() names every distinct one it saw.
     alpacacore::test::StressCallGuard guard{
-        alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
-        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::ValueNotSet,
-        alpacacore::AlpacaError::NotImplemented,   alpacacore::AlpacaError::DriverException};
+        alpacacore::AlpacaError::NotConnected,      alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation,  alpacacore::AlpacaError::ValueNotSet,
+        alpacacore::AlpacaError::NotImplemented,    alpacacore::AlpacaError::DriverException,
+        alpacacore::AlpacaError::InvalidWhileParked};  // a slew racing the storm's own Park
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { telescope_operate(guard, d); });
 
     // open-astro#326: settle_connected() rather than a bare set_connected():
@@ -128,22 +201,36 @@ TEST_CASE("OnStep telescope - destruction races an in-flight connect", "[onstep]
         25);
 }
 
-TEST_CASE("OnStep telescope - destruction mid-operation (slew/pulse threads live)", "[onstep][telescope][stress]") {
-    alpacacore::test::FakeMountServer server;
+// The driver has no slew or pulse-guide thread (#1728): what is live at
+// destruction is a MoveAxis re-send body or a Park body waiting for the mount
+// to stop, after an accepted GOTO and a pulse guide (#1762). Each driver must
+// connect, so one that a destructor left connected to the process-wide wrapper
+// fails the next iteration's connect.
+TEST_CASE("OnStep telescope - destruction mid-operation (MoveAxis re-send or Park body live)",
+          "[onstep][telescope][stress]") {
+    auto mount = std::make_shared<AcceptingOnStep>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
     REQUIRE(server.ok());
+    auto info = onstep_endpoint(server.port());
+    info.response_timeout_ms = 200;
+    mount->ignore_stops = true;  // a Park waits in its body for a mount that never stops
 
     for (int i = 0; i < 10; ++i) {
-        auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, onstep_endpoint(server.port()));
-        static_cast<void>(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
-        try {
-            driver->slew_to_coordinates_async(5.0, 20.0);
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-            // Expected: a fake-connected mount can reject/race this call.
-        }
-        try {
-            driver->pulse_guide(0, 300);
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-            // Expected: see above.
+        mount->moving = false;
+        auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, info);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        const int gotos = mount->gotos.load();
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.0, 20.0));
+        REQUIRE(mount->gotos.load() == gotos + 1);
+        REQUIRE_NOTHROW(driver->pulse_guide(0, 300));
+        const int moves = mount->moves.load();
+        REQUIRE_NOTHROW(driver->move_axis(0, 1.0));  // the re-send body now waits for its 7 s tick
+        REQUIRE(mount->moves.load() == moves + 1);
+        if ((i / 2) % 2 != 0) {
+            // Park during the move: it stops the move (ending the re-send) and
+            // its body polls :GU# for a still mount, which never comes.
+            REQUIRE_NOTHROW(driver->park());
+            CHECK(driver->get_slewing());
         }
         if ((i % 2) != 0) {
             // Half the time a disconnect is also in flight at destruction —
@@ -152,6 +239,7 @@ TEST_CASE("OnStep telescope - destruction mid-operation (slew/pulse threads live
         }
         driver.reset();
     }
+    CHECK(mount->parks.load() == 0);  // every Park body was ended before the mount stopped
 }
 
 // Decision 0016 (#1449): the getters take the state lock alone, and refresh a

@@ -34,8 +34,7 @@ using Info = alpacacore::vendor::onstep::ConnectionInfo;
 
 using Fake = alpacacore::test::FakeMountServer;
 
-// The canned "0#" default responder is enough for connect (see
-// test_onstep_concurrency_stress.cpp).
+// The canned "0#" default responder (fake_mount_server.h) is enough for connect.
 Info endpoint(int port) {
     Info info;
     info.type = alpacacore::vendor::onstep::ConnectionType::Network;
