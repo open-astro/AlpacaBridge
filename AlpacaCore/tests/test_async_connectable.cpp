@@ -60,6 +60,7 @@ public:
             if (record_disconnect_if_connect_in_flight(connected_.load())) {
                 return;
             }
+            in_disconnect_task = true;
             if (!connected_.load()) {
                 return;
             }
@@ -73,6 +74,11 @@ public:
             }
             ++disconnect_completions_;
             return;
+        }
+        // A connect on a thread that already ran a disconnect is the task
+        // tail running a connect that was queued behind that disconnect.
+        if (in_disconnect_task) {
+            ++tail_connects_;
         }
         if (consume_pending_disconnect(connected_.load())) {
             return;
@@ -104,8 +110,11 @@ public:
     std::atomic<bool> fail_connect_{false};
     std::atomic<int> connect_completions_{0};
     std::atomic<int> disconnect_completions_{0};
+    std::atomic<int> tail_connects_{0};  ///< connects run by a task tail after a disconnect
 
 private:
+    // Fresh per task thread: set once this thread has run a disconnect.
+    static inline thread_local bool in_disconnect_task = false;
     std::mutex mutex_;
     std::atomic<bool> connected_{false};
 };
@@ -284,6 +293,10 @@ TEST_CASE("AsyncConnectable - lifecycle stress with chained pending flags", "[as
     wait_until_idle(d);
     CHECK_FALSE(d.get_connected());
     CHECK_FALSE(d.get_connecting());
+    // The hammering must have driven the chained path: a connect queued behind
+    // a running disconnect and run by that task's tail. Without pending_connect_
+    // no tail ever runs a connect and this stays 0.
+    CHECK(d.tail_connects_.load() > 0);
 }
 
 // Issue #358: the reason a connect failed is kept, not just the fact.

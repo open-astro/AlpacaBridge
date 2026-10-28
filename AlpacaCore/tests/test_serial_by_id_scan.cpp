@@ -76,6 +76,40 @@ TEST_CASE("path_exists never throws and treats unreachable paths as absent", "[s
     REQUIRE_FALSE(path_exists("/etc/hostname/not-a-directory"));
 }
 
+TEST_CASE("path_exists treats a permission error as absent instead of throwing", "[serial_by_id_scan]") {
+    // EACCES on a parent directory is the only errno for which the throwing
+    // exists() overload throws (libstdc++ maps ENOENT and ENOTDIR to
+    // not_found). Root ignores mode bits, so the probe is skipped there.
+    if (::geteuid() == 0) {
+        WARN("running as root: directory permissions do not apply, EACCES probe skipped");
+        return;
+    }
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path base = fs::temp_directory_path(ec) / ("alpacabridge-path-exists-" + std::to_string(::getpid()));
+    REQUIRE_FALSE(ec);
+    REQUIRE(fs::create_directory(base, ec));
+    struct Cleanup {
+        fs::path p;
+        ~Cleanup() {
+            std::error_code ignored;
+            fs::permissions(p, fs::perms::owner_all, fs::perm_options::replace, ignored);
+            fs::remove_all(p, ignored);
+        }
+    } cleanup{base};
+    fs::permissions(base, fs::perms::none, fs::perm_options::replace, ec);
+    REQUIRE_FALSE(ec);
+
+    const fs::path inside = base / "ttyUSB0";
+    // Sanity: the probe really is a permission error, not absence.
+    std::error_code probe;
+    (void)fs::status(inside, probe);
+    REQUIRE(probe == std::errc::permission_denied);
+
+    REQUIRE_NOTHROW(path_exists(inside));
+    REQUIRE_FALSE(path_exists(inside));
+}
+
 TEST_CASE("list_serial_by_id: entries come back sorted by name (issue #1202)", "[serial_by_id_scan]") {
     // directory_iterator order is unspecified; an auto-detect index ("the second
     // matching device") must name the same port on every scan.
