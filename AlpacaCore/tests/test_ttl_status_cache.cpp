@@ -55,7 +55,8 @@ TEST_CASE("TtlStatusCache - fault() does not wait for a refill in flight", "[uti
     REQUIRE(wait_for_flag(in_fetch));
 
     // On its own thread so a fault() that waits fails the check instead of hanging the test.
-    auto probe = std::async(std::launch::async, [&] { return time_call([&] { (void)cache.fault(); }); });
+    auto probe =
+        std::async(std::launch::async, [&] { return alpacacore::test::time_call([&] { (void)cache.fault(); }); });
     const bool answered = probe.wait_for(500ms) == std::future_status::ready;
     CHECK(answered);
 
