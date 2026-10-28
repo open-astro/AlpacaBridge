@@ -582,6 +582,7 @@ public:
             pulse_guide_axis_ = -1;
             tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
+            site_read_warned_ = false;
 
             // The two reads run without firmware_mutex_: get_device_firmware()
             // takes only that lock and must not wait for a serial round trip
@@ -664,10 +665,17 @@ public:
             if (pending_site_elevation_.has_value()) {
                 site_elevation_m_ = pending_site_elevation_.value();
             }
+            // A failed time sync (the mount refused :SL#/:SC#/:SG#, or did not
+            // answer) leaves the mount on its own clock, which the read below
+            // then seeds UTCDate from. The connect still succeeds, as for the
+            // site writes above (#1754).
             if (sync_time_on_connect_) {
                 try {
                     set_utc_date_locked(std::chrono::system_clock::now());
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                } catch (const std::exception& ex) {
+                    ALPACA_LOG_WARN("OnStep", std::string("Time sync on connect failed; the mount keeps its own "
+                                                          "clock: ") +
+                                                  ex.what());
                 }
             }
             // The mount clock is read here, once, so UTCDate (and so DeviceState)
@@ -1076,7 +1084,9 @@ public:
         // never cached yet, unconditionally setting site_info_valid_ = true
         // here would silently promote a stale/default 0.0 longitude to
         // "valid" alongside the freshly-set latitude. No-op (single flag
-        // check) once the pair is already cached.
+        // check) once the pair is already cached. A failed read here is logged
+        // and leaves the pair unmarked, so the next site read asks again; it
+        // does not refuse the write, whose own refusal throws (#1754).
         ensure_site_info_cached_locked();
         wire().set_latitude(latitude);
         site_latitude_cached_ = latitude;
@@ -2814,9 +2824,23 @@ private:
             if (ex.error_code() == AlpacaError::NotConnected) {
                 throw;
             }
-            site_info_valid_ = false;
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
-            site_info_valid_ = false;
+            note_site_read_failed_locked(ex.what());
+        } catch (const std::exception& ex) {
+            note_site_read_failed_locked(ex.what());
+        } catch (...) {
+            note_site_read_failed_locked("unknown error");
+        }
+    }
+
+    // A failed :Gt#/:Gg# read is retried on the next site read (after
+    // kSiteInfoRetryDelay); it is logged once per connect (#1754), so a client
+    // polling SiderealTime does not fill the log. A read that succeeds marks the
+    // pair valid, and nothing reads it again until the next connect.
+    void note_site_read_failed_locked(const char* reason) const {
+        site_info_valid_ = false;
+        if (!site_read_warned_) {
+            site_read_warned_ = true;
+            ALPACA_LOG_WARN("OnStep", std::string("Could not read the site from the mount: ") + reason);
         }
     }
 
@@ -2945,6 +2969,7 @@ private:
     mutable double site_latitude_cached_ = 0.0;
     mutable double site_longitude_cached_ = 0.0;
     mutable bool site_info_valid_ = false;
+    mutable bool site_read_warned_ = false;  // a failed site read was logged (#1754); under mutex_
     mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
     std::atomic<double> site_elevation_m_;  // NaN until set or configured
 
