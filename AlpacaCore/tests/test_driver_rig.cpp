@@ -10,8 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include "driver_rig.h"
-
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
@@ -23,6 +21,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
