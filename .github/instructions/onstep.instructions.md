@@ -426,8 +426,9 @@ it is never reachable through `router.cpp` or the web UI.
   leaf) -> the protocol wrapper's own lock. Every command holds `io_mutex_` for the whole command through a
   `StateLock` (Mode::Io, the default), which also holds `mutex_`; its `unlock()` releases both, so the places
   that let other commands in (a task-clock wait, a slot start) are unchanged. Every exchange goes through
-  `Wire` (`wire()`), which drops `mutex_` for the call and takes it back after, so `mutex_` is never held across
-  serial I/O, and sequences that must stay together (`:hP#` or `:hC#` then `:GE#`, `:Sr#`/`:Sd#` then `:MS#` or
+  `Wire` (`wire()`), which drops `mutex_` for the call and takes it back after (the shared `util::LockGate`,
+  #1729: its held-lock table, `StateLock` and single read, which refuse on a full table, decision 0016 Rule 6; the session re-check, the single-read test seams
+  and the epochs stay in the driver), so `mutex_` is never held across serial I/O, and sequences that must stay together (`:hP#` or `:hC#` then `:GE#`, `:Sr#`/`:Sd#` then `:MS#` or
   `:CM#`, the re-send tick's reads and move) stay together under `io_mutex_`. A getter takes `mutex_` alone
   (`StateLock::Mode::State`) and answers from the state and the 2 s caches; when a cache is stale (or the fault
   is latched) its read goes through `Wire`, which then takes `io_mutex_` for that one exchange (dropping
