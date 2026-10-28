@@ -5283,19 +5283,22 @@ async function wifiApplyAp(enabled, fromToggle, revert) {
         if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = !enabled; }
         else if (revert) revert();
     };
+    // Nothing is configured yet: the setup fields are filled one at a time, so a
+    // validation return keeps what was typed (reverting would clear the other field).
+    const configured = wifiState.ap && wifiState.ap.Configured;
+    const undoInvalid = () => { if (fromToggle || configured) undo(); };
     if (wifiState.busy) { undo(); return; }
     const ssid = (wifiEl('wifi-ap-ssid') || {}).value || '';
     const passphrase = (wifiEl('wifi-ap-pass') || {}).value || '';
-    if (!ssid) { wifiMessage('The hotspot needs a name.', true); undo(); return; }
+    if (!ssid) { wifiMessage('The hotspot needs a name.', true); undoInvalid(); return; }
     if (wifiSelectedBand() === 'a' && !wifiCountryIsSet()) {
         wifiRequireCountryFor5GHz();
-        undo();
+        undoInvalid();
         return;
     }
-    const configured = wifiState.ap && wifiState.ap.Configured;
     if (!configured && !passphrase) {
         wifiMessage('Set a hotspot password first (8-63 characters).', true);
-        undo();
+        undoInvalid();
         return;
     }
     if (fromToggle) {

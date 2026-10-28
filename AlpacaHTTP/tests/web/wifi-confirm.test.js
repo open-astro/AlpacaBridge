@@ -230,14 +230,39 @@ test('hotspot toggled off on 5 GHz with no country: toggle put back on', async (
     assert.equal(t.els['wifi-ap-toggle'].checked, true);
 });
 
-test('hotspot not configured, no password: no request, previous name restored', async () => {
+test('hotspot not configured, no password: no request, typed name kept', async () => {
     const t = await setup({ apOn: false, confirmAnswer: { value: true } });
-    t.ctx.__wifiState.ap = { Configured: false, Ssid: 'Old Name' };
+    t.ctx.__wifiState.ap = { Configured: false, Ssid: '' };
     t.els['wifi-ap-ssid'].value = 'New Name';
     t.els['wifi-ap-ssid'].handlers.change();
     await flush();
     assert.equal(t.sent().length, 0);
-    assert.equal(t.els['wifi-ap-ssid'].value, 'Old Name');
+    assert.equal(t.els['wifi-ap-ssid'].value, 'New Name');
+});
+
+test('hotspot not configured, name emptied by password first: typed password kept', async () => {
+    const t = await setup({ apOn: false, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.ap = { Configured: false, Ssid: '' };
+    t.els['wifi-ap-ssid'].value = '';
+    t.els['wifi-ap-pass'].value = 'password123';
+    t.els['wifi-ap-pass'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-pass'].value, 'password123');
+});
+
+test('hotspot not configured: name then password sends one PUT with both', async () => {
+    const t = await setup({ apOn: false, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.ap = { Configured: false, Ssid: '' };
+    t.els['wifi-ap-ssid'].value = 'New Name';
+    t.els['wifi-ap-ssid'].handlers.change();
+    await flush();
+    t.els['wifi-ap-pass'].value = 'password123';
+    t.els['wifi-ap-pass'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 1);
+    assert.equal(t.sent()[0].body.Ssid, 'New Name');
+    assert.equal(t.sent()[0].body.Passphrase, 'password123');
 });
 
 test('WiFi radio off, Cancel: no request, toggle stays on', async () => {
