@@ -1470,6 +1470,8 @@ int main() {
         // Valid device type, unknown method.
         const auto resp = route_request(router, "GET", "/api/v1/telescope/0/notarealmethod");
         EXPECT(resp.status_code() == 400);
+        // The verb-mask 400 and "Device not found" answer 400 as well: pin the text.
+        EXPECT(resp.body().rfind("Unknown method: notarealmethod", 0) == 0);
         EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);  // #1476
         EXPECT(!resp.body().empty());
     }
@@ -3535,8 +3537,8 @@ int main() {
         // cover) — same vendor+deviceType slot as the Lite case above,
         // distinguished by flatPanelModel; guards that field's persistence
         // through sanitize_device_config and that it actually selects the v2
-        // driver (registered device count/type is the same either way, so
-        // this only proves routing didn't reject the config).
+        // driver (the registered count/type is the same either way, so the
+        // driver's own name is read back below).
         const auto cfg = roundtrip_config(router,
                                           {{"vendor", "gemini"},
                                            {"deviceType", "covercalibrator"},
@@ -3553,6 +3555,9 @@ int main() {
         EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB9");
         EXPECT(cfg.value("baudRate", -1) == 19200);
         EXPECT(cfg.value("panelIndex", -1) == 3);
+        const auto name = route_request(router, "GET", "/api/v1/covercalibrator/9619/name");
+        EXPECT(name.status_code() == 200);
+        EXPECT(nlohmann::json::parse(name.body()).value("Value", "") == "Gemini Astro Automatic FlatPanel v2");
         remove_device(router, "gemini", "covercalibrator", 9619);
     }
     {

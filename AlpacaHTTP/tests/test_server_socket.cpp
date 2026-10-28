@@ -353,6 +353,9 @@ public:
     // lets a test hold this call in flight past the watchdog interval, to
     // prove the client's own request never gets aborted out from under it.
     std::atomic<int> slew_sleep_ms{0};
+    // The thread inside the in-flight slew, for a test that must tell the busy
+    // worker from the idle ones.
+    std::atomic<std::thread::id> slew_thread{};
     // The router serves the synchronous forms through the async initiators
     // (#1660), so the stub holds the async initiator in flight; the guard
     // under test is the same.
@@ -360,6 +363,7 @@ public:
     void slew_to_coordinates_async(double, double) override {
         const int ms = slew_sleep_ms.load();
         if (ms > 0) {
+            slew_thread.store(std::this_thread::get_id());
             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         }
     }
@@ -424,14 +428,14 @@ int main() {
 
     // is_running() can go true before the listener is actually bound (see
     // wait_for_bound_port()'s comment), so the port readiness check -- not
-    // just is_running() -- decides whether this run is skipped. Folding both
+    // just is_running() -- decides whether the bind succeeded. Folding both
     // into one wait keeps a slow-but-eventually-successful bind on a loaded
-    // runner from hitting a hard EXPECT abort instead of the intended skip.
+    // runner from failing on is_running() alone.
     const std::uint16_t port = server.is_running() ? wait_for_bound_port(server, 2000) : 0;
     if (port == 0) {
-        std::cerr << "Server socket test skipped: unable to bind an ephemeral port.\n";
-        return 0;  // tolerate a busy/unavailable port, like the discovery test
+        std::cerr << "Server socket test: unable to bind an ephemeral port.\n";
     }
+    EXPECT(port != 0);  // a host that cannot listen fails the run, never exits 0 with nothing checked
 
     // Over the cap by one byte, terminator in the second write => 431.
     {
@@ -865,7 +869,8 @@ int main() {
             }
             small_server.stop();
         } else {
-            std::cout << "  (skipped reactor pool case: could not bind an ephemeral port)\n";
+            std::cerr << "reactor pool case: could not bind an ephemeral port\n";
+            EXPECT(false);  // a host that cannot listen fails the run, never skips it
         }
     }
 
@@ -933,7 +938,8 @@ int main() {
             ::close(idle_fd);
             cap_server.stop();
         } else {
-            std::cout << "  (skipped lifetime-cap case: could not bind an ephemeral port)\n";
+            std::cerr << "lifetime-cap case: could not bind an ephemeral port\n";
+            EXPECT(false);  // a host that cannot listen fails the run, never skips it
         }
     }
 
@@ -985,19 +991,19 @@ int main() {
             ::close(held[1]);
             bound_server.stop();
         } else {
-            std::cout << "  (skipped max-connections case: could not bind an ephemeral port)\n";
+            std::cerr << "max-connections case: could not bind an ephemeral port\n";
+            EXPECT(false);  // a host that cannot listen fails the run, never skips it
         }
     }
 
     // The management restart endpoint tears the server down and brings it
     // back on a detached thread while the requesting client's connection is
-    // still alive. Connection accounting (live_connections_, which gates
-    // accept()) must survive that: a counter reset on start, or a queue
-    // cleared without closing what it held, would let a connection that
-    // straddles the restart drive the count below zero and block every
-    // later accept. Two restarts back to back, each followed by a fresh
-    // client that must be served, and a keep-alive client that lived
-    // through the restart and is closed rather than leaked.
+    // still alive. Two restarts back to back, each followed by a fresh
+    // client that must be served, a keep-alive bystander that stop() closes
+    // rather than leaks, and the RTC probe thread coming back with each
+    // generation. Stop() closes the bystander, so no connection straddles
+    // the restart here; the counter accounting for one that does is pinned
+    // by the straddling-connection case below.
     {
         // Counter declared before the Server, so the Router that owns the
         // capturing lambda is destroyed first (open-astro#314 review).
@@ -1101,8 +1107,113 @@ int main() {
             }
             restart_server.stop();
         } else {
-            std::cout << "  (skipped restart case: could not bind an ephemeral port)\n";
+            std::cerr << "restart case: could not bind an ephemeral port\n";
+            EXPECT(false);  // a host that cannot listen fails the run, never skips it
         }
+    }
+
+    // A connection that really outlives a restart: a worker still serving a
+    // slow request when stop() runs. The join hook parks the worker thread
+    // instead of joining it (the "detached across a restart" case that
+    // reset_queues_for_start() documents), so the restart completes while the
+    // request is in flight. The counter is never reset on start; a reset would
+    // lose that connection, and its later close would wrap the count below
+    // zero and block every accept.
+    {
+        // case: a connection straddling a restart keeps accounting exact
+        constexpr int kStraddleDevice = 9549;
+        auto slow = std::make_shared<WatchdogStubTelescope>(kStraddleDevice);
+        slow->slew_sleep_ms.store(2500);
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(slow));
+
+        alpacahttp::Config straddle_config;
+        straddle_config.set_http_port(0);
+        straddle_config.set_discovery_enabled(false);
+        straddle_config.set_server_name("TestServerRestartStraddle");
+        straddle_config.set_max_connections(3);
+        alpacahttp::Server straddle_server(straddle_config);
+
+        std::mutex parked_mutex;
+        std::vector<std::thread> parked;
+        {
+            Watchdog watchdog(std::chrono::seconds(60), "connection straddling a restart");
+            alpacahttp::detail::ScopedJoinHooksForTest hooks(
+                [&](std::thread& t, const char* context) {
+                    // Only the worker inside the slow request outlives stop(); the idle
+                    // ones are joined as usual, as a real stop() leaves them.
+                    if (std::strcmp(context, "stop (worker_threads_)") == 0 && t.get_id() == slow->slew_thread.load()) {
+                        std::lock_guard<std::mutex> lock(parked_mutex);
+                        parked.push_back(std::move(t));
+                        return;
+                    }
+                    t.join();
+                },
+                [](std::thread& t, const char*) { t.detach(); });
+
+            straddle_server.start_async();
+            const std::uint16_t straddle_port =
+                straddle_server.is_running() ? wait_for_bound_port(straddle_server, 2000) : 0;
+            EXPECT(straddle_port != 0);
+
+            struct timeval tv = {};
+            tv.tv_sec = 10;
+            const int slow_fd = connect_local(straddle_port);
+            EXPECT(slow_fd >= 0);
+            ::setsockopt(slow_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            send_all(slow_fd,
+                     "PUT /api/v1/telescope/9549/slewtocoordinatesasync?RightAscension=5&Declination=10"
+                     " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+            // Wait until a worker is inside the slew.
+            for (int i = 0; i < 500 && slow->slew_thread.load() == std::thread::id{}; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            EXPECT(slow->slew_thread.load() != std::thread::id{});
+
+            int restarter = connect_local(straddle_port);
+            EXPECT(restarter >= 0);
+            ::setsockopt(restarter, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string restart_carry;
+            send_all(restarter, "PUT /management/restart HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+            EXPECT(read_one_response(restarter, restart_carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(restarter);
+            EXPECT(wait_for_restart_done(straddle_server, 5000));
+
+            // The slow request is still in flight across the restart.
+            std::string slow_carry;
+            EXPECT(read_one_response(slow_fd, slow_carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(slow_fd);
+            // The accept loop re-checks the count at least once per 500 ms
+            // select() timeout; give it a pass between the straddling close
+            // and the fresh clients, so a drifted (wrapped) count refuses them
+            // instead of being wrapped back by the first accept.
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+            // The new generation must still accept. One client is enough: a
+            // reset count wraps below zero and refuses the very first one.
+            const std::uint16_t new_port = wait_for_bound_port(straddle_server, 2000);
+            EXPECT(new_port != 0);
+            {
+                const int fresh = connect_local(new_port);
+                EXPECT(fresh >= 0);
+                ::setsockopt(fresh, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                std::string fresh_carry;
+                send_all(fresh, "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                EXPECT(read_one_response(fresh, fresh_carry).rfind("HTTP/1.1 200 ", 0) == 0);
+                ::close(fresh);
+            }
+
+            straddle_server.stop();
+            std::vector<std::thread> to_join;
+            {
+                std::lock_guard<std::mutex> lock(parked_mutex);
+                to_join.swap(parked);
+            }
+            for (auto& t : to_join) {
+                t.join();
+            }
+        }
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Telescope,
+                                                                             kStraddleDevice);
     }
 
     // open-astro#713: is_running() stays true for the WHOLE of a restart.
@@ -1206,7 +1317,8 @@ int main() {
             keep_server.stop();
             EXPECT(!keep_server.is_running());
         } else {
-            std::cout << "  (skipped restart-keeps-running case: could not bind an ephemeral port)\n";
+            std::cerr << "restart-keeps-running case: could not bind an ephemeral port\n";
+            EXPECT(false);  // a host that cannot listen fails the run, never skips it
         }
     }
 
@@ -1297,7 +1409,8 @@ int main() {
             EXPECT(peer_closed(bystander, 5000));
             ::close(bystander);
         } else {
-            std::cout << "  (skipped shutdown-callback-only case: could not bind an ephemeral port)\n";
+            std::cerr << "shutdown-callback-only case: could not bind an ephemeral port\n";
+            EXPECT(false);  // a host that cannot listen fails the run, never skips it
         }
     }
 
@@ -1315,6 +1428,37 @@ int main() {
         churn_config.set_server_name("TestServerChurn");
         churn_config.set_thread_pool_size(4);
         alpacahttp::Server churn_server(churn_config);
+        {
+            // The window itself, held open: every new worker is parked before
+            // its first instruction while stop() runs. stop() releases one
+            // permit per COUNTED worker, so workers counted only once they
+            // run would get none and the join would never complete.
+            std::mutex gate_mutex;
+            std::condition_variable gate_cv;
+            bool release_workers = false;
+            Watchdog watchdog(std::chrono::seconds(20), "stop() with workers parked before their first instruction");
+            alpacahttp::detail::ScopedWorkerStartHookForTest hook([&] {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                gate_cv.wait(lock, [&] { return release_workers; });
+            });
+            churn_server.start_async();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::atomic<bool> stopped{false};
+            std::thread stopper([&] {
+                churn_server.stop();
+                stopped.store(true);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            EXPECT(!stopped.load());  // still joining the parked workers
+            {
+                std::lock_guard<std::mutex> lock(gate_mutex);
+                release_workers = true;
+            }
+            gate_cv.notify_all();
+            stopper.join();
+            EXPECT(stopped.load());
+            EXPECT(!churn_server.is_running());
+        }
         const auto t0 = std::chrono::steady_clock::now();
         for (int i = 0; i < 20; ++i) {
             churn_server.start_async();
@@ -1337,7 +1481,8 @@ int main() {
             ::close(fd);
             churn_server.stop();
         } else {
-            std::cout << "  (skipped churn case's final request: could not bind an ephemeral port)\n";
+            std::cerr << "churn case's final request: could not bind an ephemeral port\n";
+            EXPECT(false);  // a host that cannot listen fails the run, never skips it
         }
     }
 
@@ -1635,14 +1780,14 @@ int main() {
         // without weakening that collision. Gated on the port itself (not
         // just is_running(), which can go true before the listener is
         // actually bound) so a slow-but-eventually-successful bind on a
-        // loaded runner takes the skip path below instead of a hard abort.
+        // loaded runner fails the EXPECT below instead of a hard abort.
         const std::uint16_t holder_port = holder.is_running() ? wait_for_bound_port(holder, 2000) : 0;
         if (holder_port == 0) {
-            // Say so. The whole #402 block hangs off this, and a silent skip
-            // turns the flagship regression case into a green no-op on a
-            // runner where no ephemeral port could be bound at all.
-            std::cerr << "WARNING: port-conflict cases SKIPPED -- could not bind an ephemeral port\n";
+            std::cerr << "port-conflict cases: could not bind an ephemeral port\n";
         }
+        // The whole #402 block hangs off this port: failing here keeps the
+        // flagship regression case from turning into a green no-op.
+        EXPECT(holder_port != 0);
         if (holder_port != 0) {
             {
                 alpacahttp::Config conflict_config;
@@ -1727,10 +1872,8 @@ int main() {
         concurrent.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (!concurrent.is_running()) {
-            std::cerr << "WARNING: concurrent-stop case SKIPPED -- could not bind an ephemeral port\n";
-        }
-        if (concurrent.is_running()) {
+        EXPECT(concurrent.is_running());  // a host that cannot listen fails the run, never skips it
+        {
             // Released together so both land in stop() at once, which is what
             // makes them race for the join rather than queueing behind it.
             std::atomic<bool> go{false};
@@ -1759,201 +1902,169 @@ int main() {
     }
 
     {
-        // The loser of the ownership race must not return from stop() early.
-        // ~Server() runs straight after stop() and destroys the wake pipe, the
-        // config and the connection maps that run_server() still reads, so a
-        // stop() that returns while the accept loop is unwinding is a
-        // use-after-free -- which is exactly what "return if another caller
-        // took the thread" does.
-        //
-        // Both stoppers are joined before the Server is destroyed: a stopper
-        // still inside stop() when the object dies is a *different* hazard
-        // (the caller must outlive the callee) and not what this PR claims to
-        // fix, so racing it here would only make the test unsound. What this
-        // does exercise, many times over, is the interleaving itself -- one
-        // caller in the !running_ branch winning the thread while the other
-        // runs the full phases -- and the ASan and TSan pre-flight gates are
-        // what turn a surviving run_server() into a report.
-        //
-        // The early-return regression was confirmed against this loop under
-        // ASan by deleting the condition-variable wait in
-        // join_server_thread(): heap-use-after-free in run_server() reading
-        // the destroyed Server's running_ flag, on every run.
-        for (int round = 0; round < 25; ++round) {
-            alpacahttp::Config teardown_config;
-            teardown_config.set_http_port(0);
-            teardown_config.set_discovery_enabled(false);
-            teardown_config.set_server_name("TestServerStopThenDestroy");
+        // case: loser of the join ownership race stays parked
+        // The loser of the ownership race must not return from stop() or
+        // wait() early. ~Server() runs straight after either and destroys the
+        // wake pipe, the config and the connection maps that run_server()
+        // still reads, so a caller that returns while the accept loop is
+        // unwinding is a use-after-free -- which is exactly what "return if
+        // another caller took the thread" does. The winner is held inside
+        // its join() through the join hook, so the loser provably reaches
+        // join_server_thread() while a join is in flight; it must still be
+        // parked when the winner is released, never have returned.
+        for (const bool loser_waits : {false, true}) {
+            alpacahttp::Config race_config;
+            race_config.set_http_port(0);
+            race_config.set_discovery_enabled(false);
+            race_config.set_server_name("TestServerLoserParks");
 
-            auto server = std::make_unique<alpacahttp::Server>(teardown_config);
-            server->start_async();
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
-            if (!server->is_running()) {
-                std::cerr << "WARNING: stop-then-destroy loop SKIPPED at round " << round
-                          << " -- could not bind an ephemeral port\n";
-                break;
-            }
+            std::mutex gate_mutex;
+            std::condition_variable gate_cv;
+            bool winner_in_join = false;
+            bool release_winner = false;
+            alpacahttp::Server server(race_config);
+            {
+                Watchdog watchdog(std::chrono::seconds(20), "loser of the join_server_thread ownership race");
+                alpacahttp::detail::ScopedJoinHooksForTest hooks(
+                    [&](std::thread& t, const char* context) {
+                        if (std::strcmp(context, "join_server_thread") == 0) {
+                            std::unique_lock<std::mutex> lock(gate_mutex);
+                            winner_in_join = true;
+                            gate_cv.notify_all();
+                            gate_cv.wait(lock, [&] { return release_winner; });
+                        }
+                        t.join();
+                    },
+                    [](std::thread& t, const char*) { t.detach(); });
 
-            alpacahttp::Server* raw = server.get();
-            std::atomic<bool> go{false};
-            std::atomic<int> returned{0};
-            std::thread other([&]() {
-                while (!go.load()) {
-                    std::this_thread::yield();
+                server.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                EXPECT(server.is_running());
+
+                std::atomic<bool> winner_returned{false};
+                std::atomic<bool> loser_returned{false};
+                std::thread winner([&] {
+                    server.stop();
+                    winner_returned.store(true);
+                });
+                {
+                    std::unique_lock<std::mutex> lock(gate_mutex);
+                    EXPECT(gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return winner_in_join; }));
                 }
-                raw->stop();
-                returned.fetch_add(1);
-            });
-
-            go.store(true);
-            raw->stop();
-            returned.fetch_add(1);
-
-            other.join();
-            EXPECT(returned.load() == 2);
-            EXPECT(!raw->is_running());
-
-            // Destroyed only once both stop() calls have returned. With the
-            // wait in place that means the server thread is already reaped;
-            // without it, run_server() can still be live here.
-            server.reset();
-        }
-    }
-
-    {
-        // Regression test for #428's join_server_thread() fix, specifically
-        // for wait() as one of the two racing callers -- issue #507 asked for
-        // this because the block above only proves it for two stop() callers,
-        // and a fix scoped to "the OTHER caller of stop()" rather than "any
-        // other caller of join_server_thread()" would still let a wait() that
-        // loses the ownership race return before the thread is truly gone.
-        // wait() and stop() share join_server_thread(), so the same
-        // early-return hazard applies: whichever call does not win the move
-        // must still block until the winner's join() completes, not merely
-        // find server_thread_ empty and return.
-        //
-        // stop() always runs its own teardown phases (closing the listener,
-        // stopping the reactor and workers) before it ever reaches
-        // join_server_thread(), regardless of which of the two calls wins
-        // ownership of the actual join -- so this cannot deadlock even when
-        // wait() wins the race and calls owned.join() first: stop()'s
-        // concurrent phase 3 still closes the listener and unblocks the
-        // accept loop that join() is waiting on.
-        //
-        // Same reasoning as the block above for why destruction is not
-        // raced here: a caller still inside join_server_thread() when the
-        // Server dies is a different hazard (the caller must outlive the
-        // callee), not what this proves. Both calls are joined before the
-        // Server is destroyed; what this exercises, many times over, is the
-        // interleaving itself -- stop() and wait() reaching
-        // join_server_thread() at the same moment, one of them losing the
-        // move -- for the ASan/TSan pre-flight gates to turn a surviving
-        // run_server() (reading a destroyed Server's members) into a report.
-        for (int round = 0; round < 25; ++round) {
-            alpacahttp::Config wait_config;
-            wait_config.set_http_port(0);
-            wait_config.set_discovery_enabled(false);
-            wait_config.set_server_name("TestServerStopWaitRace");
-
-            auto server = std::make_unique<alpacahttp::Server>(wait_config);
-            server->start_async();
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
-            if (!server->is_running()) {
-                std::cerr << "WARNING: stop/wait race loop SKIPPED at round " << round
-                          << " -- could not bind an ephemeral port\n";
-                break;
-            }
-
-            alpacahttp::Server* raw = server.get();
-            std::atomic<bool> go{false};
-            std::atomic<int> returned{0};
-            std::thread waiter([&]() {
-                while (!go.load()) {
-                    std::this_thread::yield();
-                }
-                raw->wait();
-                returned.fetch_add(1);
-            });
-
-            go.store(true);
-            raw->stop();
-            returned.fetch_add(1);
-
-            waiter.join();
-            EXPECT(returned.load() == 2);
-            EXPECT(!raw->is_running());
-
-            // Destroyed only once both stop() and wait() have returned. With
-            // the fix that means the server thread is already reaped;
-            // without it (a fix scoped to stop()-vs-stop() only rather than
-            // every join_server_thread() caller), wait() could have returned
-            // while run_server() was still unwinding.
-            server.reset();
-        }
-    }
-
-    {
-        // The restart shape: one caller stops and immediately starts again
-        // while another is still parked inside stop() waiting for the join.
-        // Without a generation counter the waiter wakes after the restart has
-        // installed a NEW server_thread_, adopts it and joins a server that is
-        // still running -- stop() never returns. A regression HANGS here
-        // rather than failing an assertion, which the watchdog below turns
-        // into a reported failure.
-        //
-        // Repeated, because the window is the winner's join: the waiter has to
-        // park on the condition variable while the winner is inside it, and
-        // the winner has to finish and restart before the waiter re-acquires
-        // the mutex.
-        //
-        // HONEST LIMIT: 40 restarts did NOT reach that window on this machine
-        // -- the generation check was removed and this loop still passed, three
-        // runs out of three. So treat it as an exerciser of the restart shape
-        // (and material for the ASan/TSan gates), not as the regression test
-        // for the adopt-the-next-generation bug. That one is argued in
-        // join_server_thread()'s comment and would need a test seam inside the
-        // join to pin properly.
-        alpacahttp::Config restart_config;
-        restart_config.set_http_port(0);
-        restart_config.set_discovery_enabled(false);
-        restart_config.set_server_name("TestServerRestartRace");
-
-        alpacahttp::Server restarting(restart_config);
-        restarting.start_async();
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-
-        if (!restarting.is_running()) {
-            std::cerr << "WARNING: restart-race case SKIPPED -- could not bind an ephemeral port\n";
-        } else {
-            std::atomic<bool> done{false};
-            std::atomic<long> waiter_returns{0};
-            // The embedder loop: every time it sees the server go down it
-            // calls stop() too, which is the caller that ends up parked.
-            std::thread waiter([&]() {
-                while (!done.load()) {
-                    if (!restarting.is_running()) {
-                        restarting.stop();
-                        waiter_returns.fetch_add(1);
+                std::thread loser([&] {
+                    if (loser_waits) {
+                        server.wait();
+                    } else {
+                        server.stop();
                     }
-                    std::this_thread::yield();
+                    loser_returned.store(true);
+                });
+                // Plenty for a loser that wrongly skips the wait to return.
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                EXPECT(!winner_returned.load());
+                EXPECT(!loser_returned.load());
+
+                {
+                    std::lock_guard<std::mutex> lock(gate_mutex);
+                    release_winner = true;
                 }
-            });
-
-            for (int round = 0; round < 40; ++round) {
-                restarting.stop();
-                restarting.start_async();
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                gate_cv.notify_all();
+                winner.join();
+                loser.join();
+                EXPECT(winner_returned.load() && loser_returned.load());
+                EXPECT(!server.is_running());
             }
+        }
+    }
 
-            done.store(true);
+    {
+        // case: waiter parked across a restart does not adopt the next generation's thread
+        // A wait() parked behind a join in flight wakes when that join ends.
+        // If a restart installs the next server thread before the waiter
+        // re-reads server_thread_, a waiter without the generation check
+        // adopts that live thread and joins it, so wait() never returns while
+        // the restarted server runs. The wake hook holds the woken waiter
+        // until the restart is done, so the interleaving is forced, not hoped
+        // for; the waiter must then return without touching the new thread.
+        alpacahttp::Config race_config;
+        race_config.set_http_port(0);
+        race_config.set_discovery_enabled(false);
+        race_config.set_server_name("TestServerGeneration");
+
+        std::mutex gate_mutex;
+        std::condition_variable gate_cv;
+        bool winner_in_join = false;
+        bool release_winner = false;
+        bool waiter_woken = false;
+        bool release_waiter = false;
+        std::atomic<int> joins_seen{0};
+        alpacahttp::Server server(race_config);
+        {
+            Watchdog watchdog(std::chrono::seconds(30), "waiter parked across a restart");
+            alpacahttp::detail::ScopedJoinWakeHookForTest wake_hook([&] {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                waiter_woken = true;
+                gate_cv.notify_all();
+                gate_cv.wait(lock, [&] { return release_waiter; });
+            });
+            alpacahttp::detail::ScopedJoinHooksForTest hooks(
+                [&](std::thread& t, const char* context) {
+                    // Hold only the first join (the winner's); a waiter that
+                    // wrongly adopts the new thread joins it unheld.
+                    if (std::strcmp(context, "join_server_thread") == 0 && joins_seen.fetch_add(1) == 0) {
+                        std::unique_lock<std::mutex> lock(gate_mutex);
+                        winner_in_join = true;
+                        gate_cv.notify_all();
+                        gate_cv.wait(lock, [&] { return release_winner; });
+                    }
+                    t.join();
+                },
+                [](std::thread& t, const char*) { t.detach(); });
+
+            server.start_async();
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            EXPECT(server.is_running());
+
+            std::thread winner([&] { server.stop(); });
+            {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                EXPECT(gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return winner_in_join; }));
+            }
+            std::atomic<bool> waiter_returned{false};
+            std::thread waiter([&] {
+                server.wait();
+                waiter_returned.store(true);
+            });
+            // Plenty for the waiter to park on the in-flight join.
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            {
+                std::lock_guard<std::mutex> lock(gate_mutex);
+                release_winner = true;
+            }
+            gate_cv.notify_all();
+            {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                EXPECT(gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return waiter_woken; }));
+            }
+            winner.join();
+            server.start_async();  // the restart: installs the next generation's thread
+            EXPECT(server.is_running());
+            {
+                std::lock_guard<std::mutex> lock(gate_mutex);
+                release_waiter = true;
+            }
+            gate_cv.notify_all();
+            // A correct waiter returns at once; one that adopted the new
+            // thread is stuck joining a server that is still running.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!waiter_returned.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            EXPECT(waiter_returned.load());
+            EXPECT(server.is_running());
+            server.stop();
             waiter.join();
-            // Reaching here at all is the assertion: a waiter that adopted a
-            // restarted thread would still be inside stop() and this join
-            // would never return -- when the window is actually hit.
-            EXPECT(waiter_returns.load() >= 0);
-
-            restarting.stop();
-            EXPECT(!restarting.is_running());
+            EXPECT(!server.is_running());
         }
     }
 
@@ -1970,9 +2081,8 @@ int main() {
         alpacahttp::Server server(config);
         server.start_async();
         const std::uint16_t before = server.is_running() ? wait_for_bound_port(server, 2000) : 0;
-        if (before == 0) {
-            std::cerr << "WARNING: rebind case SKIPPED -- could not bind an ephemeral port\n";
-        } else {
+        EXPECT(before != 0);  // a host that cannot listen fails the run, never skips it
+        {
             const int listener = server.listener_fd_for_test();
             EXPECT(listener >= 0);
             ::close(listener);
@@ -2030,12 +2140,11 @@ int main() {
         // its destructor runs strictly AFTER ScopedJoinHooksForTest's, per
         // thread_join.h's documented contract ("must be destroyed before any
         // Server instance that may still be joining threads is torn down").
-        // With hooks still installed during ~Server(), the SKIPPED branch's
+        // With hooks still installed during ~Server(), a failed bind's
         // own teardown (join_server_thread() reaping the early-returned
         // thread) would run under the injected throw too, masking a bind
         // failure as a spurious fallback-error match.
         alpacahttp::Server server(config);
-        bool ran = false;
         {
             Watchdog watchdog(std::chrono::seconds(10), "case a2 (join_server_thread fallback)");
 
@@ -2050,10 +2159,8 @@ int main() {
 
             server.start_async();
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            if (!server.is_running()) {
-                std::cerr << "WARNING: join-fallback case SKIPPED -- could not bind an ephemeral port\n";
-            } else {
-                ran = true;
+            EXPECT(server.is_running());  // a host that cannot listen fails the run, never skips it
+            {
                 server.stop();  // Must return despite the injected join() throw.
                 server.wait();  // Must also return -- both funnel through join_server_thread().
                 EXPECT(!server.is_running());
@@ -2075,7 +2182,7 @@ int main() {
         }
 
         alpacahttp::util::set_external_log_sink(nullptr);
-        if (ran) {
+        {
             std::lock_guard<std::mutex> lock(captured_mutex);
             bool saw_fallback_error = false;
             for (const auto& line : captured) {

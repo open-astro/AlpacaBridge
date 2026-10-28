@@ -20,6 +20,8 @@
 #include <alpacahttp/config.h>
 #include <alpacahttp/util/logging_adapter.h>
 
+#include <atomic>
+#include <chrono>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -128,9 +130,16 @@ void test_happy_path_unaffected() {
     reset_capture();
     const std::size_t before = alpacahttp::detail::abandoned_thread_count();
 
-    std::thread real([] {});
+    // A detaching joiner would also leave the thread non-joinable, so the body
+    // must be observable: the flag is set only if the join really waited.
+    std::atomic<bool> finished{false};
+    std::thread real([&finished] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        finished.store(true);
+    });
     alpacahttp::detail::join_or_abandon(real, "test_happy_path_unaffected");
 
+    EXPECT(finished.load());
     EXPECT(!real.joinable());
     EXPECT(captured_count() == 0);
     EXPECT(alpacahttp::detail::abandoned_thread_count() == before);
