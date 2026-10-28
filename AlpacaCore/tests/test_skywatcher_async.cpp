@@ -5393,6 +5393,117 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
+// ── Slew hold window and pulse deadline on util::HoldWindow (decision 0022) ──
+//
+// All on the shared FakeTaskClock: virtual time only, no real sleep.
+
+namespace {
+
+// Slews to (lst - 5 h, 20 deg) and waits for the landing, so a later slew a
+// fraction of a degree away lands in about a second of virtual time.
+void land_at_reference_point(FakeTaskClock& clock, alpacacore::TelescopeDriver& driver) {
+    const double ra = std::fmod(driver.get_sidereal_time() - 5.0 + 24.0, 24.0);
+    driver.slew_to_coordinates_async(ra, 20.0);
+    REQUIRE(run_clock_until(clock, [&] { return !driver.get_slewing(); }, std::chrono::milliseconds(120000)));
+}
+
+}  // namespace
+
+// The #580/#715 regression: landing is the board's answer, never the 8 s
+// hold. A 0.5 deg goto lands in about a second of virtual time, and Slewing
+// reads false then, long before the hold would have ended.
+TEST_CASE("SkyWatcher async - a short goto reports landed before the 8 s hold ends (#580, #715)",
+          "[skywatcher][async][hold-window]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    land_at_reference_point(clock, *driver);
+
+    const double ra = driver->get_right_ascension();
+    const auto dispatched = clock.now();
+    driver->slew_to_coordinates_async(ra, 20.5);
+    REQUIRE(driver->get_slewing());
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(20000)));
+    CHECK(clock.now() - dispatched < std::chrono::seconds(8));
+    driver->set_connected(false);
+}
+
+// The dispatch gap: Slewing is true the moment the call returns, before the
+// task has asked the board anything or set goto_in_progress_.
+TEST_CASE("SkyWatcher async - Slewing is true as soon as SlewToCoordinatesAsync returns",
+          "[skywatcher][async][hold-window]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+
+    driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 5.0 + 24.0, 24.0), 20.0);
+    CHECK(driver->get_slewing());
+    driver->abort_slew();
+    driver->set_connected(false);
+}
+
+// An abort inside the hold closes it: Slewing reads false at once, with
+// virtual time still inside the 8 s.
+TEST_CASE("SkyWatcher async - AbortSlew inside the hold clears Slewing at once", "[skywatcher][async][hold-window]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+
+    driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 5.0 + 24.0, 24.0), 20.0);
+    REQUIRE(driver->get_slewing());
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_slewing());
+    elapse(clock, std::chrono::milliseconds(500));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// A reconnect starts without the old session's hold.
+TEST_CASE("SkyWatcher async - a reconnect inside the hold leaves Slewing false", "[skywatcher][async][hold-window]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+
+    driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 5.0 + 24.0, 24.0), 20.0);
+    REQUIRE(driver->get_slewing());
+    REQUIRE(call_on_clock(clock, [&] { driver->set_connected(false); }, std::chrono::milliseconds(5000)));
+    REQUIRE(call_on_clock(clock, [&] { driver->set_connected(true); }, std::chrono::milliseconds(5000)));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// The pulse deadline is a HoldWindow on the task clock: the axis stays owned
+// by its pulse until virtual time reaches duration + 1 s, so a rate write in
+// the middle defers instead of rewriting the running axis, and nothing waits
+// on real time (#994).
+TEST_CASE("SkyWatcher async - a Dec pulse owns its axis until its deadline on virtual time",
+          "[skywatcher][async][pulseguide][hold-window]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 2000);  // North
+    REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
+    CHECK(driver->get_is_pulse_guiding());
+    const uint32_t period_before = mount.step_period(2);
+    driver->set_declination_rate(10.0);  // busy axis: stored, not applied to the running pulse
+    CHECK(mount.step_period(2) == period_before);
+
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(4000)));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
 
 TEST_CASE("SkyWatcher async - SiteLatitude crossing the equator inside the pulse-end restore window reverses RA",
