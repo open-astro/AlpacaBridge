@@ -85,6 +85,23 @@ public:
     ScopedWorkerStartHookForTest& operator=(const ScopedWorkerStartHookForTest&) = delete;
 };
 
+// Test-only. Installs a process-wide hook that join_server_thread() calls
+// after every wake from its condition wait, with server_thread_mutex_
+// released, before it re-checks the generation. A test parks a woken waiter
+// there while a restart installs the next thread. Must be destroyed before
+// any Server whose waiters may still be woken.
+class ScopedJoinWakeHookForTest {
+public:
+    explicit ScopedJoinWakeHookForTest(std::function<void()> hook);
+    ~ScopedJoinWakeHookForTest();
+
+    ScopedJoinWakeHookForTest(const ScopedJoinWakeHookForTest&) = delete;
+    ScopedJoinWakeHookForTest& operator=(const ScopedJoinWakeHookForTest&) = delete;
+};
+
+// Runs the installed join-wake hook, if any. Called by join_server_thread().
+void run_join_wake_hook();
+
 // Runs the installed worker-start hook, if any. Called by Server's worker.
 void run_worker_start_hook();
 #endif  // ALPACAHTTP_ENABLE_TEST_HOOKS

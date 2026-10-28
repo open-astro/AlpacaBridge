@@ -365,8 +365,16 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
         // server_thread_ blind would then adopt the NEW server's thread and
         // join it, hanging stop() forever while the restarted server runs on.
         const std::uint64_t generation = server_thread_generation_;
-        server_thread_cv_.wait(
-            guard, [this, generation] { return !server_thread_joining_ || server_thread_generation_ != generation; });
+        while (server_thread_joining_ && server_thread_generation_ == generation) {
+            server_thread_cv_.wait(guard);
+#ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
+            // Lets a test hold a woken waiter until a restart has installed the
+            // next generation's thread (the race this loop's condition guards).
+            guard.unlock();
+            detail::run_join_wake_hook();
+            guard.lock();
+#endif
+        }
         if (only_if_stopped && running_) {
             // stop()'s !running_ path asked to reap a thread that had already
             // returned early (a failed bind, #402). By the time it won this

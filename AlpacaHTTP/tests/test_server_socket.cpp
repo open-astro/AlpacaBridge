@@ -1974,6 +1974,97 @@ int main() {
     }
 
     {
+        // case: waiter parked across a restart does not adopt the next generation's thread
+        // A wait() parked behind a join in flight wakes when that join ends.
+        // If a restart installs the next server thread before the waiter
+        // re-reads server_thread_, a waiter without the generation check
+        // adopts that live thread and joins it, so wait() never returns while
+        // the restarted server runs. The wake hook holds the woken waiter
+        // until the restart is done, so the interleaving is forced, not hoped
+        // for; the waiter must then return without touching the new thread.
+        alpacahttp::Config race_config;
+        race_config.set_http_port(0);
+        race_config.set_discovery_enabled(false);
+        race_config.set_server_name("TestServerGeneration");
+
+        std::mutex gate_mutex;
+        std::condition_variable gate_cv;
+        bool winner_in_join = false;
+        bool release_winner = false;
+        bool waiter_woken = false;
+        bool release_waiter = false;
+        std::atomic<int> joins_seen{0};
+        alpacahttp::Server server(race_config);
+        {
+            Watchdog watchdog(std::chrono::seconds(30), "waiter parked across a restart");
+            alpacahttp::detail::ScopedJoinWakeHookForTest wake_hook([&] {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                waiter_woken = true;
+                gate_cv.notify_all();
+                gate_cv.wait(lock, [&] { return release_waiter; });
+            });
+            alpacahttp::detail::ScopedJoinHooksForTest hooks(
+                [&](std::thread& t, const char* context) {
+                    // Hold only the first join (the winner's); a waiter that
+                    // wrongly adopts the new thread joins it unheld.
+                    if (std::strcmp(context, "join_server_thread") == 0 && joins_seen.fetch_add(1) == 0) {
+                        std::unique_lock<std::mutex> lock(gate_mutex);
+                        winner_in_join = true;
+                        gate_cv.notify_all();
+                        gate_cv.wait(lock, [&] { return release_winner; });
+                    }
+                    t.join();
+                },
+                [](std::thread& t, const char*) { t.detach(); });
+
+            server.start_async();
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            EXPECT(server.is_running());
+
+            std::thread winner([&] { server.stop(); });
+            {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                EXPECT(gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return winner_in_join; }));
+            }
+            std::atomic<bool> waiter_returned{false};
+            std::thread waiter([&] {
+                server.wait();
+                waiter_returned.store(true);
+            });
+            // Plenty for the waiter to park on the in-flight join.
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            {
+                std::lock_guard<std::mutex> lock(gate_mutex);
+                release_winner = true;
+            }
+            gate_cv.notify_all();
+            {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                EXPECT(gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return waiter_woken; }));
+            }
+            winner.join();
+            server.start_async();  // the restart: installs the next generation's thread
+            EXPECT(server.is_running());
+            {
+                std::lock_guard<std::mutex> lock(gate_mutex);
+                release_waiter = true;
+            }
+            gate_cv.notify_all();
+            // A correct waiter returns at once; one that adopted the new
+            // thread is stuck joining a server that is still running.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!waiter_returned.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            EXPECT(waiter_returned.load());
+            EXPECT(server.is_running());
+            server.stop();
+            waiter.join();
+            EXPECT(!server.is_running());
+        }
+    }
+
+    {
         // (#562) With http_port 0, the descriptor-loss recovery must come back
         // on the port it had, not a new ephemeral one: clients and discovery
         // already hold that port. Close the listener behind the server; its
