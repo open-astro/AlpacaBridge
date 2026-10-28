@@ -369,6 +369,54 @@ TEST_CASE("SynScan Telescope Driver - the two target properties are independent"
 
 #ifndef _WIN32
 
+TEST_CASE("SynScan Telescope Driver - UTCDate requires a mount sample or successful write without getter I/O",
+          "[synscan][telescope][unit][utcdate]") {
+    std::atomic<int> time_reads{0};
+    std::atomic<bool> readable{false};
+    alpacacore::test::FakeMountServer server([&](const std::string& command) -> std::string {
+        if (command == "h") {
+            ++time_reads;
+            return readable.load() ? std::string{3, 4, 5, 1, 2, 20, 0, 0} + "#" : "#";
+        }
+        if (command == "e") return "40000000,20000000#";
+        return alpacacore::test::FakeMountServer::default_responder()(command);
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, 30.0, -100.0, {}, false,
+        alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(time_reads.load() == 1);
+    REQUIRE_NOTHROW(driver->get_sidereal_time());
+    for (int i = 0; i < 2; ++i) {
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        driver->get_device_state();
+    }
+    CHECK(time_reads.load() == 1);
+    const auto written = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    driver->set_utc_date(written);
+    CHECK(driver->get_utc_date() == written);
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    driver->set_connected(false);
+    readable.store(true);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto mount = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + std::chrono::hours(3) +
+                       std::chrono::minutes(4) + std::chrono::seconds(5);
+    CHECK(driver->get_utc_date() == mount);
+    CHECK(driver->get_utc_date() == mount);
+    CHECK(time_reads.load() == 3);
+    driver->set_connected(false);
+}
+
 // ── The client-clock disagreement warning (#409) ─────────────────────────────
 
 TEST_CASE("SynScan Telescope Driver - a far-off client UTCDate is logged once per connection on a disciplined host",
@@ -451,13 +499,10 @@ TEST_CASE(
     clock.advance(std::chrono::seconds(90));
     CHECK(driver->get_utc_date() == written + std::chrono::seconds(90));
 
-    // Disconnect and reconnect forget the written value: the readback is the
-    // mount's clock, not the stale client instant.
+    // The default fake cannot supply a mount clock, so reconnect leaves time unset.
     driver->set_connected(false);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
-    const auto after = driver->get_utc_date();
-    CHECK(after != written + std::chrono::seconds(90));
-    CHECK(after < written);  // the host/mount clock, not the year-2100 client write
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
     driver->set_connected(false);
 }
 

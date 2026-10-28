@@ -1210,7 +1210,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate readback and pointing fo
     // A later system-clock step invalidates the saved offset rather than
     // applying it on top of the corrected host time.
     epoch_seconds.fetch_add(10);
-    CHECK(driver->get_utc_date() == now());
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
 
     alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
     const auto synchronized_host_utc = now();
@@ -1221,6 +1221,33 @@ TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate readback and pointing fo
         synchronized_host_utc, info.site_longitude_degrees.value());
     CHECK(std::abs(std::remainder(driver->get_sidereal_time() - host_lst, 24.0)) < 1e-9);
     driver->set_connected(false);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate requires an established client time",
+          "[celestron][cgx][telescope][unit][utcdate]") {
+    struct ProbeGuard {
+        ~ProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+    } restore_probe;
+    const bool disciplined = GENERATE(false, true);
+    alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(disciplined ? +[] { return true; }
+                                                                                : +[] { return false; });
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    const auto now = [] { return std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)}; };
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(
+        0, info, alpacacore::util::default_task_clock(), now);
+    for (int session = 0; session < 2; ++session) {
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        REQUIRE_NOTHROW(driver->get_sidereal_time());
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        driver->set_utc_date(now());
+        CHECK(driver->get_utc_date() == now());
+        driver->set_connected(false);
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
+    }
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - unsupported methods use ASCOM errors",
@@ -2075,6 +2102,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - reference publication cannot ado
         else
             driver->find_home();
         const bool label_ack_held = mount.wait_for_reply_fragment(2s);
+        driver->set_utc_date(std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
         hold_utc.store(true);
         auto utc = std::async(std::launch::async, [&] { return driver->get_utc_date(); });
         const bool mutex_held = utc_entered.get_future().wait_for(2s) == std::future_status::ready;

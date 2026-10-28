@@ -2060,66 +2060,20 @@ std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {
     // that omit the terminator.
     std::string response = send_command(":GUT", false);
     response = strip_status_prefix(std::move(response));
-    if (response.length() < 18) {
+    if (response.length() != 18 || (response[0] != '+' && response[0] != '-') ||
+        (response[4] != '0' && response[4] != '1') ||
+        !std::all_of(response.begin() + 1, response.end(), [](char c) { return c >= '0' && c <= '9'; })) {
         throw AlpacaException("Invalid UTC time response from mount");
     }
-    
-    // Response: sMMMnXXXXXXXXXXXXX
-    // Sign + 3 digits: timezone offset (ignored here)
-    // Next digit: DST flag
-    // Remaining digits: time in milliseconds since J2000
-    std::string tz_str = response.substr(0, 4);
-    int tz_offset_minutes = static_cast<int>(pimpl_->parse_signed_int(tz_str));
-    bool dst_observed = (response[4] == '1');
-    std::string time_digits = response.substr(5);
-    int64_t ms_since_j2000 = parse_int64_field(time_digits, ":GUT time");
 
-    auto j2000 = std::chrono::system_clock::time_point(
-        std::chrono::seconds(946728000));  // 2000-01-01 12:00:00 UTC
-    auto raw_time = j2000 + std::chrono::milliseconds(ms_since_j2000);
-    
-    // Some mounts return local time in the GUT payload. If so, adjust using the
-    // reported timezone/DST or the host's timezone when that brings us closer
-    // to system UTC.
-    int total_offset_minutes = tz_offset_minutes + (dst_observed ? 60 : 0);
-    auto adjusted_by_mount = raw_time - std::chrono::minutes(total_offset_minutes);
-
-    auto compute_host_offset_minutes = []() -> int {
-        std::time_t now = std::time(nullptr);
-        std::tm local_tm {};
-        std::tm utc_tm {};
-#if defined(_WIN32)
-        localtime_s(&local_tm, &now);
-        gmtime_s(&utc_tm, &now);
-#else
-        local_tm = *std::localtime(&now);
-        utc_tm = *std::gmtime(&now);
-#endif
-        std::time_t local_time = std::mktime(&local_tm);
-        std::time_t utc_as_local = std::mktime(&utc_tm);
-        double offset_seconds = std::difftime(local_time, utc_as_local);
-        return static_cast<int>(std::llround(offset_seconds / 60.0));
-    };
-
-    int host_offset_minutes = compute_host_offset_minutes();
-    auto adjusted_by_host = raw_time - std::chrono::minutes(host_offset_minutes);
-    
-    auto now = std::chrono::system_clock::now();
-    auto raw_diff = (raw_time > now) ? (raw_time - now) : (now - raw_time);
-    auto mount_diff = (adjusted_by_mount > now) ? (adjusted_by_mount - now) : (now - adjusted_by_mount);
-    auto host_diff = (adjusted_by_host > now) ? (adjusted_by_host - now) : (now - adjusted_by_host);
-
-    auto best_time = raw_time;
-    auto best_diff = raw_diff;
-    if (mount_diff + std::chrono::minutes(1) < best_diff) {
-        best_time = adjusted_by_mount;
-        best_diff = mount_diff;
-    }
-    if (host_diff + std::chrono::minutes(1) < best_diff) {
-        best_time = adjusted_by_host;
-        best_diff = host_diff;
-    }
-    return best_time;
+    // Protocol v3.10: the payload is UTC milliseconds since J2000, not local time.
+    const auto ms_since_j2000 = parse_int64_field(response.substr(5), ":GUT time");
+    const auto j2000 = std::chrono::system_clock::time_point{std::chrono::seconds(946728000)};
+    const auto max_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::time_point::max() - j2000)
+            .count();
+    if (ms_since_j2000 > max_ms) throw AlpacaException("UTC time response exceeds the supported clock range");
+    return j2000 + std::chrono::milliseconds(ms_since_j2000);
 }
 
 void iOptronProtocolWrapper::set_timezone_offset(int offset_minutes) {

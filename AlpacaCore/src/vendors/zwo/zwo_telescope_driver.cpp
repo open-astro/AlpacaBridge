@@ -88,6 +88,12 @@ void civil_from_days(std::int64_t days, int& year, unsigned& month, unsigned& da
 }
 
 std::chrono::system_clock::time_point to_utc_time_point(const TimeInfo& info) {
+    const std::chrono::year_month_day date{std::chrono::year{info.year},
+                                           std::chrono::month{static_cast<unsigned>(info.month)},
+                                           std::chrono::day{static_cast<unsigned>(info.day)}};
+    if (!date.ok() || info.hour < 0 || info.hour > 23 || info.minute < 0 || info.minute > 59 || info.second < 0 ||
+        info.second > 59)
+        throw AlpacaException("Invalid mount date/time sample", AlpacaError::DriverException);
     const auto days = days_from_civil(info.year, static_cast<unsigned>(info.month), static_cast<unsigned>(info.day));
     std::int64_t local_seconds = days * 86400 +
                                  static_cast<std::int64_t>(info.hour) * 3600 +
@@ -582,6 +588,11 @@ public:
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
             }
+            try {
+                refresh_mount_time(true);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("ZWO", "Mount UTC unavailable on refresh: " + std::string(e.what()));
+            }
             refresh_cached_values();
             start_poll_thread();
             start_pulse_thread();
@@ -672,6 +683,11 @@ public:
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO",
                                     "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
+                }
+                try {
+                    refresh_mount_time(true);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("ZWO", "Mount UTC unavailable on connect: " + std::string(e.what()));
                 }
                 // Try the first measurement before publishing Connected; failure is unavailable telemetry, not a guess.
                 refresh_cached_values();
@@ -929,8 +945,9 @@ public:
     }
 
     GuideRate get_guide_rate() const override {
-        check_writable_state();
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         return guide_rate_;
     }
 
@@ -962,6 +979,9 @@ public:
         guide_rate_ = {effective, effective};
         ++guide_rate_writes_;
     }
+
+    void set_guide_rate_right_ascension(double value) override { set_guide_rate({value, value}); }
+    void set_guide_rate_declination(double value) override { set_guide_rate({value, value}); }
 
     double get_right_ascension() const override {
         check_connected();
@@ -1378,8 +1398,9 @@ public:
     }
 
     double get_target_declination() const override {
-        check_writable_state();
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         if (!target_dec_set_) {
             throw AlpacaException("TargetDeclination has not been set", AlpacaError::ValueNotSet);
         }
@@ -1403,8 +1424,9 @@ public:
     }
 
     double get_target_right_ascension() const override {
-        check_writable_state();
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         if (!target_ra_set_) {
             throw AlpacaException("TargetRightAscension has not been set", AlpacaError::ValueNotSet);
         }
@@ -1454,13 +1476,17 @@ public:
     }
 
     std::chrono::system_clock::time_point get_utc_date() const override {
-        check_writable_state();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
-        }
+        update_link_state();
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
+        if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
+        throw AlpacaException("UTCDate has not been established; set the mount time first",
+                              AlpacaError::InvalidOperation);
+    }
 
-        return std::chrono::system_clock::now();
+    std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return utc_offset_.current(clock_.now());
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -2426,14 +2452,18 @@ private:
         return true;
     }
 
-    // Match Connected during the handshake; neither this gate nor a getter waits on the wire.
+    // Call without mutex_, including safety stops; match Connected without waiting on the wire.
     void check_connected(bool safety_stop = false) const {
         update_link_state();
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked(safety_stop);
+    }
+
+    void check_connected_locked(bool safety_stop = false) const {
         if (!connected_.load() || !caches_ready_.load()) {
             throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
         }
         if (!safety_stop) {
-            std::lock_guard<std::mutex> lock(mutex_);
             const auto fault = link_fault_locked();
             if (!fault.empty()) throw AlpacaException(fault, AlpacaError::DriverException);
         }
@@ -2672,6 +2702,24 @@ private:
         park_state_at_ = *frame.mandatory_at;
     }
 
+    void refresh_mount_time(bool only_if_unset = false) {
+        std::uint64_t session;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (only_if_unset && utc_offset_.valid()) return;
+            session = utc_session_;
+        }
+        const auto mount_time = protocol_.get_time_info();
+        const auto utc = to_utc_time_point(mount_time);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load() || poll_stop_.load() || session != utc_session_ ||
+            (only_if_unset && utc_offset_.valid()))
+            return;
+        utc_offset_.set(utc, clock_.now());
+        timezone_offset_minutes_ = mount_time.timezone_offset_minutes;
+        timezone_valid_ = true;
+    }
+
     void start_poll_thread() {
         stop_poll_thread();
         poll_stop_.store(false);
@@ -2698,13 +2746,7 @@ private:
                 const auto now = clock_.now();
                 if (!poll_stop_.load() && now >= next_time_refresh) {
                     try {
-                        const TimeInfo mount_time = protocol_.get_time_info();
-                        const auto utc = to_utc_time_point(mount_time);
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        if (!connected_.load() || poll_stop_.load()) break;
-                        utc_offset_.set(utc, clock_.now());
-                        timezone_offset_minutes_ = mount_time.timezone_offset_minutes;
-                        timezone_valid_ = true;
+                        refresh_mount_time();
                     } catch (const std::exception&) {
                     }
                     next_time_refresh = now + std::chrono::seconds(30);
@@ -3049,6 +3091,11 @@ private:
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
 };
+
+std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(const TelescopeDriver& driver) {
+    const auto* zwo = dynamic_cast<const ZWOTelescopeDriver*>(&driver);
+    return zwo ? zwo->utc_anchor_for_testing() : std::nullopt;
+}
 
 std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,
                                                       util::TaskClock& clock) {

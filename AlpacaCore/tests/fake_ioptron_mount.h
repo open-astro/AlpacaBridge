@@ -63,6 +63,11 @@ public:
     /// firmware say "moving" with no GOTO issued, as during a pulse-guide or a slew started from the handset.
     void set_system_status(int status) { system_status_.store(status); }
 
+    void set_utc_reply(std::string reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        utc_reply_ = std::move(reply);
+    }
+
     /// GPS digit of the ":GLS" reply (0 no or failed GPS module, 1 GPS works but no valid data, 2 valid GPS data)
     /// together with the site that reply carries: the receiver's own reading when the digit is 2, otherwise the
     /// mount's stored site. Defaults: digit 0 and an all-zero site field.
@@ -159,7 +164,8 @@ private:
                    "0001#";
         }
         if (cmd == ":GUT#") {
-            return "+00000000000000000#";
+            std::lock_guard<std::mutex> lock(mutex_);
+            return utc_reply_;
         }
         // The driver no longer reads :GAL / :GMT (#763). Keep these answers:
         // without them the old override failed its read and never sent :SAL /
@@ -213,6 +219,7 @@ private:
     std::atomic<int> hold_ms_{0};
     std::atomic<bool> holding_{false};
     mutable std::mutex mutex_;
+    std::string utc_reply_ = "+00000000000000000#";
     std::vector<std::string> commands_;
     long long pending_ra_ = 0;
     long long pending_dec_ = 0;
