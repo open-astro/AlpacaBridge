@@ -277,6 +277,15 @@ TEST_CASE("ToupTek AAF Focuser Driver - Value range validation",
     require_alpaca_error([&]() { driver->move(100000000); },
                          alpacacore::AlpacaError::NotConnected);
 
+    // Connected over the fake: out-of-range positions are InvalidValue and no
+    // move reaches the device.
+    alpacacore::test::FakeToupTekSDK fake;
+    auto connected = make_connected(fake);
+    require_alpaca_error([&]() { connected->move(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { connected->move(connected->get_max_step() + 1); },
+                         alpacacore::AlpacaError::InvalidValue);
+    CHECK(fake.call_count("aaf_set") == 0);
+
     // Set temp comp is unsupported, but the connection check answers first
     // while disconnected (open-astro#309). The NotImplemented answer on a
     // connected focuser is unchanged.

@@ -18,6 +18,7 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_touptek_sdk.h"
 
 namespace {
 
@@ -102,6 +103,18 @@ TEST_CASE("ToupTek Thermal Switch Driver - Async not supported", "[touptek][swit
     require_alpaca_error([&]() { driver->set_async(0, true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_async_value(0, 50.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_can_async(0); }, alpacacore::AlpacaError::NotConnected);
+
+    // Connected over the fake: no switch is asynchronous.
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    auto connected = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    connected->set_connected(true);
+    for (int id = 0; id < 3; ++id) {
+        CHECK_FALSE(connected->get_can_async(id));
+        require_alpaca_error([&]() { connected->set_async(id, true); }, alpacacore::AlpacaError::NotImplemented);
+        require_alpaca_error([&]() { connected->set_async_value(id, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+    }
+    connected->set_connected(false);
 }
 
 TEST_CASE("ToupTek Thermal Switch Driver - State machine", "[touptek][switch][unit]") {
@@ -121,12 +134,13 @@ TEST_CASE("ToupTek Thermal Switch Driver - State machine", "[touptek][switch][un
 }
 
 TEST_CASE("ToupTek Thermal Switch Driver - Connect fails on invalid camera index", "[touptek][switch][unit]") {
-    // Index 999 can never enumerate: with no camera attached connect throws
-    // NotConnected, with cameras attached it throws InvalidValue. Either way it
-    // must throw and never silently report connected — and the absurd index
-    // keeps this test hardware-independent.
-    auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 999);
+    // With no camera attached connect throws NotConnected before the index is
+    // looked at, so the index check needs one attached camera.
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 999, fake);
 
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::InvalidValue);
     CHECK_FALSE(driver->get_connected());
+    CHECK(fake.physical_opens == 0);
 }
