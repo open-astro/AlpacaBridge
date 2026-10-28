@@ -54,6 +54,7 @@ Symbol: `UtcOffset`
 | iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1590 | `utc_offset_` set and read with `clock_.now()` |
 | OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | with its clock ticket; clears on disconnect too |
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1522 | TaskClock elapsed time; clears on fresh connect, disconnect and failed initialization |
+| Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1779 | Remote TheSkyX computer-clock samples in the session snapshot; TaskClock elapsed time; snapshot reset clears on connect and disconnect |
 
 ## Links
 
