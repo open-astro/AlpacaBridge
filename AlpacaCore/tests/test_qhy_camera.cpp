@@ -3513,8 +3513,7 @@ TEST_CASE("QHY Camera Driver - Connected capability members report the fake's mo
     driver->set_connected(false);
 }
 
-TEST_CASE("QHY Camera Driver - Connected members the driver does not implement answer 0x400",
-          "[qhy][camera][unit]") {
+TEST_CASE("QHY Camera Driver - Connected members the driver does not implement answer 0x400", "[qhy][camera][unit]") {
     // Falsified by: any of these getters returning a value, or throwing another code (a mono camera has no
     // Bayer offsets either).
     auto fake = make_fake();
