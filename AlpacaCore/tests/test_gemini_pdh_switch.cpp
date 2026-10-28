@@ -665,3 +665,50 @@ TEST_CASE("Gemini PDH Switch Driver - Connect with empty serial port names portP
     CHECK(message.find("portPath") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
 }
+
+// Falsified by: gemini_pdh_switch_driver.cpp set_async/set_async_value return instead of throwing
+//   MethodNotImplemented, or get_state_change_complete returns false.
+TEST_CASE("Gemini PDH Switch Driver - Connected async pair and out-of-range ids",
+          "[gemini][switch][unit][fake]") {
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+
+    // Id 11 is writable (DEW6 value), id 6 is the read-only always-on rail.
+    for (const int id : {11, 6}) {
+        CHECK(driver->get_state_change_complete(id));
+        require_alpaca_error([&]() { driver->set_async(id, true); }, alpacacore::AlpacaError::NotImplemented);
+        require_alpaca_error([&]() { driver->set_async_value(id, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+    }
+    // The ID check precedes the not-implemented answer, connected too.
+    for (const int id : {-1, 24}) {
+        require_alpaca_error([&]() { driver->set_async(id, true); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_async_value(id, 1.0); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_state_change_complete(id); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+}
+
+// Falsified by: gemini_pdh_switch_driver.cpp set_switch_name writes switch_names_[0] whatever the id,
+//   or get_switch_description returns the name instead of the table description.
+TEST_CASE("Gemini PDH Switch Driver - Connected names and descriptions", "[gemini][switch][unit][fake]") {
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+
+    for (const int id : {11, 6}) {
+        const std::string before = driver->get_switch_name(id);
+        CHECK_FALSE(driver->get_switch_description(id).empty());
+        driver->set_switch_name(id, "Renamed");
+        CHECK(driver->get_switch_name(id) == "Renamed");
+        // Only the addressed id changes, and the description does not follow the name.
+        CHECK(driver->get_switch_name(0) == "USB A");
+        CHECK(driver->get_switch_description(id) != "Renamed");
+        CHECK(before != "Renamed");
+    }
+    CHECK(driver->get_switch_description(11) != driver->get_switch_description(6));
+
+    for (const int id : {-1, 24}) {
+        require_alpaca_error([&]() { (void)driver->get_switch_description(id); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_switch_name(id, "x"); }, alpacacore::AlpacaError::InvalidValue);
+    }
+}

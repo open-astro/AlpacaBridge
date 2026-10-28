@@ -400,3 +400,53 @@ TEST_CASE("WandererAstro Box Switch Driver - Link fault restores retuned line se
                          std::chrono::milliseconds(2000)));
     driver->set_connected(false);
 }
+
+// Falsified by: wandererastro_box_switch_driver.cpp set_async/set_async_value return instead of throwing
+//   MethodNotImplemented, or get_state_change_complete returns false.
+TEST_CASE("WandererAstro Box Switch Driver - Connected async pair and out-of-range ids",
+          "[wandererastro][switch][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Id 7 (DC8-9) is writable, id 0 (DC1) is read-only.
+    for (const int id : {7, 0}) {
+        CHECK(driver->get_state_change_complete(id));
+        require_alpaca_error([&]() { driver->set_async(id, true); }, alpacacore::AlpacaError::NotImplemented);
+        require_alpaca_error([&]() { driver->set_async_value(id, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+    }
+    for (const int id : {-1, 24}) {
+        require_alpaca_error([&]() { driver->set_async(id, true); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_async_value(id, 1.0); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_state_change_complete(id); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    driver->set_connected(false);
+}
+
+// Falsified by: wandererastro_box_switch_driver.cpp set_switch_name writes switch_names_[0] whatever the id,
+//   or get_switch_description returns the name instead of the table description.
+TEST_CASE("WandererAstro Box Switch Driver - Connected names and descriptions",
+          "[wandererastro][switch][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    for (const int id : {7, 14}) {  // DC8-9 writable, Input Voltage read-only
+        CHECK_FALSE(driver->get_switch_description(id).empty());
+        driver->set_switch_name(id, "Renamed");
+        CHECK(driver->get_switch_name(id) == "Renamed");
+        CHECK(driver->get_switch_name(0) == "DC1");
+        CHECK(driver->get_switch_description(id) != "Renamed");
+    }
+    CHECK(driver->get_switch_description(7) != driver->get_switch_description(14));
+
+    for (const int id : {-1, 24}) {
+        require_alpaca_error([&]() { (void)driver->get_switch_description(id); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_switch_name(id, "x"); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    driver->set_connected(false);
+}
