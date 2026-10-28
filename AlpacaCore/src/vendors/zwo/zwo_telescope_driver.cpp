@@ -1389,6 +1389,7 @@ public:
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
         check_writable_state();
+        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1413,6 +1414,7 @@ public:
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
         check_writable_state();
+        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1777,8 +1779,8 @@ public:
 
         // Joinable member thread, NOT detached (H1): cancel + join any
         // previous GOTO setup first, then reset the cancel flag for this one.
-        // Park, FindHome, MoveAxis, AbortSlew and set_connected(false) cancel
-        // and join via cancel_and_join_goto_thread(); the destructor cancels
+        // Park, FindHome, MoveAxis, AbortSlew, Sync, Unpark and set_connected(false)
+        // cancel and join via cancel_and_join_goto_thread(); the destructor cancels
         // and joins too. The reap stays inline here because goto_reap_mutex_
         // must be held across the respawn and is not recursive.
         // goto_reap_mutex_ serializes concurrent SlewAsync callers — without
@@ -1833,18 +1835,24 @@ public:
                     abandon();
                     return;
                 }
-                protocol.set_target_ra(target_ra);
-                if (goto_cancel_.load()) {
-                    abandon();
-                    return;
-                }
-                protocol.set_target_dec(target_dec);
-                if (goto_cancel_.load()) {
-                    abandon();
-                    return;
-                }
                 for (int attempt = 0; attempt < 3 && !goto_cancel_.load(); ++attempt) {
                     try {
+                        // Target registers are shared with Sync and property writes; restore both on every retry.
+                        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+                        if (goto_cancel_.load()) {
+                            abandon();
+                            return;
+                        }
+                        protocol.set_target_ra(target_ra);
+                        if (goto_cancel_.load()) {
+                            abandon();
+                            return;
+                        }
+                        protocol.set_target_dec(target_dec);
+                        if (goto_cancel_.load()) {
+                            abandon();
+                            return;
+                        }
                         if (!protocol.goto_target()) {
                             throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
                         }
@@ -1964,7 +1972,6 @@ public:
     void sync_to_target() override {
         check_connected();
         ensure_not_parked("SyncToTarget");
-        reset_position_offsets();
 
         double target_ra = 0.0;
         double target_dec = 0.0;
@@ -1978,10 +1985,15 @@ public:
         }
 
         util::validate_ra_dec(target_ra, target_dec, "SyncToTarget");
+        // A pending setup/retry must not consume the target registers replaced by Sync.
+        // This clears setup ownership/errors, not an accepted physical slew; moving-response recovery below stops it.
+        cancel_and_join_goto_thread();
+        reset_position_offsets();
 
         auto& protocol = protocol_;
 
         auto attempt_sync = [&]() {
+            std::lock_guard<std::mutex> target_lock(target_write_mutex_);
             try {
                 protocol.sync_target_equatorial(target_ra, target_dec);
                 return true;
@@ -2017,6 +2029,7 @@ public:
                 // Last resort: abort again and try the set-target + :CM path.
                 protocol.abort_motion();
                 clock_.sleep_for(std::chrono::milliseconds(300));
+                std::lock_guard<std::mutex> target_lock(target_write_mutex_);
                 protocol.set_target_ra(target_ra);
                 protocol.set_target_dec(target_dec);
                 protocol.sync_target();
@@ -2880,9 +2893,9 @@ private:
     // open-astro#720 fence: after this returns no GOTO setup thread started
     // before the call can put anything on the wire. The join waits for at
     // most the one mount round trip in flight (the body checks goto_cancel_
-    // between protocol calls). The caller must NOT hold mutex_, pulse_mutex_
-    // or the protocol mutex: the GOTO body takes mutex_ and the protocol
-    // mutex, so a join under either deadlocks. Does not reset goto_cancel_;
+    // between protocol calls). The caller must NOT hold mutex_, pulse_mutex_,
+    // target_write_mutex_ or the protocol mutex: the GOTO body takes the state,
+    // target and protocol locks, so joining under one deadlocks. Does not reset goto_cancel_;
     // only slew_to_target_async() does, under goto_mutex_.
     void cancel_and_join_goto_thread() {
         {
@@ -2893,7 +2906,7 @@ private:
             }
         }
         // Every caller starts other motion or none (Park, FindHome, MoveAxis,
-        // AbortSlew, disconnect): the driver's GOTO is no longer in flight.
+        // AbortSlew, Sync, Unpark, disconnect): the driver's GOTO is no longer in flight.
         // Taken after the reap lock is released, never nested in it.
         std::lock_guard<std::mutex> lock(mutex_);
         goto_active_ = false;
@@ -2920,6 +2933,9 @@ private:
     mutable std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
+    // Serializes target writes through CM/MS, never held across a join or a driver wait; getters never take it.
+    // Order: before the protocol wrapper's mutex and mutex_.
+    std::mutex target_write_mutex_;
     // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
     // read-back and re-send. No getter takes it. Order: set_connected_mutex_, then this, then the protocol
     // wrapper's mutex, then mutex_.
