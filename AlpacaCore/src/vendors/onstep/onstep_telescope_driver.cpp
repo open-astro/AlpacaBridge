@@ -18,6 +18,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/pointing.h>
@@ -182,101 +183,15 @@ class OnStepTelescopeDriver : public TelescopeDriver, protected alpacacore::Asyn
     // is stale and it has to ask the mount: then Wire takes io_mutex_ for that one read (a live read waits
     // for the wire, decision 0016 consequences). The protocol wrapper's own lock serialises the wire itself.
     //
-    // Which locks this thread holds is recorded per driver in a thread-local table, so Wire, called from
-    // helpers that were handed no lock object, knows whether to drop mutex_ (and which lock to re-take).
-    struct HeldLocks {
-        const void* driver = nullptr;
-        bool state = false;
-        bool io = false;
-    };
-    static HeldLocks* held_locks(const void* driver, bool create) {
-        thread_local HeldLocks table[8];
-        HeldLocks* free_slot = nullptr;
-        for (auto& slot : table) {
-            if (slot.driver == driver) {
-                return &slot;
-            }
-            if (slot.driver == nullptr && free_slot == nullptr) {
-                free_slot = &slot;
-            }
-        }
-        if (create && free_slot != nullptr) {
-            free_slot->driver = driver;
-            return free_slot;
-        }
-        if (create) {
-            // More than eight drivers locked at once on this thread. Never expected. Without a slot Wire
-            // cannot see the locks this thread holds: it would take io_mutex_ again and deadlock this
-            // thread, so StateLock::lock() refuses before it takes any lock.
-            ALPACA_LOG_ERROR("OnStep", "Lock table full on this thread; refusing the call");
-            assert(false && "OnStep lock table full on this thread");  // debug and test builds only
-        }
-        return nullptr;
-    }
-    static void release_slot(HeldLocks* slot) {
-        if (slot != nullptr && !slot->state && !slot->io) {
-            slot->driver = nullptr;
-        }
-    }
+    // The gate itself (which locks this thread holds, StateLock's two modes, dropping mutex_ around an exchange
+    // and the single read) is util::LockGate (lock_gate.h, #1729). What stays here: the session re-check and
+    // the test seams of the single read (Wire::call), and the epochs a read compares across an exchange.
 
 public:
-    // The driver's state lock, with the operation lock above it in Mode::Io. unique_lock-shaped: lock(),
-    // unlock() (releases both) and owns_lock() mean what they meant when this was a unique_lock on mutex_,
-    // so a release point (a wait, a join, a slot start) still lets every other command in. Mode::State is
-    // for the getters and the MoveAxis re-send's scheduling read: they take no operation lock, and reach
+    // The driver's state lock, with the operation lock above it in Mode::Io (util::StateLock). Mode::State
+    // is for the getters and the MoveAxis re-send's scheduling read: they take no operation lock, and reach
     // the wire only through Wire's single-read path.
-    class StateLock {
-    public:
-        enum class Mode : std::uint8_t { State, Io };
-
-        explicit StateLock(const OnStepTelescopeDriver& driver, Mode mode = Mode::Io) : driver_(&driver), mode_(mode) {
-            lock();
-        }
-        StateLock(const StateLock&) = delete;
-        StateLock& operator=(const StateLock&) = delete;
-        StateLock(StateLock&&) = delete;
-        StateLock& operator=(StateLock&&) = delete;
-        ~StateLock() {
-            if (owned_) {
-                unlock();
-            }
-        }
-
-        void lock() {
-            HeldLocks* held = held_locks(driver_, true);
-            if (held == nullptr) {
-                throw AlpacaException("OnStep driver lock table full on this thread", AlpacaError::DriverException);
-            }
-            if (mode_ == Mode::Io) {
-                driver_->io_mutex_.lock();
-                held->io = true;
-            }
-            driver_->mutex_.lock();
-            held->state = true;
-            owned_ = true;
-        }
-        void unlock() {
-            HeldLocks* held = held_locks(driver_, false);
-            if (held != nullptr) {
-                held->state = false;
-            }
-            driver_->mutex_.unlock();
-            if (mode_ == Mode::Io) {
-                if (held != nullptr) {
-                    held->io = false;
-                }
-                driver_->io_mutex_.unlock();
-            }
-            release_slot(held);
-            owned_ = false;
-        }
-        bool owns_lock() const { return owned_; }
-
-    private:
-        const OnStepTelescopeDriver* driver_;
-        Mode mode_;
-        bool owned_ = false;
-    };
+    using StateLock = util::StateLock;
 
 private:
     // Every exchange with the mount goes through this gate (the process-wide protocol wrapper behind it).
@@ -292,65 +207,28 @@ private:
         template <typename F>
         decltype(auto) call(F&& f) const {
             auto& protocol = OnStepProtocolWrapper::instance();
-            HeldLocks* held = held_locks(&driver_, false);
-            const bool had_state = held != nullptr && held->state;
-            if (held != nullptr && held->io) {
-                if (!had_state) {
-                    return f(protocol);
-                }
-                held->state = false;
-                driver_.mutex_.unlock();
-                struct Restore {
-                    const OnStepTelescopeDriver& driver;
-                    HeldLocks* held;
-                    ~Restore() {
-                        driver.mutex_.lock();
-                        held->state = true;
-                    }
-                } restore{driver_, held};
-                return f(protocol);
+            const util::LockGate& gate = driver_.lock_gate_;
+            if (gate.holds_io()) {
+                return gate.exchange([&]() -> decltype(auto) { return f(protocol); });
             }
             // The session this read belongs to: a Disconnect, or a reconnect, that lands while this thread
             // waits for io_mutex_ ends it. Written under io_mutex_ and mutex_, so it is stable while either
             // is held.
             const std::uint64_t session = driver_.session_generation_.load();
-            if (had_state) {
-                held->state = false;
-                driver_.mutex_.unlock();
-            }
-            driver_.run_single_read_before_io_hook();
-            driver_.io_mutex_.lock();
-            // Recorded for the call, so a nested wire() or check_connected() inside `f` sees the operation
-            // lock as held instead of taking io_mutex_ again (#1728 review). Cleared by the guard below, on a
-            // throw too, after the state lock is back and before io_mutex_ is released.
-            HeldLocks* io_slot = held != nullptr ? held : held_locks(&driver_, true);
-            if (io_slot != nullptr) {
-                io_slot->io = true;
-            }
-            struct Release {
-                const OnStepTelescopeDriver& driver;
-                HeldLocks* held;
-                HeldLocks* io_slot;
-                bool had_state;
-                ~Release() {
-                    if (had_state) {
-                        driver.mutex_.lock();
-                        held->state = true;
+            // The gate drops mutex_, takes io_mutex_ and records it for the call, so a nested wire() or
+            // check_connected() inside `f` sees the operation lock as held instead of taking io_mutex_ again
+            // (#1728 review); on the way out, a throw included, mutex_ is back before io_mutex_ is released.
+            return gate.single_read(
+                [&] { driver_.run_single_read_before_io_hook(); },
+                [&]() -> decltype(auto) {
+                    // Re-checked under io_mutex_, as check_connected() answers: a session that ended while this
+                    // thread waited is not read from, and a newer one is not this getter's to read.
+                    if (!driver_.connected_.load() || driver_.session_generation_.load() != session) {
+                        throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
                     }
-                    if (io_slot != nullptr) {
-                        io_slot->io = false;
-                        release_slot(io_slot);
-                    }
-                    driver.io_mutex_.unlock();
-                }
-            } release{driver_, held, io_slot, had_state};
-            // Re-checked under io_mutex_, as check_connected() answers: a session that ended while this
-            // thread waited is not read from, and a newer one is not this getter's to read.
-            if (!driver_.connected_.load() || driver_.session_generation_.load() != session) {
-                throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
-            }
-            driver_.run_single_read_in_io_hook();
-            return f(protocol);
+                    driver_.run_single_read_in_io_hook();
+                    return f(protocol);
+                });
         }
 
         // No I/O, no wrapper lock held across a wait: called directly.
@@ -465,10 +343,7 @@ private:
     Wire wire() const { return Wire(*this); }
 
     // True when this thread holds the operation lock (a command, or the connect itself).
-    bool holds_io_lock() const {
-        const HeldLocks* held = held_locks(this, false);
-        return held != nullptr && held->io;
-    }
+    bool holds_io_lock() const { return lock_gate_.holds_io(); }
 
     // A slew or sync to (ra, dec) sets both targets, except one a client wrote
     // while the command ran: the target setters take mutex_ alone (#1728
@@ -633,7 +508,7 @@ public:
         // below goes through Wire, with mutex_ free; io_mutex_ is held from the first state write to the end.
         // A getter meanwhile reads NotConnected (check_connected()) instead of waiting for the connect.
         std::lock_guard<std::mutex> transition(transition_mutex_);
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         // A Connected=true against a lost link must reconnect, not return as
         // already connected (decision 0009 point 4, #1241).
         if (connected && connected_ && !protocol.link_alive()) {
@@ -872,14 +747,14 @@ public:
 
     std::string command_blind(std::string_view command, bool raw) override {
         (void)raw;
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         wire().send_command_blind(std::string(command));
         return "";
     }
 
     bool command_bool(std::string_view command, bool raw) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         const Wire protocol = wire();
         if (raw) {
@@ -892,7 +767,7 @@ public:
 
     std::string command_string(std::string_view command, bool raw) override {
         (void)raw;
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         return wire().send_command(std::string(command));
     }
@@ -900,7 +775,7 @@ public:
     AlignmentMode get_alignment_mode() const override { return AlignmentMode::GermanPolar; }
 
     double get_altitude() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         refresh_altaz_cache_locked();
         return cached_alt_degrees_;
@@ -919,7 +794,7 @@ public:
     double get_aperture_area() const override { return aperture_area_m2_; }
 
     bool get_at_home() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         raise_park_home_error_locked(true);
         refresh_status_cache_locked(false);
@@ -927,7 +802,7 @@ public:
     }
 
     bool get_at_park() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         raise_park_home_error_locked(false);
         refresh_status_cache_locked(false);
@@ -935,7 +810,7 @@ public:
     }
 
     double get_azimuth() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         refresh_altaz_cache_locked();
         return cached_az_degrees_;
@@ -946,7 +821,7 @@ public:
     bool get_can_pulse_guide() const override { return true; }
 
     bool get_is_pulse_guiding() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_faulted_locked();  // commanded state, not a wire read: refused too (decision 0009 rule 1)
         if (pulse_guiding_active_ && clock_.now() >= pulse_guide_end_time_) {
@@ -974,7 +849,7 @@ public:
     bool get_can_unpark() const override { return true; }
 
     double get_declination() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         refresh_equatorial_cache_locked();
         return cached_dec_degrees_;
@@ -995,14 +870,14 @@ public:
     }
 
     bool get_tracking() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         refresh_status_cache_locked(false);
         return cached_status_.is_tracking;
     }
 
     void set_tracking(bool tracking) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("Tracking");
         if (tracking) {
@@ -1047,7 +922,7 @@ public:
     }
 
     double get_right_ascension() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         refresh_equatorial_cache_locked();
         return cached_ra_hours_;
@@ -1065,7 +940,7 @@ public:
     }
 
     int get_side_of_pier() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         // Always compute from hour angle — same convention as the project's
         // other GEM drivers (SynScan/iOptron/Celestron), and the only source
@@ -1114,7 +989,7 @@ public:
     int get_destination_side_of_pier(double ra, double dec) const override {
         // Arguments first, even while disconnected (#1478).
         util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         ensure_site_info_cached_locked();
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
@@ -1128,14 +1003,14 @@ public:
     // the firmware is built, so only the value the firmware already uses can
     // be written. Older firmware keeps the local flag.
     bool get_does_refraction() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_faulted_locked();  // the connect's :GXEE# value, a mount read (decision 0009 rule 1)
         return refraction_from_firmware_.value_or(does_refraction_);
     }
 
     void set_does_refraction(bool does_refraction) override {
-        StateLock lock(*this, StateLock::Mode::State);  // no wire I/O, see set_target_declination()
+        StateLock lock(lock_gate_, StateLock::Mode::State);  // no wire I/O, see set_target_declination()
         check_connected();
         if (refraction_from_firmware_.has_value()) {
             if (does_refraction != *refraction_from_firmware_) {
@@ -1159,7 +1034,7 @@ public:
     }
 
     double get_sidereal_time() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         ensure_site_info_cached_locked();
         return util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
@@ -1185,7 +1060,7 @@ public:
     }
 
     double get_site_latitude() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         ensure_site_info_cached_locked();
         return site_latitude_cached_;
@@ -1193,7 +1068,7 @@ public:
 
     void set_site_latitude(double latitude) override {
         util::validate_latitude(latitude);
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("SiteLatitude");  // as the other writes (#1626)
         // Populate longitude (and mark the pair valid) from the mount BEFORE
@@ -1208,7 +1083,7 @@ public:
     }
 
     double get_site_longitude() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         ensure_site_info_cached_locked();
         return site_longitude_cached_;
@@ -1216,7 +1091,7 @@ public:
 
     void set_site_longitude(double longitude) override {
         util::validate_longitude(longitude);
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("SiteLongitude");  // as the other writes (#1626)
         // See set_site_latitude(): populate latitude from the mount first so
@@ -1228,7 +1103,7 @@ public:
     }
 
     bool get_slewing() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         if (park_home_request_) {
             // This answer asks the mount nothing, so it refuses a latched fault
@@ -1242,7 +1117,7 @@ public:
     }
 
     double get_target_declination() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -1251,14 +1126,14 @@ public:
 
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
-        StateLock lock(*this, StateLock::Mode::State);  // no wire I/O: never waits behind a command (#1728 review)
+        StateLock lock(lock_gate_, StateLock::Mode::State);  // no wire I/O: never waits behind a command (#1728 review)
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
         ++target_dec_writes_;
     }
 
     double get_target_right_ascension() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -1267,7 +1142,7 @@ public:
 
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
-        StateLock lock(*this, StateLock::Mode::State);  // see set_target_declination()
+        StateLock lock(lock_gate_, StateLock::Mode::State);  // see set_target_declination()
         target_ra_hours_ = ra;
         target_ra_set_ = true;
         ++target_ra_writes_;
@@ -1288,7 +1163,7 @@ public:
     std::vector<int> get_tracking_rates() const override { return {0}; }
 
     std::chrono::system_clock::time_point get_utc_date() const override {
-        StateLock lock(*this, StateLock::Mode::State);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_faulted_locked();  // no I/O, but a faulted read throws (decision 0009 rule 1)
         if (!utc_offset_.valid()) {
@@ -1326,7 +1201,7 @@ public:
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         // Here, not in set_utc_date_locked(): the connect's own time sync runs
         // right after link_health_.reset(), where the check cannot fire (#1626).
@@ -1349,7 +1224,7 @@ public:
     // meets is kept and raised by Slewing, AtPark or AtHome (the shared rule
     // "A failed async operation body keeps its error").
     void find_home() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("FindHome");
         check_not_parked_locked("FindHome");
@@ -1362,7 +1237,7 @@ public:
     }
 
     void park() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("Park");
         refresh_status_cache_locked(true);
@@ -1385,7 +1260,7 @@ public:
             throw AlpacaException("PulseGuide duration must be 0 to " + std::to_string(kMaxPulseGuideMs) + " ms",
                                   AlpacaError::InvalidValue);
         }
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("PulseGuide");
         check_not_parked_locked("PulseGuide");
@@ -1401,7 +1276,7 @@ public:
     }
 
     void set_park() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("SetPark");
         // OnStepX refuses :hQ# while parked, during a GOTO or a guide move, or on a
@@ -1416,7 +1291,7 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         check_equatorial_slew_locked(ra, dec, "SlewToCoordinates");
         start_slew_locked(ra, dec, "SlewToCoordinates", targets);
@@ -1424,7 +1299,7 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         check_equatorial_slew_locked(ra, dec, "SlewToCoordinatesAsync");
         start_slew_locked(ra, dec, "SlewToCoordinatesAsync", targets);
@@ -1432,7 +1307,7 @@ public:
 
     // Under the target slew's own name, so a refusal names the member called (#1379).
     void slew_to_target() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
         check_equatorial_slew_locked(ra, dec, "SlewToTarget");
@@ -1441,7 +1316,7 @@ public:
     }
 
     void slew_to_target_async() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
         check_equatorial_slew_locked(ra, dec, "SlewToTargetAsync");
@@ -1456,13 +1331,13 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         sync_locked(ra, dec, "SyncToCoordinates", targets);
     }
 
     void sync_to_target() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
         sync_locked(ra, dec, "SyncToTarget", targets);
@@ -1495,7 +1370,7 @@ public:
     }
 
     void unpark() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("Unpark");
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
@@ -1523,7 +1398,7 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         check_not_parked_locked("MoveAxis");
         if (axis != 0 && axis != 1) {
@@ -1707,7 +1582,7 @@ public:
     }
 
     void abort_slew() override {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         check_connected();
         check_not_parked_locked("AbortSlew");
         supersede_park_or_home_locked();  // also ends a Park or FindHome still finishing (#1430)
@@ -1747,7 +1622,7 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra = 0.0;
         double dec = 0.0;
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAz");
         start_slew_locked(ra, dec, "SlewToAltAz", targets);
@@ -1757,7 +1632,7 @@ public:
     void slew_to_alt_az_async(double altitude, double azimuth) override {
         double ra = 0.0;
         double dec = 0.0;
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAzAsync");
         start_slew_locked(ra, dec, "SlewToAltAzAsync", targets);
@@ -1770,7 +1645,7 @@ public:
     }
 
     void set_park_home_before_start_for_testing(std::function<void()> hook) {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         park_home_before_start_ = std::move(hook);
     }
 
@@ -1974,7 +1849,7 @@ private:
                 std::chrono::steady_clock::duration wait{};
                 {
                     // Reads the due times only: the state lock, no operation lock.
-                    StateLock lock(*this, StateLock::Mode::State);
+                    StateLock lock(lock_gate_, StateLock::Mode::State);
                     if (ctx.stop_reason() != util::StopReason::None || !connected_) {
                         return;
                     }
@@ -1995,7 +1870,7 @@ private:
                 // The tick holds the operation lock across its serial exchanges
                 // (:GU#, the altitude reads, the re-send) and drops mutex_ for
                 // each (decision 0016, #1449), so a getter never waits for it.
-                StateLock lock(*this);
+                StateLock lock(lock_gate_);
                 if (ctx.stop_reason() != util::StopReason::None || !connected_) {
                     return;
                 }
@@ -2280,7 +2155,7 @@ private:
     // retry. Waits on the task clock with both driver locks released (decision
     // 0005); its exchanges hold the operation lock only (decision 0016).
     void run_park_or_home(util::OperationContext& ctx) {
-        StateLock lock(*this);
+        StateLock lock(lock_gate_);
         // A body stopped before it runs takes no request: a newer Park or
         // FindHome may have stored its own after cancelling this body and
         // before its start() marked this one superseded, and this body must
@@ -3013,6 +2888,8 @@ private:
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
+    // Which of the two this thread holds, and the exchanges that drop mutex_ (#1729).
+    util::LockGate lock_gate_{io_mutex_, mutex_, "OnStep"};
     // Read lock-free by check_connected(); written under io_mutex_ and mutex_.
     std::atomic<bool> connected_;
     // Bumped by every connect and disconnect (under io_mutex_ and mutex_), so Wire's single-read path

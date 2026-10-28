@@ -308,7 +308,8 @@ datagrams before each send so replies cannot get off-by-one.
   reaches the board holds `io_mutex_` for the whole command through a `StateLock` (Mode::Io, the default), which
   also holds `mutex_`; its `unlock()` releases both, so the places that let other commands in (a sleep, a join)
   are unchanged. Every exchange goes through `Wire` (`wire()`), which drops `mutex_` for the call and takes it back
-  after, so `mutex_` is never held across serial or UDP I/O and the multi-step sequences stay together under
+  after (the shared `util::LockGate`, #1729; a full lock table refuses the `StateLock` with `DriverException`
+  before it takes any lock, decision 0016 Rule 6, #1730), so `mutex_` is never held across serial or UDP I/O and the multi-step sequences stay together under
   `io_mutex_`. A getter takes `mutex_` alone (`StateLock::Mode::State`) or nothing: `Connected`, `SiteLatitude`
   (an atomic like `SiteElevation`), `SiteLongitude`, `SiderealTime` and `UTCDate` never touch `mutex_`. The last
   three read `client_clock_`, one leaf-locked snapshot of the client UTCDate offset (with its anchors and

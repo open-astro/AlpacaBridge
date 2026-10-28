@@ -125,15 +125,14 @@ vendor-agnostic; do them in the driver from the start.
   `session_generation_` under the I/O lock so a read never lands on a session that
   ended, or started, while it waited (#1728, #1729;
   [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) item 8).
-- A driver that tracks the locks it holds per thread (OnStep's and Sky-Watcher's
-  `HeldLocks` table) throws `DriverException` before it takes any lock when it cannot
-  record one. It never takes `mutex_` untracked: the wire call then cannot drop it, and
-  every exchange runs under the state lock, which
+- A driver that tracks the locks it holds per thread throws `DriverException` before it
+  takes any lock when it cannot record one. It never takes `mutex_` untracked: the wire
+  call then cannot drop it, and every exchange runs under the state lock, which
   [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) items 1
-  and 8 rule out. Two deviations remain. Sky-Watcher logs and keeps `mutex_` (and
-  `io_mutex_`) held untracked (#1730). OnStep's `StateLock::lock()` throws, but its
-  single-read `Wire::call` takes `io_mutex_` before it records it and only logs on a
-  full table (#1729). One shared `util/` helper for both drivers will throw (#1729).
+  and 8 and Rule 6 rule out. The tracker is `util::LockGate`
+  (`AlpacaCore/include/alpacacore/util/lock_gate.h`), shared by the OnStep and Sky-Watcher
+  telescopes: its `StateLock::lock()` and its single read both refuse on a full table
+  (#1729, #1730). A newly converted driver composes it rather than copying it.
 - An SDK call on a closable handle is safe only if the handle can't be closed
   underneath it. In a converted driver, `set_connected(false)` clears state under
   `mutex_` and releases it, then takes the I/O lock across the close, so the I/O
