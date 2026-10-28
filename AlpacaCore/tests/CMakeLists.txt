@@ -23,6 +23,7 @@ endif()
 set(TEST_SOURCES
     test_alpaca_defs.cpp
     test_contract_sweep.cpp
+    test_driver_rig.cpp
     test_async_connectable.cpp
     test_device_catalog.cpp
     test_catalog_builtins.cpp

@@ -33,6 +33,7 @@
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_gphoto_sdk.h"
 #include "fake_raw_decoder.h"
 #include "fake_task_clock.h"
@@ -60,14 +61,7 @@ FakeGPhotoSDK::FakeCamera make_camera(const std::string& model = "Nikon DSC D530
     return cam;
 }
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 // A camera that left the USB bus mid-exposure disconnects itself, and CameraState then throws NotConnected:
 // no exposure is in progress either way.

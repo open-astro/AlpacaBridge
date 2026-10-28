@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_svbony_sdk.h"
 #include "fake_task_clock.h"
 
@@ -85,14 +86,7 @@ void require_array_failure(alpacacore::CameraDriver& camera) {
     }
 }
 
-void require_alpaca_error(const std::function<void()>& operation, int expected) {
-    try {
-        operation();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == expected);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 std::unique_ptr<alpacacore::CameraDriver> connected_camera(alpacacore::test::FakeSVBSDK& sdk) {
     auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);

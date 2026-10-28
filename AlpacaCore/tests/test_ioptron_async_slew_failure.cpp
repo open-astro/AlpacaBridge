@@ -36,6 +36,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
+#include "driver_rig.h"
 #include "fake_ioptron_mount.h"
 #include "fake_task_clock.h"
 
@@ -74,14 +75,7 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     return pred();
 }
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 class WorkerGate {
 public:

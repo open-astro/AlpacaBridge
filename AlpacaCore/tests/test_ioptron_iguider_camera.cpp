@@ -33,6 +33,7 @@
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_iguider_v4l2.h"
 #include "fake_task_clock.h"
 #include "locked_iguider_v4l2.h"
@@ -44,14 +45,7 @@ using alpacacore::CameraState;
 using alpacacore::test::FakeIGuiderV4L2;
 using Control = alpacacore::vendor::ioptron::IGuiderControl;
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 bool wait_until(const std::function<bool()>& predicate, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;

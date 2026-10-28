@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 #ifndef _WIN32
 #include "concurrency_stress.h"
@@ -50,14 +51,7 @@ using alpacacore::DeviceType;
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 } // namespace
 

@@ -28,19 +28,13 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_pty_write.h"
 #include "rotator_sync_offset_test_dir.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 // Plays a WandererRotator Mini with no DC power: it answers the "1500001"
 // handshake and then stays silent for every move (MCU alive, motor dead).

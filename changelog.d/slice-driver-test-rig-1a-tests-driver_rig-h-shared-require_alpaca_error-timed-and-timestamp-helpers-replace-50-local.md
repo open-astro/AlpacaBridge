@@ -1,0 +1,3 @@
+### Changed
+
+- **Shared driver test helpers**, tests and docs, issue #1782. `AlpacaCore/tests/driver_rig.h` now holds `require_alpaca_error`, `timed`, `parse_timestamp` and `time_stamp_of`, and the 51 local copies of `require_alpaca_error` (and the three snapshot-file copies of the others) are gone. Covered by `AlpacaCore/tests/test_driver_rig.cpp`: the helper fails on no throw, on a wrong code and on a non-Alpaca exception, `timed` returns the elapsed time and `parse_timestamp` reads the `TimeStamp` format. `testing.instructions.md` now says a driver's `contract_sweep.h` entry covers 8+1 cases 3, 4, 6 and 8, and that a test of a clock-adopted driver does not use `sleep_for`.

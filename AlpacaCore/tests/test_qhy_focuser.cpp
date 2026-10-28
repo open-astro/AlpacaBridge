@@ -25,18 +25,12 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_qhy_qfocuser.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 // The getters are served from the state snapshot (open-astro#1310), so a dead
 // port is seen by the next poll (250 ms period), not by the getter itself: wait

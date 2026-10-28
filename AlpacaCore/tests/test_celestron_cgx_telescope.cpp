@@ -45,19 +45,13 @@
 
 #include "catch2_compat.h"
 #include "cgx_clock_cleanup.h"
+#include "driver_rig.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_task_clock.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& error) {
-        REQUIRE(error.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 alpacacore::vendor::celestron::CelestronCgxConnectionInfo test_info() {
     alpacacore::vendor::celestron::CelestronCgxConnectionInfo info;
