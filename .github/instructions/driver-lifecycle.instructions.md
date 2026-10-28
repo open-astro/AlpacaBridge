@@ -112,11 +112,10 @@ vendor-agnostic; do them in the driver from the start.
   slot mutex, the `StateSnapshot` mutex, the `util::PolledState` mutexes (a driver
   that composes `PolledState` for its poll-fed frame) and the `util::CaptureSession` mutex (a
   camera that composes the session; it never nests with the slot mutex) are leaves that nest
-  under `mutex_` (decisions 0006, 0010, 0016, 0020). The ZWO `MountIdentityClaim`
-  registry mutex is also a leaf under `mutex_`: no I/O, joins or other locks beneath it.
-  Never acquire in reverse, and
-  convert a whole driver class in one PR so the old and new order never mix in one
-  class.
+  under `mutex_` (decisions 0006, 0010, 0016, 0020), as does a vendor-local registry
+  mutex such as the ZWO `MountIdentityClaim` one ([ZWO](zwo.instructions.md)). A leaf
+  takes no other lock and runs no I/O or joins. Never acquire in reverse, and convert a
+  whole driver class in one PR so the old and new order never mix in one class.
 - In a converted driver, a `*_locked` helper that reaches the wire can release `mutex_`
   partway through: the wire call drops the state lock around the exchange and takes it
   back after (OnStep's and Sky-Watcher's `Wire::call`). State read before the exchange

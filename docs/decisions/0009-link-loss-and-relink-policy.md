@@ -13,7 +13,7 @@ A driver's link can fail in two ways a client cannot tell apart from `Connected`
 3. **While lost.** Operational getters and setters throw `NotConnected`; `Connected` reads false; `DeviceState` returns the empty list with no `TimeStamp`; the transport handle is closed (best effort: when an exchange holds the link at that moment, the fd may stay open until the next Connect or Disconnect); `link_lost_at` is stamped once on the task clock for every transport (`util::LinkLostStamp`).
 4. **No autonomous reconnect.** A driver never reopens on its own. Only the client's `Connected=true` / `Connect()` relinks. It never short-circuits on a lost link and re-runs the connect probe. Motion on relink keeps the #521 window, now fed by `link_lost_at` on every transport (OnStep times it from the last time the link was seen alive instead; see Adoption, #1241).
 5. **One fault text.** `get_link_fault()` stays the single source. After the link is lost it keeps the last fault text until the next Connect or Disconnect, so the management listing shows why. There is no second health field.
-6. **open-astro#660 identity gap, accepted for this slice.** Closing it is a per-driver identity query on five drivers, each a vendor-protocol change with its own rig check. The risk is a different device appearing on the same path between a loss and the client's reconnect. The table below records what each connect probe checks today (read from the source at the time of writing, not rig-verified).
+6. **open-astro#660 identity gap.** Closing it is a per-driver identity query, each a vendor-protocol change with its own rig check, so drivers close it one at a time. The risk is a different device appearing on the same path between a loss and the client's reconnect. The table below records what each connect probe checks (read from the source when the row was written; any rig evidence is in the driver's vendor instructions).
 7. **Slice scope.** This record, the shared helper in `util/link_health.h`, Sky-Watcher as the reference driver for both transports, fake-only tests (`tests/test_skywatcher_link_loss.cpp`). Other drivers adopt through the table below.
 
 ### Connect probe: does it reject a different device? (point 6)
@@ -27,7 +27,7 @@ A driver's link can fail in two ways a client cannot tell apart from `Connected`
 | iOptron | `:MountInfo#` / `:DeviceInfo#` model | Rejects a different model, not a second unit of the same one | planned follow-up |
 | Gemini | `>H#` identity string (exact compare) | Rejects a different Gemini product, not a second unit | planned follow-up |
 | QHY | JSON version handshake (Q-Focuser), slot-count check (CFW3) | No per-unit identity | planned follow-up |
-| ZWO AM | Fresh hash-terminated supported `:GVP#` model and normalized twelve-hex `:GMA#` serial | Yes: the first successfully claimed serial is pinned for the driver object's lifetime, across loss, Disconnect and later initialization failure; driver recreation clears the in-memory pin | #1581 |
+| ZWO AM | Fresh hash-terminated supported `:GVP#` model and normalized twelve-hex `:GMA#` serial | Yes: the first successfully claimed serial is pinned for the driver object's lifetime, across loss, Disconnect and later initialization failure; driver recreation (a service restart, or saving the device again in the web UI) clears the in-memory pin | done (#1581) |
 
 ## Rules
 
@@ -36,7 +36,7 @@ The rules a change is checked against. Each names where it applies and what chec
 1. A faulted link keeps `Connected` true and makes reads and writes throw `DriverException` with the fault text from `get_link_fault()`; the next good reply clears it. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_link_loss.cpp`, review.
 2. A link is lost at once on positive evidence that the transport is gone, and when a fault has stood past `util::kLinkStalenessBound`; a driver never sets a bound shorter than its own latch threshold. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/link_health.h`. Checked by: `AlpacaCore/tests/test_skywatcher_link_loss.cpp`, `AlpacaCore/tests/test_onstep_link_loss.cpp`, review.
 3. While lost: `Connected` reads false, operations throw `NotConnected`, `DeviceState` is the empty list, the transport is closed and the loss time is stamped once. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (trace each loss path through state clearing, best-effort close and the one-time loss stamp).
-4. A driver never reopens a lost link on its own; only the client's Connect relinks, and it re-runs the connect probe. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (no worker reopens a lost transport; the client connect path performs fresh identity verification).
+4. A driver never reopens a lost link on its own; only the client's Connect relinks, and it re-runs the connect probe. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (no worker reopens a lost transport; the client connect path re-runs the connect probe).
 5. `get_link_fault()` is the one fault text, and it keeps the last text after a loss until the next Connect or Disconnect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (loss preserves the fault text, while Connect and Disconnect reset it). <!-- allowed -->
 
 ## Alternatives rejected
@@ -50,7 +50,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 - On an adopted driver a client sees `Connected` false within `util::kLinkStalenessBound` of a device going silent, and reconnects itself; a drop shorter than the bound only faults.
 - A driver not yet adopted keeps `Connected` true while faulted (Adoption table).
-- A reconnect after a loss re-runs the connect probe. The identity table in point 6 states which drivers distinguish two units of one model. ZWO AM retains the first successfully claimed serial in memory for the driver object's lifetime; deliberate replacement requires recreating the driver, not only Disconnect. An identity or duplicate-claim refusal before admission learns no serial. A later initialization failure releases active ownership but retains the admitted serial.
+- A reconnect after a loss re-runs the connect probe. The identity table in point 6 states which drivers distinguish two units of one model; a driver that pins a unit says in its vendor instructions how a deliberate replacement is admitted.
 
 ## How to reverse
 
