@@ -1155,7 +1155,7 @@ int main() {
                 straddle_server.is_running() ? wait_for_bound_port(straddle_server, 2000) : 0;
             EXPECT(straddle_port != 0);
 
-            struct timeval tv {};
+            struct timeval tv = {};
             tv.tv_sec = 10;
             const int slow_fd = connect_local(straddle_port);
             EXPECT(slow_fd >= 0);
