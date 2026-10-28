@@ -78,6 +78,16 @@ constexpr int kSocketTimeoutMs = 200;
 // A mount reply never nears this; it caps a runaway line instead of growing a string forever.
 constexpr std::size_t kMaxReplyLen = 65536;
 
+// The longest drain_stale() runs, its first-byte wait included. A drain holds
+// the wrapper lock, and the driver's io_mutex_ above it, so every command
+// waits behind it (#1449). Its callers end well inside this: the drain after
+// a blind command (drain_stale(50)) and the TCP flush_input() (drain_stale(0))
+// wait one read slice (100 ms serial, 200 ms TCP) for a first byte and end
+// after a quiet one, so a stray ack or a stale reply in flight costs well
+// under a second. Only a line that never goes quiet for one slice reaches the
+// cap; before it the bound was max_len idle gaps (about 6,554 s on serial).
+constexpr std::chrono::milliseconds kDrainCap{2000};
+
 // The probe keeps at most 31 bytes before the '#' (a '#' as the 31st byte still ends it).
 constexpr std::size_t kProbeReplyMax = 31;
 
@@ -750,8 +760,10 @@ public:
 
     // Discard whatever the mount sends now: wait up to wait_ms (at least one
     // read slice) for a first byte, then read on until a read slice passes
-    // with none, as the byte-at-a-time loop did. A hangup on the tty loses
-    // the link; over TCP it ends the drain (the seam is never lost).
+    // with none, as the byte-at-a-time loop did, for at most kDrainCap. A line
+    // still busy at the cap ends the drain without an error, like a quiet one;
+    // its rest stays in the line. A hangup on the tty loses the link; over TCP
+    // it ends the drain (the seam is never lost).
     void drain_stale(int wait_ms) {
         util::ReadSpec spec;
         spec.stop = util::ReadSpec::Stop::IdleGap;
@@ -759,11 +771,13 @@ public:
         spec.first_byte_timeout = std::max(std::chrono::milliseconds(wait_ms), read_slice());
         spec.skip.clear();  // every byte is stale, CR/LF included
         spec.max_len = kMaxReplyLen;
-        // The deadline only caps a line that never goes idle: max_len bytes, each within one idle gap.
-        (void)checked_read(spec,
-                           std::chrono::steady_clock::now() + *spec.first_byte_timeout +
-                               spec.idle_gap * static_cast<int>(spec.max_len),
-                           /*hangup_throws=*/false);
+        // The deadline only ends a line that never goes idle.
+        const auto r = checked_read(spec, std::chrono::steady_clock::now() + kDrainCap, /*hangup_throws=*/false);
+        if (r.outcome == util::ReadOutcome::Timeout && !r.bytes.empty()) {
+            ALPACA_LOG_DEBUG("OnStep", "Stale-input drain stopped at its " + std::to_string(kDrainCap.count()) +
+                                           " ms cap with the line still busy (" + std::to_string(r.bytes.size()) +
+                                           " bytes discarded)");
+        }
     }
 
     void flush_input() {

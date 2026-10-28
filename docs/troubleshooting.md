@@ -76,9 +76,9 @@ run is not proof that the reported ASI2600/CM4/Renesas/VIA-hub failure is resolv
 
 **Checks**:
 
-1. **Port path in config**: The device must have Connection type set to Serial/USB and Port path set to the actual device (e.g., `/dev/ttyUSB0`). In the Web UI: add/edit the device, choose Serial/USB, and enter the port path.
+1. **Connection type in config**: **Auto-Detect**, the default, finds the port by itself and needs no port path. To pin a port, add/edit the device in the Web UI, choose the manual serial option (for example **Serial/USB (Manual)**; the label differs by vendor), and enter the device (e.g., `/dev/ttyUSB0`) in the **Serial Port** field.
 
-2. **Permissions**: Your user must be in the `dialout` group:
+2. **Permissions**: The service runs as the `alpacabridge` user, which the package adds to `dialout` on install. Verify: `id alpacabridge` should list `dialout`. Add your own user only when you run a source build by hand:
    ```sh
    sudo usermod -aG dialout $USER
    ```
@@ -86,7 +86,7 @@ run is not proof that the reported ASI2600/CM4/Renesas/VIA-hub failure is resolv
 
 3. **Device present and not in use**: Check the port exists: `ls /dev/ttyUSB*` or `ls /dev/ttyACM*`. Ensure no other process has the port open.
 
-4. **Server logs**: When connection fails, the server logs a clear error. Run the server from a terminal or check its log output to see the exact reason.
+4. **Server logs**: When connection fails, the server logs a clear error. Read it on the device card, in the log viewer on the **Server Info** tab, or with `journalctl -u alpacabridge`. Do not start a second server from a terminal on a package install: it collides with the service on port 6800 and uses a different state directory.
 
 See [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) for driver-specific notes.
 
@@ -143,7 +143,7 @@ sudo hwclock -w                          # persist the correct time to the RTC
 timedatectl status                       # expect: System clock synchronized: yes
 ```
 
-**If the SBC has no internet at all**: connecting a telescope from a client that sends `UTCDate` (NINA, SkySafari and PHD2 all do on connect) sets the SBC's clock by itself, as long as `sync_system_clock_from_clients` is left on; the Server Info panel's Clock row shows which source the clock currently has. To set it by hand instead, use the **Sync Time** button in the AlpacaBridge web portal (`http://<sbc>:6800/` → top-right server actions) — it sets the SBC's clock from the browser's time. Or use `scripts/sync-clock.sh` from an internet-connected workstation (e.g. your laptop) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
+**If the SBC has no internet at all**: connecting a telescope from a client that sends `UTCDate` (NINA, SkySafari and PHD2 all do on connect) sets the SBC's clock by itself, as long as `sync_system_clock_from_clients` is left on; the Server Info panel's Clock row shows which source the clock currently has. To set it by hand instead, use the **Sync Time** button in the AlpacaBridge web portal (`http://<sbc>:6800/` → the action bar at the bottom of the page) — it sets the SBC's clock from the browser's time. Or use `scripts/sync-clock.sh` from a clone of this repository on an internet-connected workstation (e.g. your laptop; the package does not install it) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
 
 ```sh
 scripts/sync-clock.sh astro@192.168.168.1 --rtc
