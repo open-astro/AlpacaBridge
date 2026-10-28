@@ -181,6 +181,9 @@ public:
     }
 
     /// Test seam: while paused the poll thread waits its ticks but probes nothing.
+    void set_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        slot_.set_spawn_for_testing(std::move(spawn));
+    }
     void pause_for_testing(bool paused) { paused_.store(paused); }
 
     /// Test seam: one poll cycle on the calling thread, `on_lost()` included.

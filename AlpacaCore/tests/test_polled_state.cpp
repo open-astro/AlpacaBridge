@@ -20,6 +20,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -346,6 +347,15 @@ TEST_CASE("PolledState - on_lost runs on the poll thread and the poll ends with 
     CHECK(rig.lost_thread.load() != std::this_thread::get_id());
     CHECK(rig.state->link_lost());
     rig.state->stop_and_join();
+}
+
+// Falsified by: polled_state.h:start() return true after the slot's start() throws.
+TEST_CASE("PolledState - start reports false when the poll thread cannot start", "[polled_state][unit]") {
+    Rig rig;
+    rig.state->set_spawn_for_testing(
+        [](std::function<void()>) -> std::thread { throw std::system_error(EAGAIN, std::generic_category()); });
+    CHECK_FALSE(rig.state->start());
+    CHECK(rig.clock.waiter_count() == 0);
 }
 
 // Falsified by: polled_state.h constructor delete the max_age check.
