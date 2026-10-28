@@ -997,6 +997,10 @@ def _tracked_paths(root=ROOT):
     return _TRACKED_PATHS_CACHE[key]
 
 
+# Spans under these trees may carry `<vendor>` placeholders; see _check_doc_path_refs.
+DESCRIPTOR_TEMPLATE_PREFIXES = ("AlpacaCore/src/vendors/", "AlpacaCore/src/catalog/")
+
+
 def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefixes=(), root=ROOT):
     """Every backticked path span in `doc` names a tracked file or directory.
 
@@ -1043,6 +1047,14 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
         # Markdown anchors / fragments (`docs/x.md#section`), glob patterns,
         # and template placeholders (`AlpacaCore/src/vendors/<vendor>/...`)
         # aren't real filesystem paths.
+        if "<" in path and path.startswith(DESCRIPTOR_TEMPLATE_PREFIXES):
+            # A descriptor template (`.../<vendor>/<vendor>_fields.h`) must
+            # match at least one tracked file, `<x>` standing for one name.
+            pattern = re.compile(re.sub(r"<[^<>/]+>", "[^/]+", re.escape(path).replace("\\<", "<").replace("\\>", ">")) + "/?")
+            if path not in seen and not any(pattern.fullmatch(t) for t in tracked | tracked_dirs):
+                failures.append("%s references a descriptor path that matches no tracked file: %s" % (doc, path))
+            seen.add(path)
+            continue
         if "#" in path or "*" in path or "<" in path or ">" in path:
             continue
         if path in seen:
@@ -3190,6 +3202,36 @@ def self_test():
             found = run_check(noreadme)
             check("agents md check: a missing README.md is reported",
                   found is not None and any("README.md" in f and "does not exist" in f for f in found))
+
+            # A templated descriptor span (`<vendor>` placeholder) under the
+            # vendor or catalog tree must match at least one tracked file.
+            tmpl_files = {"AlpacaCore/src/vendors/acme/acme_fields.h": "//\n",
+                          "AlpacaCore/src/catalog/builtin_catalog.cpp": "//\n"}
+            tmpl_ok = repo_fixture("tmpl_ok", extra=tmpl_files)
+            with open(tmpl_ok / ".github/instructions/a.instructions.md", "a", encoding="utf-8") as f:
+                f.write("Write `AlpacaCore/src/vendors/<vendor>/<vendor>_fields.h` and "
+                        "`AlpacaCore/src/catalog/builtin_catalog.cpp`.\n")
+            found = run_check(tmpl_ok)
+            check("agents md check: a templated descriptor span that matches a tracked file passes",
+                  found is not None and found == [])
+            tmpl_bad = repo_fixture("tmpl_bad", extra=tmpl_files)
+            with open(tmpl_bad / ".github/instructions/a.instructions.md", "a", encoding="utf-8") as f:
+                f.write("Write `AlpacaCore/src/vendors/<vendor>/<vendor>_gone.cpp`.\n")
+            found = run_check(tmpl_bad)
+            check("agents md check: a templated descriptor span that matches no tracked file is reported",
+                  found is not None and any("<vendor>_gone.cpp" in f for f in found))
+            tmpl_dir = repo_fixture("tmpl_dir", extra=tmpl_files)
+            with open(tmpl_dir / ".github/instructions/a.instructions.md", "a", encoding="utf-8") as f:
+                f.write("Write `AlpacaCore/src/catalog/<kind>_gone.cpp`.\n")
+            found = run_check(tmpl_dir)
+            check("agents md check: a templated span under the catalog tree is checked too",
+                  found is not None and any("<kind>_gone.cpp" in f for f in found))
+            tmpl_other = repo_fixture("tmpl_other", extra=tmpl_files)
+            with open(tmpl_other / ".github/instructions/a.instructions.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/<x>_nope.py`.\n")
+            found = run_check(tmpl_other)
+            check("agents md check: a templated span outside the descriptor trees stays skipped",
+                  found is not None and found == [])
 
             gone = repo_fixture("gone")
             (gone / ".github/instructions/a.instructions.md").unlink()
