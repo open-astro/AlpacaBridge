@@ -1,0 +1,9 @@
+### Fixed
+
+- **An OnStep stale-input drain on a line that never goes quiet ends after 2 s** (OnStep, issues #1449 and #1686): `drain_stale()`, after a blind command and in the TCP `flush_input()`, now stops at `kDrainCap` (2 s, its first-byte wait included) without an error, like a drain that ends on a quiet read slice. Before, its deadline was `max_len` idle gaps, about 6,554 s on serial and 13,100 s over TCP, so a byte that came inside every read slice could hold the wrapper lock and the driver's `io_mutex_`, and so every command, for hours. A normal drain still ends after one quiet read slice. Test: "OnStep mount - a blind-command drain on a line that never goes quiet ends at its time cap" in `AlpacaCore/tests/test_mount_read_until_hangup.cpp`.
+- **A `util::read_until` `Length` read with `length` 0 ends at once** (AlpacaCore `util/serial_read.h`, follow-up to #1747): it returns outcome `Length` with no bytes and leaves the line's bytes in the fd. Before, it kept the first byte that came, on time or in the `late_byte_grace` wait. No caller makes such a read. Test: "read_until - a Length(0) read ends at once and leaves the line's bytes in the fd" in `AlpacaCore/tests/test_serial_read.cpp`.
+
+### Changed (tests and docs)
+
+- **The two `late_byte_grace` cases that need a byte after the 100 ms deadline write it at 200 ms, not 150 ms** (`AlpacaCore/tests/test_serial_read.cpp`, #1747 review), so a slow runner has 100 ms of slack on each side of the window.
+- **Docs:** the `ReadSpec::late_byte_grace` field doc says the grace does not check `max_len` and how far past the deadline a read can run; `serial-autodetect.instructions.md` says the same of `read_until`'s deadline, names the four wrappers that set `late_byte_grace` (the ZWO mount keeps its own late read) and gives the OnStep drain's 2 s cap, which `onstep.instructions.md` explains.

@@ -154,6 +154,26 @@ TEST_CASE("read_until - a Length(1) ack read skips a stray CR/LF first", "[seria
     CHECK(r.bytes == "1");
 }
 
+// Falsified by: serial_read.h read_until_impl() without the length == 0 early return (the read keeps the first byte,
+// on time or in the grace, and returns Length with it)
+TEST_CASE("read_until - a Length(0) read ends at once and leaves the line's bytes in the fd",
+          "[serial][serial_read][issue1686]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), "1#");
+    ReadSpec spec;
+    spec.stop = ReadSpec::Stop::Length;  // length stays at its default, 0
+    spec.late_byte_grace = 200ms;
+    const auto start = Clock::now();
+    const auto r = read_until(link.fd(), spec, start + 1s);
+    CHECK(r.outcome == ReadOutcome::Length);
+    CHECK(r.bytes.empty());
+    CHECK(Clock::now() - start < 500ms);
+    const auto next = read_until(link.fd(), ReadSpec{}, Clock::now() + 1s);
+    CHECK(next.outcome == ReadOutcome::Terminator);
+    CHECK(next.bytes == "1#");
+}
+
 // Falsified by: serial_read.h read_until_impl() not shortening the wait to last_kept + spec.idle_gap
 TEST_CASE("read_until - an IdleGap read ends after the gap that follows the first byte",
           "[serial][serial_read][issue1604]") {
@@ -423,7 +443,7 @@ TEST_CASE("read_until - late_byte_grace: a '#' in flight when the timeout runs o
     PtyPair pty("serial_read");
     auto link = open_slave(pty);
     feed(pty.master_fd(), "12");
-    const auto r = read_with_late_writes(pty.master_fd(), {{150ms, "#"}}, [&](Clock::time_point start) {
+    const auto r = read_with_late_writes(pty.master_fd(), {{200ms, "#"}}, [&](Clock::time_point start) {
         return read_until(link.fd(), late_spec(), start + kLateDeadline);
     });
     CHECK(r.outcome == ReadOutcome::Terminator);
@@ -432,7 +452,7 @@ TEST_CASE("read_until - late_byte_grace: a '#' in flight when the timeout runs o
 
     // Without the grace the same read times out and leaves the '#' for the next one.
     feed(pty.master_fd(), "12");
-    const auto strict = read_with_late_writes(pty.master_fd(), {{150ms, "#"}}, [&](Clock::time_point start) {
+    const auto strict = read_with_late_writes(pty.master_fd(), {{200ms, "#"}}, [&](Clock::time_point start) {
         return read_until(link.fd(), ReadSpec{}, start + kLateDeadline);
     });
     CHECK(strict.outcome == ReadOutcome::Timeout);
@@ -448,7 +468,7 @@ TEST_CASE("read_until - late_byte_grace: a late byte that is not a terminator is
     PtyPair pty("serial_read");
     auto link = open_slave(pty);
     feed(pty.master_fd(), "12");
-    const auto r = read_with_late_writes(pty.master_fd(), {{150ms, "\r34#"}}, [&](Clock::time_point start) {
+    const auto r = read_with_late_writes(pty.master_fd(), {{200ms, "\r34#"}}, [&](Clock::time_point start) {
         return read_until(link.fd(), late_spec(), start + kLateDeadline);
     });
     CHECK(r.outcome == ReadOutcome::Timeout);
@@ -489,7 +509,8 @@ TEST_CASE("read_until - late_byte_grace: a Length payload in flight is read whol
     spec.stop = ReadSpec::Stop::Length;
     spec.length = 4;
     spec.skip.clear();
-    // Each payload byte 120 ms after the last: the last one comes 160 ms after the grace that began at the deadline.
+    // Each payload byte 120 ms after the last: the last one comes at 390 ms, 90 ms after the first grace (100 to
+    // 300 ms) would have ended, so only a grace that restarts on each kept byte reads it.
     const auto r = read_with_late_writes(
         pty.master_fd(), {{150ms, std::string("\x02", 1)}, {270ms, std::string("\x0a", 1)}, {390ms, "#"}},
         [&](Clock::time_point start) { return read_until(link.fd(), spec, start + kLateDeadline); });
