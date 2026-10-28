@@ -15,4 +15,4 @@ Reap a joinable thread on every failure and retry path. Use the single-owner, wa
 ## Evidence
 
 - Issue [#402](https://github.com/open-astro/AlpacaBridge/issues/402); PR [#428](https://github.com/open-astro/AlpacaBridge/pull/428).
-- Regression tests: `AlpacaHTTP/tests/test_server_socket.cpp` port-conflict, same-object retry, and concurrent-stop cases. The port-conflict case warns if it cannot bind an ephemeral port (issue #507 moved it off a fixed literal), because a skip would otherwise look green.
+- Regression tests: `AlpacaHTTP/tests/test_server_socket.cpp` port-conflict, same-object retry, and concurrent-stop cases. The port-conflict case fails if it cannot bind an ephemeral port (issue #507 moved it off a fixed literal), because a skip would otherwise look green.

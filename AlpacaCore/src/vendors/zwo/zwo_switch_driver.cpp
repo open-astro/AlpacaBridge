@@ -477,6 +477,10 @@ private:
     // same fix as the camera's control-caps accessor (issue #116).
     ZWOControlCaps dew_caps_or_throw() const {
         std::lock_guard<std::mutex> lock(mutex_);
+        // A disconnect racing past ensure_connected() clears dew_caps_ and connected_ together under mutex_.
+        if (!connected_.load()) {
+            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
+        }
         if (!dew_caps_.has_value()) {
             throw AlpacaException("Dew heater not supported", AlpacaError::NotImplemented);
         }

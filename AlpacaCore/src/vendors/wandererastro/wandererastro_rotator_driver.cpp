@@ -14,6 +14,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/util/rotator_sync_offset_store.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
@@ -324,13 +325,7 @@ private:
         }
     }
 
-    static double normalize_angle(double angle) {
-        double normalized = std::fmod(angle, 360.0);
-        if (normalized < 0.0) {
-            normalized += 360.0;
-        }
-        return normalized;
-    }
+    static double normalize_angle(double angle) { return util::wrap_degrees(angle); }
 
     // Signed shortest rotation from one normalized angle to another, in
     // (-180, 180] degrees — keeps every commanded sweep at most half a turn.

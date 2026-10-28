@@ -70,8 +70,6 @@ include/alpacacore/
     └─ <vendor>_sdk_wrapper.h   # Clean wrapper API
 
 src/
-├─ drivers/
-│   └─ <device>_driver.cpp      # Base implementation (optional)
 └─ vendors/<vendor>/
     ├─ <vendor>_sdk_wrapper.cpp # Wrapper implementation
     ├─ <vendor>_<device>_driver.cpp  # Driver implementation

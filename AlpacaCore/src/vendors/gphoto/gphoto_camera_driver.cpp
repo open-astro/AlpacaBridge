@@ -105,7 +105,7 @@ std::optional<std::string> pick_raw_format_choice(const std::vector<std::string>
 // model on this rig it is cached to disk (keyed by the model string, not
 // the individual device) and never needs a priming capture again -- not on
 // the next Connect, not after a reboot, and not for a second camera of the
-// same model. AlpacaCore does not do JSON (see alpaca_json.h), so this is a
+// same model. AlpacaCore does not do JSON (see "Core Architecture" in AGENTS.md), so this is a
 // deliberately tiny tab-separated flat file rather than pulling in a JSON
 // dependency for five integers.
 constexpr const char* kSensorCacheRelativePath = "config/gphoto_sensor_cache.tsv";

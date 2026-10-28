@@ -35,9 +35,8 @@ on:
       - "AlpacaHTTP/tests/fake_skywatcher_server.cpp"
       - "AlpacaHTTP/CMakeLists.txt"
       - "AlpacaCore/CMakeLists.txt"
-      # The telescope device interface and the base-driver code behind it.
+      # The telescope device interface and the core code behind it.
       - "AlpacaCore/include/alpacacore/telescope_driver.h"
-      - "AlpacaCore/src/drivers/telescope_driver.cpp"
       - "AlpacaCore/include/alpacacore/alpaca_defs.h"
       - "AlpacaCore/include/alpacacore/alpaca_errors.h"
       - "AlpacaCore/include/alpacacore/alpacadriver.h"
@@ -47,7 +46,6 @@ on:
       - "AlpacaCore/src/core/**"
       - "AlpacaCore/src/management/**"
       - "AlpacaCore/include/alpacacore/managementdriver.h"
-      - "AlpacaCore/include/alpacacore/alpaca_json.h"
       - "AlpacaCore/include/alpacacore/version.h"
       # Shared helpers the driver includes (link health, serial I/O, motion
       # limits, state snapshot, task clock) and the catalog it registers in.

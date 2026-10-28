@@ -598,7 +598,7 @@ private:
     // link_.mark_lost() takes no lock and the SDK's with_link() holds none.
     // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
     // device transactions (connect, close, move, halt, the status refill). Never take the cache mutex
-    // (reset/invalidate/fault) while holding io_mutex_ or mutex_.
+    // (reset/invalidate) while holding io_mutex_ or mutex_; fault() takes only the leaf fault_mutex_.
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;

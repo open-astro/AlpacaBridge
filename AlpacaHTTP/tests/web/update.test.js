@@ -156,6 +156,11 @@ test('a disabled check is worded as such, before any stale result', () => {
         'Checking for updates is turned off in the server configuration.');
     assert.strictEqual(updateStatusText({ InstalledVersion: '4.1.0', CheckEnabled: true, LatestVersion: null }),
                        'Not checked yet.');
+    // A stale answer and a stale error must not outrank the disabled wording.
+    assert.strictEqual(
+        updateStatusText({ InstalledVersion: '4.1.0', CheckEnabled: false, LatestVersion: '4.2.0', UpdateAvailable: true,
+                           CheckError: 'timed out' }),
+        'Checking for updates is turned off in the server configuration.');
 });
 
 // --- Stable/Beta channel selector (issue #1103)

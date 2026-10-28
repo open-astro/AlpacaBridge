@@ -40,11 +40,11 @@
 // generated from them and cannot omit an entry without failing to compile.
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/touptek/shared_open_refs.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 
 #include <map>
 #include <mutex>
-#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -846,22 +846,9 @@ private:
     // Reference-counted shared opens keyed by the device's opaque id, so the
     // camera driver and the thermal-switch driver can operate on the same
     // physical camera at once (the SDK allows only one open handle per device).
-    // Open fires once (first opener); Close fires once (last closer). Mirrors
-    // the Player One wrapper's usage_ map.
-    struct SharedCam {
-        HToupcam handle{nullptr};
-        int open_count{0};
-    };
-    std::map<std::string, SharedCam> shared_by_id_;
-    std::map<HToupcam, std::string> id_by_handle_;
-
-    // Every currently-open SDK handle. Lets close_shared() be idempotent: a
-    // handle not in this set is a double-close and is ignored rather than passed
-    // to Close (which, on an already-closed handle, could hit a recycled value
-    // and tear down an innocent holder). Note this does not defend against a
-    // caller that closes a stale handle AFTER another open recycled the same
-    // value — that is a use-after-free in the caller.
-    std::set<HToupcam> open_handles_;
+    // Open fires once (first opener); Close fires once (last closer). The count
+    // itself lives in SharedOpenRefs, which the test fake shares.
+    SharedOpenRefs<HToupcam> refs_;
 
     // Reference-counted open/close shared by EVERY device type that opens by id
     // (camera, focuser, filter wheel). Keyed by the device's opaque id, so two
@@ -870,29 +857,20 @@ private:
     // Open instead of the second raw-open returning null. Callers must already
     // hold mutex_.
     HToupcam open_shared_by_id(const std::string& id, const char* device_kind) {
-        auto it = shared_by_id_.find(id);
-        if (it != shared_by_id_.end() && it->second.open_count > 0) {
-            ++it->second.open_count;
-            return it->second.handle;
+        if (auto shared = refs_.acquire(id)) {
+            return *shared;
         }
         HToupcam h = Api::Open(id.empty() ? nullptr : id.c_str());
         if (!h) {
             throw AlpacaException(std::string(Api::kPrefix) + "_Open returned null (" + device_kind + " not available)",
                                   AlpacaError::NotConnected);
         }
-        // Publish into both maps exception-safely: if either insertion throws
-        // (only on OOM for these small key/value types), the caller never receives
-        // h, so close_shared() would never run and the SDK handle would leak for
-        // the singleton's lifetime. Roll back any partial state and close the
-        // handle before rethrowing.
+        // If publishing throws (only on OOM), the caller never receives h, so
+        // close_shared() would never run and the SDK handle would leak for the
+        // singleton's lifetime: close it before rethrowing.
         try {
-            shared_by_id_[id] = SharedCam{h, 1};
-            id_by_handle_[h] = id;
-            open_handles_.insert(h);
+            refs_.publish(id, h);
         } catch (...) {
-            shared_by_id_.erase(id);
-            id_by_handle_.erase(h);
-            open_handles_.erase(h);
             Api::Close(h);
             throw;
         }
@@ -900,38 +878,10 @@ private:
     }
 
     void close_shared(HToupcam handle) {
-        // Idempotent guard: if we have no record of this handle being open it is a
-        // double-close. Do NOT fall through to Close — the handle value may have
-        // been recycled by a later open, and closing it would kill that innocent
-        // holder.
-        auto live = open_handles_.find(handle);
-        if (live == open_handles_.end()) {
-            return;
-        }
-        auto hit = id_by_handle_.find(handle);
-        if (hit != id_by_handle_.end()) {
-            auto sit = shared_by_id_.find(hit->second);
-            if (sit != shared_by_id_.end()) {
-                // A tracked handle always has open_count >= 1 here (a zero-count
-                // entry is erased below and removed from both maps). Guard the
-                // decrement rather than doing "--open_count > 0" unconditionally:
-                // if a mispaired double-close drove the count to <= 1 while another
-                // holder still existed, the raw decrement would underflow past the
-                // erase and Close a handle still in use (undefined behaviour).
-                // Only a count > 1 means another driver still holds it.
-                if (sit->second.open_count > 1) {
-                    --sit->second.open_count;
-                    return;  // Another driver still holds this device open.
-                }
-                shared_by_id_.erase(sit);  // final release: fall through to Close
-            }
-            id_by_handle_.erase(hit);
-        }
-        // Reached only when a tracked handle's ref count just hit zero above.
-        // Drop it from the live set first so a later double-close is ignored by
-        // the guard at the top.
-        open_handles_.erase(live);
-        if (handle) {
+        // A handle not tracked as open is a double-close: do NOT Close it, the
+        // value may have been recycled by a later open and closing it would kill
+        // that innocent holder. Another holder still open: just drop our count.
+        if (refs_.release(handle) == SharedOpenRefs<HToupcam>::Release::Last && handle) {
             Api::Close(handle);
         }
     }

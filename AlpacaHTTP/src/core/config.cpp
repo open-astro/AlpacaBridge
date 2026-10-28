@@ -36,17 +36,7 @@ int count_leading_spaces(const std::string& line) {
     return count;
 }
 
-std::string trim_copy(std::string_view input) {
-    std::size_t start = 0;
-    std::size_t end = input.size();
-    while (start < end && std::isspace(static_cast<unsigned char>(input[start]))) {
-        ++start;
-    }
-    while (end > start && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
-        --end;
-    }
-    return std::string(input.substr(start, end - start));
-}
+std::string trim_copy(std::string_view input) { return std::string(util::trim_view(input)); }
 
 std::string unquote_string(const std::string& value) {
     if (value.size() < 2) {
@@ -324,15 +314,20 @@ bool Config::load_default() {
 }
 
 LogLevel Config::parse_log_level(const std::string& level_str) {
-    std::string lower = level_str;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-
-    if (lower == "debug") return LogLevel::DEBUG;
-    if (lower == "info") return LogLevel::INFO;
-    if (lower == "warning") return LogLevel::WARNING;
-    if (lower == "error") return LogLevel::ERROR;
-
-    return LogLevel::INFO;
+    using alpacacore::logging::LogLevel;
+    switch (util::parse_log_level_name(level_str).value_or(LogLevel::Info)) {
+        case LogLevel::Trace:
+        case LogLevel::Debug:
+            return alpacahttp::LogLevel::DEBUG;
+        case LogLevel::Warn:
+            return alpacahttp::LogLevel::WARNING;
+        case LogLevel::Error:
+        case LogLevel::Critical:
+            return alpacahttp::LogLevel::ERROR;
+        case LogLevel::Info:
+            break;
+    }
+    return alpacahttp::LogLevel::INFO;
 }
 
 bool Config::is_device_enabled(const std::string& device_type, std::uint32_t device_number) const {
@@ -348,10 +343,8 @@ bool Config::is_device_enabled(const std::string& device_type, std::uint32_t dev
 void Config::apply_environment_overrides() {
     const char* port_env = std::getenv("ALPACAHTTP_PORT");
     if (port_env) {
-        try {
-            http_port_ = static_cast<std::uint16_t>(std::stoul(port_env));
-        } catch (...) {
-            // Invalid port, use default
+        if (!parse_port_value(port_env, http_port_)) {
+            util::log_warning("Ignoring ALPACAHTTP_PORT: expected 1-65535; keeping " + std::to_string(http_port_));
         }
     }
 

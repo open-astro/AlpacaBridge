@@ -58,7 +58,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   border per edge that no libgphoto2 widget or PTP `ObjectInfo` metadata reports — confirmed by
   probing both directly). So `set_connected` no longer waits for the caller's first exposure:
   on Connect it checks an on-disk cache (`config/gphoto_sensor_cache.tsv`, a tiny tab-separated
-  flat file — AlpacaCore has no JSON, see `alpaca_json.h`) keyed by camera **model** string; a hit
+  flat file — AlpacaCore has no JSON, see "Core Architecture" in `AGENTS.md`) keyed by camera **model** string; a hit
   populates geometry instantly with no capture. A miss (this exact model has never connected on
   this rig before) triggers one throwaway capture at the fastest native shutter speed off
   `mutex_`, decodes it, populates geometry, and writes the cache entry — so the cost (one shutter
