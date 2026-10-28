@@ -884,7 +884,7 @@ TEST_CASE("LockedQHYSDK - cancel_exposure forwards without taking the decorator'
     sdk.close_camera("fake-qhy-0");
 }
 
-TEST_CASE("QHYSeamFixture - owns the fake, decorator and driver in destruction order", "[qhy][fake][unit]") {
+TEST_CASE("QHYSeamFixture - owns the FakeQHYSDK, decorator and driver in destruction order", "[qhy][fake][unit]") {
     // open-astro#338. Every QHY seam test must outlive the driver with the
     // fake: the driver holds a QHYSDK& and its detachable workers capture a
     // raw QHYSDK*. A case that declares them the other way round, or stashes
