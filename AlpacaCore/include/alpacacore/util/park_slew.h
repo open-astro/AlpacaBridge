@@ -66,6 +66,9 @@ struct ParkSlewHooks {
     /// because a mount that acked the GOTO and never moved ends the poll like one that arrived. Like the other hooks
     /// it may throw; it checks `superseded` itself when it releases the mutex.
     std::function<std::string()> verify_at_target;
+    /// When set, a miss reported by `verify_at_target` repeats the whole flow once (dispatch to verify) before it
+    /// fails: a handset that ends a GOTO far off its aim lands on it when the GOTO is sent again (#1105).
+    bool repeat_on_miss = false;
     /// Publishes AtPark true and Slewing false in the same locked step.
     std::function<void()> complete;
 };
@@ -172,23 +175,17 @@ inline void run_park_slew(OperationContext& ctx, std::unique_lock<std::mutex>& l
             return;
         }
         if (!miss.empty()) {
+            if (hooks.repeat_on_miss) {
+                ParkSlewHooks again = hooks;
+                again.repeat_on_miss = false;
+                run_park_slew(ctx, lock, clock, settle_seconds, again);
+                return;
+            }
             hooks.fail(miss);
             return;
         }
     }
     hooks.complete();
-}
-
-/// Great-circle separation in arcseconds between two points given as longitude-like and latitude-like degrees
-/// (RA in degrees and Dec, or azimuth and altitude).
-inline double angular_separation_arcsec(double lon1_deg, double lat1_deg, double lon2_deg, double lat2_deg) {
-    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
-    const double dlat = (lat2_deg - lat1_deg) * kDegToRad;
-    const double dlon = (lon2_deg - lon1_deg) * kDegToRad;
-    const double a = std::sin(dlat / 2) * std::sin(dlat / 2) + std::cos(lat1_deg * kDegToRad) *
-                                                                   std::cos(lat2_deg * kDegToRad) * std::sin(dlon / 2) *
-                                                                   std::sin(dlon / 2);
-    return 2.0 * std::asin(std::min(1.0, std::sqrt(a))) / kDegToRad * 3600.0;
 }
 
 /**

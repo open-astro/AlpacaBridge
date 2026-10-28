@@ -16,6 +16,7 @@
 // includes this header instead of keeping its own copy.
 
 #include <alpacacore/alpacadriver.h>
+#include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 
 #include <chrono>
@@ -38,6 +39,15 @@ inline void require_alpaca_error(const std::function<void()>& fn, int expected_c
         FAIL("Expected AlpacaException");
     } catch (const alpacacore::AlpacaException& ex) {
         REQUIRE(ex.error_code() == expected_code);
+    }
+}
+
+// True once a Park has ended: the mount is parked, or a read reports the failure.
+inline bool park_done(alpacacore::TelescopeDriver& d) {
+    try {
+        return d.get_at_park() || !d.get_slewing();
+    } catch (const alpacacore::AlpacaException&) {
+        return true;
     }
 }
 

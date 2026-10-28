@@ -36,6 +36,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -1365,18 +1366,6 @@ TEST_CASE("Celestron initiator supersede - a superseded slew body does not learn
     CHECK(rig.st->goto_text() == after_learning);  // slew 2's measurement was dropped
 }
 
-#endif  // !_WIN32
-
-namespace {
-bool park_done(alpacacore::TelescopeDriver& d) {
-    try {
-        return d.get_at_park() || !d.get_slewing();
-    } catch (const alpacacore::AlpacaException&) {
-        return true;
-    }
-}
-}  // namespace
-
 // Case A: park GOTO acked, mount never moves, 3 h of RA (45 deg) from the saved park position.
 TEST_CASE("Celestron case A - refused park GOTO must not report AtPark", "[park][celestron]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1390,7 +1379,7 @@ TEST_CASE("Celestron case A - refused park GOTO must not report AtPark", "[park]
     st->pos_variant.store(1);  // mount now reads 3 h of RA away from it
     st->no_motion.store(true);
     driver->park();
-    REQUIRE(advance_until(clock, [&] { return park_done(*driver); }));
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
     const bool err = read_slewing_error(*driver);
     bool at_park = false;
     try {
@@ -1415,7 +1404,7 @@ TEST_CASE("Celestron case B - already at park target still parks", "[park][celes
     driver->set_park();
     st->no_motion.store(true);
     driver->park();
-    REQUIRE(advance_until(clock, [&] { return park_done(*driver); }));
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
     bool at_park = false;
     try {
         at_park = driver->get_at_park();
@@ -1425,3 +1414,5 @@ TEST_CASE("Celestron case B - already at park target still parks", "[park][celes
     CHECK_FALSE(read_slewing_error(*driver));
     driver->set_connected(false);
 }
+
+#endif  // !_WIN32
