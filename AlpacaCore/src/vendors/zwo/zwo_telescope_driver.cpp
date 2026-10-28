@@ -88,6 +88,12 @@ void civil_from_days(std::int64_t days, int& year, unsigned& month, unsigned& da
 }
 
 std::chrono::system_clock::time_point to_utc_time_point(const TimeInfo& info) {
+    const std::chrono::year_month_day date{std::chrono::year{info.year},
+                                           std::chrono::month{static_cast<unsigned>(info.month)},
+                                           std::chrono::day{static_cast<unsigned>(info.day)}};
+    if (!date.ok() || info.hour < 0 || info.hour > 23 || info.minute < 0 || info.minute > 59 || info.second < 0 ||
+        info.second > 59)
+        throw AlpacaException("Invalid mount date/time sample", AlpacaError::DriverException);
     const auto days = days_from_civil(info.year, static_cast<unsigned>(info.month), static_cast<unsigned>(info.day));
     std::int64_t local_seconds = days * 86400 +
                                  static_cast<std::int64_t>(info.hour) * 3600 +
@@ -582,6 +588,11 @@ public:
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
             }
+            try {
+                refresh_mount_time(true);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("ZWO", "Mount UTC unavailable on refresh: " + std::string(e.what()));
+            }
             refresh_cached_values();
             start_poll_thread();
             start_pulse_thread();
@@ -672,6 +683,11 @@ public:
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO",
                                     "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
+                }
+                try {
+                    refresh_mount_time(true);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("ZWO", "Mount UTC unavailable on connect: " + std::string(e.what()));
                 }
                 // Try the first measurement before publishing Connected; failure is unavailable telemetry, not a guess.
                 refresh_cached_values();
@@ -963,6 +979,9 @@ public:
         guide_rate_ = {effective, effective};
         ++guide_rate_writes_;
     }
+
+    void set_guide_rate_right_ascension(double value) override { set_guide_rate({value, value}); }
+    void set_guide_rate_declination(double value) override { set_guide_rate({value, value}); }
 
     double get_right_ascension() const override {
         check_connected();
@@ -2433,7 +2452,7 @@ private:
         return true;
     }
 
-    // Match Connected during the handshake; neither this gate nor a getter waits on the wire.
+    // Call without mutex_, including safety stops; match Connected without waiting on the wire.
     void check_connected(bool safety_stop = false) const {
         update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2683,6 +2702,24 @@ private:
         park_state_at_ = *frame.mandatory_at;
     }
 
+    void refresh_mount_time(bool only_if_unset = false) {
+        std::uint64_t session;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (only_if_unset && utc_offset_.valid()) return;
+            session = utc_session_;
+        }
+        const auto mount_time = protocol_.get_time_info();
+        const auto utc = to_utc_time_point(mount_time);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load() || poll_stop_.load() || session != utc_session_ ||
+            (only_if_unset && utc_offset_.valid()))
+            return;
+        utc_offset_.set(utc, clock_.now());
+        timezone_offset_minutes_ = mount_time.timezone_offset_minutes;
+        timezone_valid_ = true;
+    }
+
     void start_poll_thread() {
         stop_poll_thread();
         poll_stop_.store(false);
@@ -2709,13 +2746,7 @@ private:
                 const auto now = clock_.now();
                 if (!poll_stop_.load() && now >= next_time_refresh) {
                     try {
-                        const TimeInfo mount_time = protocol_.get_time_info();
-                        const auto utc = to_utc_time_point(mount_time);
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        if (!connected_.load() || poll_stop_.load()) break;
-                        utc_offset_.set(utc, clock_.now());
-                        timezone_offset_minutes_ = mount_time.timezone_offset_minutes;
-                        timezone_valid_ = true;
+                        refresh_mount_time();
                     } catch (const std::exception&) {
                     }
                     next_time_refresh = now + std::chrono::seconds(30);

@@ -235,6 +235,7 @@ public:
     }
 
     void set_connected(bool connected) override {
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
 
         ALPACA_LOG_INFO("iOptron", "set_connected called with: " + std::string(connected ? "true" : "false"));
@@ -296,7 +297,6 @@ public:
                 "iOptron");
             {
                 ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
-                connected_ = true;
                 site_info_valid_ = false;
                 position_cache_valid_ = false;
                 altaz_cache_valid_ = false;
@@ -355,6 +355,17 @@ public:
                 sync_offset_dec_degrees_ = 0.0;
                 slew_in_progress_ = false;
                 invalidate_slew_error_locked();
+                util::UtcOffset mount_time;
+                lock.unlock();
+                try {
+                    const auto utc = protocol.get_utc_time();
+                    mount_time.set(utc, clock_.now());
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
+                }
+                lock.lock();
+                utc_offset_ = mount_time;
+                connected_ = true;
                 prefetch_mount_state_locked();
                 try {
                     mount_info_ = protocol.get_mount_info();
@@ -2776,6 +2787,7 @@ private:
     // What get_connected() reads: true only once a connect has fully finished (#910).
     std::atomic<bool> published_connected_{false};
     mutable MountInfo mount_info_;
+    std::mutex transition_mutex_;
     mutable std::mutex mutex_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 

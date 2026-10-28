@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -791,15 +792,40 @@ TEST_CASE("ZWO cached operational getters require a connection while offline set
     error(reads[property], AlpacaError::NotConnected);
 }
 
+TEST_CASE("ZWO individual guide-rate writes update the shared rate without a getter",
+          "[zwo][telescope][unit][guide-rate]") {
+    Rig rig;
+    const bool ra = GENERATE(false, true);
+    const auto write = [&](double value) {
+        if (ra)
+            rig.driver->set_guide_rate_right_ascension(value);
+        else
+            rig.driver->set_guide_rate_declination(value);
+    };
+    error([&] { write(50.0); }, AlpacaError::InvalidValue);
+    error([&] { write(std::numeric_limits<double>::quiet_NaN()); }, AlpacaError::InvalidValue);
+    REQUIRE_NOTHROW(write(0.002));
+    error([&] { rig.driver->get_guide_rate(); }, AlpacaError::NotConnected);
+    rig.connect();
+    write(0.003);
+    const auto before = rig.driver->get_guide_rate();
+    write(0.001);
+    const auto after = rig.driver->get_guide_rate();
+    CHECK(after.ra == after.dec);
+    CHECK(after.ra < before.ra);
+}
+
 TEST_CASE("ZWO UTCDate getters never read the link and the poll refreshes mount time",
           "[zwo][telescope][telemetry][getter-stall]") {
     Rig rig(1000);  // The wire reader paces each character; a complete GMTI reply exceeds 100 ms.
+    rig.set_mount_time(20);
     rig.connect();
     const int queries = rig.mount.count(":GMTI");
-    error([&] { rig.driver->get_utc_date(); }, AlpacaError::InvalidOperation);
+    REQUIRE(queries == 1);
+    const auto mount_time = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 3h + 4min + 5s;
+    CHECK(rig.driver->get_utc_date() == mount_time);
     rig.driver->get_device_state();
     CHECK(rig.mount.count(":GMTI") == queries);
-    const auto mount_time = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 3h + 4min + 5s;
     const auto client_time = mount_time - 24h;
     rig.driver->set_utc_date(client_time);
     rig.tick(1s);
@@ -818,6 +844,37 @@ TEST_CASE("ZWO UTCDate getters never read the link and the poll refreshes mount 
     rig.tick(1s);
     CHECK(rig.driver->get_utc_date() == mount_time + 366 * 24h);
     CHECK(rig.mount.count(":GMTI") == queries + 2);
+}
+
+TEST_CASE("ZWO connect samples mount UTC when configured sync fails", "[zwo][telescope][unit][utcdate]") {
+    Rig rig(1000, 0, true);
+    rig.set_mount_time(20, 3);
+    rig.mount.override_reply(":SMTI", "e1");
+    rig.connect();
+    const auto mount_utc = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 6h + 4min + 5s;
+    CHECK(rig.mount.count(":SMTI") == 1);
+    CHECK(rig.mount.count(":GMTI") == 1);
+    CHECK(rig.driver->get_utc_date() == mount_utc);
+    CHECK(rig.driver->get_utc_date() == mount_utc);
+    CHECK(rig.mount.count(":GMTI") == 1);
+}
+
+TEST_CASE("ZWO unavailable connect time is not invented or retried by getters", "[zwo][telescope][unit][utcdate]") {
+    const auto reply = GENERATE("bad", "02/30/20&03:04:05&+00:00", "01/02/20&25:04:05&+00:00");
+    Rig rig(1000);
+    rig.mount.override_reply(":GMTI", reply);
+    for (int session = 0; session < 2; ++session) {
+        rig.connect();
+        for (int read = 0; read < 2; ++read) {
+            error([&] { rig.driver->get_utc_date(); }, AlpacaError::InvalidOperation);
+            rig.driver->get_device_state();
+        }
+        CHECK(rig.mount.count(":GMTI") == session + 1);
+        const auto client = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+        rig.driver->set_utc_date(client);
+        CHECK(rig.driver->get_utc_date() == client);
+        rig.driver->set_connected(false);
+    }
 }
 
 TEST_CASE("ZWO UTC anchor preserves fractional elapsed time and earlier or later client writes",
@@ -936,7 +993,8 @@ TEST_CASE("ZWO disconnect cannot republish a periodic UTC read from the old sess
     error([&] { rig.driver->get_utc_date(); }, AlpacaError::NotConnected);
     CHECK(vendor::zwo::utc_anchor_for_testing(*rig.driver) == offline);
     rig.driver->set_connected(true);  // Joins teardown and starts with sync disabled.
-    error([&] { rig.driver->get_utc_date(); }, AlpacaError::InvalidOperation);
+    const auto mount_utc = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 3h + 4min + 5s;
+    CHECK(rig.driver->get_utc_date() == mount_utc);  // A fresh sample, neither the old read nor the offline write.
 }
 
 TEST_CASE("ZWO an old UTC writer cannot replace an offline write after disconnect",
