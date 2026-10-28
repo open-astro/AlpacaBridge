@@ -75,8 +75,8 @@ TEST_CASE("path_exists never throws and treats unreachable paths as absent", "[s
     // error case that makes the throwing exists() overload abort a scan.
     REQUIRE_FALSE(path_exists("/etc/hostname/not-a-directory"));
 
-    // EACCES on a parent directory is the only errno for which the throwing
-    // exists() overload throws (libstdc++ maps ENOENT and ENOTDIR to
+    // EACCES on a parent directory makes the throwing exists() overload throw
+    // (so do ELOOP and ENAMETOOLONG; libstdc++ maps only ENOENT and ENOTDIR to
     // not_found). Root ignores mode bits, so the probe is skipped there.
     if (::geteuid() == 0) {
         WARN("running as root: directory permissions do not apply, EACCES probe skipped");
