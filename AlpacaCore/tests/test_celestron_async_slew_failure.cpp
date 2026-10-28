@@ -232,11 +232,16 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
 }
 
 // Steps the fake clock one `step` at a time, once a driver task is parked on
-// it, until `pred` holds or `max_steps` steps pass. Each step waits for the
-// woken task to settle, so no step lands between two of its waits.
+// it, until `pred` holds or `real_limit` of real time passes. The bound is real
+// time, not a step count: another thread's waiter satisfies the rendezvous
+// while the task under test is still on the socket, so a step budget can run
+// out in milliseconds. Each step waits for the woken task to settle, so no
+// step lands between two of its waits.
 bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred,
-                   std::chrono::milliseconds step = std::chrono::milliseconds(250), int max_steps = 200) {
-    for (int i = 0; i < max_steps; ++i) {
+                   std::chrono::milliseconds step = std::chrono::milliseconds(250),
+                   std::chrono::seconds real_limit = std::chrono::seconds(60)) {
+    const auto deadline = Clock::now() + real_limit;
+    while (Clock::now() < deadline) {
         if (pred()) return true;
         clock.wait_for_waiters(1, std::chrono::milliseconds(100));
         clock.advance(step);
@@ -503,7 +508,7 @@ TEST_CASE("Celestron async - one bad HC or MC status poll recovers before the fa
         const auto poll_count = [&] {
             return motor_controller ? st->mc_slew_status_polls.load() : st->slew_status_polls.load();
         };
-        REQUIRE(advance_until(clock, [&] { return poll_count() >= 2; }, std::chrono::milliseconds(250), 20));
+        REQUIRE(advance_until(clock, [&] { return poll_count() >= 2; }, std::chrono::milliseconds(250)));
         CHECK(st->cancel_goto_count.load() == 0);
         CHECK(driver->get_slewing());
 
@@ -513,8 +518,7 @@ TEST_CASE("Celestron async - one bad HC or MC status poll recovers before the fa
         } else {
             st->malformed_slew_status.store(1);
         }
-        REQUIRE(
-            advance_until(clock, [&] { return st->cancel_goto_count.load() > 0; }, std::chrono::milliseconds(250), 20));
+        REQUIRE(advance_until(clock, [&] { return st->cancel_goto_count.load() > 0; }, std::chrono::milliseconds(250)));
         CHECK(poll_count() - after_recovery == 3);
         std::string message;
         CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
@@ -554,7 +558,7 @@ TEST_CASE("Celestron sync slew - three status-poll failures abort the wait",
     clock.advance(std::chrono::seconds(9));
     clock.wait_for_woken_settled(std::chrono::seconds(2));
     const bool finished_after_bad_poll =
-        advance_until(clock, [&] { return finished.load(); }, std::chrono::milliseconds(250), 20);
+        advance_until(clock, [&] { return finished.load(); }, std::chrono::milliseconds(250));
     slew.join();
     REQUIRE(goto_dispatched);
     REQUIRE(waiting_for_poll);
@@ -685,8 +689,10 @@ TEST_CASE("Celestron async - slew timeout is a persistent failure", "[celestron]
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     std::string message;
+    const auto started = clock.now();
     REQUIRE(advance_until(
-        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, std::chrono::seconds(1), 125));
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, std::chrono::seconds(1)));
+    CHECK(clock.now() - started <= std::chrono::seconds(125));  // the 120 s timeout itself, not only its message
     CHECK(message.find("timed out after 120s") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
@@ -707,8 +713,7 @@ TEST_CASE("Celestron async - tracking restoration failure is retained", "[celest
     st->reject_next_tracking_write.store(true);
     std::string message;
     REQUIRE(advance_until(
-        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, std::chrono::milliseconds(250),
-        24));
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, std::chrono::milliseconds(250)));
     CHECK(message.find("Slew completion handling failed") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
@@ -730,8 +735,7 @@ TEST_CASE("Celestron async - post-slew position-read failure is retained",
     st->reject_position_after_slew.store(true);
     std::string message;
     REQUIRE(advance_until(
-        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, std::chrono::milliseconds(250),
-        24));
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, std::chrono::milliseconds(250)));
     CHECK(message.find("Slew completion handling failed") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
@@ -1007,11 +1011,15 @@ TEST_CASE("Celestron PulseGuide - overlapping axes keep independent pulse chains
     const int dec_before = st->guide_command_count(1);
     const double ra_start = driver->get_right_ascension();
     const double ra_delta = driver->get_guide_rate().ra * 8.0 / 15.0;
+    const auto parked_before = clock.waiter_count();
     driver->pulse_guide(2, 8000);  // East: RA chain continues beyond the 2.55 s hardware limit.
     driver->pulse_guide(0, 3500);  // North: must not cancel RA's remaining chunks.
+    // Both chains must be parked on the clock before it moves: the pulses end on virtual time since their start, so
+    // a clock that runs ahead of a chain still on the socket ends them before the checks below.
+    REQUIRE(wait_until([&] { return clock.waiter_count() >= parked_before + 2; }, 5000));
 
     REQUIRE(advance_until(
-        clock, [&] { return st->guide_command_count(0) >= ra_before + 2; }, std::chrono::milliseconds(250), 18));
+        clock, [&] { return st->guide_command_count(0) >= ra_before + 2; }, std::chrono::milliseconds(250)));
     REQUIRE(st->guide_command_count(1) >= dec_before + 1);
     clock.advance(std::chrono::milliseconds(2500));
     clock.wait_for_woken_settled(std::chrono::seconds(2));
@@ -1034,11 +1042,13 @@ TEST_CASE("Celestron MoveAxis - a jog on one axis preserves the other axis pulse
     REQUIRE(driver->get_can_pulse_guide());
 
     const int ra_before = st->guide_command_count(0);
+    const auto parked_before = clock.waiter_count();
     driver->pulse_guide(2, 6000);  // RA pulse is still chaining after its first hardware chunk.
     driver->move_axis(1, 0.0);     // A Dec-axis stop must not cancel the RA pulse.
+    REQUIRE(wait_until([&] { return clock.waiter_count() >= parked_before + 1; }, 5000));  // as above
 
     CHECK(advance_until(
-        clock, [&] { return st->guide_command_count(0) >= ra_before + 2; }, std::chrono::milliseconds(250), 18));
+        clock, [&] { return st->guide_command_count(0) >= ra_before + 2; }, std::chrono::milliseconds(250)));
     driver->set_connected(false);
 }
 
