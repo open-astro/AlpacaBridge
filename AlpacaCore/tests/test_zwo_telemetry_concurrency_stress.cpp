@@ -877,6 +877,23 @@ TEST_CASE("ZWO unavailable connect time is not invented or retried by getters", 
     }
 }
 
+TEST_CASE("ZWO redundant connect retries an unavailable mount clock only while UTC is unset",
+          "[zwo][telescope][unit][utcdate]") {
+    Rig rig(1000);
+    rig.connect();
+    error([&] { rig.driver->get_utc_date(); }, AlpacaError::InvalidOperation);
+    REQUIRE(rig.mount.count(":GMTI") == 1);
+    rig.set_mount_time(20);
+    rig.driver->set_connected(true);
+    const auto mount_utc = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 3h + 4min + 5s;
+    CHECK(rig.driver->get_utc_date() == mount_utc);
+    CHECK(rig.mount.count(":GMTI") == 2);
+    rig.set_mount_time(21);
+    rig.driver->set_connected(true);
+    CHECK(rig.driver->get_utc_date() == mount_utc);
+    CHECK(rig.mount.count(":GMTI") == 2);
+}
+
 TEST_CASE("ZWO UTC anchor preserves fractional elapsed time and earlier or later client writes",
           "[zwo][telescope][utc][issue1522]") {
     Rig rig;
