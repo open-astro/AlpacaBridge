@@ -317,8 +317,7 @@ int main() {
               {"mode", WifiSettingValue::str("infrastructure")},
               {"bssid", WifiSettingValue::str("00:11:22:33:44:55")}}},
             {"802-11-wireless-security", {{"key-mgmt", WifiSettingValue::str("sae")}}},
-            {"ipv4",
-             {{"method", WifiSettingValue::str("manual")}, {"gateway", WifiSettingValue::str("192.0.2.1")}}},
+            {"ipv4", {{"method", WifiSettingValue::str("manual")}, {"gateway", WifiSettingValue::str("192.0.2.1")}}},
             {"802-1x", {{"identity", WifiSettingValue::str("observer")}}}};
         WifiManager manager("unused", backend);
         manager.save_profile("RealNet", "", false, 7);
