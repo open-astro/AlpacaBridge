@@ -1163,7 +1163,11 @@ int main() {
             send_all(slow_fd,
                      "PUT /api/v1/telescope/9549/slewtocoordinatesasync?RightAscension=5&Declination=10"
                      " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));  // a worker is inside the slew
+            // Wait until a worker is inside the slew.
+            for (int i = 0; i < 500 && slow->slew_thread.load() == std::thread::id{}; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            EXPECT(slow->slew_thread.load() != std::thread::id{});
 
             int restarter = connect_local(straddle_port);
             EXPECT(restarter >= 0);
