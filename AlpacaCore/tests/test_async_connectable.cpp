@@ -287,16 +287,31 @@ TEST_CASE("AsyncConnectable - lifecycle stress with chained pending flags", "[as
     }
     wait_until_idle(d);
 
+    // Whether the hammering ever lands a connect behind a running disconnect
+    // depends on timing (under TSan on arm64 it did not), so drive the chained
+    // path once on purpose: queue a connect behind a slow disconnect. The
+    // task's tail must run it; without pending_connect_ it is dropped.
+    d.op_delay_ = 300ms;
+    d.connect();
+    wait_until_idle(d);
+    REQUIRE(d.get_connected());
+    d.tail_connects_.store(0);
+    d.disconnect();
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (d.get_connected() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);  // connected_ clears as the teardown starts
+    }
+    d.connect();  // queued behind the in-flight disconnect
+    wait_until_idle(d);
+    CHECK(d.tail_connects_.load() == 1);
+    CHECK(d.get_connected());
+
     // Converge deterministically: the final instruction is a disconnect and
     // it must win regardless of what the hammering left queued.
     d.disconnect();
     wait_until_idle(d);
     CHECK_FALSE(d.get_connected());
     CHECK_FALSE(d.get_connecting());
-    // The hammering must have driven the chained path: a connect queued behind
-    // a running disconnect and run by that task's tail. Without pending_connect_
-    // no tail ever runs a connect and this stays 0.
-    CHECK(d.tail_connects_.load() > 0);
 }
 
 // Issue #358: the reason a connect failed is kept, not just the fact.
