@@ -547,6 +547,10 @@ private:
         if (normalized < 0.0) {
             normalized += wrap;
         }
+        // A tiny negative remainder plus wrap rounds to exactly wrap.
+        if (normalized >= wrap) {
+            normalized -= wrap;
+        }
         return normalized;
     }
 
