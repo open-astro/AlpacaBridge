@@ -1050,7 +1050,7 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
         if "<" in path and path.startswith(DESCRIPTOR_TEMPLATE_PREFIXES):
             # A descriptor template (`.../<vendor>/<vendor>_fields.h`) must
             # match at least one tracked file, `<x>` standing for one name.
-            pattern = re.compile(re.sub(r"<[^<>/]+>", "[^/]+", re.escape(path).replace("\\<", "<").replace("\\>", ">")) + "/?")
+            pattern = re.compile(re.sub(r"<[^<>/]+>", "[^/]+", re.escape(path)) + "/?")
             if path not in seen and not any(pattern.fullmatch(t) for t in tracked | tracked_dirs):
                 failures.append("%s references a descriptor path that matches no tracked file: %s" % (doc, path))
             seen.add(path)

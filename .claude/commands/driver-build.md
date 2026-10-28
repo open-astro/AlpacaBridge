@@ -547,41 +547,7 @@ Checklist:
 
 ## Step 6 — AlpacaHTTP integration
 
-All 9 steps required for end-to-end functionality:
-1. Catalog descriptor: `<vendor>_fields.h`, `<vendor>_schema.cpp` and `<vendor>_catalog.cpp` under `AlpacaCore/src/vendors/<vendor>/`, registered in `AlpacaCore/src/catalog/builtin_catalog.cpp` (the router has no vendor arm).
-2. No vendor include in `AlpacaHTTP/src/http/router.cpp` (`scripts/check_layering.py`).
-3. Config sanitization: every persisted field declared in the schema.
-4. Web UI vendor dropdown: add the `<option>` to `#vendor` in `AlpacaHTTP/web/index.html`; which device types offer it comes from the descriptor's `available` flag in the device catalog.
-5. Web UI vendor-specific form fields.
-   - **Unique vendor-prefixed `name` on EVERY field** (not just filter wheels): hidden
-     vendor sections still submit, so a generic `name` like `cameraIndex`/`focuserIndex`
-     collides in `FormData` with ZWO's same-named field (first in DOM wins) and the value
-     you typed is silently dropped — `0` gets saved. Name non-ZWO fields like
-     `playerOneCameraIndex`, `qhyCameraIndex`, `touptekFocuserIndex`, and read that exact
-     name in the submit handler. Element `id`s stay descriptive; only the `name` must be
-     unique. (ZWO keeps the bare names as the canonical first block.)
-   - **FilterWheel vendors**: the form MUST include the standard slot UI — a slot-count
-     select listing the manufacturer's actual lineup (from Question 4b) plus Custom,
-     per-slot filter name dropdowns, and the advanced names textarea. Instantiate
-     `createFilterwheelSlotUI({...})` in `app.js` with vendor-prefixed element IDs and
-     copy the markup pattern from an existing filterwheel vendor in `index.html`.
-   - **Catalog keys**: put each field inside a `data-vendor` / `data-device-type` scope
-     `<div>` and give it `data-config-key="<catalog key>"`; `catalog_form_drift.test.js`
-     fails on a named field without one, on a catalog field no form field names, and on a
-     control that does not fit the field type or role. Editing fills a mapped field from
-     the saved config with no `app.js` code; a field that needs a conversion carries
-     `data-config-fill="manual"` and its fill goes in `startEditDevice`.
-6. Web UI index auto-numbering — for any SDK-enumeration index field (camera/focuser/
-   filterwheel/rotator), make it a `type="number"` input whose `data-config-key` names an
-   `EnumerationIndex` catalog field. `app.js` derives the index fields from the catalog
-   (`deriveIndexFields()` in `catalog_schema.js`), so there is no table to edit. That wires up
-   per-`(vendor, deviceType)` auto-increment and manual-edit tracking, so a second device
-   of the same vendor/type doesn't silently reuse index 0. (Distinct from the Alpaca
-   device number, which auto-assigns per type already.) See "Enumeration index fields" in
-   `.github/instructions/http-integration.instructions.md`.
-7. Frontend validation logic.
-8. Build-flag propagation from AlpacaCore to AlpacaHTTP.
-9. Routing/config tests in `AlpacaHTTP/tests/`.
+Follow "AlpacaHTTP Integration Checklist" in `.github/instructions/http-integration.instructions.md`: one catalog descriptor and its tests, plus the web UI steps the catalog does not cover.
 
 ## Step 7 — Tests (MANDATORY — do not skip)
 

@@ -19,7 +19,6 @@ With the device catalog (decision 0004), adding a vendor or device type is one d
 5. **Index inputs** — an SDK enumeration index input gets a **unique vendor-prefixed `name`** and `type="number"` with a `data-config-key` naming an `EnumerationIndex` field; see "Enumeration index fields" below.
 6. **Tests** — add the descriptor's tests and any routing/config tests in `AlpacaHTTP/tests/`; `ALPACACORE_ENABLE_<VENDOR>` must reach AlpacaHTTP (see the packaging rules).
 
-
 ### FilterWheel vendors — required web UI (slot count + filter name pickers)
 
 Every filterwheel vendor's config form MUST include the standard slot UI, not just a
