@@ -43,7 +43,7 @@ async function setup({ apOn, confirmAnswer, host = 'pi.local', status }) {
         'wifi-ap-toggle': makeEl({ checked: apOn }),
         'wifi-ap-ssid': makeEl({ value: 'Old Name' }),
         'wifi-ap-pass': makeEl({ value: '' }),
-        'wifi-country': makeEl({ value: 'US', options: [1] }),
+        'wifi-country': makeEl({ value: 'US', options: [1], focus() {} }),
         'wifi-message': makeEl(),
     };
     const bands = [makeEl({ dataset: { band: 'bg' } }), makeEl({ dataset: { band: 'a' } })];
@@ -174,6 +174,121 @@ test('hotspot edits while the hotspot is off save without a prompt', async () =>
     assert.equal(t.prompts.length, 0);
     assert.equal(t.sent().length, 1);
     assert.equal(t.sent()[0].body.Enabled, false);
+});
+
+// Early returns of wifiApplyAp must put the edit back, like Cancel does.
+test('hotspot name edit while busy: no request, previous name restored', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.busy = true;
+    t.els['wifi-ap-ssid'].value = 'New Name';
+    t.els['wifi-ap-ssid'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-ssid'].value, 'Old Name');
+});
+
+test('hotspot toggle while busy: no request, toggle put back', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.busy = true;
+    t.els['wifi-ap-toggle'].checked = false;
+    t.els['wifi-ap-toggle'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-toggle'].checked, true);
+});
+
+test('hotspot name emptied: no request, previous name restored', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: true } });
+    t.els['wifi-ap-ssid'].value = '';
+    t.els['wifi-ap-ssid'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-ssid'].value, 'Old Name');
+});
+
+test('hotspot edit on 5 GHz with no country: no request, previous name restored', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: true } });
+    t.bands[0].classList.toggle('active', false);
+    t.bands[1].classList.toggle('active', true);
+    t.els['wifi-country'].value = '';
+    t.els['wifi-ap-ssid'].value = 'New Name';
+    t.els['wifi-ap-ssid'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-ssid'].value, 'Old Name');
+});
+
+test('hotspot toggled off on 5 GHz with no country: toggle put back on', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: true } });
+    t.bands[0].classList.toggle('active', false);
+    t.bands[1].classList.toggle('active', true);
+    t.els['wifi-country'].value = '';
+    t.els['wifi-ap-toggle'].checked = false;
+    t.els['wifi-ap-toggle'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-toggle'].checked, true);
+});
+
+test('hotspot not configured, no password: no request, typed name kept', async () => {
+    const t = await setup({ apOn: false, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.ap = { Configured: false, Ssid: '' };
+    t.els['wifi-ap-ssid'].value = 'New Name';
+    t.els['wifi-ap-ssid'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-ssid'].value, 'New Name');
+});
+
+test('hotspot not configured, name emptied by password first: typed password kept', async () => {
+    const t = await setup({ apOn: false, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.ap = { Configured: false, Ssid: '' };
+    t.els['wifi-ap-ssid'].value = '';
+    t.els['wifi-ap-pass'].value = 'password123';
+    t.els['wifi-ap-pass'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-pass'].value, 'password123');
+});
+
+// Falsified by: app.js undoInvalid, drop `fromToggle ||`, or delete the no-password undoInvalid() call.
+test('hotspot not configured, toggled on with no password: no request, toggle put back off', async () => {
+    const t = await setup({ apOn: false, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.ap = { Configured: false, Ssid: '' };
+    t.els['wifi-ap-ssid'].value = 'New Name';
+    t.els['wifi-ap-toggle'].checked = true;
+    t.els['wifi-ap-toggle'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-toggle'].checked, false);
+});
+
+// Falsified by: app.js 5 GHz return, change undoInvalid() to undo().
+test('hotspot not configured, 5 GHz with no country: no request, typed name kept', async () => {
+    const t = await setup({ apOn: false, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.ap = { Configured: false, Ssid: '' };
+    t.bands[0].classList.toggle('active', false);
+    t.bands[1].classList.toggle('active', true);
+    t.els['wifi-country'].value = '';
+    t.els['wifi-ap-ssid'].value = 'New Name';
+    t.els['wifi-ap-ssid'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-ssid'].value, 'New Name');
+});
+
+test('hotspot not configured: name then password sends one PUT with both', async () => {
+    const t = await setup({ apOn: false, confirmAnswer: { value: true } });
+    t.ctx.__wifiState.ap = { Configured: false, Ssid: '' };
+    t.els['wifi-ap-ssid'].value = 'New Name';
+    t.els['wifi-ap-ssid'].handlers.change();
+    await flush();
+    t.els['wifi-ap-pass'].value = 'password123';
+    t.els['wifi-ap-pass'].handlers.change();
+    await flush();
+    assert.equal(t.sent().length, 1);
+    assert.equal(t.sent()[0].body.Ssid, 'New Name');
+    assert.equal(t.sent()[0].body.Passphrase, 'password123');
 });
 
 test('WiFi radio off, Cancel: no request, toggle stays on', async () => {
