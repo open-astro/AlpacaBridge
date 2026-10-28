@@ -60,6 +60,7 @@ public:
             if (record_disconnect_if_connect_in_flight(connected_.load())) {
                 return;
             }
+            in_disconnect_task = true;
             if (!connected_.load()) {
                 return;
             }
@@ -73,6 +74,11 @@ public:
             }
             ++disconnect_completions_;
             return;
+        }
+        // A connect on a thread that already ran a disconnect is the task
+        // tail running a connect that was queued behind that disconnect.
+        if (in_disconnect_task) {
+            ++tail_connects_;
         }
         if (consume_pending_disconnect(connected_.load())) {
             return;
@@ -104,8 +110,11 @@ public:
     std::atomic<bool> fail_connect_{false};
     std::atomic<int> connect_completions_{0};
     std::atomic<int> disconnect_completions_{0};
+    std::atomic<int> tail_connects_{0};  ///< connects run by a task tail after a disconnect
 
 private:
+    // Fresh per task thread: set once this thread has run a disconnect.
+    static inline thread_local bool in_disconnect_task = false;
     std::mutex mutex_;
     std::atomic<bool> connected_{false};
 };
@@ -277,6 +286,25 @@ TEST_CASE("AsyncConnectable - lifecycle stress with chained pending flags", "[as
         t.join();
     }
     wait_until_idle(d);
+
+    // Whether the hammering ever lands a connect behind a running disconnect
+    // depends on timing (under TSan on arm64 it did not), so drive the chained
+    // path once on purpose: queue a connect behind a slow disconnect. The
+    // task's tail must run it; without pending_connect_ it is dropped.
+    d.op_delay_ = 300ms;
+    d.connect();
+    wait_until_idle(d);
+    REQUIRE(d.get_connected());
+    d.tail_connects_.store(0);
+    d.disconnect();
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (d.get_connected() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);  // connected_ clears as the teardown starts
+    }
+    d.connect();  // queued behind the in-flight disconnect
+    wait_until_idle(d);
+    CHECK(d.tail_connects_.load() == 1);
+    CHECK(d.get_connected());
 
     // Converge deterministically: the final instruction is a disconnect and
     // it must win regardless of what the hammering left queued.

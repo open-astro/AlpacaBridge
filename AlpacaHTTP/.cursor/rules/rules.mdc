@@ -103,11 +103,7 @@ AlpacaHTTP -> AlpacaCore::DeviceDriver -> Vendor SDK (only inside AlpacaCore)
 
 When adding a new vendor/device type in AlpacaCore, make the matching AlpacaHTTP updates:
 
-- Router registration: handle `vendor/deviceType` in `Router::register_device_from_config`.
-- Config schema: add any vendor-specific fields and validation.
-- Web UI: update vendor options and any vendor-specific config panels.
-- Build flags: ensure the AlpacaCore vendor target propagates compile definitions.
-- Tests: add or extend routing/config tests for the new vendor.
+See "AlpacaHTTP Integration Checklist" in `.github/instructions/http-integration.instructions.md` (one catalog descriptor and its tests, plus the web UI steps the catalog does not cover).
 
 ---
 

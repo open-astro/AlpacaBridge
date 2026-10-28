@@ -1,0 +1,3 @@
+### Changed
+
+- **New-vendor checklist and docs-drift path check**, docs and `scripts/check_docs_drift.py`, issue #1781. The nine-step AlpacaHTTP integration checklist in `http-integration.instructions.md` is now "write one descriptor and its tests" plus the web UI steps the catalog does not cover. Check 7 now also resolves templated descriptor spans such as `AlpacaCore/src/vendors/<vendor>/<vendor>_fields.h` under `AlpacaCore/src/vendors/` and `AlpacaCore/src/catalog/`: a span that matches no tracked file fails. Covered by the "templated descriptor span" cases in `python3 scripts/check_docs_drift.py --self-test`.

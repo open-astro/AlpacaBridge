@@ -308,10 +308,11 @@ TEST_CASE("HostClock - outcome names are stable log text", "[util][hostclock][un
 
 TEST_CASE("HostClock - default construction queries the real kernel without stepping", "[util][hostclock][unit]") {
     // The real adjtimex() path must be callable unprivileged; whether this
-    // host is synchronised depends on the machine, so only the type is checked.
+    // host is synchronised depends on the machine, so the readout is compared
+    // with the same probe rather than with a fixed value.
     HostClock real;
     const bool s = real.synchronized();
-    CHECK((s == true || s == false));
+    CHECK(s == HostClock::kernel_is_synchronized());
     // "rtc" is what an NTP-less host with a plausible boot RTC reports, so the
     // readout is checked against the real probe, as the RTC case above does.
     const std::string src = real.source();
@@ -562,8 +563,11 @@ TEST_CASE("ClientUtcWarning - warn_once is silent on an undisciplined host", "[u
 
 TEST_CASE("ClientUtcWarning - a null probe restores the kernel one", "[util][hostclock][unit]") {
     using alpacacore::util::ClientUtcWarning;
-    ClientUtcWarning::set_host_synchronized_probe([] { return true; });
-    CHECK(ClientUtcWarning::host_synchronized());
+    // The opposite of the kernel's answer, so a probe that survives the null
+    // reset disagrees with the restored kernel one on any host.
+    const bool opposite = !HostClock::kernel_is_synchronized();
+    ClientUtcWarning::set_host_synchronized_probe([opposite] { return opposite; });
+    CHECK(ClientUtcWarning::host_synchronized() == opposite);
     ClientUtcWarning::set_host_synchronized_probe(nullptr);
     CHECK(ClientUtcWarning::host_synchronized() == HostClock::kernel_is_synchronized());
 }
