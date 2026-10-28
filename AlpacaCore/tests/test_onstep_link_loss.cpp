@@ -43,8 +43,8 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
 
@@ -328,7 +328,8 @@ TEST_CASE("OnStep link loss - Connected drops when the adapter is pulled with no
     CHECK(driver->get_link_fault().empty());
     // With no link at all the wrapper answers NotConnected too, not a
     // generic driver error.
-    require_alpaca_error([] { (void)OnStepProtocolWrapper::instance().send_command(":GVP#"); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([] { (void)OnStepProtocolWrapper::instance().send_command(":GVP#"); },
+                         alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep link loss - a reply cut off by the unplug fails NotConnected before the timeout",
