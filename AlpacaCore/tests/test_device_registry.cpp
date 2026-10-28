@@ -121,6 +121,30 @@ private:
     std::optional<std::string> sdk_version_;
 };
 
+// Overrides ONLY get_device_firmware(): the AlpacaDriver default for
+// get_device_sdk_version() is what the test below pins.
+class FirmwareOnlyDriver final : public alpacacore::AlpacaDriver {
+public:
+    int get_device_number() const override { return 0; }
+    std::string get_name() const override { return "FirmwareDriver"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Camera; }
+    std::string fallback_unique_id() const override { return "firmware-0"; }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+
+    std::optional<std::string> get_device_firmware() const override { return "2025-05-04"; }
+};
+
 struct RegistryGuard {
     RegistryGuard() { alpacacore::management::DeviceRegistry::instance().clear(); }
     ~RegistryGuard() { alpacacore::management::DeviceRegistry::instance().clear(); }
@@ -138,7 +162,9 @@ TEST_CASE("AlpacaDriver firmware/SDK hooks default to empty", "[driver][firmware
 
 TEST_CASE("AlpacaDriver firmware and SDK version are independent hooks", "[driver][firmware]") {
     // Real device firmware (e.g. WandererCover, a mount handset, SVBONY camera).
-    FirmwareDriver firmware_only(std::string("2025-05-04"));
+    // The base-class default for the SDK hook must stay empty: a default that
+    // forwarded to get_device_firmware() would show firmware as the SDK version.
+    FirmwareOnlyDriver firmware_only;
     REQUIRE(firmware_only.get_device_firmware() == std::optional<std::string>("2025-05-04"));
     REQUIRE(firmware_only.get_device_sdk_version() == std::nullopt);
 
