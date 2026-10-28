@@ -1360,6 +1360,10 @@ void WifiManager::set_country(const std::string& alpha2) {
     // the persisted file either (PR #198 review round 6).
     std::lock_guard<std::mutex> country_lock(country_mutex_);
     nl80211_set_regdom(alpha2);
+    persist_country(alpha2);
+}
+
+void WifiManager::persist_country(const std::string& alpha2) {
     std::error_code ec;
     std::filesystem::create_directories(state_dir_, ec);
     std::ofstream f(country_file(), std::ios::trunc);
