@@ -4658,7 +4658,7 @@ TEST_CASE("SkyWatcher async - a goto landing that reports stopped early is waite
     // plain landing takes one goto and a coasting one four, but the WARN
     // stays the sharper signal. Wall-clock timing cannot be the signal either -- the
     // tracking restore sits between the landing and Slewing clearing (as the
-    // 3 s slew_force_until_ window also did before #715), and it swamps a
+    // 3 s slew hold window also did before #715), and it swamps a
     // coast short enough to be waited out.
     //
     // So: coast for longer than kLandingSettleTimeout (2 s). The stationary
@@ -5477,30 +5477,6 @@ TEST_CASE("SkyWatcher async - a reconnect inside the hold leaves Slewing false",
     REQUIRE(call_on_clock(clock, [&] { driver->set_connected(false); }, std::chrono::milliseconds(5000)));
     REQUIRE(call_on_clock(clock, [&] { driver->set_connected(true); }, std::chrono::milliseconds(5000)));
     CHECK_FALSE(driver->get_slewing());
-    driver->set_connected(false);
-}
-
-// The pulse deadline is a HoldWindow on the task clock: the axis stays owned
-// by its pulse until virtual time reaches duration + 1 s, so a rate write in
-// the middle defers instead of rewriting the running axis, and nothing waits
-// on real time (#994).
-TEST_CASE("SkyWatcher async - a Dec pulse owns its axis until its deadline on virtual time",
-          "[skywatcher][async][pulseguide][hold-window]") {
-    FakeTaskClock clock;
-    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
-    REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock);
-    driver->set_tracking(true);
-    mount.jump_axis_degrees(2, 45.0);
-
-    driver->pulse_guide(0, 2000);  // North
-    REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
-    CHECK(driver->get_is_pulse_guiding());
-    const uint32_t period_before = mount.step_period(2);
-    driver->set_declination_rate(10.0);  // busy axis: stored, not applied to the running pulse
-    CHECK(mount.step_period(2) == period_before);
-
-    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(4000)));
     driver->set_connected(false);
 }
 

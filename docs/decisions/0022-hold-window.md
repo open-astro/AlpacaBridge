@@ -4,7 +4,7 @@ Status: proposed
 
 ## Context
 
-Each telescope driver keeps a "Slewing stays true for N s after a goto" deadline and read `window still open OR the mount reports slewing`. Most telescope and camera drivers keep an "IsPulseGuiding stays true until the pulse ends" deadline in the same shape. Each is a raw `time_point` field with its own arm and clear sites, and several sit on `std::chrono::steady_clock` while the driver's waits run on the task clock ([decision 0005](0005-task-clock.md)). The window was where the bugs lived: open-astro#580 (a sync 10.1" short) came from landing detection that waited out a fixed 8 s plus 3 s window instead of polling the board, and open-astro#715 replaced that wait with a poll of `:f` that ignores the window. ZWO #720 and #575, SynScan #880 and Celestron #575 were arm or clear mistakes in the same field.
+Seven of the eight telescope drivers keep a "Slewing stays true for N s after a goto" deadline and read `window still open OR the mount reports slewing`. Most telescope and camera drivers keep an "IsPulseGuiding stays true until the pulse ends" deadline in the same shape. Each is a raw `time_point` field with its own arm and clear sites, and several sit on `std::chrono::steady_clock` while the driver's waits run on the task clock ([decision 0005](0005-task-clock.md)). The window was where the bugs lived: open-astro#580 (a sync 10.1" short) came from landing detection that waited out a fixed 8 s plus 3 s window instead of polling the board, and open-astro#715 replaced that wait with a poll of `:f` that ignores the window. ZWO #720 and #575, SynScan #880 and Celestron #575 were arm or clear mistakes in the same field.
 
 The window exists for one reason: a client that polls `Slewing` between the dispatch of `SlewToCoordinatesAsync` and the mount's first status reply must read true, as the ASCOM `Slewing` definition requires once the call has returned. The mount, not the window, says when the slew ended.
 
@@ -20,7 +20,7 @@ The window exists for one reason: a client that polls `Slewing` between the disp
   - The hold length stays a per-driver literal passed to `arm()`.
 - **Settle is not in the type.** The settle after landing is a wait in a task body (`clock_.sleep_for`); the window is a read predicate. A type that both slept and answered would need a clock reference and a lock discipline, and would mix a wait with a client contract. The type has no wait method, so it cannot become the landing wait of #580.
 - **The pulse-guide deadline is the second use.** A per-axis driver holds `std::array<util::HoldWindow, 2>`. The hold is the pulse duration plus the driver's completion delay. ASCOM `IsPulseGuiding` is true while a pulse is in progress; the deadline is the ownership backstop when the pulse task's own end is the primary signal (Sky-Watcher, open-astro#559).
-- **Sky-Watcher adopts it first.** `slew_force_until_` and `pulse_guide_end_time_` become `HoldWindow`s, and the pulse deadline moves from raw `steady_clock::now()` onto `clock_.now()`. Hold lengths do not change.
+- **Sky-Watcher adopts it first.** `slew_force_until_` and `pulse_guide_end_time_` become `HoldWindow`s. Hold lengths do not change.
 - **The other drivers follow, one ticket each**, after their own clock work: Celestron and SynScan, Bisque, OnStep, iOptron, ZWO. The cameras' pulse deadlines move in their capture-session slices ([decision 0020](0020-capture-session.md)).
 
 ## Rules
@@ -30,7 +30,7 @@ The rules a change is checked against.
 1. A telescope driver's "Slewing stays true after a goto" deadline is a `util::HoldWindow`, not a raw `time_point`. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_hold_window.cpp`, `AlpacaCore/tests/test_skywatcher_async.cpp` ("a short goto reports landed before the 8 s hold ends").
 2. A hold window is armed before the command is sent and cleared on abort, a failed dispatch, a cancel, connect and disconnect. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("Slewing is true as soon as SlewToCoordinatesAsync returns", "AbortSlew inside the hold clears Slewing at once", "a reconnect inside the hold leaves Slewing false").
 3. Landing detection polls the device and never reads a hold window. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("a short goto reports landed before the 8 s hold ends"), `AlpacaCore/tests/test_skywatcher_pointing.cpp` ("landing is reported when the board reports stopped, not at the 8 s floor").
-4. A pulse-guide deadline is a `util::HoldWindow` on the driver's task clock. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("a Dec pulse owns its axis until its deadline on virtual time").
+4. A pulse-guide deadline is a `util::HoldWindow` on the driver's task clock. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("a pulse keeps its axis while virtual time has not reached its end (#994)").
 
 ## Alternatives rejected
 
