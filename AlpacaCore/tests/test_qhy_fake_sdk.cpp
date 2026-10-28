@@ -905,7 +905,8 @@ TEST_CASE("QHYSeamFixture - owns the fake, decorator and driver in destruction o
     CHECK(rig.fake().physical_opens == 1);
     rig->set_connected(false);
 
-    // The destructor runs driver -> decorator -> fake. Under ASan a reversed
-    // member order here is a use-after-free at scope exit; the assertion above
-    // is what makes an ordinary run notice the fixture works at all.
+    // The destructor runs driver -> decorator -> fake. ASan would catch a
+    // reversed member order as a use-after-free at scope exit, but no CI job
+    // runs a vendor under ASan, so the declaration order is asserted directly.
+    CHECK(rig.destroys_driver_first());
 }
