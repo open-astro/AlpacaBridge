@@ -27,6 +27,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_qhy_qfocuser.h"
 #include "fake_task_clock.h"
 
@@ -50,14 +51,7 @@ void tick(FakeTaskClock& clock) {
     REQUIRE(clock.wait_for_waiters(1, kBound));
 }
 
-void expect_code(const std::function<void()>& fn, int code) {
-    try {
-        fn();
-        FAIL("expected an AlpacaException");
-    } catch (const alpacacore::AlpacaException& e) {
-        CHECK(e.error_code() == code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 std::unique_ptr<alpacacore::FocuserDriver> connected_driver(FakeQhyQFocuser& fake, FakeTaskClock& clock) {
     auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), {}, clock);
@@ -150,8 +144,10 @@ TEST_CASE("QHY Q-Focuser Snapshot - a stale frame is served until the link-loss 
     clock.advance(31s);
     REQUIRE(clock.wait_for_woken_settled(kBound));
     CHECK(driver->get_connected() == false);
-    expect_code([&] { (void)driver->get_position(); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
-    expect_code([&] { (void)driver->get_temperature(); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
+    require_alpaca_error([&] { (void)driver->get_position(); },
+                         static_cast<int>(alpacacore::AlpacaError::NotConnected));
+    require_alpaca_error([&] { (void)driver->get_temperature(); },
+                         static_cast<int>(alpacacore::AlpacaError::NotConnected));
     CHECK(driver->get_device_state().empty());
     // The poll in flight ends with the loss; no tick is left waiting.
     const auto deadline = std::chrono::steady_clock::now() + kBound;
@@ -185,15 +181,17 @@ TEST_CASE("QHY Q-Focuser Snapshot - three failed polls latch a fault that the ne
     // Faulted, not lost: Connected stays true, the cache is refused, static
     // metadata answers.
     CHECK(driver->get_connected() == true);
-    expect_code([&] { (void)driver->get_position(); }, static_cast<int>(alpacacore::AlpacaError::DriverException));
-    expect_code([&] { (void)driver->get_is_moving(); }, static_cast<int>(alpacacore::AlpacaError::DriverException));
+    require_alpaca_error([&] { (void)driver->get_position(); },
+                         static_cast<int>(alpacacore::AlpacaError::DriverException));
+    require_alpaca_error([&] { (void)driver->get_is_moving(); },
+                         static_cast<int>(alpacacore::AlpacaError::DriverException));
     CHECK(driver->get_max_step() > 0);
     CHECK(driver->get_link_fault().find("no valid reply to the state poll") == 0);
 
     // Move is refused by the latch, not by a wire timeout: the fake answers
     // again and still sees no move. Halt is never refused.
     fake.set_muted(false);
-    expect_code([&] { driver->move(1200); }, static_cast<int>(alpacacore::AlpacaError::DriverException));
+    require_alpaca_error([&] { driver->move(1200); }, static_cast<int>(alpacacore::AlpacaError::DriverException));
     CHECK(fake.count("\"cmd_id\":6") == 0);
     CHECK_NOTHROW(driver->halt());
     CHECK(fake.count("\"cmd_id\":3}") == 1);
@@ -291,7 +289,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - a Move against a frame older than the stalen
     REQUIRE(fake.count("\"cmd_id\":4}") == telemetry_before + 1);
     clock.advance(31s);
 
-    expect_code([&] { driver->move(1200); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
+    require_alpaca_error([&] { driver->move(1200); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
     CHECK(fake.count("\"cmd_id\":6") == 0);   // no move command was sent
     CHECK(driver->get_connected() == false);  // the refused Move latched the loss
 

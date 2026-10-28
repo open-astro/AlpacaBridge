@@ -34,6 +34,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_skywatcher_serial_board.h"
 #include "fake_task_clock.h"
@@ -42,6 +43,7 @@ namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeSkyWatcherMount;
 using alpacacore::test::FakeSkyWatcherSerialBoard;
 using alpacacore::test::FakeTaskClock;
+using alpacacore::test::require_alpaca_error;
 
 namespace {
 
@@ -50,16 +52,6 @@ struct Transport {
     std::function<void(bool)> silent;  // true: the board stops answering
     std::function<int()> traffic;      // frames the board has seen
 };
-
-void require_not_connected(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& e) {
-        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
-        return;
-    }
-    FAIL("expected AlpacaException(NotConnected)");
-}
 
 void run_staleness_scenario(const Transport& t, FakeTaskClock& clock) {
     auto owned = std::make_unique<sw::SkyWatcherProtocolWrapper>();
@@ -80,8 +72,8 @@ void run_staleness_scenario(const Transport& t, FakeTaskClock& clock) {
     // Stage two: past the bound the link is lost.
     clock.advance(std::chrono::seconds(1));
     CHECK_FALSE(driver->get_connected());
-    require_not_connected([&] { driver->get_right_ascension(); });
-    require_not_connected([&] { driver->set_tracking(true); });
+    require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_device_state().empty());
     // link_lost_at is stamped once, on the task clock, for this transport.
     const auto lost_at = protocol->consume_link_lost_at();
@@ -103,7 +95,7 @@ void run_staleness_scenario(const Transport& t, FakeTaskClock& clock) {
     const int traffic = t.traffic();
     clock.advance(std::chrono::seconds(120));
     CHECK_FALSE(driver->get_connected());
-    require_not_connected([&] { driver->get_declination(); });
+    require_alpaca_error([&] { driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(t.traffic() == traffic);
 
     // Only the client's Connect relinks, and it re-runs the connect probe.
@@ -239,7 +231,7 @@ TEST_CASE("SkyWatcher link loss - UDP: a reachability error stays a fault until 
     // Past the bound the silence is a loss.
     clock.advance(alpacacore::util::kLinkStalenessBound);
     CHECK_FALSE(driver->get_connected());
-    require_not_connected([&] { driver->get_right_ascension(); });
+    require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     const auto lost_at = protocol->consume_link_lost_at();
     REQUIRE(lost_at.has_value());
     CHECK(*lost_at == clock.now());
@@ -269,10 +261,10 @@ TEST_CASE("SkyWatcher link loss - UDP: an unusable socket loses the link at once
     REQUIRE(::dup2(devnull, fd) == fd);
     ::close(devnull);
 
-    require_not_connected([&] { protocol->inquire_position(sw::kAxisRa); });
+    require_alpaca_error([&] { protocol->inquire_position(sw::kAxisRa); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
     CHECK_FALSE(protocol->is_connected());
-    require_not_connected([&] { driver->get_right_ascension(); });
+    require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     const auto lost_at = protocol->consume_link_lost_at();
     REQUIRE(lost_at.has_value());
     CHECK(*lost_at == clock.now());
@@ -309,7 +301,7 @@ struct SeveredSerial {
 TEST_CASE("SkyWatcher link loss - serial: an exchange on a severed link keeps the fault text",
           "[skywatcher][linkloss][serial]") {
     SeveredSerial s;
-    require_not_connected([&] { s.protocol->inquire_position(sw::kAxisRa); });
+    require_alpaca_error([&] { s.protocol->inquire_position(sw::kAxisRa); }, alpacacore::AlpacaError::NotConnected);
     CHECK(s.driver->get_link_fault().find("consecutive failures") != std::string::npos);
     s.driver->set_connected(false);
     CHECK(s.driver->get_link_fault().empty());

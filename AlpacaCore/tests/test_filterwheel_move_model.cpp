@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_qhy_cfw3.h"
 #include "fake_zwo_efw_sdk.h"
 
@@ -36,6 +37,7 @@ namespace {
 
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
+using alpacacore::test::require_alpaca_error;
 
 constexpr int kSlots = 7;
 
@@ -123,15 +125,6 @@ struct QhyRig {
     }
 };
 
-void require_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
-
 // Every value Position reports until it stops reading -1 (or the budget ends); the last entry is the settled one.
 std::vector<int> positions_until_settled(alpacacore::FilterWheelDriver& driver) {
     std::vector<int> seen;
@@ -170,17 +163,17 @@ template <class Rig>
 void an_out_of_range_write_is_invalid_value_and_starts_no_move() {
     Rig rig;
     rig.connect_at(2);
-    require_error([&] { rig.driver->set_position(-1); }, AlpacaError::InvalidValue);
-    require_error([&] { rig.driver->set_position(kSlots); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->set_position(-1); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->set_position(kSlots); }, AlpacaError::InvalidValue);
     CHECK(rig.driver->get_position() == 2);
 }
 
 template <class Rig>
 void invalid_value_precedes_not_connected() {
     Rig rig;
-    require_error([&] { rig.driver->set_position(-1); }, AlpacaError::InvalidValue);
-    require_error([&] { rig.driver->set_position(0); }, AlpacaError::NotConnected);
-    require_error([&] { rig.driver->get_position(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->set_position(-1); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { rig.driver->set_position(0); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->get_position(); }, AlpacaError::NotConnected);
 }
 
 template <class Rig>

@@ -44,11 +44,13 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
 
 namespace {
 
+using alpacacore::test::require_alpaca_error;
 using alpacacore::vendor::onstep::ConnectionInfo;
 using alpacacore::vendor::onstep::ConnectionType;
 using alpacacore::vendor::onstep::OnStepProtocolWrapper;
@@ -251,16 +253,6 @@ ConnectionInfo serial_info(const PortLink& link) {
     return info;
 }
 
-void require_not_connected_error(const std::function<void()>& fn) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        INFO(ex.what());
-        REQUIRE(ex.error_code() == alpacacore::AlpacaError::NotConnected);
-    }
-}
-
 // The wrapper is a process-wide singleton: leave it disconnected and with no
 // loss stamp, so the next case's first connect is a fresh one.
 // Reset on entry too, in case an earlier OnStep test left it connected.
@@ -328,7 +320,7 @@ TEST_CASE("OnStep link loss - Connected drops when the adapter is pulled with no
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_device_state().empty());
     const auto started = std::chrono::steady_clock::now();
-    require_not_connected_error([&] { (void)driver->get_right_ascension(); });
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
 
     driver->set_connected(false);
@@ -336,7 +328,8 @@ TEST_CASE("OnStep link loss - Connected drops when the adapter is pulled with no
     CHECK(driver->get_link_fault().empty());
     // With no link at all the wrapper answers NotConnected too, not a
     // generic driver error.
-    require_not_connected_error([] { (void)OnStepProtocolWrapper::instance().send_command(":GVP#"); });
+    require_alpaca_error([] { (void)OnStepProtocolWrapper::instance().send_command(":GVP#"); },
+                         alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep link loss - a reply cut off by the unplug fails NotConnected before the timeout",
@@ -354,7 +347,7 @@ TEST_CASE("OnStep link loss - a reply cut off by the unplug fails NotConnected b
     // see the hang-up and give up, not wait out the 5 s response timeout.
     mount.sever_on(":GRa#");
     const auto started = std::chrono::steady_clock::now();
-    require_not_connected_error([&] { (void)protocol.send_command(":GRa#"); });
+    require_alpaca_error([&] { (void)protocol.send_command(":GRa#"); }, alpacacore::AlpacaError::NotConnected);
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1000));
     // The pty reports the hang-up as EIO on that read. (Were it missed, the
     // next read returns 0 and the removed-node check would still catch it, so
@@ -378,7 +371,7 @@ TEST_CASE("OnStep link loss - a link lost before the :GE# read fails it instead 
 
     mount.sever_on(":GE#");
     protocol.find_home();
-    require_not_connected_error([&] { (void)protocol.get_last_command_error(); });
+    require_alpaca_error([&] { (void)protocol.get_last_command_error(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(protocol.link_alive());
 }
 
@@ -388,7 +381,7 @@ TEST_CASE("OnStep link loss - the :GE# read fails NotConnected while disconnecte
     WrapperReset reset;
     auto& protocol = OnStepProtocolWrapper::instance();
     REQUIRE_FALSE(protocol.is_connected());
-    require_not_connected_error([&] { (void)protocol.get_last_command_error(); });
+    require_alpaca_error([&] { (void)protocol.get_last_command_error(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep link loss - Connected=true on a lost link reconnects instead of short-circuiting",
@@ -807,7 +800,7 @@ TEST_CASE("OnStep link loss - a loss found during an exchange closes the fd once
         CHECK_FALSE(protocol.is_connected());
     }
     SECTION("the next exchange closes it and fails NotConnected") {
-        require_not_connected_error([&] { (void)protocol.send_command(":GVP#"); });
+        require_alpaca_error([&] { (void)protocol.send_command(":GVP#"); }, alpacacore::AlpacaError::NotConnected);
         CHECK_FALSE(protocol.is_connected());
     }
     SECTION("the next connect closes it instead of refusing a second mount") {
@@ -858,7 +851,7 @@ TEST_CASE("OnStep link loss - a command after an unnoticed unplug fails NotConne
     // Nothing has looked since the unplug; the path is still there (now
     // dangling). The check before the write finds the removed node.
     mount.sever_link();
-    require_not_connected_error([&] { (void)protocol.send_command(":GVP#"); });
+    require_alpaca_error([&] { (void)protocol.send_command(":GVP#"); }, alpacacore::AlpacaError::NotConnected);
     CHECK(protocol.link_lost_reason().find("the adapter was removed") != std::string::npos);
     CHECK_FALSE(protocol.is_connected());
 }
@@ -1068,16 +1061,8 @@ TEST_CASE("OnStep link loss - a fault latched on status reads serves no fresh po
     (void)driver->get_tracking();
     CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);  // the third latches
     REQUIRE_FALSE(driver->get_link_fault().empty());
-    const auto require_driver_error = [](const std::function<void()>& fn) {
-        try {
-            fn();
-            FAIL("a fresh cache was served during a fault");
-        } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-        }
-    };
-    require_driver_error([&] { (void)driver->get_right_ascension(); });
-    require_driver_error([&] { (void)driver->get_altitude(); });
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
 }
 
@@ -1323,11 +1308,11 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
     }
     REQUIRE(driver->get_connected());
     clock.advance(std::chrono::seconds(2));  // the fault has now stood past the bound
-    require_not_connected_error([&] { (void)driver->get_right_ascension(); });
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().find("lost") != std::string::npos);
     CHECK(driver->get_device_state().empty());
-    require_not_connected_error([&] { (void)driver->get_tracking(); });
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
 
     mount.mute(false);
     REQUIRE_FALSE(mount.received_any_stop());
@@ -1380,7 +1365,7 @@ TEST_CASE("OnStep link loss - a read inside the back-off still loses a link whos
     // 1.5 s later the fault has stood past the bound, and the next read is still
     // inside that window: it asks nothing, and it reports the loss.
     clock.advance(std::chrono::milliseconds(1500));
-    require_not_connected_error([&] { (void)driver->get_right_ascension(); });
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(mount.commands().size() == asked);  // inside the back-off: no read went out
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().find("lost") != std::string::npos);
@@ -1495,7 +1480,7 @@ TEST_CASE("OnStep link loss - a write refused past the staleness bound loses the
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);  // faulted, not yet stale
     }
     clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));  // no reads meanwhile
-    require_not_connected_error([&] { driver->set_tracking(true); });
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().find("lost") != std::string::npos);
 }
@@ -1529,7 +1514,7 @@ TEST_CASE("OnStep link loss - FindHome fails when the mount goes silent after :h
         mount.set_reply(":hC#", "");
         mount.set_reply(":GE#", "");  // no code, so the :GU# read follows
         mount.sever_after(":GE#");    // the adapter goes as that :GU# is sent
-        require_not_connected_error([&] { driver->find_home(); });
+        require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::NotConnected);
         CHECK_FALSE(driver->get_connected());
     }
     SECTION("firmware without :GE# still homes") {

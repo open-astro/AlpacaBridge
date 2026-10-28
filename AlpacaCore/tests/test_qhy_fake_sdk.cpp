@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_qhy_sdk.h"
 #include "locked_qhy_sdk.h"
 
@@ -40,14 +41,7 @@ namespace control = alpacacore::vendor::qhy::control;
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 // One-camera fake, shared with the other QHY seam test files (issue #342):
 // this was three verbatim copies, so a change to what a default test fake

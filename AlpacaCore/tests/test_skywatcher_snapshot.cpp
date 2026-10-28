@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
 
@@ -78,45 +79,11 @@ void step(FakeTaskClock& clock, std::chrono::nanoseconds d) {
     clock.wait_for_woken_settled(std::chrono::seconds(10));
 }
 
-template <typename Fn>
-std::chrono::microseconds timed(Fn&& fn) {
-    const auto start = std::chrono::steady_clock::now();
-    fn();
-    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
-}
+using alpacacore::test::require_alpaca_error;
 
-void require_not_connected(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& e) {
-        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
-        return;
-    }
-    FAIL("expected AlpacaException(NotConnected)");
-}
-
-// "2026-10-10T21:46:30.626Z" -> system_clock time point.
-std::chrono::system_clock::time_point parse_timestamp(const std::string& text) {
-    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
-    REQUIRE(std::sscanf(text.c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h, &mi, &s, &ms) == 7);
-    std::tm tm{};
-    tm.tm_year = y - 1900;
-    tm.tm_mon = mo - 1;
-    tm.tm_mday = d;
-    tm.tm_hour = h;
-    tm.tm_min = mi;
-    tm.tm_sec = s;
-    return std::chrono::system_clock::from_time_t(timegm(&tm)) + milliseconds(ms);
-}
-
-std::string time_stamp_of(const alpacacore::TelescopeDriver& driver) {
-    for (const auto& entry : driver.get_device_state()) {
-        if (entry.name == "TimeStamp") {
-            return std::get<std::string>(entry.value);
-        }
-    }
-    return {};
-}
+using alpacacore::test::parse_timestamp;
+using alpacacore::test::time_stamp_of;
+using alpacacore::test::timed;
 
 }  // namespace
 
@@ -481,11 +448,11 @@ TEST_CASE("SkyWatcher snapshot - a frame older than the link-loss bound with no 
     CHECK_NOTHROW(driver->get_right_ascension());  // 29 s old: stale, served
     step(clock, seconds(2));
     CHECK(driver->get_link_fault().empty());
-    require_not_connected([&] { driver->get_right_ascension(); });
-    require_not_connected([&] { driver->get_slewing(); });
+    require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_device_state().empty());
-    require_not_connected([&] { driver->set_tracking(true); });
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
     sw::set_status_poll_paused_for_testing(*driver, false);
     driver->set_connected(false);
 }
@@ -568,7 +535,7 @@ TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked:
     step(clock, alpacacore::util::kLinkStalenessBound + seconds(1));
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_device_state().empty());
-    require_not_connected([&] { driver->get_right_ascension(); });
+    require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
 
     // The mount kept turning unattended for longer than the preserve window.
     clock.advance(sw::detail::relink_motion_preserve_window() + seconds(5));

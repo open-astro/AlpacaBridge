@@ -12,20 +12,10 @@
 
 #include <alpacacore/util/image_validation.h>
 
-#include <functional>
-
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
-namespace {
-void check_driver_exception(const std::function<void()>& call) {
-    try {
-        call();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& e) {
-        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
-    }
-}
-}  // namespace
+using alpacacore::test::require_alpaca_error;
 
 TEST_CASE("Camera image validation - rejects malformed shapes", "[camera][image][unit]") {
     alpacacore::ImageArray mono{{1, 2, 3, 4, 5, 6}, 2, 3, 2};
@@ -41,14 +31,18 @@ TEST_CASE("Camera image validation - rejects malformed shapes", "[camera][image]
     CHECK(rgb_shape.element_count == 6);
 
     alpacacore::ImageArray invalid_rank{{}, 1, 1, 1};
-    check_driver_exception([&] { (void)alpacacore::util::validate_image_array(invalid_rank); });
+    require_alpaca_error([&] { (void)alpacacore::util::validate_image_array(invalid_rank); },
+                         alpacacore::AlpacaError::DriverException);
 
     alpacacore::ImageArray invalid_dimensions{{}, 0, 1, 2};
-    check_driver_exception([&] { (void)alpacacore::util::validate_image_array(invalid_dimensions); });
+    require_alpaca_error([&] { (void)alpacacore::util::validate_image_array(invalid_dimensions); },
+                         alpacacore::AlpacaError::DriverException);
 
     alpacacore::ImageArray short_mono{{1, 2, 3}, 2, 2, 2};
-    check_driver_exception([&] { (void)alpacacore::util::validate_image_array(short_mono); });
+    require_alpaca_error([&] { (void)alpacacore::util::validate_image_array(short_mono); },
+                         alpacacore::AlpacaError::DriverException);
 
     alpacacore::ImageArray short_rgb{{1, 2, 3, 4, 5}, 1, 2, 3};
-    check_driver_exception([&] { (void)alpacacore::util::validate_image_array(short_rgb); });
+    require_alpaca_error([&] { (void)alpacacore::util::validate_image_array(short_rgb); },
+                         alpacacore::AlpacaError::DriverException);
 }

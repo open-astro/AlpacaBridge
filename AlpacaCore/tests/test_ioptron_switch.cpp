@@ -20,19 +20,13 @@
 #include <map>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_ioptron_gpio.h"
 #include "power_port_test_dir.h"
 
 namespace {
 
-void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
-    try {
-        fn();
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        REQUIRE(ex.error_code() == expected_code);
-    }
-}
+using alpacacore::test::require_alpaca_error;
 
 }  // namespace
 

@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 #include "fake_touptek_sdk.h"
 
@@ -1046,15 +1047,15 @@ void wait_for_entered(const std::atomic<bool>& entered) {
     REQUIRE(entered.load());
 }
 
+// `timed` that swallows an AlpacaException: only the latency matters here.
 template <typename Fn>
-std::chrono::milliseconds time_of(Fn&& fn) {
-    const auto start = std::chrono::steady_clock::now();
-    try {
-        fn();
-    } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
-        // Only the latency matters here.
-    }
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+std::chrono::microseconds time_of(Fn&& fn) {
+    return alpacacore::test::timed([&] {
+        try {
+            fn();
+        } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        }
+    });
 }
 
 // The error code a call ends with: 0 when it succeeds, else the AlpacaException code. A disconnect racing

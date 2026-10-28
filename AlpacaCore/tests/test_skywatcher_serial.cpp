@@ -40,10 +40,12 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_serial_board.h"
 
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherSerialBoard;
+using alpacacore::test::require_alpaca_error;
 namespace sw = alpacacore::vendor::skywatcher;
 
 namespace {
@@ -574,16 +576,6 @@ bool wait_until_true(const std::function<bool()>& pred, int timeout_ms) {
     return pred();
 }
 
-void require_not_connected_error(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& e) {
-        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
-        return;
-    }
-    FAIL("expected AlpacaException(NotConnected)");
-}
-
 // A by-id style symlink to a fake board, repointable to a "replugged" one.
 struct PortLink {
     std::filesystem::path path;
@@ -627,7 +619,7 @@ TEST_CASE("SkyWatcher serial - Connected drops when the adapter is pulled, with 
     // hold the link in an exchange at that moment, and that exchange then
     // finishes the close (decision 0009, point 3).
     CHECK(wait_until_true([&] { return !alpacacore::util::is_serial_port_in_use(key); }, 3000));
-    require_not_connected_error([&] { driver->get_right_ascension(); });
+    require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
 
     // An explicit disconnect of the dead link still completes cleanly, and
     // the client's own disconnect settles the fault.
@@ -646,7 +638,7 @@ TEST_CASE("SkyWatcher serial - an operation that hits a dead link fails NotConne
     REQUIRE_FALSE(proto.get_motor_board_version().empty());
 
     board.sever_link();
-    require_not_connected_error([&] { proto.inquire_position(sw::kAxisRa); });
+    require_alpaca_error([&] { proto.inquire_position(sw::kAxisRa); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(proto.is_connected());
     proto.disconnect();
 }
@@ -829,7 +821,7 @@ TEST_CASE("SkyWatcher serial - read errors on a present node lose the link", "[s
     REQUIRE_FALSE(protocol.get_motor_board_version().empty());
     fail_read = true;
     REQUIRE(std::filesystem::exists(board.slave_path()));
-    require_not_connected_error([&] { protocol.inquire_position(1); });
+    require_alpaca_error([&] { protocol.inquire_position(1); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(protocol.link_alive());
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
 }
