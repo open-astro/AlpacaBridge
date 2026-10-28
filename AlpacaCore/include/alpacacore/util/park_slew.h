@@ -15,7 +15,9 @@
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/task_clock.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <functional>
 #include <mutex>
@@ -27,8 +29,8 @@ namespace alpacacore::util {
  * The asynchronous Park flow shared by the Celestron and SynScan telescope
  * drivers (ascom-contract.instructions.md, "Telescope Park / MoveAxis(axis, 0) are asynchronous
  * initiators"): dispatch the park GOTO, poll the hardware until the slew has
- * ended, wait out the settle time, stop tracking, then publish AtPark and
- * Slewing in one locked step. The driver keeps what differs between mounts
+ * ended, wait out the settle time, stop tracking, check the mount landed at the park
+ * target, then publish AtPark and Slewing in one locked step. The driver keeps what differs between mounts
  * (the target, the wire commands, the state it clears) in the hooks.
  *
  * Every hook is entered and left with the driver mutex held. The flow itself
@@ -59,6 +61,11 @@ struct ParkSlewHooks {
     /// A failed step: stop hardware and record failure while this body still
     /// owns the park. If cancelled or superseded, the newer operation owns state.
     std::function<void(const std::string&)> fail;
+    /// Optional; empty means no check. Reads where the mount landed and returns an empty string when it is within
+    /// tolerance of the park target, else the failure message. Run after the tracking stop on every completion,
+    /// because a mount that acked the GOTO and never moved ends the poll like one that arrived. Like the other hooks
+    /// it may throw; it checks `superseded` itself when it releases the mutex.
+    std::function<std::string()> verify_at_target;
     /// Publishes AtPark true and Slewing false in the same locked step.
     std::function<void()> complete;
 };
@@ -151,7 +158,37 @@ inline void run_park_slew(OperationContext& ctx, std::unique_lock<std::mutex>& l
         hooks.abandon();
         return;
     }
+    if (hooks.verify_at_target) {
+        std::string miss;
+        try {
+            miss = hooks.verify_at_target();
+        } catch (const std::exception& ex) {
+            miss = std::string("Park: position check failed: ") + ex.what();
+        } catch (...) {
+            miss = "Park: position check failed with unknown exception";
+        }
+        if (hooks.superseded && hooks.superseded()) {
+            hooks.abandon();
+            return;
+        }
+        if (!miss.empty()) {
+            hooks.fail(miss);
+            return;
+        }
+    }
     hooks.complete();
+}
+
+/// Great-circle separation in arcseconds between two points given as longitude-like and latitude-like degrees
+/// (RA in degrees and Dec, or azimuth and altitude).
+inline double angular_separation_arcsec(double lon1_deg, double lat1_deg, double lon2_deg, double lat2_deg) {
+    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+    const double dlat = (lat2_deg - lat1_deg) * kDegToRad;
+    const double dlon = (lon2_deg - lon1_deg) * kDegToRad;
+    const double a = std::sin(dlat / 2) * std::sin(dlat / 2) + std::cos(lat1_deg * kDegToRad) *
+                                                                   std::cos(lat2_deg * kDegToRad) * std::sin(dlon / 2) *
+                                                                   std::sin(dlon / 2);
+    return 2.0 * std::asin(std::min(1.0, std::sqrt(a))) / kDegToRad * 3600.0;
 }
 
 /**

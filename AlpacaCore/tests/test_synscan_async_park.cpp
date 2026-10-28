@@ -1058,8 +1058,8 @@ bool park_done(alpacacore::TelescopeDriver& d) {
 }
 std::unique_ptr<alpacacore::TelescopeDriver> mk(int port, alpacacore::util::TaskClock& clock) {
     return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
-        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
 }
 }  // namespace
 
@@ -1080,9 +1080,16 @@ TEST_CASE("SynScan case A - refused park GOTO must not report AtPark", "[park][s
     driver->park();
     REQUIRE(advance_until(clock, [&] { return park_done(*driver); }));
     bool err = false;
-    try { (void)driver->get_slewing(); } catch (const alpacacore::AlpacaException&) { err = true; }
+    try {
+        (void)driver->get_slewing();
+    } catch (const alpacacore::AlpacaException&) {
+        err = true;
+    }
     bool at_park = false;
-    try { at_park = driver->get_at_park(); } catch (const alpacacore::AlpacaException&) {}
+    try {
+        at_park = driver->get_at_park();
+    } catch (const alpacacore::AlpacaException&) {
+    }
     CHECK(st->goto_count.load() >= 1);
     CHECK_FALSE(at_park);
     CHECK(err);
@@ -1104,7 +1111,10 @@ TEST_CASE("SynScan case B - already at park target still parks", "[park][synscan
     driver->park();
     REQUIRE(advance_until(clock, [&] { return park_done(*driver); }));
     bool at_park = false;
-    try { at_park = driver->get_at_park(); } catch (const alpacacore::AlpacaException&) {}
+    try {
+        at_park = driver->get_at_park();
+    } catch (const alpacacore::AlpacaException&) {
+    }
     CHECK(at_park);
     driver->set_connected(false);
 }

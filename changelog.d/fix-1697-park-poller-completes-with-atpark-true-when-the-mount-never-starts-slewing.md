@@ -1,0 +1,3 @@
+### Fixed
+
+- **Park no longer reports `AtPark` when the mount never moved**, Celestron and SynScan drivers, issue #1697. When the handset acked the park GOTO but the mount stayed more than 600 arcseconds from the saved park position, Park used to finish with `AtPark` true and no error. It now fails: the next `Slewing` read throws a DriverException naming the miss and the 600 arcsec limit, and `AtPark` stays false. A mount already at the park position still parks. Covered by "Celestron case A/B" in `AlpacaCore/tests/test_celestron_async_park.cpp` and "SynScan case A/B" in `AlpacaCore/tests/test_synscan_async_park.cpp`.

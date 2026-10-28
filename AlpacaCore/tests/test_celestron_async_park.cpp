@@ -163,7 +163,8 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                 if (const int hold = st->e_hold_ms.exchange(0); hold > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(hold));
                 }
-                return st->pos_variant.load() == 0 ? "12AB0500,20000500#" : "32AB0500,20000500#";  // parseable 16/24-bit position pair
+                return st->pos_variant.load() == 0 ? "12AB0500,20000500#"
+                                                   : "32AB0500,20000500#";  // parseable 16/24-bit position pair
             case 'r':
             case 'R':
             case 'b':
@@ -1385,14 +1386,17 @@ TEST_CASE("Celestron case A - refused park GOTO must not report AtPark", "[park]
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    driver->set_park();          // park target = position variant 0
-    st->pos_variant.store(1);    // mount now reads 3 h of RA away from it
+    driver->set_park();        // park target = position variant 0
+    st->pos_variant.store(1);  // mount now reads 3 h of RA away from it
     st->no_motion.store(true);
     driver->park();
     REQUIRE(advance_until(clock, [&] { return park_done(*driver); }));
     const bool err = read_slewing_error(*driver);
     bool at_park = false;
-    try { at_park = driver->get_at_park(); } catch (const alpacacore::AlpacaException&) {}
+    try {
+        at_park = driver->get_at_park();
+    } catch (const alpacacore::AlpacaException&) {
+    }
     CHECK(st->goto_count.load() == 1);
     CHECK_FALSE(at_park);
     CHECK(err);
@@ -1413,7 +1417,10 @@ TEST_CASE("Celestron case B - already at park target still parks", "[park][celes
     driver->park();
     REQUIRE(advance_until(clock, [&] { return park_done(*driver); }));
     bool at_park = false;
-    try { at_park = driver->get_at_park(); } catch (const alpacacore::AlpacaException&) {}
+    try {
+        at_park = driver->get_at_park();
+    } catch (const alpacacore::AlpacaException&) {
+    }
     CHECK(at_park);
     CHECK_FALSE(read_slewing_error(*driver));
     driver->set_connected(false);
