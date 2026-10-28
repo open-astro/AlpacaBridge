@@ -1120,6 +1120,7 @@ int main() {
     // lose that connection, and its later close would wrap the count below
     // zero and block every accept.
     {
+        // case: a connection straddling a restart keeps accounting exact
         constexpr int kStraddleDevice = 9549;
         auto slow = std::make_shared<WatchdogStubTelescope>(kStraddleDevice);
         slow->slew_sleep_ms.store(2500);
@@ -1897,6 +1898,7 @@ int main() {
     }
 
     {
+        // case: loser of the join ownership race stays parked
         // The loser of the ownership race must not return from stop() or
         // wait() early. ~Server() runs straight after either and destroys the
         // wake pipe, the config and the connection maps that run_server()
