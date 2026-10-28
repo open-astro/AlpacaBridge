@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -3813,6 +3814,83 @@ TEST_CASE("OnStep Telescope Driver - Connected answers while a connect is in fli
 #endif  // _WIN32
 
 #ifndef _WIN32
+// #1762 B4: members no case called while connected. These four read no mount
+// reply: GuideRate is OnStep's default guide rate (CanSetGuideRates is false),
+// and the optics are the device config's values, so each case also checks that
+// nothing reached the mount.
+namespace {
+std::unique_ptr<alpacacore::TelescopeDriver> connect_scripted(alpacacore::test::FakeMountServer& server) {
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    return driver;
+}
+}  // namespace
+
+TEST_CASE("OnStep Telescope Driver - GuideRate reads half sidereal on both axes and cannot be written",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_scripted(server);
+    mount->clear_log();
+
+    // OnStep guides at 0.5x sidereal by default; ASCOM GuideRate* are in deg/s.
+    const double half_sidereal = 0.5 * 15.0411 / 3600.0;
+    const auto rate = driver->get_guide_rate();
+    CHECK(std::fabs(rate.ra - half_sidereal) < 1e-12);
+    CHECK(std::fabs(rate.dec - half_sidereal) < 1e-12);
+    CHECK_FALSE(driver->get_can_set_guide_rates());
+    require_alpaca_error([&]() { driver->set_guide_rate({half_sidereal, half_sidereal}); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(mount->count(":") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("OnStep Telescope Driver - the aperture and focal length members read back what was set",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_scripted(server);
+    mount->clear_log();
+
+    driver->set_aperture_diameter(0.2);
+    CHECK(driver->get_aperture_diameter() == 0.2);
+    CHECK(std::fabs(driver->get_aperture_area() - 0.01 * 3.14159265358979323846) < 1e-12);  // pi r^2, r = 0.1 m
+    driver->set_aperture_diameter(0.0);
+    CHECK(driver->get_aperture_diameter() == 0.0);
+    CHECK(driver->get_aperture_area() == 0.0);
+    driver->set_focal_length(1.2);
+    CHECK(driver->get_focal_length() == 1.2);
+    require_alpaca_error([&]() { driver->set_focal_length(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_focal_length() == 1.2);  // a refused write keeps the value
+    CHECK(mount->count(":") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("OnStep Telescope Driver - CanMoveAxis is true for the RA and Dec axes only", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_scripted(server);
+
+    CHECK(driver->get_can_move_axis(0));
+    CHECK(driver->get_can_move_axis(1));
+    CHECK_FALSE(driver->get_can_move_axis(2));  // no third (rotator) axis
+    require_alpaca_error([&]() { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { (void)driver->get_can_move_axis(3); }, alpacacore::AlpacaError::InvalidValue);
+    // MoveAxis agrees: the axis CanMoveAxis says no to is refused before anything is sent.
+    mount->clear_log();
+    require_alpaca_error([&]() { driver->move_axis(2, 1.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(mount->count(":M") == 0);
+    driver->set_connected(false);
+}
+
 // #1298: the LST helper cut UTC to whole seconds.
 TEST_CASE("OnStep Telescope Driver - SiderealTime follows the clock to under a second", "[onstep][telescope][unit]") {
     alpacacore::test::FakeMountServer server([](const std::string& chunk) {
