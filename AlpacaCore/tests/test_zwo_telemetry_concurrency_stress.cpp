@@ -384,17 +384,24 @@ TEST_CASE("ZWO mandatory telemetry alone controls fault recovery and loss", "[zw
     REQUIRE(rig.driver->get_slewing());
     rig.driver->slew_to_coordinates_async(6.0, 20.0);
     REQUIRE(eventually([&] { return rig.mount.count(":MS") > 0; }));
-    rig.driver->command_string(":GVP", false);  // fence the setup exchange before advancing the poll clock
+    rig.driver->command_string(":GVP", false);  // Drain the MS exchange before advancing virtual time.
+    // A completed wire exchange does not prove the GOTO worker has resumed the poll loop.
+    const int paused_polls = rig.mount.count(":GU");
+    for (int step = 0; step < 2000 && !rig.mount.wait_for_count(":GU", paused_polls + 1, 1ms); ++step) rig.tick(50ms);
+    REQUIRE(rig.mount.count(":GU") > paused_polls);
     rig.mount.set_moving(false);
     rig.fail(":GU", failure == 0);
     rig.fail(":GR", failure == 1);
     rig.fail(":GD", failure == 2);
     rig.silence(failure == 3);
+    const int polls_before_fault = rig.mount.count(":GU");
     rig.tick();
     rig.tick();
+    REQUIRE(rig.mount.count(":GU") == polls_before_fault + 2);
     CHECK(rig.driver->get_link_fault().empty());
     CHECK(rig.driver->get_slewing());
     rig.tick();
+    REQUIRE(rig.mount.count(":GU") == polls_before_fault + 3);
     REQUIRE_FALSE(rig.driver->get_link_fault().empty());
     const auto fault = rig.driver->get_link_fault();
     CHECK(rig.driver->get_connected());
@@ -584,6 +591,8 @@ TEST_CASE("ZWO a polled Park error remains on both completion properties", "[zwo
     }
     rig.driver->abort_slew();
     CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.driver->get_slewing());  // Abort clears the error; a new poll must confirm the stopped state.
+    rig.tick();
     CHECK_FALSE(rig.driver->get_slewing());
 }
 

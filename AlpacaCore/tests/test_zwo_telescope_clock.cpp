@@ -405,20 +405,28 @@ TEST_CASE("ZWO a new GOTO during Sync settling keeps its own target across a ret
     CHECK(rig.mount.count(":CM") == 1);
 }
 
-TEST_CASE("ZWO telescope clock - FindHome reports Slewing for the 5 s forced window and not after",
+TEST_CASE("ZWO telescope clock - FindHome publishes completion only when the forced slew window ends",
           "[zwo][telescope][unit][clock]") {
+    const auto duration = GENERATE(0ms, 6000ms);
     Rig rig;
     rig.connect();
-    rig.mount.set_slew_duration(0ms);  // the mount itself reports idle at once
+    rig.mount.set_slew_duration(duration);
     rig.advance(250ms);
     CHECK_FALSE(rig.driver->get_slewing());
     rig.driver->find_home();
+    if (duration > 0ms) rig.mount.override_reply(":GU", "NHG", 3);  // stale home/stopped startup replies
     rig.advance(250ms);
     CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_home());
     for (int i = 0; i < 17; ++i) rig.advance(250ms);  // 4.5 s since the command
     CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_home());
     for (int i = 0; i < 4; ++i) rig.advance(250ms);  // 5.5 s
+    CHECK(rig.driver->get_slewing() == (duration > 5500ms));
+    CHECK(rig.driver->get_at_home() == (duration <= 5500ms));
+    for (int i = 0; i < 4; ++i) rig.advance(250ms);  // 6.5 s
     CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_at_home());
 }
 
 TEST_CASE("ZWO telescope clock - MoveAxis reports Slewing for the 2 s forced window after the jog stops",
@@ -437,6 +445,81 @@ TEST_CASE("ZWO telescope clock - MoveAxis reports Slewing for the 2 s forced win
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
+TEST_CASE("ZWO telescope clock - moving status cannot restore AtHome before the final pair",
+          "[zwo][telescope][unit][clock]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->find_home();
+    rig.mount.override_reply(":GU", "HG");  // home flag lags behind the moving flag
+    rig.mount.hold_reply(":GR");
+    rig.clock.advance(250ms);
+    REQUIRE(rig.mount.wait_until_held(kReal));
+    CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_home());
+    rig.mount.release();
+    REQUIRE(rig.clock.wait_for_woken_settled(kReal));
+    CHECK_FALSE(rig.driver->get_at_home());
+}
+
+TEST_CASE("ZWO telescope clock - an active jog suppresses a stale Home flag after the guard",
+          "[zwo][telescope][unit][clock]") {
+    const int axis = GENERATE(0, 1);
+    Rig rig;
+    rig.connect();
+    rig.mount.set_slew_duration(0ms);
+    rig.driver->find_home();
+    for (int i = 0; i < 20; ++i) rig.advance(250ms);
+    REQUIRE(rig.driver->get_at_home());
+    rig.driver->move_axis(axis, 1.0);
+    rig.mount.override_reply(":GU", "NHG");          // stopped/home telemetry lags behind the commanded jog
+    for (int i = 0; i < 9; ++i) rig.advance(250ms);  // beyond the 2 s startup guard
+    CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_home());
+    rig.driver->move_axis(axis, 0.0);
+}
+
+TEST_CASE("ZWO telescope clock - Home completion needs a final pair after the startup guard",
+          "[zwo][telescope][unit][clock]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.set_slew_duration(0ms);
+    rig.driver->find_home();
+    for (int i = 0; i < 19; ++i) rig.advance(250ms);  // 4.75 s
+    rig.mount.hold_reply(":GR");
+    rig.clock.advance(250ms);  // the startup guard expires while the final pair is held
+    REQUIRE(rig.mount.wait_until_held(kReal));
+    CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_home());
+    rig.mount.release();
+    REQUIRE(rig.clock.wait_for_woken_settled(kReal));
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_at_home());
+}
+
+TEST_CASE("ZWO telescope clock - pending Park suppresses a stale Home flag after the guard",
+          "[zwo][telescope][unit][clock]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.set_slew_duration(0ms);
+    rig.driver->find_home();
+    for (int i = 0; i < 20; ++i) rig.advance(250ms);
+    REQUIRE(rig.driver->get_at_home());
+    rig.mount.override_reply(":GU", "NHG");
+    rig.mount.override_reply(":Gps", "1");
+    rig.driver->park();
+    for (int i = 0; i < 19; ++i) rig.advance(250ms);  // 4.75 s since Park
+    rig.mount.hold_reply(":Gps");
+    rig.clock.advance(250ms);  // stopped mandatory pair accepted, Park evaluation still pending
+    REQUIRE(rig.mount.wait_until_held(kReal));
+    CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_home());
+    CHECK_FALSE(rig.driver->get_at_park());
+    rig.mount.release();
+    REQUIRE(rig.clock.wait_for_woken_settled(kReal));
+    CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
 TEST_CASE("ZWO telescope clock - SlewToCoordinatesAsync reports Slewing for the 5 s forced window and not after",
           "[zwo][telescope][unit][clock]") {
     Rig rig;
@@ -452,29 +535,43 @@ TEST_CASE("ZWO telescope clock - SlewToCoordinatesAsync reports Slewing for the 
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
-TEST_CASE("ZWO telescope clock - Park reports Slewing for the 5 s forced window after the mount parked",
+TEST_CASE("ZWO telescope clock - Park publishes completion only when the forced slew window ends",
           "[zwo][telescope][unit][clock]") {
+    const auto duration = GENERATE(0ms, 6000ms);
     Rig rig;
     rig.connect();
-    rig.mount.set_slew_duration(0ms);  // ":Gps" reports parked at the first poll
+    rig.mount.set_slew_duration(duration);
     rig.advance(250ms);
     rig.driver->park();
+    if (duration > 0ms) {
+        rig.mount.override_reply(":GU", "NG", 3);  // firmware has not published motion yet
+        rig.mount.override_reply(":Gps", "2", 3);
+    }
     rig.advance(250ms);
-    // AtPark reads true while Slewing is still true: known base behaviour, tracked separately. This pins it.
-    CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.driver->get_slewing());
     for (int i = 0; i < 17; ++i) rig.advance(250ms);  // 4.5 s since the command
     CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_park());
     for (int i = 0; i < 4; ++i) rig.advance(250ms);  // 5.5 s
+    CHECK(rig.driver->get_slewing() == (duration > 5500ms));
+    CHECK(rig.driver->get_at_park() == (duration <= 5500ms));
+    for (int i = 0; i < 4; ++i) rig.advance(250ms);  // 6.5 s
     CHECK_FALSE(rig.driver->get_slewing());
     CHECK(rig.driver->get_at_park());
 }
 
-TEST_CASE("ZWO telescope clock - Park infers completion 2 s after the command when the mount never moves",
+TEST_CASE("ZWO telescope clock - inferred Park completion waits for the forced slew window",
           "[zwo][telescope][unit][clock]") {
+    const auto reply = GENERATE("0", "1", "x", "");
     Rig rig;
     rig.connect();
     rig.mount.set_slew_duration(0ms);
-    rig.mount.override_reply(":Gps", "1");  // "in progress" for ever, while :GU reports the mount stopped
+    if (*reply) {
+        rig.mount.override_reply(":Gps", reply);  // unavailable completion indication, stationary mount
+    } else {
+        rig.mount.go_silent(":Gps");
+    }
     rig.advance(250ms);
     rig.driver->park();
     for (int i = 0; i < 7; ++i) rig.advance(250ms);  // 1.75 s since the command
@@ -482,8 +579,11 @@ TEST_CASE("ZWO telescope clock - Park infers completion 2 s after the command wh
     CHECK(rig.driver->get_slewing());  // the park command is still active
     rig.advance(250ms);
     rig.advance(250ms);  // 2.25 s
-    // AtPark reads true while Slewing is still true: known base behaviour, tracked separately. This pins it.
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.driver->get_slewing());
+    for (int i = 0; i < 13; ++i) rig.advance(250ms);  // 5.5 s
     CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_slewing());
 }
 
 TEST_CASE("ZWO telescope clock - Unpark reports Slewing for the 2 s forced window and not after",

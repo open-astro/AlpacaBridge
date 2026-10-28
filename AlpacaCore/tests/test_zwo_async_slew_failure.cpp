@@ -437,8 +437,7 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
     REQUIRE(driver->get_tracking());
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return mount.count(":MS") == 1; }, 5000));
-    // Drain the setup exchange before advancing the poll clock; MS receipt precedes its reply completion.
-    REQUIRE_NOTHROW(driver->command_string(":GVP", false));
+    rig.await_poll_resumed();
     mount.hold_running(true);  // the GOTO keeps reporting motion, and no tracking
     mount.set_tracking(false);
     const int pairs_before = mount.count(":GD");
