@@ -336,6 +336,9 @@ alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
 // Virtual time. The driver's waits (landing moves, settle, hunt ticks, the async tasks) and the fake handset's
 // motors and sawtooth share one FakeTaskClock per case; a test advances it, it never sleeps.
 constexpr auto kVirtualStep = std::chrono::milliseconds(10);
+// A positive wait ends on the real clock: any parked task satisfies step_virtual, so virtual time can run out in
+// milliseconds while the driver is still on the socket.
+constexpr auto kRealLimit = std::chrono::seconds(60);
 
 // One step: once the driver is parked on the clock, advance it by kVirtualStep and wait for the woken task to
 // settle, so no step lands between two of its waits. Returns false when nothing was parked within 20 ms of real
@@ -380,6 +383,26 @@ void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn) {
     caller.join();
     if (error) std::rethrow_exception(error);
 }
+
+// Steps `done` out of a parked thread: virtual time jumps ahead until the flag is set.
+void release_until(alpacacore::test::FakeTaskClock& clock, const std::atomic<bool>& done) {
+    while (!done.load()) {
+        clock.advance(std::chrono::hours(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+// Joins `thread` when the scope ends, after `release` has let it finish, so a REQUIRE that throws while the thread
+// is still joinable reports as a failure instead of std::terminate. A thread already joined is left alone.
+struct ScopedJoin {
+    std::thread& thread;
+    std::function<void()> release;
+    ~ScopedJoin() {
+        if (!thread.joinable()) return;
+        release();
+        thread.join();
+    }
+};
 
 std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock) {
     return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
@@ -561,8 +584,8 @@ TEST_CASE("SynScan GOTO landing - async slew keeps Slewing true until the refine
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
-    const auto deadline = clock.now() + std::chrono::seconds(40);
-    while (driver->get_slewing() && clock.now() < deadline) {
+    const auto deadline = Clock::now() + kRealLimit;
+    while (driver->get_slewing() && Clock::now() < deadline) {
         step_virtual(clock);
     }
     REQUIRE_FALSE(driver->get_slewing());
@@ -610,9 +633,9 @@ TEST_CASE("SynScan GOTO landing - an async landing that never converges is bound
     use_fast_guide_rate(*driver);
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
-    const auto deadline = clock.now() + std::chrono::seconds(60);
+    const auto deadline = Clock::now() + kRealLimit;
     bool slewing = true;
-    while (slewing && clock.now() < deadline) {
+    while (slewing && Clock::now() < deadline) {
         // Reported as a WARN, not as a slew error on the next Slewing read (#1027).
         REQUIRE_NOTHROW(slewing = driver->get_slewing());
         step_virtual(clock);
@@ -661,9 +684,9 @@ TEST_CASE("SynScan GOTO landing - async Dec scatter of the GOTO is removed by a 
     use_fast_guide_rate(*driver);
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
-    const auto deadline = clock.now() + std::chrono::seconds(60);
+    const auto deadline = Clock::now() + kRealLimit;
     bool slewing = true;
-    while (slewing && clock.now() < deadline) {
+    while (slewing && Clock::now() < deadline) {
         REQUIRE_NOTHROW(slewing = driver->get_slewing());
         step_virtual(clock);
     }
@@ -806,8 +829,8 @@ TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#
     driver->set_guide_rate(alpacacore::GuideRate{2.0 / 3600.0, 2.0 / 3600.0});
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
-    const auto deadline = clock.now() + std::chrono::seconds(40);
-    while (st->nudge_starts.load() < 1 && clock.now() < deadline) {
+    const auto deadline = Clock::now() + kRealLimit;
+    while (st->nudge_starts.load() < 1 && Clock::now() < deadline) {
         step_virtual(clock);
     }
     REQUIRE(st->nudge_starts.load() == 1);  // the landing move is under way
@@ -867,6 +890,7 @@ TEST_CASE(
         }
         returned.store(true);
     });
+    ScopedJoin caller_join{caller, [&] { release_until(clock, returned); }};
     // Advance virtual time until the landing move is under way.
     const auto deadline = Clock::now() + std::chrono::seconds(30);
     while (st->nudge_starts.load() < 1 && Clock::now() < deadline) {
@@ -922,8 +946,8 @@ struct LongDecNudge {
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         driver->set_guide_rate(alpacacore::GuideRate{2.0 / 3600.0, 2.0 / 3600.0});
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
-        const auto deadline = clock.now() + std::chrono::seconds(40);
-        while (st->nudge_starts.load() < 1 && clock.now() < deadline) {
+        const auto deadline = Clock::now() + kRealLimit;
+        while (st->nudge_starts.load() < 1 && Clock::now() < deadline) {
             step_virtual(clock);
         }
         REQUIRE(st->nudge_starts.load() == 1);
@@ -1054,8 +1078,8 @@ TEST_CASE("SynScan initiator supersede - Tracking off during a long RA landing m
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_guide_rate(alpacacore::GuideRate{2.0 / 3600.0, 2.0 / 3600.0});
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
-    const auto deadline = clock.now() + std::chrono::seconds(40);
-    while (st->nudge_starts.load() < 1 && clock.now() < deadline) {
+    const auto deadline = Clock::now() + kRealLimit;
+    while (st->nudge_starts.load() < 1 && Clock::now() < deadline) {
         step_virtual(clock);
     }
     REQUIRE(st->nudge_starts.load() == 1);
@@ -1088,8 +1112,8 @@ TEST_CASE("SynScan initiator supersede - Tracking off during a long RA landing m
     REQUIRE(wrote);
     CHECK_NOTHROW(returned.get());
     // Let the landing finish; it goes on with tracking off.
-    const auto settle_by = clock.now() + std::chrono::seconds(60);
-    while (driver->get_slewing() && clock.now() < settle_by) {
+    const auto settle_by = Clock::now() + kRealLimit;
+    while (driver->get_slewing() && Clock::now() < settle_by) {
         step_virtual(clock);
     }
     CHECK_FALSE(driver->get_slewing());
@@ -1128,8 +1152,8 @@ void check_initiator_behind_queued_tracking_write(const std::function<void(alpac
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_guide_rate(alpacacore::GuideRate{2.0 / 3600.0, 2.0 / 3600.0});
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
-    const auto deadline = clock.now() + std::chrono::seconds(40);
-    while (st->nudge_starts.load() < 1 && clock.now() < deadline) {
+    const auto deadline = Clock::now() + kRealLimit;
+    while (st->nudge_starts.load() < 1 && Clock::now() < deadline) {
         step_virtual(clock);
     }
     REQUIRE(st->nudge_starts.load() == 1);
@@ -1307,9 +1331,9 @@ constexpr uint32_t kFarMissCounts = 38100;
 
 // Waits for an async slew to end. Returns the DriverException message if a Slewing read throws, else "".
 std::string wait_async_slew(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver) {
-    const auto deadline = clock.now() + std::chrono::seconds(60);
+    const auto deadline = Clock::now() + kRealLimit;
     try {
-        while (driver.get_slewing() && clock.now() < deadline) {
+        while (driver.get_slewing() && Clock::now() < deadline) {
             step_virtual(clock);
         }
     } catch (const alpacacore::AlpacaException& e) {
@@ -1582,8 +1606,8 @@ double true_ra_error_arcsec(LandingOffsetHandset& st, double target_hours) {
 }
 
 void wait_pulse_done(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver) {
-    const auto deadline = clock.now() + std::chrono::seconds(5);
-    while (driver.get_is_pulse_guiding() && clock.now() < deadline) {
+    const auto deadline = Clock::now() + kRealLimit;
+    while (driver.get_is_pulse_guiding() && Clock::now() < deadline) {
         // The flag also clears by a clock read once the pulse's completion delay has passed, with no task parked.
         if (!step_virtual(clock)) clock.advance(kVirtualStep);
     }
@@ -1711,8 +1735,9 @@ TEST_CASE("SynScan GOTO landing - a superseded synchronous landing move leaves t
         }
         slew_done.store(true);
     });
-    const auto deadline = clock.now() + std::chrono::seconds(10);
-    while (st->nudge_starts.load() < 1 && clock.now() < deadline) {
+    ScopedJoin slew_join{slew, [&] { release_until(clock, slew_done); }};
+    const auto deadline = Clock::now() + kRealLimit;
+    while (st->nudge_starts.load() < 1 && Clock::now() < deadline) {
         step_virtual(clock);
     }
     REQUIRE(st->nudge_starts.load() >= 1);
@@ -1836,6 +1861,7 @@ TEST_CASE("SynScan GOTO landing - the hunt waits for a poll tick that is inside 
         while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     });
     std::thread tick([&] { alpacacore::vendor::synscan::poll_status_now_for_testing(*driver); });
+    ScopedJoin tick_join{tick, [&] { release.store(true); }};
     const auto real_deadline = Clock::now() + std::chrono::seconds(10);
     while (!in_sample.load() && Clock::now() < real_deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     REQUIRE(in_sample.load());
@@ -1904,6 +1930,13 @@ std::chrono::nanoseconds virtual_slew_duration(bool poll_in_flight) {
     bool entered = false;
     bool release = false;
     std::thread poll;
+    ScopedJoin poll_join{poll, [&] {
+                             {
+                                 std::lock_guard<std::mutex> lock(mutex);
+                                 release = true;
+                             }
+                             cv.notify_all();
+                         }};
     if (poll_in_flight) {
         alpacacore::vendor::synscan::set_status_poll_after_sample_hook_for_testing(*driver, [&] {
             std::unique_lock<std::mutex> lock(mutex);
