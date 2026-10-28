@@ -1221,20 +1221,26 @@ int main() {
     // keeps that race from aborting). With no callback installed the handler
     // keeps calling stop() itself; that path is not under test here.
     {
-        std::mutex shutdown_cb_mutex;
-        std::condition_variable shutdown_cb_cv;
-        bool shutdown_cb_called = false;
+        // Shared with the callback by value: the endpoint's detached thread
+        // may still be inside notify_all() when this block closes, so the
+        // state must outlive the block.
+        struct ShutdownCbState {
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool called = false;
+        };
+        const auto cb_state = std::make_shared<ShutdownCbState>();
         alpacahttp::Config cb_config;
         cb_config.set_http_port(0);
         cb_config.set_discovery_enabled(false);
         cb_config.set_server_name("TestServerShutdownCallbackOnly");
         alpacahttp::Server cb_server(cb_config);
-        cb_server.set_shutdown_callback([&shutdown_cb_mutex, &shutdown_cb_cv, &shutdown_cb_called]() {
+        cb_server.set_shutdown_callback([cb_state]() {
             {
-                std::lock_guard<std::mutex> lock(shutdown_cb_mutex);
-                shutdown_cb_called = true;
+                std::lock_guard<std::mutex> lock(cb_state->mutex);
+                cb_state->called = true;
             }
-            shutdown_cb_cv.notify_all();
+            cb_state->cv.notify_all();
         });
         cb_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
@@ -1266,10 +1272,9 @@ int main() {
             // The callback runs on the endpoint's detached thread 100 ms
             // after the response.
             {
-                std::unique_lock<std::mutex> lock(shutdown_cb_mutex);
-                shutdown_cb_cv.wait_for(lock, std::chrono::seconds(5),
-                                        [&shutdown_cb_called] { return shutdown_cb_called; });
-                EXPECT(shutdown_cb_called);
+                std::unique_lock<std::mutex> lock(cb_state->mutex);
+                cb_state->cv.wait_for(lock, std::chrono::seconds(5), [&cb_state] { return cb_state->called; });
+                EXPECT(cb_state->called);
             }
 
             // After the callback the server is still up: the bystander is
@@ -2001,26 +2006,14 @@ int main() {
         // stop() still returns rather than propagating or hanging.
         std::mutex captured_mutex;
         std::vector<std::string> captured;
-        std::mutex stopped_mutex;
-        std::condition_variable stopped_cv;
-        bool stopped_seen = false;
-        // Default Config{} logs at WARNING, which would filter out the INFO
-        // "Server stopped" line below before it ever reaches the sink (see
-        // logging.cpp's level gate) -- need INFO to observe it.
+        // The abandoned server thread is moved here instead of detached, so
+        // the test can join it before `server` and the sink state go away.
+        std::thread abandoned_server_thread;
         alpacahttp::Config logging_config;
         logging_config.set_log_level(alpacahttp::LogLevel::INFO);
         alpacahttp::util::init_logging(logging_config);
         alpacahttp::util::set_external_log_sink(
             [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
-                if (message == "Server stopped") {
-                    // run_server()'s very last statement before it returns. Once
-                    // this fires, the (possibly detached, see below) thread
-                    // running it is done touching the Server object and it is
-                    // safe to let `server` go out of scope.
-                    std::lock_guard<std::mutex> lock(stopped_mutex);
-                    stopped_seen = true;
-                    stopped_cv.notify_all();
-                }
                 if (level != alpacacore::logging::LogLevel::Error) {
                     return;
                 }
@@ -2053,7 +2046,7 @@ int main() {
                     }
                     t.join();
                 },
-                [](std::thread& t, const char*) { t.detach(); });
+                [&abandoned_server_thread](std::thread& t, const char*) { abandoned_server_thread = std::move(t); });
 
             server.start_async();
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -2066,18 +2059,15 @@ int main() {
                 EXPECT(!server.is_running());
                 server.stop();  // Second stop() is a no-op; must not re-throw or hang.
 
-                // The injected join() throw makes join_or_abandon() detach
-                // the still-running server thread instead of joining it --
-                // case a2's whole point. stop()/wait() return as soon as
-                // that detach happens, but the now-detached OS thread is
-                // still inside run_server(), which keeps touching `this`
-                // (server_fd_, then the "Server stopped" log) right up to
-                // its last statement. Without waiting for that thread to
-                // actually finish, `server`'s destructor below can run
-                // concurrently with those last touches -- a real
-                // use-after-free window, not a theoretical one.
-                std::unique_lock<std::mutex> lock(stopped_mutex);
-                stopped_cv.wait(lock, [&stopped_seen] { return stopped_seen; });
+                // The injected join() throw makes join_or_abandon() abandon
+                // the still-running server thread (here: park it in
+                // abandoned_server_thread). stop()/wait() return as soon as
+                // that happens, but the thread is still inside run_server(),
+                // which keeps touching `this` and the log state. Join it
+                // before `server` and the sink's captured state go away.
+                if (abandoned_server_thread.joinable()) {
+                    abandoned_server_thread.join();
+                }
             }
             // hooks (and its process-wide override) ARE destroyed here, at
             // the end of this scope -- strictly before `server` goes out of
