@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -57,6 +58,8 @@ public:
     bool update_pinned = false;
     WifiSettings added_settings;
     WifiSettings updated_settings;
+    // What NetworkManager holds per profile path; Update replaces it whole.
+    std::map<std::string, WifiSettings> stored;
 
     std::vector<Connection> wifi_connections() override {
         ++connection_reads;
@@ -82,6 +85,7 @@ public:
         updated_path = path;
         update_pinned = pin_shared_ip4;
         updated_settings = settings;
+        stored[path] = settings;
         if (failure == Failure::Update) throw WifiError("scripted update failure");
     }
 };
@@ -280,6 +284,40 @@ int main() {
         EXPECT(replacement_psk.type == 's');
         EXPECT(replacement_psk.string_value == "newpassword1");
         EXPECT(!replacement_result.contains("Passphrase"));
+    }
+
+    {
+        // case: WifiManager keeps every stored setting when it edits an existing profile
+        using alpacahttp::util::detail::WifiSettingSection;
+        FakeWifiProfileBackend backend;
+        auto profile = saved_profile("RealNet", "infrastructure", "Real Net", "uuid-real");
+        profile["802-11-wireless-security"] = {{"key-mgmt", "sae"}};
+        backend.connections.emplace_back("/saved/real", profile);
+        backend.stored["/saved/real"] = {
+            {"connection",
+             {{"id", WifiSettingValue::str("Real Net")},
+              {"type", WifiSettingValue::str("802-11-wireless")},
+              {"uuid", WifiSettingValue::str("uuid-real")}}},
+            {"802-11-wireless",
+             {{"ssid", WifiSettingValue::bytearr("RealNet")},
+              {"mode", WifiSettingValue::str("infrastructure")},
+              {"bssid", WifiSettingValue::str("00:11:22:33:44:55")}}},
+            {"802-11-wireless-security", {{"key-mgmt", WifiSettingValue::str("sae")}}},
+            {"ipv4",
+             {{"method", WifiSettingValue::str("manual")}, {"gateway", WifiSettingValue::str("192.0.2.1")}}},
+            {"802-1x", {{"identity", WifiSettingValue::str("observer")}}}};
+        WifiManager manager("unused", backend);
+        manager.save_profile("RealNet", "", false, 7);
+        const auto& kept = backend.stored["/saved/real"];
+        EXPECT(setting(kept, "ipv4", "method").string_value == "manual");
+        EXPECT(setting(kept, "ipv4", "gateway").string_value == "192.0.2.1");
+        EXPECT(setting(kept, "802-11-wireless", "bssid").string_value == "00:11:22:33:44:55");
+        EXPECT(setting(kept, "802-1x", "identity").string_value == "observer");
+        EXPECT(setting(kept, "802-11-wireless-security", "key-mgmt").string_value == "sae");
+        EXPECT(setting(kept, "connection", "uuid").string_value == "uuid-real");
+        EXPECT(setting(kept, "connection", "id").string_value == "Real Net");
+        EXPECT(!setting(kept, "connection", "autoconnect").boolean_value);
+        EXPECT(setting(kept, "connection", "autoconnect-priority").integer_value == 7);
     }
 
     {
