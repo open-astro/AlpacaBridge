@@ -449,3 +449,42 @@ TEST_CASE("WandererAstro Box Switch Driver - Connected names and descriptions", 
     }
     driver->set_connected(false);
 }
+
+// Falsified by: wandererastro_box_switch_driver.cpp:329 (read-only throw in set_switch_value) replaced with return,
+//   or :276 get_can_write returning true, or a range member returning the wrong table row.
+TEST_CASE("WandererAstro Box Switch Driver - Connected capability and range members on writable and read-only ids",
+          "[wandererastro][switch][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_can_write(7));
+    CHECK_FALSE(driver->get_can_async(7));
+    CHECK(driver->get_min_switch_value(7) == 0.0);
+    CHECK(driver->get_max_switch_value(7) == 1.0);
+    CHECK(driver->get_switch_step(7) == 1.0);
+
+    for (const int id : {0, 14}) {  // DC1 and Input Voltage are read-only
+        CHECK_FALSE(driver->get_can_write(id));
+        CHECK_FALSE(driver->get_can_async(id));
+        const double before = driver->get_switch_value(id);
+        const bool before_on = driver->get_switch(id);
+        require_alpaca_error([&]() { driver->set_switch(id, true); }, alpacacore::AlpacaError::NotImplemented);
+        require_alpaca_error([&]() { driver->set_switch_value(id, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+        CHECK(driver->get_switch_value(id) == before);
+        CHECK(driver->get_switch(id) == before_on);
+    }
+    CHECK(driver->get_min_switch_value(0) == 0.0);
+    CHECK(driver->get_max_switch_value(0) == 1.0);
+    CHECK(driver->get_switch_step(0) == 1.0);
+    CHECK(driver->get_max_switch_value(14) == 30.0);
+    CHECK(driver->get_switch_step(14) == 0.01);
+
+    for (const int id : {-1, 24}) {
+        require_alpaca_error([&]() { (void)driver->get_can_write(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_can_async(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_min_switch_value(id); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    driver->set_connected(false);
+}

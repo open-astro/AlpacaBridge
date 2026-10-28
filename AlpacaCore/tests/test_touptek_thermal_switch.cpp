@@ -177,3 +177,33 @@ TEST_CASE("ToupTek Thermal Switch Driver - Connected names, descriptions and sta
     }
     driver->set_connected(false);
 }
+
+// Falsified by: touptek_thermal_switch_driver.cpp:386 get_max_switch_value returning min_value, :389 get_switch_step
+//   returning a value other than 1, or get_can_async returning true.
+TEST_CASE("ToupTek Thermal Switch Driver - Connected capability and range members", "[touptek][switch][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_max_switch() == 3);
+
+    // Ranges come from the fake SDK: heat level 0-10 (get_heat_max), fan 0-3 (max_fan_speed), tail LED 0-1.
+    const double expected_max[] = {10.0, 3.0, 1.0};
+    for (int id = 0; id < 3; ++id) {
+        CHECK(driver->get_can_write(id));
+        CHECK_FALSE(driver->get_can_async(id));
+        CHECK(driver->get_min_switch_value(id) == 0.0);
+        CHECK(driver->get_max_switch_value(id) == expected_max[id]);
+        CHECK(driver->get_switch_step(id) == 1.0);
+    }
+
+    for (const int id : {-1, 3}) {
+        require_alpaca_error([&]() { (void)driver->get_can_write(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_can_async(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_min_switch_value(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_max_switch_value(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_switch_step(id); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    driver->set_connected(false);
+}

@@ -711,3 +711,44 @@ TEST_CASE("Gemini PDH Switch Driver - Connected names and descriptions", "[gemin
         require_alpaca_error([&]() { driver->set_switch_name(id, "x"); }, alpacacore::AlpacaError::InvalidValue);
     }
 }
+
+// Falsified by: gemini_pdh_switch_driver.cpp:539 (read-only throw in set_switch_value_locked) replaced with a
+//   fall-through, or :318 get_can_write returning true, or get_switch_step returning a constant.
+TEST_CASE("Gemini PDH Switch Driver - Connected capability and range members on writable and read-only ids",
+          "[gemini][switch][unit][fake]") {
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+
+    for (const int id : {7, 11}) {  // DC2 on/off, DEW6 value
+        CHECK(driver->get_can_write(id));
+        CHECK_FALSE(driver->get_can_async(id));
+        CHECK(driver->get_min_switch_value(id) == 0.0);
+        CHECK(driver->get_switch_step(id) == 1.0);
+    }
+    CHECK(driver->get_max_switch_value(7) == 1.0);
+    CHECK(driver->get_max_switch_value(11) >= 1.0);
+
+    // DC1 (6) and Input Voltage (15) are read-only.
+    CHECK_FALSE(driver->get_can_write(6));
+    CHECK_FALSE(driver->get_can_async(6));
+    CHECK(driver->get_max_switch_value(6) == 1.0);
+    CHECK(driver->get_switch_step(6) == 1.0);
+    CHECK_FALSE(driver->get_can_write(15));
+    CHECK(driver->get_max_switch_value(15) == 30.0);
+    CHECK(driver->get_switch_step(15) == 0.01);
+    for (const int id : {6, 15}) {
+        const double before = driver->get_switch_value(id);
+        const bool before_on = driver->get_switch(id);
+        require_alpaca_error([&]() { driver->set_switch(id, true); }, alpacacore::AlpacaError::NotImplemented);
+        require_alpaca_error([&]() { driver->set_switch_value(id, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+        CHECK(driver->get_switch_value(id) == before);
+        CHECK(driver->get_switch(id) == before_on);
+    }
+
+    for (const int id : {-1, 24}) {
+        require_alpaca_error([&]() { (void)driver->get_can_write(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_can_async(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_min_switch_value(id); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_switch_step(id); }, alpacacore::AlpacaError::InvalidValue);
+    }
+}
