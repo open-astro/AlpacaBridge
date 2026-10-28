@@ -1,0 +1,6 @@
+### Breaking changes
+- **Unavailable telescope time and disconnected ZWO reads now fail** (AlpacaCore, issue #1641): SynScan, iOptron, Celestron CGX USB and ZWO AM no longer substitute host time for an uninitialized `UTCDate`; ZWO target and guide-rate reads also require a connection. **After upgrading:** connect before reading operational properties, and establish UTC through a supported client write or successful configured time synchronization when the mount clock is unavailable; on CGX, write UTC again after a host-clock step invalidates the client offset. ZWO offline guide-rate writes remain supported through Alpaca, and invalid writes keep their validation errors.
+
+### Fixed
+- **Telescope UTCDate reports unavailable time instead of inventing it** (AlpacaCore, issue #1641): remove host-clock readback fallbacks in SynScan, iOptron, Celestron CGX USB and ZWO AM, and require a connection for ZWO target RA, target Dec, UTCDate and guide-rate reads; see Breaking changes for client upgrade steps.
+- **Available mount clocks work immediately after connect** (AlpacaCore, issue #1641): sample iOptron UTC before background synchronization and ZWO time when configured synchronization is disabled or fails. Keep UTCDate getters free of device I/O, and interpret the iOptron clock payload as the UTC specified by its protocol.

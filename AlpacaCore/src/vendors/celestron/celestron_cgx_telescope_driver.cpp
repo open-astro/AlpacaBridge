@@ -486,7 +486,8 @@ double CelestronCgxTelescopeDriver::current_utc_locked() const {
 
 std::chrono::system_clock::time_point CelestronCgxTelescopeDriver::client_utc_now_locked() const {
     const auto system_now = system_now_();
-    return client_utc_offset_survives_locked(system_now) ? system_now + utc_offset_ : system_now;
+    if (client_utc_offset_survives_locked(system_now)) return system_now + utc_offset_;
+    throw AlpacaException("UTCDate has not been established; set the mount time first", AlpacaError::InvalidOperation);
 }
 
 bool CelestronCgxTelescopeDriver::client_utc_offset_survives_locked(
