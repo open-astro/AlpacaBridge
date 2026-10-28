@@ -27,7 +27,7 @@ A driver's link can fail in two ways a client cannot tell apart from `Connected`
 | iOptron | `:MountInfo#` / `:DeviceInfo#` model | Rejects a different model, not a second unit of the same one | planned follow-up |
 | Gemini | `>H#` identity string (exact compare) | Rejects a different Gemini product, not a second unit | planned follow-up |
 | QHY | JSON version handshake (Q-Focuser), slot-count check (CFW3) | No per-unit identity | planned follow-up |
-| ZWO AM | Fresh hash-terminated supported `:GVP#` model and normalized twelve-hex `:GMA#` serial | Yes: the first successfully claimed serial is pinned for the driver object's lifetime, across loss, Disconnect and later initialization failure; driver recreation (a service restart, or saving the device again in the web UI) clears the in-memory pin | done (#1581) |
+| ZWO AM | Fresh hash-terminated supported `:GVP#` model and normalized twelve-hex `:GMA#` serial | Yes: refuses a different mount serial until the driver is recreated ([ZWO](../../.github/instructions/zwo.instructions.md)) | done (#1581) |
 
 ## Rules
 
