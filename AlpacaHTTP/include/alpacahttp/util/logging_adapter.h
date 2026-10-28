@@ -91,10 +91,6 @@ void set_log_retention_days(int days);
 // Returns the number of files removed.
 std::size_t prune_old_log_files();
 
-// Persist the currently-active log level so it survives a server restart.
-// Stored in config/runtime_state.json relative to cwd; failures are logged at
-// warning level but do not throw — callers should never let a save error block
-// the user-visible operation that requested it.
 // The one table of log-level spellings (config file, env var, API, runtime
 // state): case-insensitive, surrounding whitespace ignored. nullopt for an
 // unknown spelling.
@@ -107,6 +103,10 @@ inline std::string_view trim_view(std::string_view s) {
     return s;
 }
 
+// Persist the currently-active log level so it survives a server restart.
+// Stored in config/runtime_state.json relative to cwd; failures are logged at
+// warning level but do not throw — callers should never let a save error block
+// the user-visible operation that requested it.
 void save_runtime_log_level(alpacacore::logging::LogLevel level);
 
 // Read the persisted log level, if any. Returns nullopt when the state file
