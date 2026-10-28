@@ -5275,32 +5275,38 @@ function wifiSelectedBand() {
 // change that can drop the browser's connection asks first: turning the
 // hotspot on or off, and editing a running hotspot (it restarts). Editing a
 // hotspot that is off cannot drop anything, so it saves without asking.
-// `revert` puts a field back to its previous value when the user cancels.
+// `revert` puts a field back to its previous value when the user cancels or
+// the apply returns early.
 async function wifiApplyAp(enabled, fromToggle, revert) {
-    if (wifiState.busy) return;
+    // Every early return puts the edit back, like Cancel: nothing was saved.
+    const undo = () => {
+        if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = !enabled; }
+        else if (revert) revert();
+    };
+    // Nothing is configured yet: the setup fields are filled one at a time, so a
+    // validation return keeps what was typed (reverting would clear the other field).
+    const configured = wifiState.ap && wifiState.ap.Configured;
+    const undoInvalid = () => { if (fromToggle || configured) undo(); };
+    if (wifiState.busy) { undo(); return; }
     const ssid = (wifiEl('wifi-ap-ssid') || {}).value || '';
     const passphrase = (wifiEl('wifi-ap-pass') || {}).value || '';
-    if (!ssid) { wifiMessage('The hotspot needs a name.', true); return; }
+    if (!ssid) { wifiMessage('The hotspot needs a name.', true); undoInvalid(); return; }
     if (wifiSelectedBand() === 'a' && !wifiCountryIsSet()) {
         wifiRequireCountryFor5GHz();
-        if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false; }
+        undoInvalid();
         return;
     }
-    const configured = wifiState.ap && wifiState.ap.Configured;
     if (!configured && !passphrase) {
         wifiMessage('Set a hotspot password first (8-63 characters).', true);
-        if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false; }
+        undoInvalid();
         return;
     }
     if (fromToggle) {
         const ok = enabled ? wifiConfirmSwitch('start the hotspot "' + ssid + '"')
             : wifiConfirmDrop('turn off the hotspot');
-        if (!ok) {
-            const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = !enabled;
-            return;
-        }
+        if (!ok) { undo(); return; }
     } else if (enabled && !wifiConfirmDrop('restart the hotspot "' + ssid + '" with the new settings')) {
-        if (revert) revert();
+        undo();
         return;
     }
     wifiState.busy = true;
