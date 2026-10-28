@@ -70,29 +70,38 @@ int main() {
     ::unsetenv("ALPACAHTTP_LOG_LEVEL");
     ::unsetenv("ALPACAHTTP_PORT");
 
-    for (const auto& [spelling, want] : {std::pair<const char*, LogLevel>{"warn", LogLevel::WARNING},
-                                         {"WARN", LogLevel::WARNING},
-                                         {"warning", LogLevel::WARNING},
-                                         {"trace", LogLevel::DEBUG},
-                                         {"critical", LogLevel::ERROR},
-                                         {"fatal", LogLevel::ERROR},
-                                         {"error", LogLevel::ERROR}}) {
-        EXPECT(level_from_file(spelling) == want);
-        EXPECT(level_from_env(spelling) == want);
+    {
+        // case: log level spellings load from the config file and the env var
+        for (const auto& [spelling, want] : {std::pair<const char*, LogLevel>{"warn", LogLevel::WARNING},
+                                             {"WARN", LogLevel::WARNING},
+                                             {"warning", LogLevel::WARNING},
+                                             {"trace", LogLevel::DEBUG},
+                                             {"critical", LogLevel::ERROR},
+                                             {"fatal", LogLevel::ERROR},
+                                             {"error", LogLevel::ERROR}}) {
+            EXPECT(level_from_file(spelling) == want);
+            EXPECT(level_from_env(spelling) == want);
+        }
+        EXPECT(level_from_file("bogus") == LogLevel::INFO);
     }
-    EXPECT(level_from_file("bogus") == LogLevel::INFO);
 
-    EXPECT(port_from_env("70000") == 1234);
-    EXPECT(port_from_env("-1") == 1234);
-    EXPECT(port_from_env("6800") == 6800);
-
-    alpacahttp::Router router;
-    for (const char* ok : {"{\"level\":\"warn\"}", "{\"level\":\"trace\"}", "{\"level\":\"critical\"}"}) {
-        EXPECT(post_level(router, ok) == 0);
+    {
+        // case: ALPACAHTTP_PORT outside 1-65535 is rejected
+        EXPECT(port_from_env("70000") == 1234);
+        EXPECT(port_from_env("-1") == 1234);
+        EXPECT(port_from_env("6800") == 6800);
     }
-    EXPECT(post_level(router, "{\"level\":\"bogus\"}") == 0x401);
-    for (const char* bad : {"{\"level\":3}", "{\"level\":true}", "{\"level\":null}", "{\"Level\":3}"}) {
-        EXPECT(post_level(router, bad) == 0x401);
+
+    {
+        // case: loglevel API accepts the shared spellings and rejects a non-string level
+        alpacahttp::Router router;
+        for (const char* ok : {"{\"level\":\"warn\"}", "{\"level\":\"trace\"}", "{\"level\":\"critical\"}"}) {
+            EXPECT(post_level(router, ok) == 0);
+        }
+        EXPECT(post_level(router, "{\"level\":\"bogus\"}") == 0x401);
+        for (const char* bad : {"{\"level\":3}", "{\"level\":true}", "{\"level\":null}", "{\"Level\":3}"}) {
+            EXPECT(post_level(router, bad) == 0x401);
+        }
     }
     return 0;
 }
