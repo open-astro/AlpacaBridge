@@ -270,12 +270,21 @@ TEST_CASE("ToupTek AAF Focuser Driver - Value range validation",
 
     // Move() validates the connection first. The contract is: when not
     // connected, NotConnected is reported; when connected, out-of-range
-    // positions yield InvalidValue. Without hardware we exercise the
-    // disconnected path here and rely on ConformU for the connected path.
+    // positions yield InvalidValue. The disconnected path runs on the real SDK
+    // here; the connected range check runs below over FakeToupTekSDK.
     require_alpaca_error([&]() { driver->move(-1); },
                          alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->move(100000000); },
                          alpacacore::AlpacaError::NotConnected);
+
+    // Connected over the fake: out-of-range positions are InvalidValue and no
+    // move reaches the device.
+    alpacacore::test::FakeToupTekSDK fake;
+    auto connected = make_connected(fake);
+    require_alpaca_error([&]() { connected->move(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { connected->move(connected->get_max_step() + 1); },
+                         alpacacore::AlpacaError::InvalidValue);
+    CHECK(fake.call_count("aaf_set") == 0);
 
     // Set temp comp is unsupported, but the connection check answers first
     // while disconnected (open-astro#309). The NotImplemented answer on a
