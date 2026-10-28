@@ -27,6 +27,7 @@ A driver's link can fail in two ways a client cannot tell apart from `Connected`
 | iOptron | `:MountInfo#` / `:DeviceInfo#` model | Rejects a different model, not a second unit of the same one | planned follow-up |
 | Gemini | `>H#` identity string (exact compare) | Rejects a different Gemini product, not a second unit | planned follow-up |
 | QHY | JSON version handshake (Q-Focuser), slot-count check (CFW3) | No per-unit identity | planned follow-up |
+| ZWO AM | Fresh hash-terminated supported `:GVP#` model and normalized twelve-hex `:GMA#` serial | Yes: the first successfully claimed serial is pinned for the driver object's lifetime, across loss, Disconnect and later initialization failure; driver recreation clears the in-memory pin | #1581 |
 
 ## Rules
 
@@ -34,9 +35,9 @@ The rules a change is checked against. Each names where it applies and what chec
 
 1. A faulted link keeps `Connected` true and makes reads and writes throw `DriverException` with the fault text from `get_link_fault()`; the next good reply clears it. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_link_loss.cpp`, review.
 2. A link is lost at once on positive evidence that the transport is gone, and when a fault has stood past `util::kLinkStalenessBound`; a driver never sets a bound shorter than its own latch threshold. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/link_health.h`. Checked by: `AlpacaCore/tests/test_skywatcher_link_loss.cpp`, `AlpacaCore/tests/test_onstep_link_loss.cpp`, review.
-3. While lost: `Connected` reads false, operations throw `NotConnected`, `DeviceState` is the empty list, the transport is closed and the loss time is stamped once. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
-4. A driver never reopens a lost link on its own; only the client's Connect relinks, and it re-runs the connect probe. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
-5. `get_link_fault()` is the one fault text, and it keeps the last text after a loss until the next Connect or Disconnect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review. <!-- allowed -->
+3. While lost: `Connected` reads false, operations throw `NotConnected`, `DeviceState` is the empty list, the transport is closed and the loss time is stamped once. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (trace each loss path through state clearing, best-effort close and the one-time loss stamp).
+4. A driver never reopens a lost link on its own; only the client's Connect relinks, and it re-runs the connect probe. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (no worker reopens a lost transport; the client connect path performs fresh identity verification).
+5. `get_link_fault()` is the one fault text, and it keeps the last text after a loss until the next Connect or Disconnect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (loss preserves the fault text, while Connect and Disconnect reset it). <!-- allowed -->
 
 ## Alternatives rejected
 
@@ -49,7 +50,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 - On an adopted driver a client sees `Connected` false within `util::kLinkStalenessBound` of a device going silent, and reconnects itself; a drop shorter than the bound only faults.
 - A driver not yet adopted keeps `Connected` true while faulted (Adoption table).
-- A reconnect after a loss re-runs the connect probe, which does not tell two units of one model apart (point 6).
+- A reconnect after a loss re-runs the connect probe. The identity table in point 6 states which drivers distinguish two units of one model. ZWO AM retains the first successfully claimed serial in memory for the driver object's lifetime; deliberate replacement requires recreating the driver, not only Disconnect. An identity or duplicate-claim refusal before admission learns no serial. A later initialization failure releases active ownership but retains the admitted serial.
 
 ## How to reverse
 

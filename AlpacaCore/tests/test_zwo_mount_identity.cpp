@@ -425,6 +425,129 @@ TEST_CASE("ZWO verified identity survives unavailable initial telemetry and reco
     CHECK(rig.probes() == 1);
 }
 
+TEST_CASE("ZWO reconnect refuses a different mount serial and retains the original identity",
+          "[zwo][telescope][identity][issue1581]") {
+    const bool asynchronous = GENERATE(false, true);
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    rig.make_driver(rig.info(), true);
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    REQUIRE(rig.server.drop_connections());
+    rig.tick();
+    REQUIRE(eventually([&] { return !rig.driver->get_connected(); }));
+
+    rig.set_serial("FEDCBA543210#");
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto before = rig.received().size();
+        std::string message;
+        if (asynchronous) {
+            rig.driver->connect();
+            REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+            message = rig.driver->get_last_connect_error();
+        } else {
+            try {
+                rig.driver->set_connected(true);
+            } catch (const AlpacaException& error) {
+                CHECK(error.error_code() == AlpacaError::DriverException);
+                message = error.what();
+            }
+        }
+        CHECK(message.find("different mount") != std::string::npos);
+        CHECK(message.find("restart") != std::string::npos);
+        CHECK(message.find("012345ABCDEF") == std::string::npos);
+        CHECK(message.find("FEDCBA543210") == std::string::npos);
+        REQUIRE_FALSE(rig.driver->get_connected());
+        CHECK(rig.driver->get_device_state().empty());
+        const auto commands = rig.received();
+        CHECK(std::vector<std::string>(commands.begin() + before, commands.end()) ==
+              std::vector<std::string>{":GVP#", ":GMA#"});
+        MountIdentityClaim other;
+        CHECK_NOTHROW(other.claim("FEDCBA543210", true, 9));
+    }
+
+    rig.set_serial("012345abcdef#");
+    rig.driver->connect();
+    REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.driver->get_last_connect_error().empty());
+}
+
+TEST_CASE("ZWO Disconnect preserves the admitted serial until driver recreation",
+          "[zwo][telescope][identity][issue1581]") {
+    const bool asynchronous = GENERATE(false, true);
+    const bool serial = GENERATE(false, true);
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    test::PtyResponder tty([&](const std::string& chunk) { return rig.respond(chunk); });
+    auto info = rig.info();
+    if (serial) {
+        info.type = ConnectionType::Serial;
+        info.port_path = tty.slave_path();
+    }
+    rig.make_driver(info);
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    if (asynchronous) {
+        rig.driver->disconnect();
+        REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    } else {
+        rig.driver->set_connected(false);
+    }
+    REQUIRE_FALSE(rig.driver->get_connected());
+    rig.set_serial("FEDCBA543210#");
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        rig.driver->set_connected(false);
+        CHECK(error_code([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
+        REQUIRE_FALSE(rig.driver->get_connected());
+        if (serial) CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
+    }
+    rig.set_serial("012345abcdef#");
+    CHECK_NOTHROW(rig.driver->set_connected(true));
+    REQUIRE(rig.driver->get_connected());
+    rig.driver.reset();
+    rig.set_serial("FEDCBA543210#");
+    rig.make_driver(info);
+    CHECK_NOTHROW(rig.driver->set_connected(true));
+    CHECK(rig.driver->get_connected());
+    rig.driver.reset();  // The driver must close before its PTY responder dies.
+}
+
+TEST_CASE("ZWO serial telemetry loss cannot rebind to a different mount at the same port",
+          "[zwo][telescope][identity][serial][issue1581]") {
+    IdentityRig rig;
+    test::PtyResponder tty([&](const std::string& chunk) { return rig.respond(chunk); });
+    auto info = rig.info();
+    info.type = ConnectionType::Serial;
+    info.port_path = tty.slave_path();
+    rig.make_driver(info);
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    rig.bad_status.store(true);
+    rig.tick();
+    rig.tick();
+    rig.tick();
+    CHECK(rig.driver->get_connected());
+    REQUIRE_FALSE(rig.driver->get_link_fault().empty());
+    REQUIRE(rig.clock.wait_for_waiters(1, 5s));
+    rig.clock.advance(31s);
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
+    REQUIRE(eventually([&] { return !rig.driver->get_connected(); }));
+    rig.bad_status.store(false);
+    rig.set_serial("FEDCBA543210#");
+    const auto before = rig.received().size();
+    CHECK(error_code([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
+    CHECK_FALSE(rig.driver->get_connected());
+    const auto commands = rig.received();
+    CHECK(std::vector<std::string>(commands.begin() + before, commands.end()) ==
+          std::vector<std::string>{":GVP#", ":GMA#"});
+    CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
+    rig.set_serial("012345ABCDEF#");
+    CHECK_NOTHROW(rig.driver->set_connected(true));
+    CHECK(rig.driver->get_connected());
+    rig.driver.reset();
+}
+
 TEST_CASE("ZWO transport loss during identity fails the fresh connection", "[zwo][telescope][identity][issue1523]") {
     const bool after_identity = GENERATE(false, true);
     IdentityRig rig;
@@ -450,6 +573,51 @@ TEST_CASE("ZWO transport loss during identity fails the fresh connection", "[zwo
     if (!after_identity) CHECK(rig.received() == std::vector<std::string>{":GVP#"});
 }
 
+TEST_CASE("ZWO failed identity admission does not pin a mount serial", "[zwo][telescope][identity][issue1581]") {
+    const bool duplicate = GENERATE(false, true);
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    MountIdentityClaim owner;
+    if (duplicate)
+        owner.claim("012345ABCDEF", true, 7);
+    else
+        rig.set_serial("e1#");
+    rig.make_driver(rig.info());
+    CHECK(error_code([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
+    REQUIRE_FALSE(rig.driver->get_connected());
+    owner.reset();
+    rig.set_serial("FEDCBA543210#");
+    CHECK_NOTHROW(rig.driver->set_connected(true));
+    CHECK(rig.driver->get_connected());
+}
+
+TEST_CASE("ZWO initialization failure after identity admission retains the serial but releases ownership",
+          "[zwo][telescope][identity][issue1581]") {
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    rig.make_driver(rig.info());
+    rig.hold_status.store(true);
+    auto connect = std::async(std::launch::async, [&] { return error_code([&] { rig.driver->set_connected(true); }); });
+    ReleaseProbe release{rig.probe};
+    REQUIRE(rig.probe.wait());
+    (void)rig.server.drop_connections(0ms);
+    rig.probe.release();
+    REQUIRE(connect.wait_for(5s) == std::future_status::ready);
+    CHECK(connect.get() == AlpacaError::DriverException);
+    REQUIRE_FALSE(rig.driver->get_connected());
+    {
+        MountIdentityClaim other;
+        CHECK_NOTHROW(other.claim("012345ABCDEF", true, 9));
+    }
+    rig.hold_status.store(false);
+    rig.set_serial("FEDCBA543210#");
+    CHECK(error_code([&] { rig.driver->set_connected(true); }) == AlpacaError::DriverException);
+    REQUIRE_FALSE(rig.driver->get_connected());
+    rig.set_serial("012345ABCDEF#");
+    CHECK_NOTHROW(rig.driver->set_connected(true));
+    CHECK(rig.driver->get_connected());
+}
+
 TEST_CASE("ZWO mount serial identity requires a fresh normalized twelve-hex reply",
           "[zwo][telescope][identity][issue1523]") {
     IdentityRig rig;
@@ -465,6 +633,62 @@ TEST_CASE("ZWO mount serial identity requires a fresh normalized twelve-hex repl
         CAPTURE(reply);
         rig.set_serial(reply);
         CHECK_THROWS_AS(protocol.get_mount_serial_number(), AlpacaException);
+    }
+}
+
+TEST_CASE("ZWO discovery probes accept supported terminated models on serial and TCP",
+          "[zwo][telescope][identity][discovery][issue1581]") {
+    const bool serial = GENERATE(false, true);
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    test::PtyResponder tty([&](const std::string& chunk) { return rig.respond(chunk); });
+    ZWODeviceInfo candidate{serial ? ConnectionType::Serial : ConnectionType::Network,
+                            serial ? tty.slave_path() : "",
+                            "127.0.0.1",
+                            rig.server.port(),
+                            "",
+                            "synthetic mount"};
+    for (const auto* model : {"AM3", "AM5", "AM5N", "AM7"}) {
+        for (const bool whitespace : {false, true}) {
+            CAPTURE(serial, model, whitespace);
+            rig.set_identity(whitespace ? " \t\r\n" + std::string(model) + " \t\r\n#" : std::string(model) + "#");
+            const auto found = enumerate_zwo_mounts({candidate}, 750);
+            REQUIRE(found.size() == 1);
+            CHECK(found.front().model_name == model);
+            CHECK(found.front().type == candidate.type);
+            CHECK(found.front().port_path == candidate.port_path);
+            CHECK(found.front().host == candidate.host);
+            CHECK(found.front().tcp_port == candidate.tcp_port);
+            CHECK(found.front().label == candidate.label);
+            if (serial) CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
+        }
+    }
+    CHECK(rig.received() == std::vector<std::string>(8, ":GVP#"));
+}
+
+TEST_CASE("ZWO discovery probes reject malformed and unterminated models and permit retry",
+          "[zwo][telescope][identity][discovery][issue1581]") {
+    const bool serial = GENERATE(false, true);
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    test::PtyResponder tty([&](const std::string& chunk) { return rig.respond(chunk); });
+    ZWODeviceInfo candidate{serial ? ConnectionType::Serial : ConnectionType::Network,
+                            serial ? tty.slave_path() : "",
+                            "127.0.0.1",
+                            rig.server.port(),
+                            "",
+                            "synthetic mount"};
+    for (const auto* reply : {"AM5", "", "#", "OnStep#", "0#", "e1#", "AM5garbage#", "AM50#", "am5#"}) {
+        CAPTURE(serial, reply);
+        rig.set_identity(reply);
+        const auto start = std::chrono::steady_clock::now();
+        CHECK(enumerate_zwo_mounts({candidate}, 300).empty());
+        CHECK(std::chrono::steady_clock::now() - start < 3s);
+        if (serial) CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
+        rig.set_identity("AM5#");
+        const auto retry = enumerate_zwo_mounts({candidate}, 750);
+        REQUIRE(retry.size() == 1);
+        CHECK(retry.front().model_name == "AM5");
     }
 }
 
@@ -488,6 +712,29 @@ TEST_CASE("ZWO unavailable serial identity refuses before writes and permits ret
     rig.set_serial("012345ABCDEF#");
     rig.driver->set_connected(true);
     CHECK(rig.driver->get_connected());
+}
+
+TEST_CASE("ZWO discovery keeps valid mixed candidates in input order",
+          "[zwo][telescope][identity][discovery][issue1581]") {
+    IdentityRig network, serial;
+    REQUIRE(network.server.ok());
+    serial.set_identity("AM7#");
+    test::PtyResponder tty([&](const std::string& chunk) { return serial.respond(chunk); });
+    test::PtyResponder foreign([](const std::string&) { return std::string("OnStep#"); });
+    const std::vector<ZWODeviceInfo> candidates{
+        {ConnectionType::Serial, foreign.slave_path(), "", 4030, "", "foreign"},
+        {ConnectionType::Network, "", "127.0.0.1", network.server.port(), "", "network"},
+        {ConnectionType::Serial, tty.slave_path(), "", 4030, "", "serial"}};
+    const auto found = enumerate_zwo_mounts(candidates, 750);
+    REQUIRE(found.size() == 2);
+    CHECK(found[0].model_name == "AM5N");
+    CHECK(found[0].label == "network");
+    CHECK(found[0].tcp_port == network.server.port());
+    CHECK(found[1].model_name == "AM7");
+    CHECK(found[1].label == "serial");
+    CHECK(found[1].port_path == tty.slave_path());
+    CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
+    CHECK_FALSE(util::is_serial_port_in_use(foreign.slave_path()));
 }
 
 TEST_CASE("ZWO duplicate mount identity refuses before configuration and permits retry",
