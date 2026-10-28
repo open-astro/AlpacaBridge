@@ -51,6 +51,7 @@ struct FakeSynScanState {
     alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
     alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
     std::atomic<bool> goto_seen{false};
+    std::atomic<bool> no_motion{false};  // GOTO acked, mount stays put, L says idle
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
     // #742: with `hold_goto` set the next GOTO goes unanswered and sets
@@ -86,7 +87,7 @@ struct FakeSynScanState {
 
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
-        if (!goto_seen.load()) return false;
+        if (!goto_seen.load() || no_motion.load()) return false;
         if (goto_never_ends.load()) return true;
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
         return now() - started < kGotoDuration;
@@ -118,7 +119,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
                     std::lock_guard<std::mutex> lock(st->mutex);
                     st->gotos.push_back(chunk);
                     // A precise GOTO lands on its aim, so the landing check after it (#1105) sees an arrival.
-                    if (chunk[0] == 'r' && chunk.size() >= 18) {
+                    if (chunk[0] == 'r' && chunk.size() >= 18 && !st->no_motion.load()) {
                         st->position = chunk.substr(1, 17) + "#";
                     }
                 }
@@ -1046,3 +1047,64 @@ TEST_CASE("SynScan sync slew - uncontended slew returns normally", "[synscan][te
 }
 
 #endif  // !_WIN32
+
+namespace {
+bool park_done(alpacacore::TelescopeDriver& d) {
+    try {
+        return d.get_at_park() || !d.get_slewing();
+    } catch (const alpacacore::AlpacaException&) {
+        return true;
+    }
+}
+std::unique_ptr<alpacacore::TelescopeDriver> mk(int port, alpacacore::util::TaskClock& clock) {
+    return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+}
+}  // namespace
+
+// Case A: saved park Dec 0; mount reads Dec +30 deg; GOTO acked, mount never moves.
+TEST_CASE("SynScan case A - refused park GOTO must not report AtPark", "[park][synscan]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+    driver->set_park();                      // RA 0, Dec 0
+    st->set_position("00000000,0AAAAAAB#");  // Dec +30 deg
+    st->no_motion.store(true);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return park_done(*driver); }));
+    bool err = false;
+    try { (void)driver->get_slewing(); } catch (const alpacacore::AlpacaException&) { err = true; }
+    bool at_park = false;
+    try { at_park = driver->get_at_park(); } catch (const alpacacore::AlpacaException&) {}
+    CHECK(st->goto_count.load() >= 1);
+    CHECK_FALSE(at_park);
+    CHECK(err);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan case B - already at park target still parks", "[park][synscan]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+    driver->set_park();
+    st->no_motion.store(true);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return park_done(*driver); }));
+    bool at_park = false;
+    try { at_park = driver->get_at_park(); } catch (const alpacacore::AlpacaException&) {}
+    CHECK(at_park);
+    driver->set_connected(false);
+}
