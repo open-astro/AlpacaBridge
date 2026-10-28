@@ -427,3 +427,41 @@ TEST_CASE("PolledState - a stale read from before a reset does not latch the new
     CHECK_FALSE(state.link_lost());
     CHECK(state.served().value.value == 42);
 }
+
+// Falsified by: polled_state.h:note_failure() latch lost_ without comparing the connection epoch.
+TEST_CASE("PolledState - a failed poll's verdict from before a reset does not latch the new connection",
+          "[polled_state][unit]") {
+    HookClock clock;
+    OperationGeneration generation;
+    std::atomic<bool> fail{false};
+    std::atomic<int> lost_calls{0};
+    PolledState<Frame>::Config config;
+    config.period = kPeriod;
+    config.max_age = 2 * kPeriod;
+    config.log_tag = "Test";
+    PolledState<Frame> state(
+        clock, generation, config,
+        [&] {
+            if (fail) throw std::runtime_error("no reply");
+            return Frame{1};
+        },
+        [&] { ++lost_calls; });
+
+    // Connection 1 holds one frame that ages past the staleness bound; the next poll fails.
+    state.poll_now_for_testing();
+    clock.inner.advance(alpacacore::util::kLinkStalenessBound + 1ms);
+    fail = true;
+
+    // From the failed probe: now() 1 and 2 are in the health update, 3 is the snapshot read,
+    // 4 is the staleness check outside health_mutex_, before the latch. The reconnect runs there.
+    int calls = 0;
+    clock.on_now = [&] {
+        if (++calls != 4) return;
+        clock.on_now = nullptr;
+        state.reset();
+    };
+    state.poll_now_for_testing();
+    REQUIRE(calls >= 4);
+    CHECK_FALSE(state.link_lost());
+    CHECK(lost_calls.load() == 0);
+}

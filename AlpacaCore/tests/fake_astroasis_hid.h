@@ -39,6 +39,7 @@ struct FakeHidState {
     bool moving = false;
     bool dead = false;         // reads time out, as a pulled cable does
     bool removed = false;      // write and read error out, as a vanished hidraw node does
+    bool read_fails = false;   // writes succeed but reads error out
     bool fail_config = false;  // MaxStep (0x30) goes unanswered
     bool fail_status = false;  // the state poll (0x32) goes unanswered
     bool fail_move = false;    // the device moves (0x36) but the reply is lost
@@ -130,7 +131,7 @@ public:
 
     int read(std::uint8_t* data, std::size_t length, int) override {
         std::lock_guard<std::mutex> lock(state_->mutex);
-        if (state_->removed) return -1;
+        if (state_->removed || state_->read_fails) return -1;
         if (state_->dead || state_->pending.empty()) {
             state_->pending.clear();
             return 0;

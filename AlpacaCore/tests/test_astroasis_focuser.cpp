@@ -707,3 +707,22 @@ TEST_CASE("Astroasis Focuser Driver - a getter after a successful connect never 
     CHECK_NOTHROW(driver->get_is_moving());
     driver->set_connected(false);
 }
+
+// Falsified by: astroasis_protocol_wrapper.cpp:send_command() drop the link_lost_ latch on a failed hid read.
+TEST_CASE("Astroasis Focuser Driver - a failed HID read drops Connected at once while writes succeed",
+          "[astroasis][focuser][snapshot][unit]") {
+    auto state = std::make_shared<FakeHidState>();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = connected_focuser(state, clock);
+    REQUIRE(driver->get_connected());
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->read_fails = true;
+    }
+    tick(clock);
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(false);
+}
