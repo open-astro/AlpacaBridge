@@ -577,6 +577,8 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     const int tec_calls = fake.call_count("get_tec_voltage_deciV");
     // Two poll intervals pass on the task clock; each tick is skipped.
     for (int i = 0; i < 2; ++i) {
+        // The wait_for_wait_count below proves the poller finished the tick (skipped it)
+        // and went back to waiting on the clock.
         const auto waits = clock.wait_count();
         clock.advance(std::chrono::milliseconds(1000));
         REQUIRE(clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));

@@ -592,6 +592,7 @@ private:
     // the Set* codes plus Halt; reads are the Get* codes plus IsMoving.
     static void require_aaf_direction(int action, bool write) {
         using namespace vendor::touptek;
+        // The two lists copy the ToupAAF constants by hand: a new code must be added here.
         const bool is_write = action == ToupAAF::SetPosition || action == ToupAAF::SetZero ||
                               action == ToupAAF::SetDirection || action == ToupAAF::SetMaxIncrement ||
                               action == ToupAAF::SetFine || action == ToupAAF::SetCoarse ||

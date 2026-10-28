@@ -88,6 +88,7 @@ private:
         int count{0};
     };
     std::map<std::string, Entry> by_id_;
+    // The single is-open record: a handle is open exactly while it has an entry here.
     std::map<Handle, std::string> id_by_handle_;
 };
 
