@@ -36,9 +36,7 @@ int count_leading_spaces(const std::string& line) {
     return count;
 }
 
-std::string trim_copy(std::string_view input) {
-    return std::string(util::trim_view(input));
-}
+std::string trim_copy(std::string_view input) { return std::string(util::trim_view(input)); }
 
 std::string unquote_string(const std::string& value) {
     if (value.size() < 2) {
@@ -319,11 +317,15 @@ LogLevel Config::parse_log_level(const std::string& level_str) {
     using alpacacore::logging::LogLevel;
     switch (util::parse_log_level_name(level_str).value_or(LogLevel::Info)) {
         case LogLevel::Trace:
-        case LogLevel::Debug: return alpacahttp::LogLevel::DEBUG;
-        case LogLevel::Warn: return alpacahttp::LogLevel::WARNING;
+        case LogLevel::Debug:
+            return alpacahttp::LogLevel::DEBUG;
+        case LogLevel::Warn:
+            return alpacahttp::LogLevel::WARNING;
         case LogLevel::Error:
-        case LogLevel::Critical: return alpacahttp::LogLevel::ERROR;
-        case LogLevel::Info: break;
+        case LogLevel::Critical:
+            return alpacahttp::LogLevel::ERROR;
+        case LogLevel::Info:
+            break;
     }
     return alpacahttp::LogLevel::INFO;
 }

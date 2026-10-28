@@ -5005,11 +5005,8 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
                 level_node = &body["Level"];
             }
             if (level_node && !level_node->is_string()) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::INVALID_VALUE,
-                    "'level' must be a string"
-                );
+                AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                                         "'level' must be a string");
                 response.set_body(err);
                 return response;
             }

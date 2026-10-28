@@ -524,13 +524,13 @@ const char* core_level_to_persistent_string(alpacacore::logging::LogLevel level)
     return "INFO";
 }
 
-} // namespace
+}  // namespace
 
 std::optional<alpacacore::logging::LogLevel> parse_log_level_name(std::string_view text) {
     using alpacacore::logging::LogLevel;
     static constexpr std::pair<std::string_view, LogLevel> kTable[] = {
-        {"trace", LogLevel::Trace}, {"debug", LogLevel::Debug}, {"info", LogLevel::Info},
-        {"warn", LogLevel::Warn},   {"warning", LogLevel::Warn}, {"error", LogLevel::Error},
+        {"trace", LogLevel::Trace},       {"debug", LogLevel::Debug},    {"info", LogLevel::Info},
+        {"warn", LogLevel::Warn},         {"warning", LogLevel::Warn},   {"error", LogLevel::Error},
         {"critical", LogLevel::Critical}, {"fatal", LogLevel::Critical},
     };
     std::string lower(trim_view(text));

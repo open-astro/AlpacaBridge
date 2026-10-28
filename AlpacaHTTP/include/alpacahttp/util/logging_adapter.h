@@ -12,15 +12,17 @@
 
 #pragma once
 
-#include "../config.h"
 #include <alpacacore/util/logging.h>
-#include <string>
-#include <string_view>
-#include <functional>
+
 #include <cctype>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
+
+#include "../config.h"
 
 namespace alpacahttp::util {
 
