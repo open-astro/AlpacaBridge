@@ -14,6 +14,7 @@
 
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
+#include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
 #include <barrier>
 #include <exception>
@@ -23,6 +24,8 @@
 
 #include "catch2_compat.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
+#include "fake_zwo_mount.h"
 
 namespace {
 
@@ -52,6 +55,31 @@ ConnectionInfo auto_info() {
     info.response_timeout_ms = 1500;
     return info;
 }
+
+// The wait diagnostic is emitted outside the registry lock, before its ownership recheck.
+struct ProbeWaitLog {
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+    std::promise<void> entered;
+    std::future<void> waiting = entered.get_future();
+    std::atomic<bool> first{true};
+
+    explicit ProbeWaitLog(std::function<void()> on_wait = [] {}) {
+        using namespace alpacacore::logging;
+        set_log_level(LogLevel::Debug);
+        set_log_sink([this, on_wait](LogLevel, std::string_view component, std::string_view message) {
+            if (component == "ZWO" && message.starts_with("Waiting up to 1500 ms for a network discovery probe") &&
+                first.exchange(false)) {
+                entered.set_value();
+                on_wait();
+            }
+        });
+    }
+    ~ProbeWaitLog() {
+        alpacacore::logging::set_log_sink(previous);
+        alpacacore::logging::set_log_level(level);
+    }
+};
 
 }  // namespace
 
@@ -325,6 +353,283 @@ TEST_CASE("ZWO mount Auto - deferred close keeps its endpoint reserved", "[zwo][
     REQUIRE(status == std::future_status::ready);
     CHECK_FALSE(error);
     owner.disconnect();
+}
+
+TEST_CASE("ZWO mount network - explicit connect waits for a discovery probe to release", "[zwo][network][issue1620]") {
+    ProbeWaitLog log;
+    std::promise<void> probing, resume;
+    auto released = resume.get_future().share();
+    std::atomic<bool> first{true};
+    bool valid = true;
+    SECTION("valid discovery") {}
+    SECTION("invalid discovery") { valid = false; }
+    FakeMountServer server([&](const std::string&) {
+        if (first.exchange(false)) {
+            probing.set_value();
+            released.wait();
+            if (!valid) return std::string("NotAMount#");
+        }
+        return std::string("AM5#");
+    });
+    REQUIRE(server.ok());
+    auto probe = std::async(std::launch::async, [&] { return enumerate_zwo_mounts(candidates(server), 5000); });
+    const auto entered = probing.get_future().wait_for(std::chrono::seconds(2));
+    ZWOMountProtocolWrapper explicit_link;
+    auto connecting =
+        std::async(std::launch::async, [&] { return explicit_link.connect(network_info("localhost", server.port())); });
+    const auto waited = log.waiting.wait_for(std::chrono::seconds(2));
+    const auto pending = connecting.wait_for(std::chrono::milliseconds(0));
+    const auto sockets = server.accepted_connections();
+    resume.set_value();
+    const auto found = probe.get();
+    const bool connected = connecting.get();
+    REQUIRE(entered == std::future_status::ready);
+    CHECK(waited == std::future_status::ready);
+    CHECK(pending == std::future_status::timeout);
+    CHECK(sockets == 1);
+    REQUIRE(found.size() == (valid ? 1 : 0));
+    REQUIRE(connected);
+    CHECK(explicit_link.get_mount_info() == "AM5");
+    CHECK(server.accepted_connections() == 2);
+}
+
+TEST_CASE("ZWO mount network - cancelling a probe wait preserves ownership and permits retry",
+          "[zwo][network][issue1620]") {
+    bool at_release = false;
+    SECTION("cancel while probe remains held") {}
+    SECTION("cancel before ownership recheck after release") { at_release = true; }
+    std::promise<void> recheck;
+    auto allowed = recheck.get_future().share();
+    ProbeWaitLog log([&] {
+        if (at_release) allowed.wait();
+    });
+    std::promise<void> probing, resume;
+    auto released = resume.get_future().share();
+    std::atomic<bool> first{true};
+    FakeMountServer server([&](const std::string&) {
+        if (first.exchange(false)) {
+            probing.set_value();
+            released.wait();
+        }
+        return std::string("AM5#");
+    });
+    REQUIRE(server.ok());
+    auto probe = std::async(std::launch::async, [&] { return enumerate_zwo_mounts(candidates(server), 5000); });
+    const auto entered = probing.get_future().wait_for(std::chrono::seconds(2));
+    ZWOMountProtocolWrapper explicit_link;
+    auto connecting =
+        std::async(std::launch::async, [&] { return explicit_link.connect(network_info("127.0.0.1", server.port())); });
+    const auto waited = log.waiting.wait_for(std::chrono::seconds(2));
+    if (at_release) {
+        resume.set_value();
+        (void)probe.get();
+    }
+    explicit_link.cancel_pending_io();
+    recheck.set_value();
+    const auto cancelled = connecting.wait_for(std::chrono::milliseconds(500));
+    const auto sockets = server.accepted_connections();
+    if (!at_release) {
+        resume.set_value();
+        (void)probe.get();
+    }
+    const bool connected = connecting.get();
+    REQUIRE(entered == std::future_status::ready);
+    REQUIRE(waited == std::future_status::ready);
+    CHECK(cancelled == std::future_status::ready);
+    CHECK_FALSE(connected);
+    CHECK_FALSE(explicit_link.is_connected());
+    CHECK(explicit_link.last_connect_error().find("cancelled") != std::string::npos);
+    CHECK(sockets == 1);
+    REQUIRE(explicit_link.connect(network_info("127.0.0.1", server.port())));
+    CHECK(explicit_link.get_mount_info() == "AM5");
+    explicit_link.disconnect();
+    CHECK(enumerate_zwo_mounts(candidates(server), 500).size() == 1);
+}
+
+TEST_CASE("ZWO mount network - probe wait expires despite unrelated endpoint releases", "[zwo][network][issue1620]") {
+    using namespace std::chrono_literals;
+    ProbeWaitLog log;
+    std::promise<void> probing, resume;
+    auto released = resume.get_future().share();
+    std::atomic<bool> first{true};
+    FakeMountServer server([&](const std::string&) {
+        if (first.exchange(false)) {
+            probing.set_value();
+            released.wait();
+        }
+        return std::string("AM5#");
+    });
+    FakeMountServer other([](const std::string&) { return std::string("AM7#"); }, INADDR_LOOPBACK + 1);
+    REQUIRE(server.ok());
+    REQUIRE(other.ok());
+    auto probe = std::async(std::launch::async, [&] { return enumerate_zwo_mounts(candidates(server), 5000); });
+    const auto entered = probing.get_future().wait_for(2s);
+    ZWOMountProtocolWrapper explicit_link;
+    const auto start = std::chrono::steady_clock::now();
+    auto connecting =
+        std::async(std::launch::async, [&] { return explicit_link.connect(network_info("localhost", server.port())); });
+    const auto waited = log.waiting.wait_for(2s);
+    std::atomic<unsigned> released_others{0};
+    std::jthread churn([&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            ZWOMountProtocolWrapper link;
+            if (link.connect(network_info("127.0.0.2", other.port()))) ++released_others;
+            link.disconnect();
+            std::this_thread::sleep_for(10ms);  // Real TCP registry notifications, not a driver timer.
+        }
+    });
+    const auto expired = connecting.wait_for(2200ms);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    churn.request_stop();
+    churn.join();
+    if (expired != std::future_status::ready) explicit_link.cancel_pending_io();
+    const bool connected = connecting.get();
+    const auto reason = explicit_link.last_connect_error();
+    const auto still_probing = probe.wait_for(0ms);
+    const auto sockets = server.accepted_connections();
+    // A failed waiter must not erase the still-active probe's claim.
+    const auto skipped = enumerate_zwo_mounts(candidates(server), 50);
+    resume.set_value();
+    (void)probe.get();
+    REQUIRE(entered == std::future_status::ready);
+    REQUIRE(waited == std::future_status::ready);
+    CHECK(expired == std::future_status::ready);
+    CHECK(elapsed >= 1400ms);
+    CHECK(elapsed < 2200ms);
+    CHECK(released_others.load() > 1);
+    CHECK_FALSE(connected);
+    CHECK(reason.find("1500 ms") != std::string::npos);
+    CHECK(still_probing == std::future_status::timeout);
+    CHECK(sockets == 1);
+    CHECK(skipped.empty());
+    REQUIRE(explicit_link.connect(network_info("localhost", server.port())));
+    CHECK(explicit_link.get_mount_info() == "AM5");
+}
+
+TEST_CASE("ZWO mount network - waiting explicit entry refuses an Auto winner", "[zwo][network][issue1620]") {
+    using namespace std::chrono_literals;
+    std::promise<void> recheck;
+    auto allowed = recheck.get_future().share();
+    ProbeWaitLog log([&] { allowed.wait(); });
+    std::promise<void> probing, resume;
+    auto released = resume.get_future().share();
+    std::atomic<bool> first{true};
+    FakeMountServer server([&](const std::string&) {
+        if (first.exchange(false)) {
+            probing.set_value();
+            released.wait();
+        }
+        return std::string("AM5#");
+    });
+    REQUIRE(server.ok());
+    ZWOMountProtocolWrapper automatic(false, candidates(server)), explicit_link;
+    auto auto_connect = std::async(std::launch::async, [&] { return automatic.connect(auto_info()); });
+    const auto entered = probing.get_future().wait_for(2s);
+    auto connecting =
+        std::async(std::launch::async, [&] { return explicit_link.connect(network_info("localhost", server.port())); });
+    const auto waited = log.waiting.wait_for(2s);
+    resume.set_value();
+    const bool auto_connected = auto_connect.get();
+    recheck.set_value();
+    const auto refused = connecting.wait_for(500ms);
+    const bool connected = connecting.get();
+    REQUIRE(entered == std::future_status::ready);
+    REQUIRE(waited == std::future_status::ready);
+    REQUIRE(auto_connected);
+    CHECK(refused == std::future_status::ready);
+    CHECK_FALSE(connected);
+    CHECK(automatic.get_mount_info() == "AM5");
+    CHECK(server.accepted_connections() == 2);
+    // A new explicit caller also refuses immediately, without entering the probe wait.
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_FALSE(explicit_link.connect(network_info("localhost", server.port())));
+    CHECK(std::chrono::steady_clock::now() - start < 500ms);
+    CHECK(automatic.get_mount_info() == "AM5");
+    CHECK(server.accepted_connections() == 2);
+}
+
+TEST_CASE("ZWO mount network - disconnect during probe contention leaves the driver offline",
+          "[zwo][network][telescope][issue1620]") {
+    using namespace std::chrono_literals;
+    bool sync_connect = false, sync_disconnect = false;
+    SECTION("async connect and async disconnect") {}
+    SECTION("async connect and sync disconnect") { sync_disconnect = true; }
+    SECTION("sync connect and sync disconnect") { sync_connect = sync_disconnect = true; }
+    ProbeWaitLog log;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock, "AM5");
+    REQUIRE(mount.ok());
+    const std::vector<ZWODeviceInfo> inputs{{ConnectionType::Network, "", "127.0.0.1", mount.port(), "", "loopback"}};
+    mount.hold_reply(":GVP");
+    auto probe = std::async(std::launch::async, [&] { return enumerate_zwo_mounts(inputs, 5000); });
+    const bool probing = mount.wait_until_held(2s);
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, network_info("localhost", mount.port()), clock);
+    auto connect = std::async(std::launch::async, [&] {
+        if (sync_connect)
+            driver->set_connected(true);
+        else
+            driver->connect();
+    });
+    const auto waited = log.waiting.wait_for(2s);
+    auto getters = std::async(std::launch::async, [&] {
+        return !driver->get_connected() && driver->get_connecting() == !sync_connect && !driver->get_name().empty();
+    });
+    const auto responsive = getters.wait_for(300ms);
+    auto disconnect = std::async(std::launch::async, [&] {
+        if (sync_disconnect)
+            driver->set_connected(false);
+        else
+            driver->disconnect();
+    });
+    const auto deferred = disconnect.wait_for(100ms);
+    mount.release();
+    (void)probe.get();
+    connect.get();
+    disconnect.get();
+    const bool getter_state = getters.get();
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();  // Connection-thread completion, not a driver timer.
+    }
+    const bool finished = !driver->get_connecting();
+    const bool offline = !driver->get_connected();
+    driver.reset();  // Also joins deferred physical close before testing reservation release.
+    REQUIRE(probing);
+    REQUIRE(waited == std::future_status::ready);
+    CHECK(responsive == std::future_status::ready);
+    CHECK(getter_state);
+    CHECK(deferred == (sync_connect ? std::future_status::timeout : std::future_status::ready));
+    CHECK(finished);
+    CHECK(offline);
+    CHECK(enumerate_zwo_mounts(inputs, 500).size() == 1);
+}
+
+TEST_CASE("ZWO mount network - cancellation during Auto discovery prevents final open", "[zwo][network][issue1620]") {
+    std::promise<void> probing, resume;
+    auto released = resume.get_future().share();
+    std::atomic<bool> first{true};
+    FakeMountServer server([&](const std::string&) {
+        if (first.exchange(false)) {
+            probing.set_value();
+            released.wait();
+        }
+        return std::string("AM5#");
+    });
+    REQUIRE(server.ok());
+    ZWOMountProtocolWrapper automatic(false, candidates(server));
+    auto connecting = std::async(std::launch::async, [&] { return automatic.connect(auto_info()); });
+    const auto entered = probing.get_future().wait_for(std::chrono::seconds(2));
+    automatic.cancel_pending_io();
+    resume.set_value();
+    const bool connected = connecting.get();
+    REQUIRE(entered == std::future_status::ready);
+    CHECK_FALSE(connected);
+    CHECK_FALSE(automatic.is_connected());
+    CHECK(automatic.last_connect_error().find("cancelled") != std::string::npos);
+    CHECK(server.accepted_connections() == 1);
+    REQUIRE(automatic.connect(auto_info()));
+    CHECK(automatic.get_mount_info() == "AM5");
+    CHECK(server.accepted_connections() == 3);
 }
 
 #endif  // !_WIN32
