@@ -608,7 +608,14 @@ public:
                 const std::string mount_serial = protocol.get_mount_serial_number();
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    if (!verified_mount_serial_.empty() && verified_mount_serial_ != mount_serial) {
+                        throw AlpacaException(
+                            "ZWO endpoint identifies a different mount. Restore the original mount, or restart the "
+                            "service to use an intentionally replaced mount.",
+                            AlpacaError::DriverException);
+                    }
                     mount_identity_.claim(mount_serial, connection_info_.type == ConnectionType::Auto, device_number_);
+                    if (verified_mount_serial_.empty()) verified_mount_serial_ = mount_serial;
                     mount_info_ = mount_info;
                 }
                 protocol.finish_identity_check();
@@ -2906,6 +2913,8 @@ private:
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     std::string mount_info_;
+    // Active claims release on teardown; this identity lasts until the driver is recreated.
+    std::string verified_mount_serial_;  // mutex_
 
     double target_ra_hours_;
     double target_dec_degrees_;

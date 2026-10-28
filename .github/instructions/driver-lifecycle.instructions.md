@@ -112,7 +112,9 @@ vendor-agnostic; do them in the driver from the start.
   slot mutex, the `StateSnapshot` mutex, the `util::PolledState` mutexes (a driver
   that composes `PolledState` for its poll-fed frame) and the `util::CaptureSession` mutex (a
   camera that composes the session; it never nests with the slot mutex) are leaves that nest
-  under `mutex_` (decisions 0006, 0010, 0016, 0020). Never acquire in reverse, and
+  under `mutex_` (decisions 0006, 0010, 0016, 0020). The ZWO `MountIdentityClaim`
+  registry mutex is also a leaf under `mutex_`: no I/O, joins or other locks beneath it.
+  Never acquire in reverse, and
   convert a whole driver class in one PR so the old and new order never mix in one
   class.
 - An SDK call on a closable handle is safe only if the handle can't be closed
