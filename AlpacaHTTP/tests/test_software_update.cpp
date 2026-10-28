@@ -919,8 +919,9 @@ int main() {
 
     if (std::system("command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1") == 0) {
         // case: a stop signal during the apt-get update puts the previous drop-in back and leaves no temp file
-        // Falsified by: removing the trap from the helper leaves the beta drop-in behind (stable to beta), an
-        // empty or missing one (beta to stable) and the `.alpacabridge-beta.*` backup, and writes no `killed by`.
+        // Falsified by: SystemSoftwareUpdateBackend::read_channel (software_update.cpp) always returning Beta fails
+        // the Stable expectations; removing the trap from the helper also fails it (the beta drop-in stays behind,
+        // the backup file stays, and no `killed by` line is written).
         namespace fs = std::filesystem;
         const fs::path dir = fs::temp_directory_path() / "alpacabridge-channel-trap-test";
         fs::remove_all(dir);
@@ -965,32 +966,41 @@ int main() {
             const auto last = t.rfind("=== RESULT:");
             return last != std::string::npos && t.find(tail, last) != std::string::npos;
         };
+        alpacahttp::util::SystemSoftwareUpdateBackend backend("alpacabridge-update.service", (dir / "u.log").string(),
+                                                              dropin.string(), (dir / "c.log").string());
+        const char* beta = channel_name(UpdateChannel::Beta);
+        const char* stable = channel_name(UpdateChannel::Stable);
         const char* kBeta = "Types: deb\nURIs: https://beta.example.invalid\nComponents: beta\n";
 
         stub("sleep 30");
-        EXPECT(switch_to("beta", nullptr, true) != 0);
+        EXPECT(switch_to(beta, nullptr, true) != 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Stable);
         EXPECT(!fs::exists(dropin));
         EXPECT(leftovers() == 0);
         EXPECT(ends_with("RESULT: failure"));
         EXPECT(ends_with("killed by SIGTERM"));
 
-        EXPECT(switch_to("stable", kBeta, true) != 0);
+        EXPECT(switch_to(stable, kBeta, true) != 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Beta);
         EXPECT(read_file(dropin.string()) == kBeta);
         EXPECT(leftovers() == 0);
         EXPECT(ends_with("killed by SIGTERM"));
 
-        EXPECT(switch_to("beta", kBeta, true) != 0);
+        EXPECT(switch_to(beta, kBeta, true) != 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Beta);
         EXPECT(read_file(dropin.string()) == kBeta);
         EXPECT(leftovers() == 0);
         EXPECT(ends_with("killed by SIGTERM"));
 
         // A finished switch keeps its result: the trap is gone once apt-get update has returned.
         stub("exit 0");
-        EXPECT(switch_to("beta", nullptr, false) == 0);
+        EXPECT(switch_to(beta, nullptr, false) == 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Beta);
         EXPECT(fs::exists(dropin));
         EXPECT(leftovers() == 0);
         EXPECT(ends_with("RESULT: success"));
-        EXPECT(switch_to("stable", kBeta, false) == 0);
+        EXPECT(switch_to(stable, kBeta, false) == 0);
+        EXPECT(backend.read_channel() == UpdateChannel::Stable);
         EXPECT(!fs::exists(dropin));
         EXPECT(leftovers() == 0);
         fs::remove_all(dir);
