@@ -689,8 +689,10 @@ TEST_CASE("Celestron async - slew timeout is a persistent failure", "[celestron]
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     std::string message;
+    const auto started = clock.now();
     REQUIRE(advance_until(
         clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, std::chrono::seconds(1)));
+    CHECK(clock.now() - started <= std::chrono::seconds(125));  // the 120 s timeout itself, not only its message
     CHECK(message.find("timed out after 120s") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
