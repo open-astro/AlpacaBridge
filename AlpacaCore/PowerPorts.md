@@ -41,7 +41,7 @@ Four 12V DC outputs on GPIO 12, 13, 26, 18. Each port can be configured independ
 
 The factory ASIair Pro ships **32-bit Raspbian Buster (armv7l)**. AlpacaBridge is arm64-only. Flash one of:
 
-- Raspberry Pi OS (64-bit) Bookworm or Trixie, **or**
+- Raspberry Pi OS (64-bit) Trixie, **or**
 - Debian 13 (Trixie) arm64
 
 onto the ASIair Pro's microSD card before continuing.
@@ -82,11 +82,11 @@ Reboot for the change to take effect. Without this line the ports come up OFF an
 
 ### 4. Install AlpacaBridge
 
-Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:11111`.
+Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:6800`.
 
 ### 5. Add the Switch device
 
-Open `http://<your-asiair-ip>:11111/` in a browser:
+Open `http://<your-asiair-ip>:6800/` in a browser:
 
 1. **Configure** tab → **Add Device**
 2. **Device Type**: Switch
@@ -96,7 +96,7 @@ Open `http://<your-asiair-ip>:11111/` in a browser:
 6. **Power Ports** table appears with the four ports pre-filled to the Pi 4 ASIair Pro defaults. Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Rename channels in the **Channel name** column if you want NINA to label them by role (e.g. "Mount", "Dew Heater"). The **GPIO chip device** is fixed at `/dev/gpiochip0` and its field is read-only; only the **PWM frequency** can change.
 7. Submit
 
-Or `POST` the equivalent JSON to the management API:
+Or `POST` the equivalent JSON to `/management/v1/configuredevice`:
 
 ```json
 {
@@ -112,10 +112,10 @@ Or `POST` the equivalent JSON to the management API:
 Connect the device from the **Devices** tab. You should see four channels (Port 1–4). From a second SSH session, watch the live GPIO state while you toggle a port in the Web UI:
 
 ```bash
-gpioget gpiochip0 12 13 26 18
+gpioget --numeric -c gpiochip0 12 13 26 18
 ```
 
-The value of the toggled pin will flip between `inactive` and `active`.
+The value of the toggled line flips between `0` (off) and `1` (on).
 
 ### Advanced configuration
 
@@ -169,7 +169,7 @@ Not supported. The stock `zwoair_imager` claims the GPIO via `pigpiod`, and Alpa
 
 ## ZWO ASIair Plus (Raspberry Pi CM4)
 
-The CM4-based ASIair Plus is a **Raspberry Pi Compute Module 4 (BCM2711)** and drives its four 12V DC outputs through the exact same wiring as the Pi 4 ASIair Pro: GPIO 12, 13, 26, 18 on `/dev/gpiochip0` (`pinctrl-bcm2711`), active-high, default-on at boot. It therefore **reuses the existing libgpiod `asiair` driver** — there is no separate "Plus CM4" switch type. (This is the CM4 variant only; the Rockchip RK3568 ASIair Plus is a completely different controller — see the [RK3568 section](#zwo-asiair-plus-rockchip-rk3568).)
+The CM4-based ASIair Plus is a **Raspberry Pi Compute Module 4 (BCM2711)** and drives its four 12V DC outputs through the exact same wiring as the Pi 4 ASIair Pro: GPIO 12, 13, 26, 18 on `/dev/gpiochip0` (`pinctrl-bcm2711`), active-high, default-on at boot. It therefore **runs the same libgpiod driver as the Pro**, under its own switch type `asiair-plus-picm4`, which changes only the reported model name. (This is the CM4 variant only; the Rockchip RK3568 ASIair Plus is a completely different controller — see the [RK3568 section](#zwo-asiair-plus-rockchip-rk3568).)
 
 > **Mapping verified on real hardware.** Against a live stock-firmware unit (Port 1 ON, Port 2 dew heater 59%, Port 3 flat panel 34%, Port 4 ON), the BCM GPIO bank read back exactly: GPIO12 static-high (Port 1), GPIO13 pigpio PWM at 59% (Port 2), GPIO26 PWM at 34% (Port 3), GPIO18 static-high (Port 4). Identical to `default_asiair_pro_config()`.
 
@@ -184,7 +184,7 @@ The CM4-based ASIair Plus is a **Raspberry Pi Compute Module 4 (BCM2711)** and d
 
 The factory CM4 ASIair Plus ships **32-bit Raspbian (armv7l)** (confirmed: `uname -m` reports `armv7l`, kernel `5.10.27-v7l`). AlpacaBridge is arm64-only. Flash one of:
 
-- Raspberry Pi OS (64-bit) Bookworm or Trixie, **or**
+- Raspberry Pi OS (64-bit) Trixie, **or**
 - Debian 13 (Trixie) arm64
 
 onto the CM4's eMMC / microSD before continuing.
@@ -227,28 +227,28 @@ Reboot for the change to take effect. Without this line the ports come up OFF an
 
 ### 4. Install AlpacaBridge
 
-Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:11111`.
+Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:6800`.
 
 ### 5. Add the Switch device
 
-Open `http://<your-asiair-plus-ip>:11111/` in a browser:
+Open `http://<your-asiair-plus-ip>:6800/` in a browser:
 
 1. **Configure** tab → **Add Device**
 2. **Device Type**: Switch
 3. **Vendor**: ZWO
-4. **Switch Type**: **ASIair Pro 12V Power Switch** — this is the libgpiod driver, and it serves both the Pi 4 Pro and the CM4 Plus. The pre-filled GPIO defaults (12/13/26/18) are already correct for the CM4 Plus; leave them as-is.
+4. **Switch Type**: **ASIAIR Plus 12V Power Switch (Pi CM4)** — the same libgpiod driver as the Pi 4 Pro, reported as "ASIAIR Plus (Pi CM4)". The pre-filled GPIO defaults (12/13/26/18) are already correct for the CM4 Plus; leave them as-is.
 5. **Device Number**: 0 (or any unique number)
 6. In the **Power Ports** table, tick the **PWM** checkbox on any port you'll use with a dew heater or flat panel, and rename channels to taste. The **GPIO chip device** is fixed at `/dev/gpiochip0` and its field is read-only; only the **PWM frequency** can change.
 7. Submit
 
-Or `POST` the equivalent JSON to the management API:
+Or `POST` the equivalent JSON to `/management/v1/configuredevice`:
 
 ```json
 {
   "deviceType": "switch",
   "deviceNumber": 0,
   "vendor": "zwo",
-  "switchType": "asiair"
+  "switchType": "asiair-plus-picm4"
 }
 ```
 
@@ -257,10 +257,10 @@ Or `POST` the equivalent JSON to the management API:
 Connect the device from the **Devices** tab. You should see four channels (Port 1–4). From a second SSH session, watch the live GPIO state while you toggle a port in the Web UI:
 
 ```bash
-gpioget gpiochip0 12 13 26 18
+gpioget --numeric -c gpiochip0 12 13 26 18
 ```
 
-The value of the toggled pin will flip between `inactive` and `active`.
+The value of the toggled line flips between `0` (off) and `1` (on).
 
 ### Advanced configuration, disconnect behavior, and stock-app coexistence
 
@@ -302,17 +302,17 @@ sudo usermod -aG gpio "$USER"
 
 > **Runtime libs** (`libusb-1.0-0`, `libudev1`, `libcurl4`) are what AlpacaBridge links against at runtime — required even if you install only the `.deb`. **Dev libs** (`libusb-1.0-0-dev`, `libudev-dev`, `libcurl4-openssl-dev`, `nlohmann-json3-dev`, `catch2`) and **build tools** (`git`, `build-essential`, `cmake`) are needed when building from source on the device via `build_and_run.sh`. They are harmless on a `.deb`-only target. The Plus driver does **not** use libgpiod (unlike the Pro), so no `libgpiod*` packages are required.
 
-The udev rule shipped with AlpacaBridge (`/etc/udev/rules.d/99-zwo-asiair-plus.rules`) grants the `gpio` group `0660` access to `/dev/pwm-gpio-misc`. Without it, only root can open the device — and AlpacaBridge intentionally runs unprivileged. The rule is installed automatically by `build_and_run.sh` (or by the `.deb` postinst), which also handles the `groupadd` / `usermod` steps shown above — the manual commands here just make the dependency explicit for first-time deployments.
+The udev rule shipped with AlpacaBridge (`/usr/lib/udev/rules.d/99-zwo-asiair-plus.rules`) grants the `gpio` group `0660` access to `/dev/pwm-gpio-misc`. Without it, only root can open the device — and AlpacaBridge intentionally runs unprivileged. The rule is installed automatically by `build_and_run.sh` (or by the `.deb` postinst), which also handles the `groupadd` / `usermod` steps shown above — the manual commands here just make the dependency explicit for first-time deployments.
 
 After adding yourself to the `gpio` group, log out and back in (or `newgrp gpio`) so membership applies to your current shell.
 
 ### 3. Install AlpacaBridge
 
-Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:11111`.
+Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:6800`.
 
 ### 4. Add the Switch device
 
-Open `http://<your-asiair-plus-ip>:11111/` in a browser:
+Open `http://<your-asiair-plus-ip>:6800/` in a browser:
 
 1. **Configure** tab → **Add Device**
 2. **Device Type**: Switch
@@ -322,7 +322,7 @@ Open `http://<your-asiair-plus-ip>:11111/` in a browser:
 6. The **Power Ports** table is simpler than the Pro's — only the channel name and PWM checkbox are configurable per port. The kernel module fixes the ioctl index for each port (DC1=4, DC2=5, DC3=6, DC4=7), so there's no GPIO-line field. Tick **PWM** on any port you intend to use with a dew heater or flat panel.
 7. Submit
 
-Or via the management API:
+Or `POST` it to `/management/v1/configuredevice`:
 
 ```json
 {
@@ -353,7 +353,7 @@ For non-default deployments (e.g. you've remapped the device node), the full con
   "vendor": "zwo",
   "switchType": "asiair-plus-rk3568",
   "devicePath": "/dev/pwm-gpio-misc",
-  "pwmFrequencyHz": 1000,
+  "pwmFrequencyHz": 50,
   "ports": [
     { "name": "Mount Power",  "pwm": false },
     { "name": "Camera Power", "pwm": false },
@@ -390,7 +390,7 @@ The StellaVita is ToupTek's CM4-based observatory controller — a **Raspberry P
 
 ### 1. Use an arm64 OS
 
-AlpacaBridge is arm64-only. The StellaVita CM4 must run a 64-bit OS — Raspberry Pi OS (64-bit) Bookworm or Trixie, or Debian 13 (Trixie) arm64. (The validated unit shipped on Debian 13 Trixie aarch64.) If your unit is on a 32-bit image, re-image the CM4's eMMC / microSD before continuing.
+AlpacaBridge is arm64-only. The StellaVita CM4 must run a 64-bit OS — Raspberry Pi OS (64-bit) Trixie, or Debian 13 (Trixie) arm64. (The validated unit shipped on Debian 13 Trixie aarch64.) If your unit is on a 32-bit image, re-image the CM4's eMMC / microSD before continuing.
 
 ### 2. Install runtime dependencies and add yourself to the gpio group
 
@@ -434,26 +434,28 @@ This line should already be present under the `[all]` section. It configures the
 
 ### 4. Install AlpacaBridge
 
-Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:11111`.
+Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:6800`.
 
 ### 5. Add the Switch device
 
-Open `http://<your-stellavita-ip>:11111/` in a browser:
+Open `http://<your-stellavita-ip>:6800/` in a browser:
 
 1. **Configure** tab → **Add Device**
 2. **Device Type**: Switch
 3. **Vendor**: ToupTek
-4. **Device Number**: 0 (or any unique number)
-5. The **Power Ports** table appears pre-filled with the four StellaVita ports (Port 1–4, GPIO 18/10/17/4). Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. The **GPIO Chip** is fixed at `/dev/gpiochip0` (the server refuses any other chip); only the **PWM Frequency** can change.
-6. Submit
+4. **Switch Type**: **StellaVita PowerBox (12V GPIO ports)**. The first option, Camera Thermal, is a different driver.
+5. **Device Number**: 0 (or any unique number)
+6. The **Power Ports** table appears pre-filled with the four StellaVita ports (Port 1–4, GPIO 18/10/17/4). Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. The **GPIO Chip** is fixed at `/dev/gpiochip0` (the server refuses any other chip); only the **PWM Frequency** can change.
+7. Submit
 
-Or `POST` the equivalent JSON to the management API:
+Or `POST` the equivalent JSON to `/management/v1/configuredevice`:
 
 ```json
 {
   "deviceType": "switch",
   "deviceNumber": 0,
-  "vendor": "touptek"
+  "vendor": "touptek",
+  "switchType": "stellavita"
 }
 ```
 
@@ -467,7 +469,7 @@ gpioget --numeric -c gpiochip0 18 10 17 4
 
 The value of the toggled line flips between `0` (off) and `1` (on). While connected, `gpioinfo -c gpiochip0 18` shows the line claimed by consumer `alpacabridge-stellavita-powerbox`.
 
-> **Port names are session-only.** Renaming a channel through an ASCOM client (e.g. NINA's `SetSwitchName`) is kept in memory for the life of the driver instance and is **not** persisted — the names reset to `Port 1`–`Port 4` on the next server restart or reconnect. The StellaVita web form has no name fields; if you need persistent custom labels, set them in your client's own device profile.
+> **Client renames are session-only.** Renaming a channel through an ASCOM client (e.g. NINA's `SetSwitchName`) is kept in memory for the life of the driver instance and is **not** persisted — the names go back to the configured names on the next server restart or reconnect. The StellaVita web form has no name fields. For persistent names, set `ports[].name` in the device JSON (see [Dimmable ports](#dimmable-ports-pwm) below).
 
 ### Dimmable ports (PWM)
 
@@ -482,6 +484,7 @@ The defaults match the StellaVita wiring. The configurable fields are the PWM fr
   "deviceType": "switch",
   "deviceNumber": 0,
   "vendor": "touptek",
+  "switchType": "stellavita",
   "gpioChip": "/dev/gpiochip0",
   "pwmFrequencyHz": 100,
   "ports": [
@@ -529,7 +532,7 @@ The OpenAstro image already ships `libgpiod` v2 (`libgpiod3` plus the `gpiod` CL
 sudo apt install alpacabridge
 ```
 
-The service auto-starts on `:11111`. (Building from source on the device instead additionally needs the dev packages: `git build-essential cmake libgpiod-dev libusb-1.0-0-dev libudev-dev libcurl4-openssl-dev nlohmann-json3-dev catch2`.)
+The service auto-starts on `:6800`. (Building from source on the device instead additionally needs the dev packages: `git build-essential cmake libgpiod-dev libusb-1.0-0-dev libudev-dev libcurl4-openssl-dev nlohmann-json3-dev catch2`.)
 
 ### 2. GPIO access is already configured
 
@@ -553,7 +556,7 @@ ls -l /dev/gpiochip1     # group should be 'gpio', mode crw-rw----
 
 ### 3. Add the Switch device
 
-Open `http://<your-imate-ip>:11111/` in a browser:
+Open `http://<your-imate-ip>:6800/` in a browser:
 
 1. **Configure** tab → **Add Device**
 2. **Device Type**: Switch
@@ -562,7 +565,7 @@ Open `http://<your-imate-ip>:11111/` in a browser:
 5. Leave **GPIO Chip** at its default (`/dev/gpiochip1`) unless you know you need to override it. There are no per-port fields — the three DC ports and their line mapping are fixed.
 6. Submit
 
-Or `POST` the equivalent JSON to the management API:
+Or `POST` the equivalent JSON to `/management/v1/configuredevice`:
 
 ```json
 {
