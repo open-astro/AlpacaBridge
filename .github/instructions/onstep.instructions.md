@@ -318,7 +318,9 @@ it is never reachable through `router.cpp` or the web UI.
   about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
   2.5 degrees at 0.25 deg/s in #1241; it moves from the home position too, HM-17 2026-10-19), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
   sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
-  loss, stops nothing (#521). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway, after waiting out that read's reply timeout.
+  loss, stops nothing (#521). A client Disconnect after the loss (a relink that failed included)
+  consumes the loss and last-alive stamps, so the Connect after it stops nothing either (#1289); only
+  the driver whose connect opened the process-wide wrapper's current link session consumes them (a later connect by another OnStep device ends the claim). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway, after waiting out that read's reply timeout.
   They leave tracking as it was: `:Q#` stops a GOTO through `goTo.abort()` and the guide stop and
   never calls `mount.tracking(false)` (HM-17 2026-10-24: `:GU#` `pEW160` before, `NpEW160` after a
   `:Q#` sent mid-GOTO), so nothing has to restore tracking after them.

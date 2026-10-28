@@ -27,6 +27,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -314,4 +315,139 @@ TEST_CASE("SkyWatcher link loss - serial: a polled severed link keeps the fault 
     CHECK(s.driver->get_link_fault().find("consecutive failures") != std::string::npos);
     s.driver->set_connected(false);
     CHECK(s.driver->get_link_fault().empty());
+}
+
+namespace {
+
+// A UDP mount whose link the status poll loses past the staleness bound, then
+// left for longer than the #521 preserve window: any recorded outage would
+// stop motion on the next Connect.
+std::unique_ptr<alpacacore::TelescopeDriver> lose_udp_link_past_window(
+    FakeSkyWatcherMount& mount, FakeTaskClock& clock,
+    std::unique_ptr<sw::SkyWatcherProtocolWrapper> owned = std::make_unique<sw::SkyWatcherProtocolWrapper>()) {
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.udp_port = mount.port();
+    info.response_timeout_ms = 100;
+    auto* protocol = owned.get();
+    auto driver = sw::create_skywatcher_telescope(0, info, 39.7, -104.9, 1609.0, std::move(owned), {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    mount.set_silent(true);
+    for (int i = 0; i < 3; ++i) CHECK_THROWS(protocol->inquire_position(sw::kAxisRa));
+    REQUIRE(protocol->link_faulted());
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    REQUIRE_FALSE(driver->get_connected());  // lost, and link_lost_at stamped
+    clock.advance(sw::detail::relink_motion_preserve_window() + std::chrono::seconds(5));
+    return driver;
+}
+
+// The handset slews both axes while the driver is away.
+void start_handset_slew(FakeSkyWatcherMount& mount) {
+    mount.set_axis_running(1, true);
+    mount.set_axis_running(2, true);
+}
+
+}  // namespace
+
+// #1289 item 1: the client's own Disconnect settles a loss, so the Connect
+// after it is a fresh one and leaves alone a slew started meanwhile from the
+// handset. With no Disconnect in between, the relink still stops it (#521).
+TEST_CASE("SkyWatcher link loss - UDP: a client Disconnect after a loss leaves the next Connect's motion alone",
+          "[skywatcher][linkloss][udp]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = lose_udp_link_past_window(mount, clock);
+
+    SECTION("a client Disconnect, then a Connect: the slew runs on") {
+        driver->set_connected(false);
+        mount.set_silent(false);
+        start_handset_slew(mount);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(mount.axis_running(1));
+        CHECK(mount.axis_running(2));
+    }
+    SECTION("no Disconnect, then a Connect: the relink stops the slew") {
+        mount.set_silent(false);
+        start_handset_slew(mount);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK_FALSE(mount.axis_running(1));
+        CHECK_FALSE(mount.axis_running(2));
+    }
+    driver->set_connected(false);
+}
+
+// #1289 item 1: a relink that fails leaves the loss for the next Connect, and
+// a client Disconnect after it settles the loss as on a lost link.
+TEST_CASE("SkyWatcher link loss - UDP: a Disconnect after a failed relink leaves the next Connect's motion alone",
+          "[skywatcher][linkloss][udp]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = lose_udp_link_past_window(mount, clock);
+    CHECK_THROWS(driver->set_connected(true));  // the mount is still silent: the relink fails
+    REQUIRE_FALSE(driver->get_connected());
+
+    driver->set_connected(false);
+    mount.set_silent(false);
+    start_handset_slew(mount);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(mount.axis_running(1));
+    CHECK(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+// A wrapper whose link_alive() runs a hook first: the seam that lands a
+// Disconnect on the Connect's own first look at the link.
+class HookedWrapper : public sw::SkyWatcherProtocolWrapper {
+public:
+    std::function<void()> on_link_alive;
+    bool link_alive() override {
+        if (on_link_alive) {
+            on_link_alive();
+        }
+        return sw::SkyWatcherProtocolWrapper::link_alive();
+    }
+};
+
+// #1289 item 1: the Disconnect that lands while a Connect to the lost link is
+// in flight wins over it, and settles the loss too. The Connect after that is
+// a fresh one and leaves alone a slew started meanwhile from the handset.
+TEST_CASE("SkyWatcher link loss - UDP: a Disconnect recorded against a relinking Connect settles the loss",
+          "[skywatcher][linkloss][udp]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto owned = std::make_unique<HookedWrapper>();
+    auto* wrapper = owned.get();
+    auto driver = lose_udp_link_past_window(mount, clock, std::move(owned));
+
+    // The Connect's first look at the link: the Disconnect arrives there.
+    std::atomic<bool> fired{false};
+    wrapper->on_link_alive = [&] {
+        if (driver->get_connecting() && !fired.exchange(true)) {
+            driver->disconnect();  // recorded against the in-flight Connect
+        }
+    };
+    driver->connect();
+    for (int i = 0; i < 500 && driver->get_connecting(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    wrapper->on_link_alive = nullptr;
+    REQUIRE_FALSE(driver->get_connecting());
+    REQUIRE(fired.load());
+    REQUIRE_FALSE(driver->get_connected());  // the Disconnect won
+
+    mount.set_silent(false);
+    start_handset_slew(mount);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(mount.axis_running(1));
+    CHECK(mount.axis_running(2));
+    driver->set_connected(false);
 }

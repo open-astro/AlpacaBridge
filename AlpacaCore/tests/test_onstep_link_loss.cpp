@@ -706,6 +706,155 @@ TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outag
     driver->set_connected(false);
 }
 
+// #1289 item 1: the client's own Disconnect settles a loss. A Connect after
+// it is a fresh one and sends no #521 stops, which would end a slew started
+// meanwhile from the handset or the OnStep web page.
+TEST_CASE("OnStep link loss - a client Disconnect after a loss leaves the next Connect's motion alone",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    WindowReset window_reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount first;
+    PortLink link(first.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    FakeOnStepSerialMount replugged;
+    first.sever_link();
+    link.repoint(replugged.slave_path());
+    REQUIRE_FALSE(driver->get_connected());  // the loss is seen, and stamped, here
+    // Any recorded outage would stop motion now.
+    alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
+    driver->set_connected(false);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(replugged.received_any_stop());
+    driver->set_connected(false);
+}
+
+// #1289 item 1: a relink that fails leaves the loss for the next Connect, and
+// a client Disconnect after it settles the loss as on a lost link.
+TEST_CASE("OnStep link loss - a client Disconnect after a failed relink leaves the next Connect's motion alone",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    WindowReset window_reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount first;
+    PortLink link(first.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    FakeOnStepSerialMount replugged;
+    first.sever_link();
+    // Nothing is plugged in yet.
+    link.remove();
+    REQUIRE_FALSE(driver->get_connected());  // the loss is seen, and stamped, here
+    alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
+    CHECK_THROWS(driver->set_connected(true));  // no adapter: the relink fails
+    REQUIRE_FALSE(driver->get_connected());
+
+    SECTION("a client Disconnect, then the replug: no stops") {
+        driver->set_connected(false);
+        link.repoint(replugged.slave_path());
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK_FALSE(replugged.received_any_stop());
+    }
+    SECTION("no Disconnect, then the replug: the stops are sent") {
+        link.repoint(replugged.slave_path());
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(replugged.received(":Q#"));
+        CHECK(replugged.received(":Qn#"));
+    }
+    driver->set_connected(false);
+}
+
+// #1289 item 1: the Disconnect that lands while a Connect to the lost link is
+// in flight wins over it, and settles the loss too. The Connect after that is
+// a fresh one and sends no #521 stops.
+TEST_CASE("OnStep link loss - a Disconnect recorded against a relinking Connect settles the loss",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    WindowReset window_reset;
+    LossHookReset hook_reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount first;
+    PortLink link(first.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    FakeOnStepSerialMount replugged;
+    first.sever_link();
+    link.repoint(replugged.slave_path());
+    // Nothing reads Connected for longer than the 5 s preserve window; the
+    // Connect's own first look at the link finds the loss, and the Disconnect
+    // arrives right there.
+    clock.advance(std::chrono::seconds(10));
+    bool hook_ran = false;
+    alpacacore::vendor::onstep::detail::set_link_loss_hook([&](LinkLossHookPoint point) {
+        if (point == LinkLossHookPoint::AliveBeforeRecord && driver->get_connecting() && !hook_ran) {
+            hook_ran = true;
+            driver->disconnect();  // recorded against the in-flight Connect
+        }
+    });
+    driver->connect();
+    for (int i = 0; i < 500 && driver->get_connecting(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(driver->get_connecting());
+    REQUIRE(hook_ran);
+    REQUIRE_FALSE(driver->get_connected());  // the Disconnect won
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(replugged.received_any_stop());
+    driver->set_connected(false);
+}
+
+// #1289: the wrapper is process-wide, so a Disconnect sent to driver A must not
+// consume the loss stamps of driver B, which connected after A's link was lost.
+// B's relink after a long outage still sends the #521 stops.
+TEST_CASE("OnStep link loss - a Disconnect to a driver another device has replaced leaves that device's stops",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    WindowReset window_reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount mount_a;
+    FakeOnStepSerialMount mount_b;
+    FakeOnStepSerialMount replugged_b;
+    PortLink link_a(mount_a.slave_path());
+    PortLink link_b(mount_b.slave_path());
+    auto driver_a = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link_a), clock);
+    auto driver_b = alpacacore::vendor::onstep::create_onstep_telescope(1, serial_info(link_b), clock);
+
+    driver_a->set_connected(true);
+    REQUIRE(driver_a->get_connected());
+    mount_a.sever_link();
+    link_a.remove();
+    REQUIRE_FALSE(driver_a->get_connected());     // A's loss is stamped here
+    CHECK_THROWS(driver_a->set_connected(true));  // A's relink fails: A keeps its claim
+    REQUIRE_FALSE(driver_a->get_connected());
+
+    driver_b->set_connected(true);  // B takes the free wrapper
+    REQUIRE(driver_b->get_connected());
+    mount_b.sever_link();
+    REQUIRE_FALSE(driver_b->get_connected());  // B's loss is stamped here
+    driver_a->set_connected(false);            // a Disconnect to A: B's stamps are not A's to consume
+
+    clock.advance(std::chrono::minutes(10));
+    link_b.repoint(replugged_b.slave_path());
+    driver_b->set_connected(true);
+    REQUIRE(driver_b->get_connected());
+    CHECK(replugged_b.received(":Q#"));
+    CHECK(replugged_b.received(":Qn#"));
+    driver_b->set_connected(false);
+}
+
 // #1460: the process-wide wrapper takes its loss stamps on the clock of the
 // driver that connected last. A stamp taken on one driver's clock means
 // nothing on the next driver's, so it goes with the clock instead of being
@@ -785,7 +934,10 @@ TEST_CASE("OnStep link loss - a driver that does not own the clock leaves the lo
         first.sever_link();
         link.repoint(replugged.slave_path());
         REQUIRE_FALSE(driver->get_connected());  // the loss is stamped here
-        { auto bystander = alpacacore::vendor::onstep::create_onstep_telescope(1, serial_info(link), other); }
+        {
+            auto bystander = alpacacore::vendor::onstep::create_onstep_telescope(1, serial_info(link), other);
+            bystander->set_connected(false);  // a Disconnect to a device that never connected (#1289)
+        }
         alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
         driver->set_connected(true);
         REQUIRE(driver->get_connected());

@@ -567,6 +567,8 @@ public:
             // 0009 point 5). The stamps stay for the reconnecting driver.
             clear_loss();
             mark_alive();
+            std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            ++link_session_;
         }
         return success;
     }
@@ -684,6 +686,23 @@ public:
     }
 
     std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at() { return link_lost_at_.consume(); }
+
+    std::uint64_t link_session() const {
+        std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+        return link_session_;
+    }
+
+    // Takes link_id_mutex_ before loss_mutex_ and the stamp's mutex (the lock
+    // order above). A later connect has moved the session on, so the stamps
+    // are then another device's and stay.
+    void forget_loss_if_session(std::uint64_t session) {
+        std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+        if (session != link_session_) {
+            return;
+        }
+        (void)consume_link_lost_at();
+        (void)consume_last_alive_before_loss();
+    }
 
     std::optional<std::chrono::steady_clock::time_point> consume_last_alive_before_loss() {
         std::lock_guard<std::mutex> lock(loss_mutex_);
@@ -1519,6 +1538,7 @@ private:
     dev_t link_dev_{};
     ino_t link_ino_{};
     std::uint64_t link_generation_ = 0;  // under link_id_mutex_: bumped when the node is recorded or cleared
+    std::uint64_t link_session_ = 0;     // under link_id_mutex_: bumped only when a connect succeeds
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
     util::SerialLink link_;  // the connected serial port (#1202); closed while disconnected
@@ -1556,6 +1576,10 @@ std::optional<std::chrono::steady_clock::time_point> OnStepProtocolWrapper::cons
 std::optional<std::chrono::steady_clock::time_point> OnStepProtocolWrapper::consume_last_alive_before_loss() {
     return pimpl_->consume_last_alive_before_loss();
 }
+
+std::uint64_t OnStepProtocolWrapper::link_session() const { return pimpl_->link_session(); }
+
+void OnStepProtocolWrapper::forget_loss_if_session(std::uint64_t session) { pimpl_->forget_loss_if_session(session); }
 
 std::string OnStepProtocolWrapper::last_connect_error() const { return pimpl_->last_connect_error(); }
 
