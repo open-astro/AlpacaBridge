@@ -1972,7 +1972,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
-            if (exposure_status_ != QHYExposureStatus::Working) {
+            if (exposure_status_ != QHYExposureStatus::Working && exposure_status_ != QHYExposureStatus::Failed) {
                 return;
             }
             // A late successful SDK return after AbortExposure is not an accepted image.
