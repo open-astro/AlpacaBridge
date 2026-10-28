@@ -459,12 +459,13 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
     // than a defect: a getter that races a link teardown reports its
     // unavailable telemetry as DriverException.
     // InvalidValue/InvalidOperation cover a slew or pulse racing another
-    // motion. A real defect shows up as a code outside this set, and
+    // motion; ValueNotSet covers a target read after a reconnect cleared it.
+    // A real defect shows up as a code outside this set, and
     // guard.report() names every distinct one it saw.
     alpacacore::test::StressCallGuard guard{
-        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
         alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
-        alpacacore::AlpacaError::DriverException};
+        alpacacore::AlpacaError::DriverException,  alpacacore::AlpacaError::ValueNotSet};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
         guard([&] { static_cast<void>(scope.get_tracking()); });
@@ -472,6 +473,11 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
         guard([&] { static_cast<void>(scope.get_declination()); });
         guard([&] { static_cast<void>(scope.get_slewing()); });
         guard([&] { static_cast<void>(scope.get_utc_date()); });
+        guard([&] { scope.set_target_right_ascension(5.0); });
+        guard([&] { static_cast<void>(scope.get_target_right_ascension()); });
+        guard([&] { scope.set_target_declination(20.0); });
+        guard([&] { static_cast<void>(scope.get_target_declination()); });
+        guard([&] { static_cast<void>(scope.get_guide_rate()); });
         guard([&] { scope.set_utc_date(std::chrono::system_clock::now()); });
         // The newly-fixed thread paths: async GOTO (goto_thread_) and pulse
         // guiding (pulse thread queue) issued while other threads disconnect.

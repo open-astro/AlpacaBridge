@@ -988,8 +988,8 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        ensure_utc_cached_locked();
-        return current_utc_time_locked();
+        if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
+        throw AlpacaException("The mount clock could not be read; set UTCDate first", AlpacaError::InvalidOperation);
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -2007,7 +2007,7 @@ private:
                 int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
                 mount_utc = local_time - minutes{total_offset};
             } catch (...) {
-                mount_utc = std::chrono::system_clock::now();
+                return;  // Leave time unset; getters never retry this connect-time sample.
             }
             utc_offset_.set(mount_utc, clock_.now());
         }
@@ -3603,14 +3603,6 @@ private:
         // mutex_ is already held here — call the _locked body, not the public
         // locking method (non-recursive mutex would self-deadlock).
         set_utc_date_locked(now_utc);
-    }
-
-    std::chrono::system_clock::time_point current_utc_time_locked() const {
-        const auto task_now = clock_.now();
-        if (!utc_offset_.valid()) {
-            utc_offset_.set(std::chrono::system_clock::now(), task_now);
-        }
-        return utc_offset_.current(task_now).value_or(std::chrono::system_clock::now());
     }
 
     int device_number_;
