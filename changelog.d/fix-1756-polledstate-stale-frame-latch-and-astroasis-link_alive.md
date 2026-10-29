@@ -1,0 +1,4 @@
+### Fixed
+
+- **Stale read latching a new connection lost**, all drivers using `util::PolledState`, issue #1756. A getter that read a frame older than 30 s before a reconnect could latch the new connection lost, and the poll then released its transport. `reset()` now bumps a connection epoch and the latch is set only when the epoch is unchanged (`AlpacaCore/tests/test_polled_state.cpp`, "a stale read from before a reset does not latch the new connection").
+- **Astroasis `Connected` after a removed device**, Astroasis focuser, issue #1756. A failed HID write or read (the hidraw node is gone) now drops `Connected` and makes getters throw `NotConnected` at once, instead of after the 30 s staleness bound; a read timeout does not. Covered by `AlpacaCore/tests/test_astroasis_focuser.cpp` ("a removed transport drops Connected at once").
