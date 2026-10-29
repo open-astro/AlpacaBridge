@@ -17,6 +17,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
@@ -30,6 +31,7 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cctype>
@@ -73,6 +75,11 @@ static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must under
 constexpr auto kPulseGuideSettle = std::chrono::milliseconds(50);
 constexpr auto kPulseMeasureBound = 2 * kStatusPollPeriod;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
+// Decision 0022: Slewing reads true for this long after a GOTO goes out (slew_hold_), so a getter reads true before
+// any :GU# is sampled. Landing never reads the window: it is a :GU# that shows no GOTO, and it clears the window.
+// A stale reading cannot end the slew: a reading and the :MS# share the operation lock, and the dispatch
+// write-through shows the GOTO until a later reading replaces it. The mount shows the GOTO 1 ms after :MS# answers
+// (HM-17, OnStepX 10.23a, 2026-10-29).
 constexpr auto kSlewForceGrace = std::chrono::seconds(2);
 // open-astro#1378: how far inside the horizon and overhead limits a MoveAxis
 // re-send must stay.
@@ -180,7 +187,9 @@ void alt_az_to_ra_dec(double alt_deg, double az_deg, double lat_deg, double lst_
 }
 
 // One polled frame (decision 0010): what one tick measured, nothing derived. Small and copyable: the snapshot copies
-// it under its mutex. `sampled_at` is the task-clock time the tick's first exchange went out.
+// it under its mutex. `sampled_at` is the task-clock time the tick's first exchange went out; `sample_seq` numbers the
+// samples in the order they were taken (each under the operation lock), so two taken at the same task-clock time
+// still order.
 struct PolledFrame {
     MountStatus status{};
     bool status_known = false;
@@ -191,6 +200,7 @@ struct PolledFrame {
     double az_degrees = 0.0;
     bool altaz_known = false;
     util::TaskClock::clock::time_point sampled_at{};
+    std::uint64_t sample_seq = 0;
 };
 
 bool same_status(const MountStatus& a, const MountStatus& b) {
@@ -593,9 +603,8 @@ public:
             target_ra_set_ = false;
             target_dec_set_ = false;
             clear_manual_motion_locked();
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            pulse_guiding_active_ = false;
-            pulse_guide_axis_ = -1;
+            slew_hold_.clear();
+            clear_pulse_guides_locked();
             tracking_before_slew_ = false;
             status_read_since_move_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
@@ -805,23 +814,27 @@ public:
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_faulted_locked();  // commanded state, not a wire read: refused too (decision 0009 rule 1)
-        if (!pulse_guiding_active_) {
-            return false;
-        }
         const auto now = clock_.now();
-        if (now < pulse_guide_end_time_) {
-            return true;
-        }
-        // The pulse has ended at the mount. Until a frame sampled after its end is published, the position
-        // getters would serve one measured during the pulse, so the pulse still reads as running (bounded,
-        // for a link that does not answer); the poll takes that sample kPulseGuideSettle after the end.
         const auto reading = snapshot_.read();
-        if (reading && reading->value.sampled_at < pulse_guide_end_time_ + kPulseGuideSettle &&
-            now < pulse_guide_end_time_ + kPulseMeasureBound) {
-            return true;
+        bool guiding = false;
+        for (int axis = 0; axis < 2; ++axis) {  // ASCOM: true while either axis pulses
+            if (!pulse_guiding_active_[axis]) {
+                continue;
+            }
+            const util::HoldWindow& hold = pulse_hold_[axis];  // armed for the pulse's duration (decision 0022)
+            // Past the pulse's end, until a frame sampled kPulseGuideSettle or more after it is published, the
+            // position getters would serve one measured during the pulse, so the pulse still reads as running
+            // (bounded by kPulseMeasureBound, for a link that does not answer); the poll takes that sample then.
+            // `hold.active(t - d)` is `t < end + d`.
+            const bool unmeasured = reading && hold.active(reading->value.sampled_at - kPulseGuideSettle) &&
+                                    hold.active(now - kPulseMeasureBound);
+            if (hold.active(now) || unmeasured) {
+                guiding = true;
+            } else {
+                pulse_guiding_active_[axis] = false;
+            }
         }
-        pulse_guiding_active_ = false;
-        return false;
+        return guiding;
     }
 
     // OnStep's custom tracking-rate commands were not confirmed against real
@@ -1245,23 +1258,38 @@ public:
         check_not_parked_locked("PulseGuide");
         // Hardware pulse guide: the mount times the pulse internally
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
-        // implementation there is no background stop thread to manage here —
-        // is_pulse_guiding() just compares against the known end time.
-        wire().pulse_guide(direction, duration);
-        // Supersede the pulse-end body of an earlier pulse here, under the locks and before the flags (decision
-        // 0006 rule 3): a body that wakes or takes the operation lock in the gap before start() replaces it sees
-        // the bump when its wait returns or at its next stopped() check and acts on nothing (rule 6), so it sends
-        // no tracking restore and publishes no frame. start() bumps again for the new body.
-        pulse_measurement_generation_.bump();
-        pulse_guiding_active_ = true;
-        pulse_guide_axis_ = direction >= 2 ? 0 : 1;  // East/West is axis 0, North/South axis 1
-        pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(duration);
+        // implementation there is no background stop thread to manage here:
+        // IsPulseGuiding reads the axis's hold window. Each axis has its own
+        // (OnStepX times each axis on its own), so a shorter pulse on one axis
+        // does not end the other's.
+        const int axis = direction >= 2 ? 0 : 1;  // East/West is axis 0, North/South axis 1
+        const auto now = clock_.now();
+        const auto pulse = std::chrono::milliseconds(duration);
+        // The other axis's pulse outlasts this one: its pulse-end body, which measures after the later end, stays.
+        const bool other_ends_later = pulse_guiding_active_[1 - axis] && pulse_hold_[1 - axis].active(now + pulse);
+        // Decision 0022 rule 2: armed before the command goes out, cleared if it does not.
+        pulse_guiding_active_[axis] = true;
+        pulse_hold_[axis].arm(now, pulse);
+        try {
+            wire().pulse_guide(direction, duration);
+        } catch (...) {
+            pulse_guiding_active_[axis] = false;
+            pulse_hold_[axis].clear();
+            throw;
+        }
         drop_poll_in_flight_locked();  // the position changes: a tick that sampled before the pulse is dropped
+        if (other_ends_later) {
+            return;
+        }
+        // Supersede the pulse-end body of an earlier pulse here, under the locks (decision 0006 rule 3): a body
+        // that wakes or takes the operation lock in the gap before start() replaces it sees the bump when its wait
+        // returns or at its next stopped() check and acts on nothing (rule 6), so it sends no tracking restore and
+        // publishes no frame. start() bumps again for the new body.
+        pulse_measurement_generation_.bump();
         // One extra tick measures the position kPulseGuideSettle after the pulse ends (IsPulseGuiding waits for
         // that frame), in a slot of its own: the 1 s ticks run on through the pulse. Started with no driver lock
-        // held (decision 0006 rule 4); a newer pulse replaces it.
-        const auto wait = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(duration) +
-                                                                               kPulseGuideSettle);
+        // held (decision 0006 rule 4); a newer pulse that ends last replaces it.
+        const auto wait = std::chrono::duration_cast<std::chrono::nanoseconds>(pulse + kPulseGuideSettle);
         lock.unlock();
         run_pulse_guide_gap_hook();
         // A Disconnect can land between the unlock and the start: the slot's body is then harmless, because
@@ -1425,9 +1453,8 @@ public:
             }
             // :Qe#/:Qw# and :Qn#/:Qs# end every guide on that axis, a pulse
             // guide included (OnStepX Guide.command.cpp stopAxis1/stopAxis2).
-            if (pulse_guide_axis_ == axis) {
-                pulse_guiding_active_ = false;
-            }
+            pulse_guiding_active_[axis] = false;
+            pulse_hold_[axis].clear();
         }
         std::uint64_t generation = 0;
         if (moving) {
@@ -1591,9 +1618,9 @@ public:
             manual_axis_resend_[1] = false;
             throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
         }
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_hold_.clear();
         clear_manual_motion_locked();
-        pulse_guiding_active_ = false;  // :Q# ends every guide, a pulse guide included (Guide::stop())
+        clear_pulse_guides_locked();    // :Q# ends every guide, a pulse guide included (Guide::stop())
         drop_poll_in_flight_locked();   // a tick that sampled the motion before the stops is dropped
         // ASCOM: after AbortSlew, tracking returns to its state before the
         // slew. Decide now instead of at a later slew end the driver may never
@@ -1780,6 +1807,14 @@ private:
     // with mutex_ alone, which a tick drops for each exchange: the tick
     // re-checks the stop reason and each axis's re-send flag under mutex_
     // right before it re-sends (resend_tick_locked()).
+    // Every pulse guide ended (a :Q#, a connect or a disconnect): both axes' windows cleared (decision 0022 rule 2).
+    void clear_pulse_guides_locked() const {
+        for (int axis = 0; axis < 2; ++axis) {
+            pulse_guiding_active_[axis] = false;
+            pulse_hold_[axis].clear();
+        }
+    }
+
     void clear_manual_motion_locked() const {
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -2058,8 +2093,8 @@ private:
                                   AlpacaError::DriverException);
         }
         clear_manual_motion_locked();
-        pulse_guiding_active_ = false;  // AbortSlew's stops end every guide, a pulse guide included
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        clear_pulse_guides_locked();  // AbortSlew's stops end every guide, a pulse guide included
+        slew_hold_.clear();
         tracking_before_slew_ = false;
         return true;
     }
@@ -2289,9 +2324,8 @@ private:
         target_ra_set_ = false;
         target_dec_set_ = false;
         clear_manual_motion_locked();
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        pulse_guiding_active_ = false;
-        pulse_guide_axis_ = -1;
+        slew_hold_.clear();
+        clear_pulse_guides_locked();
         utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
         mount_clock_unreadable_.reset();
     }
@@ -2387,7 +2421,7 @@ private:
     // It reads :GU# itself, never the frame alone: a GOTO the frame has not seen
     // yet would be stopped by the :MS# (#1379).
     void refuse_while_goto_running_locked(const char* who) const {
-        bool running = clock_.now() < slew_force_until_;
+        bool running = slew_hold_.active(clock_.now());
         if (!running) {
             refresh_status_locked();
             running = frame_status_locked().is_slewing;
@@ -2492,12 +2526,20 @@ private:
         const Wire protocol = wire();
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
-        const std::string reply = protocol.slew_to_target();
+        // Decision 0022 rule 2: armed before the :MS# goes out, cleared when it does not start the GOTO.
+        slew_hold_.arm(clock_.now(), kSlewForceGrace);
+        std::string reply;
+        try {
+            reply = protocol.slew_to_target();
+        } catch (...) {
+            slew_hold_.clear();
+            throw;
+        }
         if (reply.empty() || reply[0] != '0') {
+            slew_hold_.clear();
             throw slew_refused(context, reply);
         }
         store_target_locked(ra, dec, targets);
-        slew_force_until_ = clock_.now() + kSlewForceGrace;
         clear_manual_motion_locked();
         tracking_before_slew_ = frame_status_locked().is_tracking;
         // Write-through (decision 0010): Slewing reads true past the grace until a poll sampled after the :MS#
@@ -2517,10 +2559,13 @@ private:
             }
             clear_manual_motion_locked();
         }
-        if (clock_.now() < slew_force_until_) {
+        if (slew_hold_.active(clock_.now())) {
             throw_if_faulted_locked();  // the grace asks the mount nothing (decision 0009 rule 1)
             return true;
         }
+        // Past the window the frame decides. Landing (a reading after the :MS# answer that shows no GOTO) has
+        // cleared the window and written the status; a reading from before the answer is never published over
+        // the dispatch's write-through (decision 0010 token).
         return served_status_locked().is_slewing;
     }
 
@@ -2761,6 +2806,9 @@ private:
         try {
             const MountStatus status = wire().get_status();
             note_read_ok_locked();
+            if (!status.is_slewing) {
+                slew_hold_.clear();  // landed: a reading with no GOTO (decision 0022 rules 2, 3)
+            }
             note_status_read_locked(status, true);
         } catch (const std::exception& ex) {
             note_read_failure_locked(ex);
@@ -2829,6 +2877,7 @@ private:
         const Wire protocol = wire();
         PolledFrame frame = previous;
         frame.sampled_at = clock_.now();
+        frame.sample_seq = ++sample_seq_;
         frame.status = protocol.get_status();
         frame.status_known = true;
         const Position position = protocol.get_position();
@@ -2861,10 +2910,9 @@ private:
         try {
             const PolledFrame frame = sample_locked(previous ? previous->value : PolledFrame{}, true);
             note_read_ok_locked();
-            if (snapshot_.publish(token, frame)) {
+            if (publish_sample_locked(token, frame)) {
                 note_status_measured_locked(frame.status);
             }
-            drop_poll_in_flight_locked();  // a tick that sampled before this read must not replace it
         } catch (const std::exception& ex) {
             if (is_link_lost(ex)) {
                 throw;
@@ -2888,6 +2936,7 @@ private:
         const auto token = snapshot_.begin_poll();
         PolledFrame frame;
         frame.sampled_at = clock_.now();
+        frame.sample_seq = ++sample_seq_;
         const auto read = [this](const std::function<void()>& exchange) {
             try {
                 exchange();
@@ -2978,24 +3027,38 @@ private:
         if (!connected_.load() || stopped()) {
             return false;
         }
-        if (snapshot_.publish(token, frame)) {
+        if (publish_sample_locked(token, frame)) {
             note_status_measured_locked(frame.status);
-            // The regular tick and the pulse-end tick both publish here, after the operation lock is released:
-            // a tick that sampled before this one and publishes later must not put its older frame on top.
-            drop_poll_in_flight_locked();
         }
         return true;
     }
 
-    // The tracking restore a coordinate slew owes (#1230), once a tick read after the slew's grace shows its GOTO
-    // ended: before #1783 a Slewing read sent it, as a single read that waited for the operation lock. It is not
-    // decided during a MoveAxis (a 4.x mount refuses :ST mid-move), nor while a Park or FindHome is pending: one
-    // refused "in motion" and retried in the park_home_ body ends with tracking off, so a restore sent between
-    // its tries would only be undone (#1743 review). The tick holds the operation lock, so no command lands
-    // between its :GU# and the restore.
+    // The regular tick, the pulse-end tick and the synchronous slew's end read all publish under mutex_, the ticks
+    // after the operation lock is released, so they can publish out of the order they sampled in. A sample older
+    // than the held frame's is skipped; a newer one in flight is left to publish (decision 0010: a client write
+    // after its begin_poll() still drops it).
+    bool publish_sample_locked(util::StateSnapshot<PolledFrame>::Token token, const PolledFrame& frame) const {
+        const auto held = snapshot_.read();
+        if (held && frame.sample_seq < held->value.sample_seq) {
+            return false;
+        }
+        return snapshot_.publish(token, frame);
+    }
+
+    // The tracking restore a coordinate slew owes (#1230), on the first tick frame that shows no GOTO (inside the
+    // hold window too, decision 0022 rule 3): before #1783 a Slewing read sent it, as a single read that waited for the
+    // operation lock. It is not decided during a MoveAxis (a 4.x mount refuses :ST mid-move), nor while a Park or
+    // FindHome is pending: one refused "in motion" and retried in the park_home_ body ends with tracking off, so a
+    // restore sent between its tries would only be undone (#1743 review). The tick holds the operation lock, so no
+    // command lands between its :GU# and the restore. A frame that shows no GOTO ends the slew; the hold window is not
+    // read (decision 0022 rule 3). A frame cannot predate the :MS# answer: the tick holds the operation lock that :MS#
+    // is sent under, and the dispatch write-through shows the GOTO until a later frame replaces it.
     void finish_slew_if_ended_locked(PolledFrame& frame) const {
-        if (!tracking_before_slew_ || clock_.now() < slew_force_until_ || frame.status.is_slewing ||
-            manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_home_request_) {
+        if (frame.status.is_slewing) {
+            return;
+        }
+        slew_hold_.clear();  // landed: a frame with no GOTO (decision 0022 rules 2, 3)
+        if (!tracking_before_slew_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] || park_home_request_) {
             return;
         }
         if (finish_slew_tracking_locked(frame.status.is_tracking)) {
@@ -3242,7 +3305,8 @@ private:
     // cleared on connect, disconnect and a UTCDate write.
     std::optional<std::string> mount_clock_unreadable_;
 
-    mutable std::chrono::steady_clock::time_point slew_force_until_;
+    // Decision 0022: Slewing reads true while it is active, kSlewForceGrace from the :MS#. Under mutex_.
+    mutable util::HoldWindow slew_hold_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     // The running MoveAxis per axis, for the re-send (#1378). Under mutex_.
     int manual_axis_dir_[2] = {0, 0};
@@ -3266,9 +3330,12 @@ private:
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
 
-    mutable bool pulse_guiding_active_ = false;
-    int pulse_guide_axis_ = -1;  // the axis of the last pulse guide (0 East/West, 1 North/South)
-    mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
+    // Per axis (0 East/West, 1 North/South): a pulse is pending, and its hold window for the pulse's duration
+    // (decision 0022). IsPulseGuiding is true while either axis's pulse runs or is not yet measured. Under mutex_.
+    mutable bool pulse_guiding_active_[2] = {false, false};
+    mutable std::array<util::HoldWindow, 2> pulse_hold_;
+    // Numbers each sample (PolledFrame::sample_seq); under mutex_, taken with the operation lock held.
+    mutable std::uint64_t sample_seq_ = 0;
 
     // Decision 0009 fault latch for a silent mount (#1414). Under mutex_.
     mutable util::PolledLinkHealth link_health_;
