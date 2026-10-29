@@ -546,13 +546,9 @@ public:
             return;
         }
         if (connected && consume_pending_disconnect(connected_)) {
-            forget_link_loss();  // the Disconnect that wins here settles a loss too (#1289)
             return;
         }
         if (connected == connected_) {
-            if (!connected) {
-                forget_link_loss();  // a Disconnect after a relink that failed (#1289)
-            }
             return;
         }
 
@@ -584,7 +580,6 @@ public:
                     "OnStep");
             });
             connected_ = true;
-            link_session_ = OnStepProtocolWrapper::instance().link_session();
             stop_motion_after_long_outage_locked();
             snapshot_.reset();
             site_latitude_known_ = false;
@@ -720,7 +715,6 @@ public:
                 run_disconnect_before_close_hook();
                 p.disconnect();
             });
-            forget_link_loss();  // after the close, so no loss is recorded after it
         }
     }
 
@@ -2353,21 +2347,6 @@ private:
         });
     }
 
-    // A client's Disconnect settles a loss (decision 0009 point 4, #1289): the
-    // next Connect is a fresh one and sends no #521 stops. Only the driver whose
-    // connect opened the wrapper's current link session forgets the stamps: the
-    // wrapper is process-wide, so a Disconnect sent to another OnStep device, or
-    // to this one after another device connected, leaves them alone, as a change
-    // of clock does (#1460). Under transition_mutex_.
-    void forget_link_loss() {
-        if (!link_session_) {
-            return;
-        }
-        const auto session = *link_session_;
-        link_session_.reset();
-        OnStepProtocolWrapper::instance().forget_loss_if_session(session);  // the loss stamps: no I/O
-    }
-
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
     // (open-astro#1274). Runs after the parked check and argument validation and
     // before any target or GOTO command is sent, and reads Tracking as the
@@ -3207,10 +3186,6 @@ private:
     // status-poll and pulse-end slots (stop_status_poller(), on a disconnect and a relink) and only cancels
     // the others (cancel() never blocks). No slot body takes it or calls set_connected(), so the join ends.
     std::mutex transition_mutex_;
-    // The wrapper's link session this driver's last connect opened, until a Disconnect has run
-    // (forget_link_loss()). A later connect by another OnStep device moves the session on and ends
-    // this driver's claim on the loss stamps. Under transition_mutex_.
-    std::optional<std::uint64_t> link_session_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
     // Which of the two this thread holds, and the exchanges that drop mutex_ (#1729).

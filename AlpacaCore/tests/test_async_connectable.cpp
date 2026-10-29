@@ -209,7 +209,7 @@ TEST_CASE("AsyncConnectable - a disconnect queued against a connect reaches a dr
     // Issue #1289 item 6: the link is lost while the connect runs, so
     // Connected reads false when the task tail looks. The queued Disconnect
     // must still reach set_connected(false), or the lost session is never
-    // reset (and its loss stamps make the next Connect stop the mount).
+    // reset.
     TestConnectable d;
     d.op_delay_ = 100ms;
     d.lose_link_on_connect_.store(true);

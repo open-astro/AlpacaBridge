@@ -570,14 +570,9 @@ public:
             return;
         }
         if (connected && consume_pending_disconnect(connected_)) {
-            (void)protocol_->consume_link_lost_at();  // the Disconnect that wins here settles a loss too (#1289)
             return;
         }
         if (connected == connected_) {
-            if (!connected) {
-                // A Disconnect after a relink that failed settles the loss too (#1289).
-                (void)protocol_->consume_link_lost_at();
-            }
             return;
         }
 
@@ -756,10 +751,6 @@ public:
                 run_disconnect_before_close_hook();
                 p.disconnect();
             });
-            // A client's Disconnect settles a loss (decision 0009 point 4, #1289):
-            // the next Connect is a fresh one and stops nothing. After the close,
-            // so no loss is stamped after it.
-            (void)protocol_->consume_link_lost_at();
             // Identity (model/firmware) is left as last known-good: a clean
             // disconnect doesn't change what mount this is, and clearing it
             // here made the web UI / configureddevices listing revert to a

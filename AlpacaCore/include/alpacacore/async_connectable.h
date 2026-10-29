@@ -398,10 +398,10 @@ private:
                     pending_connect_ = false;
                     // Run it even when Connected already reads false: a link
                     // lost during the connect reads false too, and only the
-                    // driver's set_connected(false) resets that session and
-                    // its loss stamps (#1289). Every driver's disconnect is
-                    // idempotent: a Disconnect on a disconnected device
-                    // already reaches it through the Idle spawn above.
+                    // driver's set_connected(false) resets that session
+                    // (#1289). Every driver's disconnect is idempotent: a
+                    // Disconnect on a disconnected device already reaches it
+                    // through the Idle spawn above.
                     need_disconnect = true;
                 } else if (pending_connect_) {
                     pending_connect_ = false;

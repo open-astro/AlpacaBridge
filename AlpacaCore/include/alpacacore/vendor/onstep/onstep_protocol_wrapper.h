@@ -190,17 +190,6 @@ public:
     /// is an upper bound on the outage even when nothing looked meanwhile.
     std::optional<std::chrono::steady_clock::time_point> consume_last_alive_before_loss();
 
-    /// The current link session: bumped by every successful connect, serial or
-    /// network, and by nothing else. A caller keeps the value its own connect
-    /// saw to tell later whether another connect has taken the wrapper since.
-    std::uint64_t link_session() const;
-
-    /// Consumes the link-lost and last-alive-before-loss stamps, only while
-    /// `session` is still the current link session. A no-op after any later
-    /// connect, so a device that lost its claim cannot consume another's
-    /// stamps. No I/O.
-    void forget_loss_if_session(std::uint64_t session);
-
     /**
      * @brief Get the mount's reported product name.
      *
