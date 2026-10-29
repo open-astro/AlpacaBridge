@@ -494,72 +494,6 @@ TEST_CASE("QHY Camera Driver - a failed connect-time CURTEMP read keeps CCDTempe
     driver->set_connected(false);
 }
 
-TEST_CASE("QHY Camera Driver - disconnect does not wait out the telemetry sleep", "[qhy][camera][unit]") {
-    // open-astro#323. The telemetry worker polls CURTEMP once a second and
-    // used a bare sleep_for, which is not interruptible, so setting the stop
-    // flag did nothing until the current second elapsed. Every Connected=false
-    // on a COOLED camera therefore blocked up to ~1 s -- most of ConformU's
-    // 1.0 s STANDARD budget for that call, spent on a sleep the driver had
-    // already decided to abandon, leaving none for the SDK close on a slow
-    // device.
-    //
-    // has_cooler is the sole condition that starts the thread, so the cooled
-    // fake is the one that reproduces it.
-    auto fake = FakeQHYSDK::with_one_cooled_camera();
-    LockedQHYSDK sdk(fake);
-    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
-
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
-
-    // Let the worker reach its wait rather than catching it mid-iteration, so
-    // this measures the wait and not the startup.
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-
-    const auto started = std::chrono::steady_clock::now();
-    driver->set_connected(false);
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
-
-    REQUIRE_FALSE(driver->get_connected());
-
-    // Generous on purpose: the point is that it is not ~1 s, not that it is
-    // any particular small number -- a tight bound here would only buy CI
-    // flakes on a loaded box. Before the fix this sat just under 1000 ms;
-    // the wait is now woken immediately.
-    CHECK(elapsed < std::chrono::milliseconds(600));
-}
-
-TEST_CASE("QHY Camera Driver - disconnect does not wait out the temperature worker's sleep", "[qhy][camera][unit]") {
-    // The other polling worker #323 changed. cooler_on_ is constructed true
-    // and the temp-control worker starts on connect whenever has_cooler and
-    // cooler_on_ both hold, so the telemetry case above already runs it
-    // (reverting only the temp worker's wait_for to sleep_for turns that
-    // case red at ~870 ms); this case says so explicitly and pins it through
-    // the public setter, so the coverage does not hinge on a constructor
-    // default a later change could flip.
-    auto fake = FakeQHYSDK::with_one_cooled_camera();
-    LockedQHYSDK sdk(fake);
-    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
-
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
-    driver->set_cooler_on(true);
-    REQUIRE(driver->get_cooler_on());
-
-    // Let both workers reach their waits rather than catching one
-    // mid-iteration, so this measures the wait and not the startup.
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-
-    const auto started = std::chrono::steady_clock::now();
-    driver->set_connected(false);
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
-
-    REQUIRE_FALSE(driver->get_connected());
-    CHECK(elapsed < std::chrono::milliseconds(600));
-}
-
 TEST_CASE("QHY Camera Driver - a disconnect inside a telemetry start does not strand telemetry",
           "[qhy][camera][unit]") {
     // Issue #510. start_telemetry_thread() publishes the new generation's stop
@@ -1049,17 +983,6 @@ TEST_CASE("QHY Camera Driver - CCDTemperature is not invented", "[qhy][camera][u
                    alpacacore::AlpacaError::PropertyNotImplemented;
         }));
         driver->set_connected(false);
-    }
-    SECTION("cooled camera whose CURTEMP read fails") {
-        auto fake = FakeQHYSDK::with_one_cooled_camera();
-        fake.throw_from.insert("get_param");
-        LockedQHYSDK sdk(fake);
-        auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
-        driver->set_connected(true);
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        CHECK(error_code_of([&] { (void)driver->get_ccd_temperature(); }) == alpacacore::AlpacaError::InvalidOperation);
-        driver->set_connected(false);
-        fake.throw_from.clear();
     }
     SECTION("a good reading is dropped once the CURTEMP read starts failing") {
         std::atomic<bool> fail_reads{false};
@@ -2482,6 +2405,80 @@ TEST_CASE("QHY Camera Driver - failed mode range refresh does not stop cooling o
     CHECK(driver->get_exposure_max() == 3600.0);
     driver->start_exposure(0.02, true);
     REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+}
+
+TEST_CASE("QHY Camera Driver - disconnect does not wait out the telemetry sleep", "[qhy][camera][unit][taskclock]") {
+    // open-astro#323. The telemetry worker polls CURTEMP once a second and
+    // used a bare sleep_for, which is not interruptible, so setting the stop
+    // flag did nothing until the current second elapsed. Every Connected=false
+    // on a COOLED camera therefore blocked up to ~1 s -- most of ConformU's
+    // 1.0 s STANDARD budget for that call, spent on a sleep the driver had
+    // already decided to abandon, leaving none for the SDK close on a slow
+    // device.
+    //
+    // has_cooler is the sole condition that starts the thread, so the cooled
+    // fake is the one that reproduces it. The disconnect is stepped rather
+    // than run with no advance(): join_worker_thread() polls the running
+    // flag in 20 ms clock sleeps, which would park without one.
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    FakeTaskClock clock;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard teardown{clock, driver};
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Both workers (telemetry and temp control, cooler_on_ starts true) in
+    // their 1 s wait, so this measures the wait and not the startup.
+    REQUIRE(clock.wait_for_waiters(2, seconds(2)));
+
+    // A woken wait costs a step or two of virtual time; a waited-out one 1 s.
+    CHECK(disconnect_stepping(clock, *driver) < milliseconds(500));
+    REQUIRE_FALSE(driver->get_connected());
+}
+
+TEST_CASE("QHY Camera Driver - disconnect does not wait out the temperature worker's sleep",
+          "[qhy][camera][unit][taskclock]") {
+    // The other polling worker #323 changed. cooler_on_ is constructed true
+    // and the temp-control worker starts on connect whenever has_cooler and
+    // cooler_on_ both hold, so the telemetry case above already runs it
+    // (reverting only the temp worker's wait_for to sleep_for turns that
+    // case red too); this case says so explicitly and pins it through
+    // the public setter, so the coverage does not hinge on a constructor
+    // default a later change could flip.
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    FakeTaskClock clock;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard teardown{clock, driver};
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_cooler_on(true);
+    REQUIRE(driver->get_cooler_on());
+
+    REQUIRE(clock.wait_for_waiters(2, seconds(2)));
+
+    CHECK(disconnect_stepping(clock, *driver) < milliseconds(500));
+    REQUIRE_FALSE(driver->get_connected());
+}
+
+TEST_CASE("QHY Camera Driver - a failing CURTEMP poll keeps CCDTemperature InvalidOperation",
+          "[qhy][camera][unit][taskclock]") {
+    // The telemetry worker polls before its first wait, so once both workers
+    // wait the failed poll has run.
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    fake.throw_from.insert("get_param");
+    FakeTaskClock clock;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard teardown{clock, driver};
+
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(2, seconds(2)));
+    CHECK(error_code_of([&] { (void)driver->get_ccd_temperature(); }) == AlpacaError::InvalidOperation);
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
 
