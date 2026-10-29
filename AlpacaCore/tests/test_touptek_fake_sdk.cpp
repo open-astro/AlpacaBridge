@@ -16,6 +16,7 @@
 // attached.
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/touptek/shared_open_refs.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
@@ -40,6 +41,7 @@
 
 using alpacacore::AlpacaException;
 using alpacacore::test::FakeToupTekSDK;
+using alpacacore::test::require_alpaca_error;
 
 namespace {
 
@@ -485,6 +487,55 @@ TEST_CASE("ToupTek focuser - position round-trips through the AAF Set/Get pair",
     driver->set_connected(false);
 }
 
+TEST_CASE("FakeToupTekSDK - AAF rejects a Set code on a read and a Get code on a write",
+          "[touptek][focuser][unit][fakesdk]") {
+    namespace ToupAAF = alpacacore::vendor::touptek::ToupAAF;
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFocuserInfo focuser;
+    focuser.id = "fake-aaf-0";
+    fake.focusers.push_back(focuser);
+    const auto handle = fake.open_focuser_by_id("fake-aaf-0");
+
+    fake.aaf_set(handle, ToupAAF::SetPosition, 42, "set");
+    CHECK(fake.aaf_get(handle, ToupAAF::GetPosition, "get") == 42);
+    require_alpaca_error([&] { (void)fake.aaf_get(handle, ToupAAF::SetPosition, "get"); },
+                         alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { fake.aaf_set(handle, ToupAAF::GetPosition, 1, "set"); },
+                         alpacacore::AlpacaError::DriverException);
+    CHECK(fake.aaf_get(handle, ToupAAF::GetPosition, "get") == 42);
+    fake.close_focuser(handle);
+}
+
+TEST_CASE("ToupTek SharedOpenRefs - first holder opens, last holder closes", "[touptek][unit]") {
+    using Refs = alpacacore::vendor::touptek::SharedOpenRefs<int>;
+    Refs refs;
+    CHECK_FALSE(refs.acquire("a").has_value());
+    refs.publish("a", 7);
+    CHECK(refs.count("a") == 1);
+    REQUIRE(refs.acquire("a").has_value());
+    CHECK(*refs.acquire("a") == 7);
+    CHECK(refs.count("a") == 3);
+
+    CHECK(refs.release(7) == Refs::Release::StillHeld);
+    CHECK(refs.release(7) == Refs::Release::StillHeld);
+    CHECK(refs.count("a") == 1);
+    CHECK(refs.release(7) == Refs::Release::Last);
+    CHECK(refs.count("a") == 0);
+    CHECK_FALSE(refs.acquire("a").has_value());
+}
+
+TEST_CASE("ToupTek SharedOpenRefs - a double close and an unknown handle are untracked", "[touptek][unit]") {
+    using Refs = alpacacore::vendor::touptek::SharedOpenRefs<int>;
+    Refs refs;
+    CHECK(refs.release(1) == Refs::Release::Untracked);
+    refs.publish("a", 1);
+    refs.publish("b", 2);
+    CHECK(refs.release(1) == Refs::Release::Last);
+    CHECK(refs.release(1) == Refs::Release::Untracked);  // never closes a recycled handle's other holder
+    CHECK(refs.count("b") == 1);
+    CHECK(refs.release(2) == Refs::Release::Last);
+}
+
 TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is silent during an exposure",
           "[touptek][camera][unit][fakesdk]") {
     // Regression guard for the ATR585M E_UNEXPECTED frame drops: thermal USB
@@ -493,12 +544,15 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     // before the client's first DeviceState poll, (2) issue NO thermal SDK
     // call while exposure_active_, while the getters still answer from the
     // cache, and (3) resume once the exposure ends.
+    alpacacore::test::FakeTaskClock clock;
     auto fake = make_fake_with_camera();
-    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
     // (1) The first poller tick runs as soon as set_connected releases mutex_.
+    // The task clock is not advanced yet, so a priming tick that waited a full
+    // interval would never run and the wait below would time out.
     auto wait_until = [](const std::function<bool()>& pred, std::chrono::milliseconds limit) {
         const auto deadline = std::chrono::steady_clock::now() + limit;
         while (!pred() && std::chrono::steady_clock::now() < deadline) {
@@ -510,7 +564,7 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     // voltages after, so waiting on the temperature alone let the checks below
     // run mid-tick, which the slow -O0 coverage build did (0 >= 1).
     REQUIRE(
-        wait_until([&] { return fake.call_count("get_tec_voltage_max_deciV") >= 1; }, std::chrono::milliseconds(2000)));
+        wait_until([&] { return fake.call_count("get_tec_voltage_max_deciV") >= 1; }, std::chrono::milliseconds(5000)));
     CHECK(fake.call_count("get_temperature_deciC") >= 1);
     CHECK(fake.call_count("get_tec_voltage_deciV") >= 1);  // default fake camera supports the cooler
     CHECK(fake.call_count("get_tec_voltage_max_deciV") == 1);
@@ -521,7 +575,14 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     REQUIRE(wait_until([&] { return fake.call_count("wait_image") >= 1; }, std::chrono::milliseconds(2000)));
     const int temp_calls = fake.call_count("get_temperature_deciC");
     const int tec_calls = fake.call_count("get_tec_voltage_deciV");
-    std::this_thread::sleep_for(std::chrono::milliseconds(2300));
+    // Two poll intervals pass on the task clock; each tick is skipped.
+    for (int i = 0; i < 2; ++i) {
+        // The wait_for_wait_count below proves the poller finished the tick (skipped it)
+        // and went back to waiting on the clock.
+        const auto waits = clock.wait_count();
+        clock.advance(std::chrono::milliseconds(1000));
+        REQUIRE(clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));
+    }
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
     // Getters answer from the cache (no SDK traffic) while exposing.
     CHECK_NOTHROW(driver->get_ccd_temperature());
@@ -535,6 +596,7 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     REQUIRE(wait_until(
         [&] { return !driver->get_connected() || driver->get_camera_state() == alpacacore::CameraState::Idle; },
         std::chrono::milliseconds(3000)));
+    clock.advance(std::chrono::milliseconds(1000));
     REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") > temp_calls; },
                        std::chrono::milliseconds(3000)));
 

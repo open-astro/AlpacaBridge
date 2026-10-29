@@ -140,19 +140,42 @@ TEST_CASE("ToupTek Camera Driver - Readout modes (conversion gain + High Full We
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
 
     // ReadoutModes fold the camera's conversion-gain (HCG/LCG/HDR) and High Full
-    // Well capabilities into one flat list. The exact contents depend on the
-    // camera attached to the test host (caps are preloaded at construction), so
-    // assert only hardware-independent invariants. The LIST is readable while
-    // disconnected (never empty — at least "Normal"), matching every other camera
-    // driver: imaging clients enumerate ReadoutModes before connecting. The
-    // current-index getter needs live registers, so it throws NotConnected;
-    // `set_readout_mode` validates the range BEFORE the connection check, so an
-    // out-of-range index is InvalidValue even disconnected. Connected mode
-    // toggles are exercised by ConformU.
+    // Well capabilities into one flat list. Disconnected, this driver is built
+    // on the real SDK, so the contents depend on the attached camera and only
+    // hardware-independent invariants are asserted: the LIST is readable (never
+    // empty, at least "Normal"), matching every other camera driver: imaging
+    // clients enumerate ReadoutModes before connecting. The current-index getter
+    // needs live registers, so it throws NotConnected; `set_readout_mode`
+    // validates the range BEFORE the connection check, so an out-of-range index
+    // is InvalidValue even disconnected. The connected half below runs over
+    // FakeToupTekSDK and asserts the exact list and the mode toggles.
     REQUIRE_FALSE(driver->get_readout_modes().empty());
     require_alpaca_error([&]() { driver->get_readout_mode(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_readout_mode(-1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_readout_mode(999999); }, alpacacore::AlpacaError::InvalidValue);
+
+    // Connected over the fake: the exact list and the register each mode writes.
+    alpacacore::test::FakeToupTekSDK fake;
+    auto info = alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One");
+    info.supports_cg = true;
+    info.supports_high_fullwell = true;
+    fake.cameras.push_back(info);
+    auto connected = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    connected->set_connected(true);
+    CHECK(connected->get_readout_modes() == std::vector<std::string>{"HCG", "LCG", "High Full Well"});
+    connected->set_readout_mode(2);
+    CHECK(fake.call_count("put_high_fullwell") == 1);
+    CHECK(connected->get_readout_mode() == 2);
+    connected->set_readout_mode(0);
+    CHECK(connected->get_readout_mode() == 0);
+    connected->set_connected(false);
+
+    // A camera with HDR conversion gain adds it after High Full Well.
+    fake.cameras[0].supports_cghdr = true;
+    auto hdr = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    hdr->set_connected(true);
+    CHECK(hdr->get_readout_modes() == std::vector<std::string>{"HCG", "LCG", "High Full Well", "HDR"});
+    hdr->set_connected(false);
 }
 
 TEST_CASE("ToupTek Camera Driver - Offset (black level)", "[touptek][camera][unit]") {
@@ -161,13 +184,31 @@ TEST_CASE("ToupTek Camera Driver - Offset (black level)", "[touptek][camera][uni
     // Offset maps to the black level on cameras reporting TOUPCAM_FLAG_BLACKLEVEL.
     // Operational reads require a connection first, so disconnected they report
     // NotConnected (not a generic DriverException); the connected value range is
-    // exercised by ConformU. Named offset descriptions are never implemented
+    // checked below over FakeToupTekSDK. Named offset descriptions are never implemented
     // (integer OffsetMin/OffsetMax mode), regardless of hardware.
     require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_offset(0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offset_min(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offsets(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+
+    // Connected over the fake: the value round-trips through the black-level
+    // register and out-of-range values are rejected.
+    alpacacore::test::FakeToupTekSDK fake;
+    auto info = alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One");
+    info.supports_blacklevel = true;
+    fake.cameras.push_back(info);
+    auto connected = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    connected->set_connected(true);
+    connected->set_offset(7);
+    CHECK(fake.call_count("put_blacklevel") == 1);
+    CHECK(connected->get_offset() == 7);
+    CHECK(connected->get_offset_min() == 0);
+    require_alpaca_error([&]() { connected->set_offset(connected->get_offset_max() + 1); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { connected->set_offset(-1); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(connected->get_offset() == 7);
+    connected->set_connected(false);
 }
 
 TEST_CASE("ToupTek Camera Driver - AbortExposure during the stream restart is not undone",

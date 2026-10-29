@@ -707,35 +707,55 @@ TEST_CASE("SkyWatcher limits - Tracking off that supersedes a synchronous slew l
 // the guard's first sample (the cache still holds the inside position, the
 // board is already outside). The baseline must come from before the dispatch,
 // or the outside first sample is accepted unchecked and nothing stops the axis.
+// The driver shares the mount's FakeTaskClock: its status poll and the position
+// cache's TTL read that clock, so with virtual time standing still from the
+// jump to the command no poll can refresh the cache in between (on the wall
+// clock one could, open-astro#1796). No goto runs, so pump_until() only lets
+// virtual time follow wall time.
 TEST_CASE("SkyWatcher limits - a floor crossed before the guard's first sample is stopped",
           "[skywatcher][telescope][limits][guard]") {
-    FakeSkyWatcherMount mount;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
     mount.jump_axis_degrees(2, kGuardDecAxisDeg);
-    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {},
+                                                  floor_deg(kGuardAltitudeDeg - 1.5), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(2000)));  // the status poll, parked
     REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
+    // Age the polled frame past its freshness bound (still inside the cache's
+    // TTL), so the guard's first sample reads the board, not the inside frame.
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    clock.advance(std::chrono::milliseconds(300));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::milliseconds(2000)));
 
     mount.jump_axis_degrees(2, kGuardDecAxisDeg + 10.0);  // about 4 deg below the floor
     driver->move_axis(1, -kMaxMoveAxisRate);
-    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
-    CHECK(wait_until([&] { return !mount.axis_running(2); }, 6000));
-    CHECK(wait_until([&] { return !driver->get_slewing(); }, 6000));
+    sw::set_status_poll_paused_for_testing(*driver, false);
+    REQUIRE(follow_until(clock, [&] { return mount.axis_running(2); }, std::chrono::milliseconds(2000)));
+    CHECK(pump_until(clock, mount, [&] { return !mount.axis_running(2); }, std::chrono::seconds(6)));
+    CHECK(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(6)));
     driver->set_connected(false);
 }
 
 // Tracking start from rest takes the same pre-dispatch baseline as MoveAxis:
 // the cache holds the inside position, the board is already past the limit.
+// The driver and the mount share one FakeTaskClock, as in the floor case above.
 TEST_CASE("SkyWatcher limits - a meridian limit crossed before tracking's first sample is stopped",
           "[skywatcher][telescope][limits][guard]") {
-    FakeSkyWatcherMount mount;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
     mount.jump_axis_degrees(1, 92.0);  // 8 min past the meridian: inside the limit
-    auto driver = connected_driver(mount, meridian_minutes(10.0));
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {},
+                                                  meridian_minutes(10.0), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(2000)));  // the status poll, parked
 
     mount.jump_axis_degrees(1, 94.0);  // 16 min past the meridian, before the dispatch
     driver->set_tracking(true);
-    CHECK(wait_until([&] { return !driver->get_tracking(); }, 8000));
-    CHECK(wait_until([&] { return !mount.axis_running(1); }, 6000));
+    CHECK(pump_until(clock, mount, [&] { return !driver->get_tracking(); }, std::chrono::seconds(8)));
+    CHECK(pump_until(clock, mount, [&] { return !mount.axis_running(1); }, std::chrono::seconds(6)));
     driver->set_connected(false);
 }
 

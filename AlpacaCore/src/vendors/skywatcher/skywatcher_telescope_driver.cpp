@@ -16,6 +16,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/lock_gate.h>
@@ -28,6 +29,7 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -870,7 +872,7 @@ public:
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         const auto now = clock_.now();
         for (int i = 0; i < 2; ++i) {
-            if (pulse_axis_active_[i] && now >= pulse_guide_end_time_[i]) {
+            if (pulse_axis_active_[i] && !pulse_hold_[i].active(now)) {
                 pulse_axis_active_[i] = false;
             }
         }
@@ -1776,7 +1778,7 @@ public:
             pulse_axis_active_[ai] = true;
             pulse_axis_in_motion_[ai] = true;
             my_seq = ++pulse_seq_[ai];
-            pulse_guide_end_time_[ai] = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
+            pulse_hold_[ai].arm(now, std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay);
             invalidate_position_cache_locked(false);
         }
 
@@ -2330,7 +2332,7 @@ public:
                     // other operation has failed or finished. A superseded body
                     // leaves it to the operation that replaced it.
                     if (owns_slew_state_locked(ctx)) {
-                        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                        slew_hold_.clear();
                     }
                     return;
                 }
@@ -2507,7 +2509,7 @@ public:
                 // Best effort; status polling still reports the true state.
             }
             set_slewing_cached_false_locked();
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            slew_hold_.clear();
         }
         parking_ = false;
         parked_ = false;
@@ -2793,7 +2795,7 @@ public:
         // slew failure -- the client acted on the error, so the next Slewing
         // read must answer normally again.
         clear_last_slew_error_locked();
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_hold_.clear();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         restore_tracking_after_slew_ = false;
@@ -3103,11 +3105,13 @@ private:
         restore_tracking_after_slew_ = false;
         pulse_axis_active_[0] = false;
         pulse_axis_active_[1] = false;
+        pulse_hold_[0].clear();
+        pulse_hold_[1].clear();
         pulse_axis_in_motion_[0] = false;
         pulse_axis_in_motion_[1] = false;
         set_slewing_cached_false_locked();
         clear_last_slew_error_locked();  // open-astro#575: a reconnect starts clean
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_hold_.clear();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         parking_ = false;
@@ -5398,7 +5402,7 @@ private:
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
-        if (clock_.now() < slew_force_until_) {
+        if (slew_hold_.active(clock_.now())) {
             return true;
         }
         const auto frame = served_frame_locked().value;
@@ -5420,7 +5424,7 @@ private:
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
-        if (honor_force_window && clock_.now() < slew_force_until_) {
+        if (honor_force_window && slew_hold_.active(clock_.now())) {
             return true;
         }
         bool was_slewing = slewing_cached_;
@@ -5726,7 +5730,7 @@ private:
         set_slewing_cached_false_locked();
         // Landed: end the async initiator's window too, or Slewing would stay
         // true for the rest of its 8 s after a short goto and its restore.
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_hold_.clear();
         invalidate_position_cache_locked();
         // No post-slew position freeze: gotos are LST-compensated and refined
         // (see goto helpers), so live reads land on target -- freezing them
@@ -6033,7 +6037,7 @@ private:
         // The replaced goto's 8 s Slewing window is not the new operation's
         // (FindHome never passes wait_for_slew_complete, which would end it);
         // an initiator that wants a window sets its own after the claim.
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_hold_.clear();
         return displaced;
     }
 
@@ -6132,7 +6136,7 @@ private:
             ALPACA_LOG_ERROR("SkyWatcher", "Stop after async motion failure failed: " + stop_error +
                                                "; the mount may still be moving");
         }
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_hold_.clear();
         invalidate_position_cache_locked(false);
         ALPACA_LOG_WARN("SkyWatcher", full_error);
     }
@@ -6166,7 +6170,7 @@ private:
         // leave its dispatch stamp for the next landing's overhead EMA.
         last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
         set_slewing_cached_false_locked();
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_hold_.clear();
         if (ctx.stop_reason() == util::StopReason::None && slew_error_epoch_ == slew_epoch) {
             last_slew_error_ = message;
         }
@@ -6224,7 +6228,7 @@ private:
         // Slewing must read true once this returns, but goto_in_progress_ is
         // only set when the body takes mutex_. This window covers that gap for
         // client reads; landing detection ignores it.
-        slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+        slew_hold_.arm(clock_.now(), std::chrono::seconds(8));
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
@@ -6241,7 +6245,7 @@ private:
             [body = std::move(body), slew_epoch](util::OperationContext& ctx) { body(ctx, slew_epoch); };
         start_slew_body(std::move(run), displaced, [this] {
             set_slewing_cached_false_locked();
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            slew_hold_.clear();
         });
         return lock;
     }
@@ -6322,7 +6326,7 @@ private:
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol_;
     // The clock every task wait and deadline runs on (open-astro#743,
     // decision 0005): the slew, stop-confirm, settle and homing waits and
-    // the slew-timing state (slew_force_until_, last_goto_dispatch_time_,
+    // the slew-timing state (slew_hold_, pulse_hold_, last_goto_dispatch_time_,
     // last_landing_time_, last_slewing_poll_). Pointing time (UTC anchor,
     // dead reckoning, the discipline resample) stays on steady_clock / system time.
     util::TaskClock& clock_;
@@ -6463,7 +6467,7 @@ private:
     // its initiator did.
     uint64_t slew_error_epoch_ = 0;
     mutable std::chrono::steady_clock::time_point last_slewing_poll_ = clock_.now();
-    mutable std::chrono::steady_clock::time_point slew_force_until_ = std::chrono::steady_clock::time_point::min();
+    mutable util::HoldWindow slew_hold_;
     mutable bool manual_axis_slewing_[2] = {false, false};
 
     int slew_settle_time_seconds_ = 0;
@@ -6485,7 +6489,7 @@ private:
     // Incremented per pulse, per axis, under mutex_, so a task can tell
     // whether it has been superseded before clearing its axis's pulse state.
     std::uint64_t pulse_seq_[2] = {0, 0};
-    mutable std::chrono::steady_clock::time_point pulse_guide_end_time_[2]{};
+    mutable std::array<util::HoldWindow, 2> pulse_hold_;
 
     mutable bool parking_ = false;
     mutable bool homing_ = false;

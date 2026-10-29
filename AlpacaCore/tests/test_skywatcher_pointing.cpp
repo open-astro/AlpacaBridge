@@ -1527,7 +1527,7 @@ TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky a
 }
 
 // open-astro#715: the driver decided a goto had landed by waiting out a timer
-// (slew_force_until_: 8 s at dispatch, 3 s per refinement) instead of asking
+// (slew hold window: 8 s at dispatch, 3 s per refinement) instead of asking
 // the board, so no goto could report done in under 8 s however short the
 // move, and that floor trained goto_overhead_seconds_ (one of #580's two
 // causes). On the fake clock the board lands the instant the test says so,

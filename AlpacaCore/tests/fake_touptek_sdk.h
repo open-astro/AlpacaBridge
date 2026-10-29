@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/touptek/shared_open_refs.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 
 #include <algorithm>
@@ -123,10 +124,7 @@ public:
     int underflow_closes = 0;
     std::string last_opened_id;
 
-    int ref_count(const std::string& id) const {
-        auto it = ref_counts_.find(id);
-        return it == ref_counts_.end() ? 0 : it->second;
-    }
+    int ref_count(const std::string& id) const { return refs_.count(id); }
 
     // Convenience: a plausible cooled mono camera with every capability the
     // drivers probe, so most tests only tweak what they care about.
@@ -499,11 +497,13 @@ public:
     void aaf_set(HToupcam h, int action, int value, const char*) override {
         hit("aaf_set");
         require_open(h);
+        require_aaf_direction(action, /*write=*/true);
         aaf_values_[canonical_aaf_key(action)] = value;
     }
     int aaf_get(HToupcam h, int action, const char*) override {
         hit("aaf_get");
         require_open(h);
+        require_aaf_direction(action, /*write=*/false);
         return aaf_values_[canonical_aaf_key(action)];
     }
     int aaf_range(HToupcam h, int range_action, int target_action, const char*) override {
@@ -584,6 +584,32 @@ private:
         }
     }
 
+    // toupcam.h documents no rejection of a read through a Set code or a write
+    // through a Get code. TODO: the wrapper passes the code straight through, so
+    // the SDK may run the write. The fake throws because that is the harsher
+    // answer (ADR 0015 rule 4): a driver that mixes the pair up (get_position
+    // reading SetPosition) must fail here, not round-trip by accident. Writes are
+    // the Set* codes plus Halt; reads are the Get* codes plus IsMoving.
+    static void require_aaf_direction(int action, bool write) {
+        using namespace vendor::touptek;
+        // The two lists copy the ToupAAF constants by hand: a new code must be added here.
+        const bool is_write = action == ToupAAF::SetPosition || action == ToupAAF::SetZero ||
+                              action == ToupAAF::SetDirection || action == ToupAAF::SetMaxIncrement ||
+                              action == ToupAAF::SetFine || action == ToupAAF::SetCoarse ||
+                              action == ToupAAF::SetBuzzer || action == ToupAAF::SetBacklash ||
+                              action == ToupAAF::SetMaxStep || action == ToupAAF::Halt;
+        const bool is_read =
+            action == ToupAAF::GetPosition || action == ToupAAF::GetDirection || action == ToupAAF::GetMaxIncrement ||
+            action == ToupAAF::GetFine || action == ToupAAF::GetCoarse || action == ToupAAF::GetBuzzer ||
+            action == ToupAAF::GetBacklash || action == ToupAAF::GetAmbientTemp || action == ToupAAF::GetTemp ||
+            action == ToupAAF::IsMoving || action == ToupAAF::GetMaxStep || action == ToupAAF::GetStepSize;
+        if (write ? !is_write : !is_read) {
+            throw AlpacaException(std::string("fake: aaf_") + (write ? "set" : "get") + " with a " +
+                                      (write ? "read" : "write") + " action code",
+                                  AlpacaError::DriverException);
+        }
+    }
+
     // AAF Set and Get use DISTINCT action codes for the same register
     // (SetPosition=0x01 reads back via GetPosition=0x02, etc.). Store both
     // sides of each pair under the Get code so writes round-trip on reads.
@@ -633,28 +659,35 @@ private:
             throw AlpacaException("fake: unknown device id '" + id + "'", AlpacaError::NotConnected);
         }
         last_opened_id = id;
-        auto& count = ref_counts_[id];
-        if (count == 0) {
-            ++physical_opens;
-            handles_by_id_[id] = reinterpret_cast<HToupcam>(static_cast<std::uintptr_t>(next_handle_++));
+        // Same ref count the production wrapper runs (SharedOpenRefs).
+        if (auto shared = refs_.acquire(id)) {
+            return *shared;
         }
-        ++count;
-        return handles_by_id_[id];
+        ++physical_opens;
+        auto handle = reinterpret_cast<HToupcam>(static_cast<std::uintptr_t>(next_handle_++));
+        handles_by_id_[id] = handle;
+        refs_.publish(id, handle);
+        return handle;
     }
 
     void close_shared(HToupcam handle) {
-        for (auto it = handles_by_id_.begin(); it != handles_by_id_.end(); ++it) {
-            auto rc = ref_counts_.find(it->first);
-            if (it->second == handle && rc != ref_counts_.end() && rc->second > 0) {
-                if (--rc->second == 0) {
-                    ++physical_closes;
-                    ref_counts_.erase(rc);
-                    handles_by_id_.erase(it);  // iterators not touched afterwards
+        using Release = alpacacore::vendor::touptek::SharedOpenRefs<HToupcam>::Release;
+        switch (refs_.release(handle)) {
+            case Release::Untracked:
+                ++underflow_closes;
+                break;
+            case Release::StillHeld:
+                break;
+            case Release::Last:
+                ++physical_closes;
+                for (auto it = handles_by_id_.begin(); it != handles_by_id_.end(); ++it) {
+                    if (it->second == handle) {
+                        handles_by_id_.erase(it);
+                        break;
+                    }
                 }
-                return;
-            }
+                break;
         }
-        ++underflow_closes;
     }
 
     void require_open(HToupcam handle) const {
@@ -677,7 +710,7 @@ private:
         return false;
     }
 
-    std::map<std::string, int> ref_counts_;
+    alpacacore::vendor::touptek::SharedOpenRefs<HToupcam> refs_;
     std::map<std::string, HToupcam> handles_by_id_;
     std::uintptr_t next_handle_ = 1;
 

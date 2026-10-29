@@ -134,6 +134,24 @@ TEST_CASE("QHY Filter Wheel Driver - State machine contracts", "[qhy][filterwhee
         }
     }
     REQUIRE_FALSE(has_timestamp);
+    // The disconnected list is empty, so the loop above never iterates: the
+    // "no Connected entry" claim is only live on a connected driver.
+    CHECK(state.empty());
+
+    auto fake = make_fake();
+    fake.params[alpacacore::vendor::qhy::control::CFWSLOTSNUM] = 7.0;
+    LockedQHYSDK sdk(fake);
+    auto connected = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    connected->set_connected(true);
+    const auto live = connected->get_device_state();
+    REQUIRE_FALSE(live.empty());
+    bool has_position = false;
+    for (const auto& entry : live) {
+        CHECK(entry.name != "Connected");
+        if (entry.name == "Position") has_position = true;
+    }
+    CHECK(has_position);
+    connected->set_connected(false);
 }
 
 TEST_CASE("QHY Filter Wheel Driver - Unsupported methods", "[qhy][filterwheel][unit]") {

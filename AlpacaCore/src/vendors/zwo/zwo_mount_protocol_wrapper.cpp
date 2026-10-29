@@ -411,6 +411,7 @@ public:
                 if (kind != Kind::ExplicitLink || holder.kind == Kind::AutoLink) return Result::Held;
                 probe = probe || holder.kind == Kind::Probe;
             }
+            // Admission must precede expiry, even if a released probe's waiter was scheduled late.
             if (deadline && std::chrono::steady_clock::now() >= *deadline) return Result::TimedOut;
             if (!probe) {
                 reg.holders.emplace(this, Holder{address, kind});
@@ -736,7 +737,8 @@ public:
 
     bool connect(const ConnectionInfo& info) {
         std::lock_guard<std::mutex> lock(mutex_);
-        closing_.store(false);  // Reset once per client attempt, never after a wait or between Auto candidates.
+        // Cancellation stays latched until this fresh attempt; connect_locked must never clear it.
+        closing_.store(false);
         if (info.type == ConnectionType::Auto) {
             // Auto-detect the transport: probe USB serial ports and the mount's
             // WiFi AP, then connect to the first ZWO mount that answers. The
@@ -1236,7 +1238,8 @@ private:
             last_connect_error_ = "ZWO mount network endpoint is held by another ZWO entry or discovery probe";
             if (result == NetworkEndpointClaim::Result::TimedOut)
                 last_connect_error_ =
-                    "ZWO mount network discovery probe did not release the endpoint within 1500 ms; retry Connect";
+                    "ZWO mount network endpoint claim deadline expired after waiting up to 1500 ms for a discovery "
+                    "probe; retry Connect";
             if (result == NetworkEndpointClaim::Result::Cancelled)
                 last_connect_error_ = "ZWO mount connection cancelled";
             ALPACA_LOG_DEBUG("ZWO", "Skipping held network endpoint " + host + ":" + std::to_string(port));

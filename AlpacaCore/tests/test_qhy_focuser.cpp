@@ -190,6 +190,17 @@ TEST_CASE("QHY Q-Focuser Driver - State machine", "[qhy][focuser][unit]") {
         if (entry.name == "TimeStamp") has_timestamp = true;
     }
     REQUIRE_FALSE(has_timestamp);
+    // The disconnected list is empty, so the loop above never iterates: the
+    // "no Connected entry" claim is only live on a connected driver.
+    CHECK(state.empty());
+
+    alpacacore::test::FakeQhyQFocuser fake;
+    auto connected = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*connected, true, std::chrono::seconds(10)));
+    const auto live = connected->get_device_state();
+    REQUIRE_FALSE(live.empty());
+    for (const auto& entry : live) CHECK(entry.name != "Connected");
+    connected->set_connected(false);
 }
 
 TEST_CASE("QHY Q-Focuser Driver - Connect applies settings and reports motion", "[qhy][focuser][unit]") {
