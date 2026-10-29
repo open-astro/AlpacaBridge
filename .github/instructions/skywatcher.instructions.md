@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/skywatcher/**,AlpacaCore/include/alpacacore/vendor/skywatcher/**,AlpacaCore/tests/*skywatcher*,AlpacaCore/conformu/SkyWatcher/**"
+applyTo: "AlpacaCore/src/vendors/skywatcher/**,AlpacaCore/include/alpacacore/vendor/skywatcher/**,AlpacaCore/tests/*skywatcher*,AlpacaCore/conformu/Sky-Watcher/**"
 ---
 
 ### SkyWatcher (Wave / direct motor controller)

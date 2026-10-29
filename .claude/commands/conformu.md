@@ -414,7 +414,7 @@ Rounding does not hide a site (a whole degree still names a region), so redact: 
 each value with the marker `<redacted: site>`, and each local-time value with
 `<redacted: local time>`. Keep every PASS/FAIL/ISSUE word and the summary counts.
 
-Redact all of these, using the committed `AlpacaCore/conformu/SkyWatcher/EQM-35 Pro/Linux-arm64.txt`
+Redact all of these, using the committed `AlpacaCore/conformu/Sky-Watcher/EQM-35 Pro/Linux-arm64-direct.txt`
 as the model:
 
 - `SiteLatitude`, `SiteLongitude` and `SiteElevation`: the Read line, the "Current value"
@@ -450,10 +450,11 @@ AlpacaCore/conformu/<Vendor>/<Model>/
 Filenames:
 - Single transport: `Linux-arm64.txt`
 - Multiple transports: `Linux-arm64-<transport>.txt` (lowercase: `usb`, `wifi`, `serial`, `tcp`, `gpio`)
+- Sky-Watcher (both drivers share `AlpacaCore/conformu/Sky-Watcher/<Model>/`): `Linux-arm64-<synscan|direct>[-<transport>].txt`, the driver first: `synscan` for the SynScan hand-controller driver, `direct` for the EQMOD direct driver.
 
 ```bash
 mkdir -p "AlpacaCore/conformu/<Vendor>/<Model>"
-cp "$TMPDIR/conformu.txt" "AlpacaCore/conformu/<Vendor>/<Model>/Linux-arm64[-<transport>].txt"
+cp "$TMPDIR/conformu.txt" "AlpacaCore/conformu/<Vendor>/<Model>/Linux-arm64[-<transport>].txt"   # Sky-Watcher: Linux-arm64-<synscan|direct>[-<transport>].txt
 ```
 
 The text log alone is sufficient: it carries the `Congratulations, no errors, warnings or issues found` assertion (covers Errors / Issues / Warnings) and any `OUTSIDE … RESPONSE TIME TARGET` lines (covers timing). Do **not** generate or save a JSON report — the `-r` flag was dropped from the ConformU invocation in Step 3 precisely so the text log is the single source of truth and there is no parallel JSON to drift out of sync.
@@ -466,7 +467,7 @@ Read `SUPPORTED-DRIVERS.md` and locate the section for this device type (`## Cam
 
 ### 7a. Table row
 
-Find the vendor's `### <Vendor>` subsection in that device-type section. If absent, create a new vendor subsection following the existing format:
+Find the vendor's `### <Vendor>` subsection in that device-type section. Sky-Watcher has one heading per driver: `### Sky-Watcher (SynScan hand controller)` for synscan reports, `### Sky-Watcher (EQMOD direct)` for direct reports; both link `AlpacaCore/conformu/Sky-Watcher/<Model>/`. If absent, create a new vendor subsection following the existing format:
 
 ```
 ### <Vendor>
@@ -506,7 +507,7 @@ don't — firmware/board revision, cable/adapter/chipset details, baud rate, clo
 host ConformU ran on, mount/model codes, or other rig specifics — is not the thing #478 removed.
 Those lines are legitimate, may be extended when a new run adds to that provenance, and a brand
 new one may be added when a validation surfaces this kind of detail (see the Sky-Watcher
-`Tested model (EQ class)` and `ConformU` lines in the Sky-Watcher Direct Motor Controller Driver
+`Tested model (EQ class)` and `ConformU` lines in the Sky-Watcher (EQMOD direct) Driver
 Notes for the shape).
 Read what an existing line actually says before touching it — its presence alone doesn't mark it
 for removal.

@@ -128,6 +128,7 @@
     "vendor": "iguider",
     "deviceType": "camera",
     "displayName": "iOptron iGuider Camera",
+    "vendorLabel": "iOptron iGuider",
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_IOPTRON",
     "fields": [
@@ -233,6 +234,7 @@
     "vendor": "playerone",
     "deviceType": "camera",
     "displayName": "Player One Camera",
+    "vendorLabel": "Player One",
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_PLAYERONE",
     "fields": [
@@ -243,6 +245,7 @@
     "vendor": "playerone",
     "deviceType": "filterwheel",
     "displayName": "Player One Phoenix Filter Wheel",
+    "vendorLabel": "Player One",
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_PLAYERONE",
     "fields": [
@@ -254,6 +257,7 @@
     "vendor": "playerone",
     "deviceType": "switch",
     "displayName": "Player One Thermal Switch (dew heater/fan)",
+    "vendorLabel": "Player One",
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_PLAYERONE",
     "fields": [
@@ -310,7 +314,8 @@
   {
     "vendor": "skywatcher",
     "deviceType": "telescope",
-    "displayName": "SkyWatcher direct (motor controller)",
+    "displayName": "Sky-Watcher (EQMOD direct)",
+    "vendorLabel": "Sky-Watcher",
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_SKYWATCHER",
     "fields": [
@@ -348,7 +353,8 @@
   {
     "vendor": "synscan",
     "deviceType": "telescope",
-    "displayName": "SynScan",
+    "displayName": "Sky-Watcher (SynScan hand controller)",
+    "vendorLabel": "Sky-Watcher",
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_SYNSCAN",
     "fields": [

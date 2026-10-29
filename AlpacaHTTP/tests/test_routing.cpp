@@ -9073,9 +9073,9 @@ int main() {
 
 #ifndef ALPACACORE_ENABLE_SKYWATCHER
     // open-astro#744 rule 1 / test 3: with the vendor built out, the catalog
-    // path reports the deleted arm's exact text through vendor_label() (the
-    // display name's first word is "SkyWatcher"). Green before the arm is
-    // deleted; it pins the client-facing and web-UI text across the move. The
+    // path reports the refusal text through vendor_label() (the schema's
+    // vendor_label, "Sky-Watcher" for both telescope drivers). It pins the
+    // client-facing and web-UI text. The
     // site is supplied because the catalog validates (rule 4) before it
     // answers "not enabled", where the arm answered first.
     {
@@ -9087,7 +9087,7 @@ int main() {
                                                            R"("siteLongitude":-0.0015})"),
                                      "Telescope");
         EXPECT(!off.ok);
-        EXPECT(off.message == "SkyWatcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON");
+        EXPECT(off.message == "Sky-Watcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON");
         EXPECT(listed_entry(router, "Telescope", 9258).is_null());
     }
 #endif
@@ -9963,7 +9963,7 @@ int main() {
             router, nlohmann::json{{"vendor", "synscan"}, {"deviceType", "telescope"}, {"deviceNumber", 9273}},
             "Telescope");
         EXPECT(!off.ok);
-        EXPECT(off.message == "SynScan support not enabled. Rebuild with -DALPACACORE_ENABLE_SYNSCAN=ON");
+        EXPECT(off.message == "Sky-Watcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SYNSCAN=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "Telescope", 9273).is_null());
     }
