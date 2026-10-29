@@ -52,7 +52,7 @@ constexpr std::chrono::seconds kHostDisciplineResampleInterval{30};
 double configured_site_coordinate(const std::optional<double>& coordinate, const char* name) {
     if (!coordinate) {
         throw AlpacaException(std::string("Celestron CGX ") + name + " is not configured",
-                              AlpacaError::DriverException);
+                              AlpacaError::InvalidOperation);
     }
     return coordinate.value();
 }
@@ -305,6 +305,7 @@ private:
     double current_utc_locked() const;
     std::chrono::system_clock::time_point client_utc_now_locked() const;
     bool client_utc_offset_survives_locked(std::chrono::system_clock::time_point system_now) const;
+    void require_site_locked() const;
     void validate_site_and_coordinates(double ra, double dec, const char* operation) const;
     void start_home_operation(bool park_after);
     void run_home_operation(util::OperationContext& context, bool park_after);
@@ -504,6 +505,15 @@ bool CelestronCgxTelescopeDriver::client_utc_offset_survives_locked(
     return true;
 }
 
+// ADR 0019 rule 3: the CGX controller stores no site, so Connect works without one and every member
+// that reads the hemisphere or the longitude refuses until both coordinates are set.
+void CelestronCgxTelescopeDriver::require_site_locked() const {
+    if (!info_.site_latitude_degrees || !info_.site_longitude_degrees) {
+        throw AlpacaException("Celestron CGX needs SiteLatitude and SiteLongitude to be set before this member works",
+                              AlpacaError::InvalidOperation);
+    }
+}
+
 CgxHemisphere CelestronCgxTelescopeDriver::hemisphere_locked() const { return mechanical_hemisphere_; }
 
 void CelestronCgxTelescopeDriver::validate_site_and_coordinates(double ra, double dec, const char* operation) const {
@@ -515,6 +525,7 @@ CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position_locked(std::uint32
                                                                      bool reuse_stationary_telemetry) const {
     try {
         require_connected();
+        require_site_locked();
         require_healthy_transport();  // A known fault must refuse even a warm frame.
         if (stop_pending_)
             throw AlpacaException("Celestron CGX stop is still pending verification", AlpacaError::DriverException);
@@ -615,16 +626,6 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
     }
 
     if (connected) {
-        bool site_is_configured = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            site_is_configured = info_.site_latitude_degrees.has_value() && info_.site_longitude_degrees.has_value();
-        }
-        if (!site_is_configured) {
-            throw AlpacaException(
-                "Set Celestron CGX SiteLatitude and SiteLongitude in the device settings before connecting",
-                AlpacaError::DriverException);
-        }
         protocol_.connect_serial(info_.port_path);
         try {
             const AuxFrame ra_version = protocol_.exchange(
@@ -920,6 +921,7 @@ void CelestronCgxTelescopeDriver::set_tracking_locked(bool tracking) {
     if (tracking && parked_) {
         throw AlpacaException("Cannot enable tracking while parked", AlpacaError::InvalidWhileParked);
     }
+    if (tracking) require_site_locked();
     if (tracking && !reference_valid_locked()) {
         throw AlpacaException("Run FindHome before enabling Celestron CGX tracking", AlpacaError::InvalidOperation);
     }
@@ -987,6 +989,7 @@ int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double 
     validate_site_and_coordinates(ra, dec, "DestinationSideOfPier");
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
+    require_site_locked();
     const auto utc =
         std::chrono::system_clock::time_point{std::chrono::duration_cast<std::chrono::system_clock::duration>(
             std::chrono::duration<double>(current_utc_locked()))};
@@ -1112,6 +1115,7 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
 double CelestronCgxTelescopeDriver::get_sidereal_time() const {
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
+    require_site_locked();
     const auto utc =
         std::chrono::system_clock::time_point{std::chrono::duration_cast<std::chrono::system_clock::duration>(
             std::chrono::duration<double>(current_utc_locked()))};
@@ -1332,6 +1336,7 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
     int velocity;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        require_site_locked();
         if (parked_) throw AlpacaException("Cannot PulseGuide while parked", AlpacaError::InvalidWhileParked);
         if (!tracking_state_valid_)
             throw AlpacaException("Celestron CGX tracking state is unknown after a partial controller update",
@@ -1402,6 +1407,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
     require_connected();
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        require_site_locked();
         if (parked_) throw AlpacaException("Cannot sync while parked", AlpacaError::InvalidWhileParked);
     }
     MotionTransition transition(*this);
@@ -1690,6 +1696,10 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
 
 void CelestronCgxTelescopeDriver::start_home_operation(bool park_after) {
     require_connected();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        require_site_locked();  // FindHome fixes the mechanical hemisphere from the latitude.
+    }
     if (park_after && get_at_park()) return;
     MotionTransition transition(*this);
     if (park_after && get_at_park()) return;
@@ -1804,6 +1814,10 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
 void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     validate_site_and_coordinates(ra, dec, "SlewToCoordinates");
     require_connected();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        require_site_locked();
+    }
     MotionTransition transition(*this);
     bool sync_correction_active;
     CgxPointingSide side;
