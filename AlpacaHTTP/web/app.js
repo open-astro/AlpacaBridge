@@ -2870,14 +2870,17 @@ function updateVendorOptions() {
     }
 
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
-    const state = vendorSelectState(catalogData, deviceType, vendorSelect.value, keepVendor);
+    const order = [...vendorSelect.options].map(option => option.value);
+    const state = vendorSelectState(catalogData, deviceType, vendorSelect.value, keepVendor, order);
     vendorSelect.querySelectorAll('option').forEach(option => {
         if (option.value === '') {
             return;
         }
-        const offered = state.offered.includes(option.value);
-        option.hidden = !offered;
-        option.disabled = !offered;
+        // Only the shown member of a vendor group is enabled; the others would
+        // show as a second, identical entry in a picker that ignores hidden.
+        const shown = state.shown.includes(option.value);
+        option.hidden = !shown;
+        option.disabled = !shown;
     });
     vendorSelect.disabled = state.disabled;
     vendorSelect.value = state.value;
@@ -2885,9 +2888,31 @@ function updateVendorOptions() {
     vendorSelect.dispatchEvent(new Event('change'));
 }
 
+// The connection choice appears when the selected vendor shares its catalog
+// vendorLabel with another offered vendor; its value is the selected key.
+function updateVendorConnection() {
+    const vendorSelect = document.getElementById('vendor');
+    const connectionGroup = document.getElementById('sky-watcher-connection-group');
+    const connectionSelect = document.getElementById('sky-watcher-connection');
+    const deviceType = normalizeDeviceType(document.getElementById('device-type').value);
+    const order = [...vendorSelect.options].map(option => option.value);
+    const state = vendorSelectState(catalogData, deviceType, vendorSelect.value, keepVendor, order);
+    connectionGroup.hidden = state.group.length < 2;
+    connectionSelect.value = state.value;
+}
+
+// The connection choice picks which group member #vendor holds; updateVendorOptions
+// swaps the shown member and fires #vendor's change, which swaps the section.
+function selectVendorConnection() {
+    document.getElementById('vendor').value = document.getElementById('sky-watcher-connection').value;
+    updateVendorOptions();
+}
+
 document.getElementById('device-type').addEventListener('change', updateVendorOptions);
+document.getElementById('sky-watcher-connection').addEventListener('change', selectVendorConnection);
 
 document.getElementById('vendor').addEventListener('change', function() {
+    updateVendorConnection();
     const vendor = this.value;
     const configs = document.querySelectorAll('.vendor-config');
     configs.forEach(config => config.style.display = 'none');
