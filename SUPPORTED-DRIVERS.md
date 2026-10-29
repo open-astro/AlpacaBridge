@@ -23,7 +23,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **ConformU Verification**: All drivers listed below have been tested and verified using the ConformU tool to ensure full compliance with the ASCOM Alpaca API specification.
 - **Driver Status**: Only drivers that have been verified with ConformU are listed. Additional drivers may be in development but are not included until they pass ConformU verification.
-- **Fake-only report**: The `ConformU fake Sky-Watcher` workflow (`.github/workflows/conformu-fake.yml`, artifact `conformu-fake-skywatcher`; it runs on PRs that touch the Sky-Watcher driver, the fake mount or the telescope and HTTP layers, nightly on `main` and on demand, not on every PR) runs ConformU against a simulated Sky-Watcher mount (`FakeSkyWatcherMount`); the report is committed under `AlpacaCore/conformu/SkyWatcher/Fake/`. It checks the driver and the HTTP layer with no hardware and is not hardware validation; no row below depends on it.
+- **Fake-only report**: The `ConformU fake Sky-Watcher` workflow (`.github/workflows/conformu-fake.yml`, artifact `conformu-fake-skywatcher`; it runs on PRs that touch the Sky-Watcher driver, the fake mount or the telescope and HTTP layers, nightly on `main` and on demand, not on every PR) runs ConformU against a simulated Sky-Watcher mount (`FakeSkyWatcherMount`); the report is committed under `AlpacaCore/conformu/Sky-Watcher/Fake/`. It checks the driver and the HTTP layer with no hardware and is not hardware validation; no row below depends on it.
 - **Adding New Drivers**: New driver support can be added by implementing the appropriate driver interface. See the [Development Guide](docs/development.md) for details. All drivers must pass ConformU verification before being added to this list.
 
 - **Connection Types**:
@@ -802,15 +802,15 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
-### Sky-Watcher Direct Motor Controller
+### Sky-Watcher (EQMOD direct)
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
-| Wave 100i | USB, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/SkyWatcher/Wave%20100i/) |
-| EQM-35 Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SkyWatcher/EQM-35%20Pro/) |
+| Wave 100i | USB, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/Sky-Watcher/Wave%20100i/) |
+| EQM-35 Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Sky-Watcher/EQM-35%20Pro/) |
 
 <details>
-<summary><strong>Sky-Watcher Direct Motor Controller Driver Notes</strong></summary>
+<summary><strong>Sky-Watcher (EQMOD direct) Driver Notes</strong></summary>
 
 - **Protocol**: Sky-Watcher Motor Controller Command Set (see `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`) — talks directly to the mount's motor board, no hand controller or SynScan app required. Distinct from the `synscan` hand-controller driver.
 - **Connection**: USB (the mount's own USB port, an STM32 CDC-ACM virtual COM port at `/dev/ttyACM*`) or the mount's built-in Wi-Fi (UDP port 11880, AP address 192.168.4.1). `connectionType: "auto"` scans serial ports first (including `/dev/ttyACM0`–`9`), then runs Wi-Fi discovery (AP probe + UDP broadcast). Each candidate port is probed at 9600 and then 115200 (an EQ board's built-in USB port answers only at 115200), so a Prolific/FTDI/CH340-class port with nothing Sky-Watcher on it costs about 3.3 s per scan (up to roughly 4.4 s, since the read loops check their deadline only between reads); budget several seconds per such adapter before Wi-Fi discovery even starts.
@@ -827,12 +827,12 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
-### SynScan V3/V4
+### Sky-Watcher (SynScan hand controller)
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
-| Sky-Watcher EQM-35 Pro | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20EQM-35%20Pro/) |
-| Sky-Watcher HEQ5 PRO | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20HEQ5%20PRO/) |
+| Sky-Watcher EQM-35 Pro | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/Sky-Watcher/EQM-35%20Pro/) |
+| Sky-Watcher HEQ5 PRO | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/Sky-Watcher/HEQ5%20PRO/) |
 
 <details>
 <summary><strong>SynScan Driver Notes</strong></summary>

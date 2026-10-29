@@ -3,7 +3,7 @@ paths:
   - "AlpacaCore/src/vendors/skywatcher/**"
   - "AlpacaCore/include/alpacacore/vendor/skywatcher/**"
   - "AlpacaCore/tests/*skywatcher*"
-  - "AlpacaCore/conformu/SkyWatcher/**"
+  - "AlpacaCore/conformu/Sky-Watcher/**"
 ---
 
 Before working on these files, read `.github/instructions/skywatcher.instructions.md` in full.
