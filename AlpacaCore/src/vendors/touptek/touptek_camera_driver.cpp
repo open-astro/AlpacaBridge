@@ -375,7 +375,10 @@ public:
         connected_.store(false);
         state_lock.unlock();
         if (handle) {
-            try { sdk.stop(handle); } catch (const std::exception&) {}
+            try {
+                sdk.stop(handle);
+            } catch (const std::exception&) {
+            }
             sdk.close_camera(handle);
         }
     }
