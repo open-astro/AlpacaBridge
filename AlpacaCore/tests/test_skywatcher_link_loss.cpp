@@ -315,3 +315,36 @@ TEST_CASE("SkyWatcher link loss - serial: a polled severed link keeps the fault 
     s.driver->set_connected(false);
     CHECK(s.driver->get_link_fault().empty());
 }
+
+// open-astro#1707: a stale verdict reached on the old session must not latch
+// the session a relink opened between the verdict and the latch.
+TEST_CASE("SkyWatcher link loss - a stale verdict does not latch a session relinked after it",
+          "[skywatcher][linkloss][udp]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.udp_port = mount.port();
+    info.response_timeout_ms = 100;
+
+    sw::SkyWatcherProtocolWrapper protocol;
+    protocol.set_task_clock(clock);
+    REQUIRE(protocol.connect(info));
+    mount.set_silent(true);
+    for (int i = 0; i < 3; ++i) CHECK_THROWS(protocol.inquire_position(sw::kAxisRa));
+    REQUIRE(protocol.link_faulted());
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+
+    mount.set_silent(false);
+    protocol.set_after_stale_verdict_for_test([&] { REQUIRE(protocol.connect(info)); });
+    protocol.link_alive();  // the old session's verdict; the hook relinks before the latch
+    protocol.set_after_stale_verdict_for_test({});
+
+    CHECK(protocol.link_alive());
+    CHECK(protocol.is_connected());
+    CHECK(protocol.link_fault().empty());
+    CHECK_FALSE(protocol.consume_link_lost_at().has_value());
+    protocol.disconnect();
+}

@@ -756,6 +756,9 @@ public:
         // Decision 0009: a fault that has stood past the staleness bound is a
         // lost link, on UDP and serial alike.
         if (fault_stale()) {
+            if (after_stale_verdict_) {
+                after_stale_verdict_();
+            }
             lose_stale_link();
             return false;
         }
@@ -896,6 +899,10 @@ public:
     }
 
     void set_task_clock(util::TaskClock& clock) { clock_.store(&clock); }
+
+    // Test seam: runs between link_alive()'s stale verdict and its latch, so a
+    // test can relink exactly there (open-astro#1707).
+    void set_after_stale_verdict(std::function<void()> hook) { after_stale_verdict_ = std::move(hook); }
 
     // Decision 0009 point 5: a loss keeps the latched fault text for
     // get_link_fault() until the next connect or disconnect. Call before
@@ -1691,6 +1698,7 @@ private:
     // Decision 0009: the link was lost (transport gone, or a fault past the
     // staleness bound). Sticky until the next connect or disconnect.
     std::atomic<bool> link_lost_{false};
+    std::function<void()> after_stale_verdict_;
     std::string connect_failure_;  // under io_mutex_: why the last connect() failed
     std::string lost_fault_;  // under health_mutex_: fault text kept after a loss
     std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
@@ -1747,6 +1755,10 @@ bool SkyWatcherProtocolWrapper::link_faulted() { return !pimpl_->link_fault().em
 std::uint64_t SkyWatcherProtocolWrapper::link_recovery_epoch() { return pimpl_->recovery_epoch(); }
 
 void SkyWatcherProtocolWrapper::finish_lost_close() { pimpl_->finish_lost_close(); }
+
+void SkyWatcherProtocolWrapper::set_after_stale_verdict_for_test(std::function<void()> hook) {
+    pimpl_->set_after_stale_verdict(std::move(hook));
+}
 
 void SkyWatcherProtocolWrapper::note_link_lost_at(std::chrono::steady_clock::time_point at) {
     pimpl_->note_link_lost_at(at);
