@@ -1121,7 +1121,9 @@ public:
     }
 
     double get_site_latitude() const override {
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         if (!site_coords_valid_) {
             throw AlpacaException("Site coordinates not available", AlpacaError::ValueNotSet);
         }
@@ -1166,7 +1168,9 @@ public:
     }
 
     double get_site_longitude() const override {
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         if (!site_coords_valid_) {
             throw AlpacaException("Site coordinates not available", AlpacaError::ValueNotSet);
         }
@@ -1394,7 +1398,8 @@ public:
 
         std::lock_guard<std::mutex> lock(mutex_);
         if (park_command_active_) return true;
-        return !measured(frame_locked().status, "Slewing").stop_or_tracking;
+        const auto frame = frame_locked();
+        return !frame.parked.value_or(false) && !measured(frame.status, "Slewing").stop_or_tracking;
     }
 
     double get_target_declination() const override {
@@ -2189,7 +2194,9 @@ private:
     ParkEvaluation evaluate_park_state_locked(const std::optional<ParkStatus>& park_status,
                                               const std::optional<StatusInfo>& mount_status,
                                               std::chrono::steady_clock::time_point now) const {
-        if (park_command_active_ && mount_status && !mount_status->stop_or_tracking) {
+        // AM5 can omit GU's N even after Gps explicitly reports Park completed.
+        if (park_command_active_ && mount_status && !mount_status->stop_or_tracking &&
+            park_status != ParkStatus::Completed) {
             park_motion_seen_ = true;
             return ParkEvaluation::InProgress;
         }
