@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <future>
 #include <limits>
@@ -1355,4 +1356,116 @@ TEST_CASE("Bisque Telescope Driver spec audit - SiteElevation never set throws I
     require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
     driver->set_site_elevation(42.0);
     CHECK(driver->get_site_elevation() == 42.0);
+}
+
+// #1838: park() sends Park and polls IsParked for up to 120 s before it sets parked_, so a slew in that window
+// passed the parked_ check and went to the wire. A park in progress refuses a slew like a parked mount.
+TEST_CASE("Bisque slew - a park in progress refuses both slew forms and sends no slew (#1838)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    // A failing check must not leave the park poll running: its future would wait for it.
+    const struct FinishPark {
+        ClockedBisque& rig;
+        std::future<void>& parked;
+        ~FinishPark() {
+            rig.mount.park_polls_needed = 0;
+            advance_until(rig.clock, [&] { return !parked.valid() || ready(parked); });
+        }
+    } finish_park{rig, parked};
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+
+    require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
+                         alpacacore::AlpacaError::InvalidWhileParked);
+    // Stepped on the clock so a sent slew fails the case instead of waiting for its completion forever.
+    auto sync_slew = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
+    advance_until(rig.clock, [&] { return ready(sync_slew); }, 20);
+    REQUIRE(ready(sync_slew));
+    require_alpaca_error([&] { sync_slew.get(); }, alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(rig.mount.slew_commands.load() == 0);
+
+    rig.mount.park_polls_needed = 0;
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    REQUIRE_NOTHROW(parked.get());
+}
+
+// AbortSlew never waits for a park poll, and it ends the park window for slews.
+TEST_CASE("Bisque park - AbortSlew during the park poll returns at once and a slew is allowed again (#1838)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    // A failing check must not leave the park poll running: its future would wait for it.
+    const struct FinishPark {
+        ClockedBisque& rig;
+        std::future<void>& parked;
+        ~FinishPark() {
+            rig.mount.park_polls_needed = 0;
+            advance_until(rig.clock, [&] { return !parked.valid() || ready(parked); });
+        }
+    } finish_park{rig, parked};
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+
+    auto aborted = std::async(std::launch::async, [&] { rig.driver->abort_slew(); });
+    REQUIRE(aborted.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE_NOTHROW(aborted.get());
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(rig.mount.slew_commands.load() == 1);
+
+    rig.mount.park_polls_needed = 0;
+    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    REQUIRE_NOTHROW(parked.get());
+}
+
+// #1838: the slew gate drops mutex_ for IsTracking. A disconnect that lands in that gap must refuse the slew
+// when the gate re-locks, before anything is sent.
+TEST_CASE("Bisque slew - a disconnect inside the IsTracking gap refuses both slew forms (#1838)",
+          "[bisque][telescope][unit][park-race]") {
+    for (const bool async_form : {true, false}) {
+        alpacacore::test::FakeBisqueMount mount;
+        std::mutex gate_mutex;
+        std::condition_variable gate_cv;
+        bool tracking_entered = false;
+        bool release = false;
+        alpacacore::test::FakeMountServer server{[&](const std::string& command) {
+            if (command.find("IsTracking") != std::string::npos) {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                tracking_entered = true;
+                gate_cv.notify_all();
+                gate_cv.wait(lock, [&] { return release; });
+            }
+            return mount.responder()(command);
+        }};
+        REQUIRE(server.ok());
+        alpacacore::test::FakeTaskClock clock;
+        auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()), clock);
+        REQUIRE_NOTHROW(driver->set_connected(true));
+        pause_poll(*driver);
+
+        auto slew = std::async(std::launch::async, [&] {
+            if (async_form) {
+                driver->slew_to_coordinates_async(5.5, 20.0);
+            } else {
+                driver->slew_to_coordinates(5.5, 20.0);
+            }
+        });
+        {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds(5), [&] { return tracking_entered; }));
+        }
+        // The disconnect clears the driver state under mutex_ and then waits for the wire held by IsTracking.
+        auto disconnect = std::async(std::launch::async, [&] { driver->set_connected(false); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (driver->get_connected() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        REQUIRE_FALSE(driver->get_connected());
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            release = true;
+        }
+        gate_cv.notify_all();
+        require_alpaca_error([&] { slew.get(); }, alpacacore::AlpacaError::NotConnected);
+        disconnect.get();
+        CHECK(mount.slew_commands.load() == 0);
+    }
 }
