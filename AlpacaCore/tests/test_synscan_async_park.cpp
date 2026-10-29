@@ -52,7 +52,7 @@ struct FakeSynScanState {
     alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
     alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
     std::atomic<bool> goto_seen{false};
-    std::atomic<bool> no_motion{false};  // GOTO acked, mount stays put, L says idle
+    std::atomic<bool> no_motion{false};        // GOTO acked, mount stays put, L says idle
     std::atomic<bool> silent_position{false};  // position reads go unanswered once a GOTO was seen
     std::atomic<int> goto_count{0};
     // The next N precise GOTOs end this many RA counts (of 2^32) past their aim: the ~49' miss of #1105.
