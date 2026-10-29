@@ -66,12 +66,29 @@ function offeredVendors(catalog, deviceType, keepVendor = '') {
 }
 
 // What the #vendor select shows: the offered vendors, the selected vendor
-// only while it is offered, and disabled until a catalog is loaded.
-function vendorSelectState(catalog, deviceType, vendor, keepVendor = '') {
+// only while it is offered, and disabled until a catalog is loaded. Offered
+// vendors of one device type that carry the same explicit vendorLabel are one
+// group (a descriptor without a label is a group of one). `shown` keeps one
+// member per group: the selected vendor if it is in the group, else the group's
+// first member in `order` (the #vendor option values), then catalog order.
+// `group` is the selected vendor's group in that order, [] with nothing selected.
+function vendorSelectState(catalog, deviceType, vendor, keepVendor = '', order = []) {
     const offered = offeredVendors(catalog, deviceType, keepVendor);
+    const type = String(deviceType).toLowerCase();
+    const rank = (v) => (order.includes(v) ? order.indexOf(v) : order.length);
+    const labelOf = (v) => (Array.isArray(catalog)
+        ? catalog.find((d) => d.vendor === v && d.deviceType === type)?.vendorLabel : '') || '';
+    const groupOf = (v) => (labelOf(v) ? offered.filter((o) => labelOf(o) === labelOf(v)) : [v])
+        .sort((a, b) => rank(a) - rank(b));
+    const selected = offered.includes(vendor) ? vendor : '';
     return {
         offered,
-        value: offered.includes(vendor) ? vendor : '',
+        shown: offered.filter((v) => {
+            const group = groupOf(v);
+            return v === (group.includes(selected) ? selected : group[0]);
+        }),
+        group: selected ? groupOf(selected) : [],
+        value: selected,
         disabled: !Array.isArray(catalog),
     };
 }

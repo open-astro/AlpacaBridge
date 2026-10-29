@@ -151,7 +151,7 @@ test('vendorSelectState clears a vendor the device type does not offer, and keep
 });
 
 test('with no catalog loaded the vendor select is disabled and empty', () => {
-    assert.deepEqual(schema().vendorSelectState(null, 'camera', 'zwo'), { offered: [], value: '', disabled: true });
+    assert.deepEqual(schema().vendorSelectState(null, 'camera', 'zwo'), { offered: [], shown: [], group: [], value: '', disabled: true });
 });
 
 test('deriveIndexFields takes EnumerationIndex number inputs and pairs the nearest DeviceId, else PortPath, field of the same appliesWhen', () => {

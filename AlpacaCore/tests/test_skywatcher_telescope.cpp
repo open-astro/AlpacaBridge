@@ -72,8 +72,8 @@ TEST_CASE("SkyWatcher Telescope Driver - Device metadata", "[skywatcher][telesco
     auto driver = make_driver(3);
 
     CHECK(driver->get_device_number() == 3);
-    CHECK(driver->get_description() == "Sky-Watcher Motor Controller Mount Driver");
-    CHECK(driver->get_driver_info() == "AlpacaCore SkyWatcher Driver v0.1");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD Direct Mount Driver");
+    CHECK(driver->get_driver_info() == "AlpacaCore EQMOD Direct Driver v0.1");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "SkyWatcher_3");
