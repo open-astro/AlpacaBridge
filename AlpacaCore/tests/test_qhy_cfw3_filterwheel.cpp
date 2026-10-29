@@ -140,6 +140,17 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - State machine contracts", "[qhy][filte
         if (entry.name == "TimeStamp") has_timestamp = true;
     }
     REQUIRE_FALSE(has_timestamp);
+    // The disconnected list is empty, so the loop above never iterates: the
+    // "no Connected entry" claim is only live on a connected driver.
+    CHECK(state.empty());
+
+    FakeQhyCfw3 fake(7);
+    auto connected = make_driver(fake);
+    connected->set_connected(true);
+    const auto live = connected->get_device_state();
+    REQUIRE_FALSE(live.empty());
+    for (const auto& entry : live) CHECK(entry.name != "Connected");
+    connected->set_connected(false);
 }
 
 TEST_CASE("QHY CFW3 Filter Wheel Driver - Unsupported methods", "[qhy][filterwheel][cfw3][unit]") {
@@ -307,23 +318,33 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A second goto mid-move is InvalidOpera
 
 TEST_CASE("QHY CFW3 Filter Wheel Driver - Disconnect during a move cancels the wait and joins",
           "[qhy][filterwheel][cfw3][unit]") {
+    // Slot 0 -> 3 is three slots by shortest path: 2400 ms of travel, so an
+    // uncancelled wait outlasts the 1000 ms bound below (a one-slot move
+    // finished inside the old bound and passed with the cancel deleted).
     FakeQhyCfw3 fake(7);
-    fake.set_travel_ms(400);
+    fake.set_travel_ms(800);
     auto driver = make_driver(fake);
     driver->set_connected(true);
 
-    driver->set_position(6);
+    driver->set_position(3);
     CHECK(driver->get_position() == -1);
     const auto start = std::chrono::steady_clock::now();
     driver->set_connected(false);  // must not wait the full travel, and must not leave the move body running
-    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(1500));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(1000));
     CHECK_FALSE(driver->get_connected());
     require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
     // The pty carries the arrival reply later; a reconnect handshake must
-    // still succeed with that stale byte in the buffer.
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    // still succeed with that stale byte in the buffer. Wait out the travel
+    // (the fake is silent while it turns) before reconnecting.
+    const auto settled_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    int quiet_polls = 0;
+    while (quiet_polls < 10 && std::chrono::steady_clock::now() < settled_by) {
+        quiet_polls = fake.quiescent() ? quiet_polls + 1 : 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    REQUIRE(quiet_polls == 10);
     driver->set_connected(true);
-    CHECK(driver->get_position() == 6);
+    CHECK(driver->get_position() == 3);
 }
 
 TEST_CASE("QHY CFW3 Filter Wheel Driver - A failed move makes Position raise until the next Position PUT",
@@ -416,6 +437,10 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A severed link reads disconnected and 
     require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
     // Static data keeps answering.
     CHECK(driver->get_names().size() == 7);
+    // Connected=true over the lost link is a real reconnect attempt, not the
+    // idempotent no-op (#527): the port is gone, so it refuses.
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
     // Connected=false on the lost link still tears down cleanly.
     REQUIRE_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
@@ -453,7 +478,10 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outli
     // between wiped the cancel, and the synchronous disconnect then sat out
     // the entire move (40 s by default, against the ~5 s an ASCOM client
     // gives Disconnect). Race the two from separate threads, many times, with
-    // a travel time long enough that a lost cancel is unmistakable.
+    // a travel time long enough that a lost cancel is unmistakable. Unforced,
+    // the main-thread disconnect always won and no goto reached the wire (0 of
+    // 25 rounds), so the cancel was never exercised: odd rounds wait for the
+    // goto to be on the wire before disconnecting, even rounds stay a raw race.
     FakeQhyCfw3 fake(7);
     fake.set_travel_ms(1500);
     alpacacore::vendor::qhy::Cfw3Settings settings = fast_settings();
@@ -461,6 +489,7 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outli
     auto driver = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, fake.slave_path(), settings);
 
     int gotos_seen = 0;
+    int rounds_on_wire = 0;
     for (int round = 0; round < 25; ++round) {
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
@@ -473,6 +502,14 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outli
                 // NotConnected when the disconnect won: the expected outcome.
             }
         });
+        if (round % 2 == 1) {
+            const std::string goto_char(1, static_cast<char>('0' + target));
+            const auto on_wire_by = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (fake.count(goto_char) <= gotos_seen && std::chrono::steady_clock::now() < on_wire_by) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            REQUIRE(fake.count(goto_char) > gotos_seen);
+        }
         const auto start = std::chrono::steady_clock::now();
         driver->set_connected(false);
         const auto took = std::chrono::steady_clock::now() - start;
@@ -501,8 +538,11 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outli
         if (fake.count(goto_char) > gotos_seen) {
             gotos_seen = fake.count(goto_char);
             REQUIRE(fake.position() == target);
+            ++rounds_on_wire;
         }
     }
+    // The forced rounds reached the wire, so the cancel was really raced.
+    REQUIRE(rounds_on_wire >= 12);
 }
 
 TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect mid-move waits out the arrival byte",
@@ -528,23 +568,41 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect mid-move waits out the arr
     }
     REQUIRE(fake.count("5") > 0);
     driver->set_connected(false);  // cancels the wait; the fake keeps turning
-    // Reconnect at once: the arrival '5' is still to come.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
-    bool connected = false;
-    while (!connected && std::chrono::steady_clock::now() < deadline) {
-        try {
-            driver->set_connected(true);
-            connected = driver->get_connected();
-        } catch (const alpacacore::AlpacaException&) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-    }
-    REQUIRE(connected);
+    // Reconnect at once: the arrival '5' is still to come. The first attempt
+    // must succeed: a retry loop would swallow a handshake that read the
+    // arrival byte as its MXP or NOW answer.
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    REQUIRE(driver->get_connected());
     // Whatever the timing, the wheel's real geometry survived the reconnect.
     CHECK(driver->get_names().size() == 7);
+    // The arrival byte was drained, not swallowed into the VRS answer.
+    CHECK(driver->get_device_firmware() == std::string("20181114"));
     CHECK(driver->get_position() == 5);
     REQUIRE_NOTHROW(driver->set_position(6));
     CHECK(settle_position(*driver) == 6);
+}
+
+// Issue #528: a synchronous disconnect that lands while a synchronous connect is inside the handshake must not be
+// dropped. Without transition_mutex_ thread B saw "not connected" and returned as a no-op while A stored true.
+TEST_CASE("QHY CFW3 Filter Wheel Driver - sync disconnect during sync connect is not dropped",
+          "[qhy][filterwheel][cfw3][unit]") {
+    FakeQhyCfw3 fake(7);
+    auto driver = make_driver(fake);
+    fake.hold_next_reply(std::chrono::milliseconds(150));  // the VRS answer: A stays inside the handshake
+
+    std::thread a([&] {
+        try {
+            driver->set_connected(true);
+        } catch (const std::exception&) {
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // inside A's boot wait, before it stores true
+    driver->set_connected(false);
+    a.join();
+
+    CHECK(driver->get_connected() == false);
+    CHECK(fake.connects() == 1);
+    driver->set_connected(false);
 }
 
 // #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its

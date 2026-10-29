@@ -18,7 +18,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -366,4 +369,99 @@ TEST_CASE("PolledState - max_age must undercut the link staleness bound", "[poll
     config.max_age = alpacacore::util::kLinkStalenessBound;
     config.log_tag = "Test";
     CHECK_THROWS_AS(PolledState<Frame>(clock, generation, config, [] { return Frame{}; }, [] {}), AlpacaException);
+}
+
+namespace {
+
+// Delegates to the fake; `on_now` runs once inside now(), which orders an interleaving
+// FakeTaskClock (final) cannot: the reconnect lands between a getter's read and its latch.
+struct HookClock final : alpacacore::util::TaskClock {
+    FakeTaskClock inner;
+    std::function<void()> on_now;
+    clock::time_point now() const override {
+        const auto hook = on_now;
+        const auto t = inner.now();
+        if (hook) hook();
+        return t;
+    }
+    bool wait_for(std::unique_lock<std::mutex>& l, std::condition_variable& cv, std::chrono::nanoseconds t,
+                  const std::function<bool()>& p) override {
+        return inner.wait_for(l, cv, t, p);
+    }
+    void sleep_for(std::chrono::nanoseconds d) override { inner.sleep_for(d); }
+};
+
+}  // namespace
+
+// Falsified by: polled_state.h:served() latch lost_ without comparing the connection epoch.
+TEST_CASE("PolledState - a stale read from before a reset does not latch the new connection", "[polled_state][unit]") {
+    HookClock clock;
+    OperationGeneration generation;
+    std::atomic<int> next{1};
+    PolledState<Frame>::Config config;
+    config.period = kPeriod;
+    config.max_age = 2 * kPeriod;
+    config.log_tag = "Test";
+    PolledState<Frame> state(clock, generation, config, [&] { return Frame{next.load()}; }, [] {});
+
+    // Connection 1 holds one frame that ages past the staleness bound.
+    state.poll_now_for_testing();
+    clock.inner.advance(alpacacore::util::kLinkStalenessBound + 1ms);
+
+    // now() call 1 is inside the snapshot read (its lock is held); call 2 is the staleness check
+    // after the read and before the latch. The reconnect runs there.
+    int calls = 0;
+    clock.on_now = [&] {
+        if (++calls != 2) return;
+        clock.on_now = nullptr;
+        state.reset();
+        next = 42;
+        state.poll_now_for_testing();
+    };
+    try {
+        (void)state.served();
+    } catch (const AlpacaException&) {
+        // The old connection's getter may answer either way; only the new connection is pinned.
+    }
+    REQUIRE(calls >= 2);
+    CHECK_FALSE(state.link_lost());
+    CHECK(state.served().value.value == 42);
+}
+
+// Falsified by: polled_state.h:note_failure() latch lost_ without comparing the connection epoch.
+TEST_CASE("PolledState - a failed poll's verdict from before a reset does not latch the new connection",
+          "[polled_state][unit]") {
+    HookClock clock;
+    OperationGeneration generation;
+    std::atomic<bool> fail{false};
+    std::atomic<int> lost_calls{0};
+    PolledState<Frame>::Config config;
+    config.period = kPeriod;
+    config.max_age = 2 * kPeriod;
+    config.log_tag = "Test";
+    PolledState<Frame> state(
+        clock, generation, config,
+        [&] {
+            if (fail) throw std::runtime_error("no reply");
+            return Frame{1};
+        },
+        [&] { ++lost_calls; });
+
+    // Connection 1 holds one frame that ages past the staleness bound; the next poll fails.
+    state.poll_now_for_testing();
+    clock.inner.advance(alpacacore::util::kLinkStalenessBound + 1ms);
+    fail = true;
+
+    // From the failed probe: now() 1 and 2 are in the health update, 3 is the snapshot read,
+    // 4 is the staleness check outside health_mutex_, before the latch. The reconnect runs there.
+    int calls = 0;
+    clock.on_now = [&] {
+        if (++calls != 4) return;
+        clock.on_now = nullptr;
+        state.reset();
+    };
+    state.poll_now_for_testing();
+    REQUIRE(calls >= 4);
+    CHECK_FALSE(state.link_lost());
+    CHECK(lost_calls.load() == 0);
 }

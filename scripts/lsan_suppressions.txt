@@ -1,0 +1,28 @@
+# LeakSanitizer suppressions for the nightly all-vendors ASan job and the
+# sanitizer run in scripts/ci_preflight.sh (issue #1796).
+#
+# ONLY libgphoto2 frames belong here. gp_camera_autodetect() (called from
+# GPhotoSDKWrapper::enumerate_cameras(), which frees its own CameraList)
+# leaks the array libusb_get_device_list() allocates, even when it lists no
+# device, on two paths in libgphoto2 2.5.34 (the tarball
+# scripts/build_bundled_gphoto.sh builds):
+#
+# 1. libgphoto2_port/libusb1/libusb1.c keeps the list in port->pl->devs
+#    (line 212) and frees it only `if (nrofdevs)` (lines 190-193, 432-436).
+#    Stack: libusb_get_device_list <- (libusb1 iolib) <- gp_port_usb_find_device.
+# 2. gp_port_library_list() in the same file returns on 0 devices with
+#    libusb_exit() but no libusb_free_device_list() (lines 258-261).
+#    gphoto2-port-info-list.c foreach_func() runs it from
+#    gp_port_info_list_load() and then lt_dlclose()s the iolib (lines 274,
+#    276), so at exit the iolib frame is unmapped and LSan prints it as an
+#    unknown module or a library loaded later at that address. Stack:
+#    libusb_get_device_list <- (unmapped iolib) <- libgphoto2_port <- libltdl
+#    <- lt_dlforeachfile <- gp_port_info_list_load <- gp_camera_autodetect.
+#
+# We cannot fix libgphoto2 here; a leak reached from our own code must never
+# be suppressed -- fix the code instead. `leak:` matches any frame of the
+# allocation stack, so each line hides only leaks allocated inside that
+# libgphoto2 function. Our own gp_port_info_list_new() list stays checked: a
+# list the wrapper failed to free is still a direct leak from that call.
+leak:gp_port_usb_find_device
+leak:gp_port_info_list_load

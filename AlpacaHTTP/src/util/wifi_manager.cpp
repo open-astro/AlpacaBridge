@@ -339,6 +339,37 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
         return out;
     }
 
+    static void append_entry(sd_bus_message* m, const std::string& key, const WifiSettingValue& val) {
+        sd_bus_message_open_container(m, 'e', "sv");
+        sd_bus_message_append(m, "s", key.c_str());
+        switch (val.type) {
+            case 's':
+                sd_bus_message_open_container(m, 'v', "s");
+                sd_bus_message_append(m, "s", val.string_value.c_str());
+                break;
+            case 'b':
+                sd_bus_message_open_container(m, 'v', "b");
+                sd_bus_message_append(m, "b", val.boolean_value ? 1 : 0);
+                break;
+            case 'i':
+                sd_bus_message_open_container(m, 'v', "i");
+                sd_bus_message_append(m, "i", static_cast<std::int32_t>(val.integer_value));
+                break;
+            case 'u':
+                sd_bus_message_open_container(m, 'v', "u");
+                sd_bus_message_append(m, "u", static_cast<std::uint32_t>(val.integer_value));
+                break;
+            case 'y':
+                sd_bus_message_open_container(m, 'v', "ay");
+                sd_bus_message_append_array(m, 'y', val.bytes.data(), val.bytes.size());
+                break;
+            default:
+                break;
+        }
+        sd_bus_message_close_container(m);  // v
+        sd_bus_message_close_container(m);  // e
+    }
+
     // Append a SettingsSpec as a{sa{sv}} to an open message. pin_shared_ip4:
     // when true, an "ipv4" section with method=shared and address-data
     // 172.24.1.1/24 is appended (the OpenAstro fleet-wide AP subnet).
@@ -348,36 +379,7 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
             sd_bus_message_open_container(m, 'e', "sa{sv}");
             sd_bus_message_append(m, "s", section.c_str());
             sd_bus_message_open_container(m, 'a', "{sv}");
-            for (const auto& [key, val] : entries) {
-                sd_bus_message_open_container(m, 'e', "sv");
-                sd_bus_message_append(m, "s", key.c_str());
-                switch (val.type) {
-                    case 's':
-                        sd_bus_message_open_container(m, 'v', "s");
-                        sd_bus_message_append(m, "s", val.string_value.c_str());
-                        break;
-                    case 'b':
-                        sd_bus_message_open_container(m, 'v', "b");
-                        sd_bus_message_append(m, "b", val.boolean_value ? 1 : 0);
-                        break;
-                    case 'i':
-                        sd_bus_message_open_container(m, 'v', "i");
-                        sd_bus_message_append(m, "i", static_cast<std::int32_t>(val.integer_value));
-                        break;
-                    case 'u':
-                        sd_bus_message_open_container(m, 'v', "u");
-                        sd_bus_message_append(m, "u", static_cast<std::uint32_t>(val.integer_value));
-                        break;
-                    case 'y':
-                        sd_bus_message_open_container(m, 'v', "ay");
-                        sd_bus_message_append_array(m, 'y', val.bytes.data(), val.bytes.size());
-                        break;
-                    default:
-                        break;
-                }
-                sd_bus_message_close_container(m);  // v
-                sd_bus_message_close_container(m);  // e
-            }
+            for (const auto& [key, val] : entries) append_entry(m, key, val);
             sd_bus_message_close_container(m);  // a{sv}
             sd_bus_message_close_container(m);  // e
         }
@@ -454,15 +456,30 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
         sd_bus_message_unref(reply);
     }
 
-    // Set connection.interface-name on an existing profile, copying every
-    // other section and key VERBATIM at the sd-bus message level. A JSON
-    // round-trip cannot do this: get_settings() drops nested containers
-    // (static IP config, 802.1x, bssid locks...), and NM's Update() replaces
-    // the whole settings dict, so a rebuilt minimal spec would silently strip
-    // those settings from profiles the app didn't create (PR #202 review).
-    // GetSettings omits secrets; NM retains secrets absent from an Update
-    // payload, so the psk survives.
-    void pin_interface_name(const std::string& conn_path, const std::string& ifname) {
+    // Set the given keys on an existing profile, copying every other section
+    // and key VERBATIM at the sd-bus message level. A JSON round-trip cannot
+    // do this: get_settings() drops nested containers (static IP config,
+    // 802.1x, bssid locks...), and NM's Update() replaces the whole settings
+    // dict, so a rebuilt minimal spec would silently strip those settings from
+    // profiles the app didn't create (PR #202 review). GetSettings omits
+    // secrets; NM retains secrets absent from an Update payload, so a stored
+    // psk survives unless the overrides set one.
+    void patch_connection(const std::string& conn_path, const WifiSettings& overrides) override {
+        auto overridden = [&](const char* section, const char* key) {
+            for (const auto& [name, entries] : overrides) {
+                if (name != section) continue;
+                for (const auto& entry : entries) {
+                    if (entry.first == key) return true;
+                }
+            }
+            return false;
+        };
+        auto append_overrides = [&](sd_bus_message* m, const char* section) {
+            for (const auto& [name, entries] : overrides) {
+                if (name != section) continue;
+                for (const auto& [key, val] : entries) append_entry(m, key, val);
+            }
+        };
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* src = nullptr;
         int r = sd_bus_call_method(bus, kNmService, conn_path.c_str(), kNmConnIface, "GetSettings", &err, &src, "");
@@ -477,20 +494,22 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
             sd_bus_message_unref(src);
             throw_bus("Update new_method_call", r);
         }
+        std::vector<std::string> seen;
         sd_bus_message_open_container(m, 'a', "{sa{sv}}");
         sd_bus_message_enter_container(src, 'a', "{sa{sv}}");
         while (sd_bus_message_enter_container(src, 'e', "sa{sv}") > 0) {
-            const char* section = nullptr;
-            sd_bus_message_read(src, "s", &section);
-            bool is_conn = section && std::strcmp(section, "connection") == 0;
+            const char* section_name = nullptr;
+            sd_bus_message_read(src, "s", &section_name);
+            const std::string section = section_name ? section_name : "";
+            seen.push_back(section);
             sd_bus_message_open_container(m, 'e', "sa{sv}");
-            sd_bus_message_append(m, "s", section);
+            sd_bus_message_append(m, "s", section.c_str());
             sd_bus_message_open_container(m, 'a', "{sv}");
             sd_bus_message_enter_container(src, 'a', "{sv}");
             while (sd_bus_message_enter_container(src, 'e', "sv") > 0) {
                 const char* key = nullptr;
                 sd_bus_message_read(src, "s", &key);
-                if (is_conn && key && std::strcmp(key, "interface-name") == 0) {
+                if (key && overridden(section.c_str(), key)) {
                     sd_bus_message_skip(src, "v");
                 } else {
                     sd_bus_message_open_container(m, 'e', "sv");
@@ -502,19 +521,22 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
                 sd_bus_message_exit_container(src);
             }
             sd_bus_message_exit_container(src);
-            if (is_conn) {
-                sd_bus_message_open_container(m, 'e', "sv");
-                sd_bus_message_append(m, "s", "interface-name");
-                sd_bus_message_open_container(m, 'v', "s");
-                sd_bus_message_append(m, "s", ifname.c_str());
-                sd_bus_message_close_container(m);
-                sd_bus_message_close_container(m);
-            }
+            append_overrides(m, section.c_str());
             sd_bus_message_close_container(m);  // a{sv}
             sd_bus_message_close_container(m);  // e
             sd_bus_message_exit_container(src);
         }
         sd_bus_message_exit_container(src);
+        // Sections the profile did not have yet (e.g. first psk).
+        for (const auto& [name, entries] : overrides) {
+            if (std::find(seen.begin(), seen.end(), name) != seen.end()) continue;
+            sd_bus_message_open_container(m, 'e', "sa{sv}");
+            sd_bus_message_append(m, "s", name.c_str());
+            sd_bus_message_open_container(m, 'a', "{sv}");
+            for (const auto& [key, val] : entries) append_entry(m, key, val);
+            sd_bus_message_close_container(m);  // a{sv}
+            sd_bus_message_close_container(m);  // e
+        }
         sd_bus_message_close_container(m);  // a{sa{sv}}
         sd_bus_message_unref(src);
 
@@ -524,7 +546,7 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
         if (r < 0) {
             std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
             sd_bus_error_free(&err);
-            throw WifiError("Update (interface-name pin) failed: " + msg);
+            throw WifiError("Update (patch) failed: " + msg);
         }
         sd_bus_message_unref(reply);
     }
@@ -1147,45 +1169,57 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
         }
     }
 
-    std::optional<std::string> existing_id;
-    if (!existing_path.empty()) {
-        existing_id = existing["connection"].value("id", ssid_connection_id(ssid));
+    // On dual-interface boards, pin client profiles to the managed
+    // interface: without the pin NM may activate them on the dedicated AP
+    // interface, displacing the hotspot (OPi 4 Pro field bug, 2026-08-13).
+    std::string pin_interface;
+    {
+        auto roles = backend.device_roles();
+        if (roles.count > 1 && !roles.client_if.empty()) pin_interface = roles.client_if;
     }
-    const std::string connection_id = ssid_connection_id(ssid, existing_id);
+
+    if (!existing_path.empty()) {
+        // Read-modify-write: Update() replaces the whole profile, so a rebuilt
+        // spec would drop static IP, BSSID lock, 802.1x... (issue #1690).
+        // Secrets absent from the payload stay in NM, so psk is only set when given.
+        WifiSettings overrides{
+            {"connection",
+             {{"autoconnect", SVal::boolean(autoconnect)}, {"autoconnect-priority", SVal::i32(priority)}}}};
+        if (!pin_interface.empty()) overrides[0].second.push_back({"interface-name", SVal::str(pin_interface)});
+        const std::string connection_id =
+            ssid_connection_id(ssid, existing["connection"].contains("id")
+                                         ? std::optional<std::string>(existing["connection"].value("id", ""))
+                                         : std::nullopt);
+        if (!existing["connection"].contains("id")) overrides[0].second.push_back({"id", SVal::str(connection_id)});
+        if (!passphrase.empty()) {
+            // Keep the stored key-mgmt (sae, wpa-psk...); wpa-psk only when it had no security section.
+            Section security{{"psk", SVal::str(passphrase)}};
+            if (!existing.contains("802-11-wireless-security")) {
+                security.push_back({"key-mgmt", SVal::str("wpa-psk")});
+            }
+            overrides.push_back({"802-11-wireless-security", security});
+        }
+        backend.patch_connection(existing_path, overrides);
+        return {{"Id", connection_id},
+                {"Ssid", ssid},
+                {"SsidHex", ssid_to_hex(ssid)},
+                {"Autoconnect", autoconnect},
+                {"Priority", priority}};
+    }
+
+    const std::string connection_id = ssid_connection_id(ssid);
     Section conn{{"id", SVal::str(connection_id)},
                  {"type", SVal::str("802-11-wireless")},
                  {"autoconnect", SVal::boolean(autoconnect)},
                  {"autoconnect-priority", SVal::i32(priority)}};
-    // On dual-interface boards, pin client profiles to the managed
-    // interface: without the pin NM may activate them on the dedicated AP
-    // interface, displacing the hotspot (OPi 4 Pro field bug, 2026-08-13).
-    {
-        auto roles = backend.device_roles();
-        if (roles.count > 1 && !roles.client_if.empty()) {
-            conn.push_back({"interface-name", SVal::str(roles.client_if)});
-        }
-    }
-    if (!existing_path.empty()) {
-        conn.push_back({"uuid", SVal::str(existing["connection"].value("uuid", ""))});
-    }
+    if (!pin_interface.empty()) conn.push_back({"interface-name", SVal::str(pin_interface)});
     Section wifi{{"ssid", SVal::bytearr(ssid)}, {"mode", SVal::str("infrastructure")}};
     SettingsSpec spec{{"connection", conn}, {"802-11-wireless", wifi}};
-
-    bool had_security = !existing.empty() && existing.contains("802-11-wireless-security");
     if (!passphrase.empty()) {
         spec.push_back(
             {"802-11-wireless-security", {{"key-mgmt", SVal::str("wpa-psk")}, {"psk", SVal::str(passphrase)}}});
-    } else if (had_security) {
-        // Keep WPA with the stored secret: declare key-mgmt but omit psk —
-        // NM retains secrets that are not part of an Update payload.
-        spec.push_back({"802-11-wireless-security", {{"key-mgmt", SVal::str("wpa-psk")}}});
     }
-
-    if (existing_path.empty()) {
-        backend.add_connection(spec, /*pin_shared_ip4=*/false);
-    } else {
-        backend.update_connection(existing_path, spec, /*pin_shared_ip4=*/false);
-    }
+    backend.add_connection(spec, /*pin_shared_ip4=*/false);
 
     return {{"Id", connection_id},
             {"Ssid", ssid},
@@ -1227,7 +1261,7 @@ void WifiManager::connect_profile(const std::string& uuid) {
             // hidden-ssid flags... from profiles the app didn't create).
             if (!is_ap && roles.count > 1 && !roles.client_if.empty() &&
                 s["connection"].value("interface-name", "").empty()) {
-                bus_->pin_interface_name(path, roles.client_if);
+                bus_->patch_connection(path, {{"connection", {{"interface-name", SVal::str(roles.client_if)}}}});
             }
             bus_->activate(path, is_ap ? roles.ap_path : roles.client_path);
             return;
