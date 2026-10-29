@@ -704,10 +704,12 @@ public:
         struct ParkingGuard {
             BisqueTelescopeDriver& self;
             bool armed = false;
+            uint64_t epoch = 0;
             ~ParkingGuard() {
                 if (!armed) return;
                 std::lock_guard<std::mutex> lock(self.mutex_);
-                self.parking_ = false;
+                // A newer Park owns the flag now (park_epoch_).
+                if (self.park_epoch_ == epoch) self.parking_ = false;
             }
         };
         ParkingGuard guard{*this};
@@ -719,6 +721,7 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 check_connected();
                 parking_ = true;
+                guard.epoch = ++park_epoch_;
                 guard.armed = true;
             }
             protocol.park();
@@ -741,7 +744,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             parked_ = true;
-            parking_ = false;
+            if (park_epoch_ == guard.epoch) parking_ = false;
         }
         publish_measurement();
     }
@@ -1007,6 +1010,7 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         parked_ = false;
+        parking_ = false;  // a park poll still running no longer blocks slews
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1710,6 +1714,7 @@ private:
     bool site_info_valid_ = false;
 
     mutable bool parked_ = false;
+    uint64_t park_epoch_ = 0;  // under mutex_; bumped by each Park so a stale Park's exit leaves a newer one's parking_
     bool parking_ = false;  // under mutex_; a Park is sent and its IsParked poll runs; refuses slews like parked_
     mutable bool at_home_ = false;
     mutable bool homing_ = false;

@@ -1469,3 +1469,60 @@ TEST_CASE("Bisque slew - a disconnect inside the IsTracking gap refuses both sle
         CHECK(mount.slew_commands.load() == 0);
     }
 }
+
+// Unpark ends the park window: AtPark reads false, so a slew must not be refused as parked.
+TEST_CASE("Bisque park - Unpark during the park poll allows a slew again (#1838)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    const struct FinishPark {
+        ClockedBisque& rig;
+        std::future<void>& parked;
+        ~FinishPark() {
+            rig.mount.park_polls_needed = 0;
+            advance_until(rig.clock, [&] { return !parked.valid() || ready(parked); });
+        }
+    } finish_park{rig, parked};
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+
+    REQUIRE_NOTHROW(rig.driver->unpark());
+    CHECK_FALSE(rig.driver->get_at_park());
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(rig.mount.slew_commands.load() == 1);
+}
+
+// A Park that ends late (its 120 s timeout) must not clear the flag of a newer Park still polling.
+TEST_CASE("Bisque park - a stale Park's timeout leaves a newer Park refusing slews (#1838)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    auto park1 = std::async(std::launch::async, [&] { rig.driver->park(); });
+    std::future<void> park2;
+    const struct FinishParks {
+        ClockedBisque& rig;
+        std::future<void>& park1;
+        std::future<void>& park2;
+        ~FinishParks() {
+            rig.mount.park_polls_needed = 0;
+            advance_until(rig.clock,
+                          [&] { return (!park1.valid() || ready(park1)) && (!park2.valid() || ready(park2)); });
+        }
+    } finish_parks{rig, park1, park2};
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    // Park 2 starts 60 s into Park 1, so Park 1 times out with 60 s of Park 2's budget left.
+    advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= std::chrono::seconds(60); }, 60);
+    REQUIRE(rig.virtual_elapsed() >= std::chrono::seconds(60));
+    park2 = std::async(std::launch::async, [&] { rig.driver->park(); });
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_commands.load() == 2; }, 5));
+    // Park 1 times out (120 s after its start) while Park 2, started later, still polls.
+    REQUIRE(advance_until(rig.clock, [&] { return ready(park1); }, 200));
+    require_alpaca_error([&] { park1.get(); }, alpacacore::AlpacaError::DriverException);
+    REQUIRE_FALSE(ready(park2));
+
+    require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
+                         alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(rig.mount.slew_commands.load() == 0);
+}
