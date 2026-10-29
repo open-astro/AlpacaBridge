@@ -466,9 +466,9 @@ public:
 
     std::string fallback_unique_id() const override { return "SkyWatcher_" + std::to_string(device_number_); }
 
-    std::string get_description() const override { return "Sky-Watcher Motor Controller Mount Driver"; }
+    std::string get_description() const override { return "Sky-Watcher EQMOD Direct Mount Driver"; }
 
-    std::string get_driver_info() const override { return "AlpacaCore SkyWatcher Driver v0.1"; }
+    std::string get_driver_info() const override { return "AlpacaCore EQMOD Direct Driver v0.1"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 

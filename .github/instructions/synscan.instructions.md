@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/synscan/**,AlpacaCore/include/alpacacore/vendor/synscan/**,AlpacaCore/tests/*synscan*,AlpacaCore/conformu/SynScan/**"
+applyTo: "AlpacaCore/src/vendors/synscan/**,AlpacaCore/include/alpacacore/vendor/synscan/**,AlpacaCore/tests/*synscan*,AlpacaCore/conformu/Sky-Watcher/**"
 ---
 
 ### SynScan (SkyWatcher)

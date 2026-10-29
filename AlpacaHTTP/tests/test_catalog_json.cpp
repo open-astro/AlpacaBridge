@@ -319,6 +319,20 @@ int main() {
         EXPECT(field_named(described[0], "big").at("range").dump() == R"({"max":9223372036854775807,"min":0})");
     }
 
+    // 6b. vendorLabel is served only when the schema sets one; the web UI groups
+    // the vendors of one device type that share it.
+    {
+        // case: describe_json emits vendorLabel when the schema sets vendor_label and omits it otherwise
+        alpacacore::catalog::Schema labelled = tc::make_schema();
+        labelled.vendor_label = "Test Brand";
+        DeviceCatalog catalog;
+        catalog.add(labelled);
+        EXPECT(cj::describe_json(catalog)[0].at("vendorLabel") == "Test Brand");
+        DeviceCatalog unlabelled;
+        unlabelled.add(tc::make_schema());
+        EXPECT(!cj::describe_json(unlabelled)[0].contains("vendorLabel"));
+    }
+
     // 7. The raw reads of vendor / deviceType / deviceNumber, before a descriptor
     // exists: null and absent read as absent, a wrong kind or a number that
     // is not a whole int is refused with the field named.

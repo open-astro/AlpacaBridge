@@ -56,7 +56,7 @@ SUCCESS_PATTERNS = (
 
 
 # A report made against a test double, not a device, lives in a path component
-# that starts with "Fake" (AlpacaCore/conformu/SkyWatcher/Fake/Fake-Linux-arm64.txt)
+# that starts with "Fake" (AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt)
 # and says so on its first line, so no reader takes it for hardware validation
 # (SUPPORTED-DRIVERS.md keeps hardware rows apart). A JSON report has no first
 # line to carry the marker, so a Fake* path cannot be JSON.
