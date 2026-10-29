@@ -32,23 +32,24 @@ inline constexpr std::size_t kLockGateTableSize = 8;
  *
  * Lock order: the operation lock, then the state lock (a leaf). A command
  * holds both through a StateLock (Mode::Io) for the whole command; a getter
- * holds the state lock alone (Mode::State). Every device exchange runs inside
- * exchange() or single_read(), which drop the state lock for the exchange, so
- * the state lock is never held across device I/O.
+ * holds the state lock alone (Mode::State) and makes no device exchange.
+ * Every device exchange runs inside exchange(), under the operation lock,
+ * which drops the state lock for the exchange, so the state lock is never held
+ * across device I/O.
  *
  * Which locks a thread holds is kept per gate in a thread-local table of
  * kLockGateTableSize slots, so an exchange called from a helper that was
  * handed no lock object still knows what to drop and take back. When the
- * table is full a StateLock or single_read() refuses with DriverException
+ * table is full a StateLock refuses with DriverException
  * before it takes any lock (decision 0016 item 8, Rule 6): without a slot the gate cannot see what the
  * thread holds, so an exchange would either keep the state lock held or take
  * the operation lock a second time.
  *
  * The gate owns no mutex: it refers to the driver's two, which must outlive
  * it. It is a member the driver composes, not a base class (decision 0013,
- * point 5). What stays in the driver: the transport an exchange reaches, a
- * session re-check under the operation lock, and any counter it compares
- * across an exchange (see the driver lifecycle instructions).
+ * point 5). What stays in the driver: the transport an exchange reaches and
+ * any counter it compares across an exchange (see the driver lifecycle
+ * instructions).
  */
 class LockGate {
 public:
@@ -60,7 +61,7 @@ public:
     ~LockGate() = default;
 
     /// True when this thread holds the operation lock through this gate (a
-    /// Mode::Io StateLock, or inside a single_read()).
+    /// Mode::Io StateLock).
     bool holds_io() const;
 
     /// True when this thread holds the state lock through this gate.
@@ -82,26 +83,6 @@ public:
         held->state = false;
         state_mutex_.unlock();
         const RestoreState restore{*this, held};
-        return std::forward<F>(f)();
-    }
-
-    /// Runs `f()` as one exchange from a thread that does not hold the
-    /// operation lock (a getter whose cache is stale): drops the state lock if
-    /// held, calls `before_io()` with no lock of this gate held, takes the
-    /// operation lock and marks it held for the call, so a nested exchange()
-    /// or holds_io() inside `f` sees it. After `f`, also when it or
-    /// `before_io` throws, the state lock is taken back before the operation
-    /// lock is released, so the reply is stored before another command's
-    /// exchange can land. Throws DriverException, before it drops or takes
-    /// any lock, when this thread's table is full.
-    template <typename BeforeIo, typename F>
-    decltype(auto) single_read(BeforeIo&& before_io, F&& f) const {
-        HeldLocks* held = find_held();
-        assert((held == nullptr || !held->io) && "LockGate::single_read on a thread that holds the operation lock");
-        HeldLocks* slot = held != nullptr ? held : claim_held();
-        SingleRead read{*this, slot, held != nullptr && held->state};
-        std::forward<BeforeIo>(before_io)();
-        read.take_io();
         return std::forward<F>(f)();
     }
 
@@ -141,44 +122,6 @@ private:
         HeldLocks* held_;
     };
 
-    // The single read's locks, unwound in the order single_read() documents.
-    class SingleRead {
-    public:
-        SingleRead(const LockGate& gate, HeldLocks* slot, bool had_state)
-            : gate_(gate), slot_(slot), had_state_(had_state) {
-            if (had_state_) {
-                slot_->state = false;
-                gate_.state_mutex_.unlock();
-            }
-        }
-        SingleRead(const SingleRead&) = delete;
-        SingleRead& operator=(const SingleRead&) = delete;
-        ~SingleRead() {
-            if (had_state_) {
-                gate_.state_mutex_.lock();
-                slot_->state = true;
-            }
-            if (io_taken_) {
-                slot_->io = false;
-            }
-            release_held(slot_);
-            if (io_taken_) {
-                gate_.io_mutex_.unlock();
-            }
-        }
-        void take_io() {
-            gate_.io_mutex_.lock();
-            slot_->io = true;
-            io_taken_ = true;
-        }
-
-    private:
-        const LockGate& gate_;
-        HeldLocks* slot_;
-        bool had_state_;
-        bool io_taken_ = false;
-    };
-
     std::mutex& io_mutex_;
     std::mutex& state_mutex_;
     std::string log_tag_;
@@ -190,8 +133,8 @@ private:
  * unique_lock-shaped: lock(), unlock() (releases both) and owns_lock() mean
  * what they mean on a unique_lock of the state lock, so a release point (a
  * wait, a join, a slot start) lets every other command in. Mode::State is for
- * members that take no operation lock (the getters); they reach the device
- * only through LockGate::single_read().
+ * members that take no operation lock (the getters); they never reach the
+ * device.
  */
 class StateLock {
 public:
