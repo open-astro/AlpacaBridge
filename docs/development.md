@@ -131,7 +131,7 @@ cmake --build AlpacaHTTP/build --parallel
 | `ALPACACORE_ENABLE_ZWO` | `OFF` | ZWO cameras, focusers, rotators, switches, filter wheels |
 | `ALPACACORE_ENABLE_QHY` | `OFF` | QHY cameras |
 | `ALPACACORE_ENABLE_IOPTRON` | `OFF` | iOptron mounts |
-| `ALPACACORE_ENABLE_SYNSCAN` | `OFF` | SynScan mounts |
+| `ALPACACORE_ENABLE_SYNSCAN` | `OFF` | Sky-Watcher mounts through the SynScan hand controller |
 | `ALPACACORE_ENABLE_CELESTRON` | `OFF` | Celestron mounts |
 | `ALPACACORE_ENABLE_SVBONY` | `OFF` | SVBONY cameras |
 | `ALPACACORE_ENABLE_TOUPTEK` | `OFF` | ToupTek cameras |
@@ -140,7 +140,7 @@ cmake --build AlpacaHTTP/build --parallel
 | `ALPACACORE_ENABLE_GEMINI` | `OFF` | Losmandy Gemini focusers |
 | `ALPACACORE_ENABLE_WEEWX` | `OFF` | WeeWX observing conditions |
 | `ALPACACORE_ENABLE_ONSTEP` | `OFF` | OnStep mounts |
-| `ALPACACORE_ENABLE_SKYWATCHER` | `OFF` | SkyWatcher motor controller mounts |
+| `ALPACACORE_ENABLE_SKYWATCHER` | `OFF` | Sky-Watcher mounts direct to the motor controller (EQMOD) |
 | `ALPACACORE_ENABLE_BISQUE` | `OFF` | Bisque/Paramount (TheSkyX) telescope support |
 | `ALPACACORE_ENABLE_WANDERERASTRO` | `OFF` | WandererAstro CoverCalibrator |
 | `ALPACACORE_ENABLE_ASTROASIS` | `OFF` | Astroasis Oasis Focuser |

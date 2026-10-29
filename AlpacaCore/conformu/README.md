@@ -11,9 +11,9 @@ ConformU (ASCOM Universal Device Conformance Checker) is used to verify that Alp
 
 Test results are organized by vendor/driver:
 - Each subdirectory contains ConformU test output files for a specific driver
-- Files are named `Linux-arm64.txt` (or `Linux-arm64-<transport>.txt` for drivers tested over multiple connection types, e.g. USB vs Wi-Fi)
+- Files are named `Linux-arm64.txt` (or `Linux-arm64-<transport>.txt` for drivers tested over multiple connection types, e.g. USB vs Wi-Fi). Sky-Watcher reports, which two drivers share, put the driver first: `Linux-arm64-<synscan|direct>[-<transport>].txt`; SUPPORTED-DRIVERS.md lists them under `### Sky-Watcher (SynScan hand controller)` and `### Sky-Watcher (EQMOD direct)`
 - AlpacaBridge is arm64-only; amd64/x64 ConformU reports are no longer produced or retained
-- A report against a test double belongs under a `Fake` folder (`SkyWatcher/Fake/Fake-Linux-arm64.txt`) and its first line starts `FAKE REPORT:`; `scripts/check_conformu_reports.py` requires both. The `ConformU fake Sky-Watcher` workflow (`.github/workflows/conformu-fake.yml`, `scripts/run_fake_conformu.sh`; it runs on PRs that touch its `paths:`, nightly and on demand) makes it as a CI artifact, and a copy is committed there. It is never hardware validation
+- A report against a test double belongs under a `Fake` folder (`Sky-Watcher/Fake/Fake-Linux-arm64.txt`) and its first line starts `FAKE REPORT:`; `scripts/check_conformu_reports.py` requires both. The `ConformU fake Sky-Watcher` workflow (`.github/workflows/conformu-fake.yml`, `scripts/run_fake_conformu.sh`; it runs on PRs that touch its `paths:`, nightly and on demand) makes it as a CI artifact, and a copy is committed there. It is never hardware validation
 
 ## Current Test Results
 
@@ -28,9 +28,8 @@ One folder per vendor, one subfolder per tested model. See [SUPPORTED-DRIVERS.md
 - **OnStep** - TeSeek HM-17 telescope
 - **Player One** - Ceres 462M, Uranus-C PRO, Mars-C II cameras; PW8 filter wheel; Uranus-C PRO thermal switch
 - **QHY** - QHY268C, miniCam8M cameras; miniCam8M CFW filter wheel
-- **SkyWatcher** - Wave 100i telescope (direct motor controller, USB and Wi-Fi reports); EQM-35 Pro telescope (direct motor controller, built-in USB; site coordinates rounded to whole degrees)
+- **Sky-Watcher** - two drivers share `Sky-Watcher/`. Direct motor controller (EQMOD): Wave 100i telescope (USB and Wi-Fi reports); EQM-35 Pro telescope (built-in USB; site coordinates rounded to whole degrees). SynScan V3/V4 hand controller (serial): HEQ5 PRO and EQM-35 Pro telescopes; site coordinates rounded to whole degrees
 - **SVBONY** - SV905C2 camera; SC715C camera (rebadged ToupTek G3M715C, served by the ToupTek driver); SC571CC camera (rebadged ToupTek ATR2600C, served by the ToupTek driver)
-- **SynScan** - Sky-Watcher HEQ5 PRO and EQM-35 Pro telescopes via SynScan V3/V4 hand controller (serial); site coordinates rounded to whole degrees
 - **ToupTek** - GPCMOS01200KPF, GPCMOS02000KPA, ATR2600M, GPM662M, ATR585M, G3M678C cameras (also G3M715C and ATR2600C, whose reports are filed under `SVBONY/SC715C/` and `SVBONY/SC571CC/` after the badges they were validated under); AFW-M filter wheel; AAF focuser; ATR2600M and ATR585M thermal switches; StellaVita PowerBox switch
 - **WandererAstro** - WandererCover V4 (CoverCalibrator); SFW36S filter wheel; WandererRotator Mini V2 (Rotator); WandererBox Pro V3 (Switch)
 - **WeeWX** - HTTP JSON ObservingConditions source

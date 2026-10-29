@@ -12,9 +12,10 @@
 
 // The Sky-Watcher direct (motor controller) telescope schema (open-astro#744).
 // No vendor header: compiles in every build (including vendors-OFF). The
-// display name's first word is the router's vendor_label(), so it keeps
-// "SkyWatcher support not enabled ..." and "Registered SkyWatcher telescope"
-// as the arm spelled them.
+// vendor label "Sky-Watcher" is the router's vendor_label(), so the refusal
+// reads "Sky-Watcher support not enabled ..." and the log "Registered
+// Sky-Watcher telescope"; the web UI groups this and the SynScan telescope
+// under it.
 //
 // The cross-field rules run in the arm's order: site, connection type,
 // endpoint. The API is refused; a saved config is registered so it stays
@@ -90,7 +91,8 @@ NormalizeResult normalize_skywatcher(const DeviceConfig& in, Source source) {
 void register_skywatcher_schema(DeviceCatalog& catalog) {
     Schema schema;
     schema.key = DeviceKey{"skywatcher", DeviceType::Telescope};
-    schema.display_name = "SkyWatcher direct (motor controller)";
+    schema.display_name = "Sky-Watcher (EQMOD direct)";
+    schema.vendor_label = "Sky-Watcher";
     schema.build_option = "ALPACACORE_ENABLE_SKYWATCHER";
     schema.fields = skywatcher_telescope_fields();
     schema.normalize = normalize_skywatcher;

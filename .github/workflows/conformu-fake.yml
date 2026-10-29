@@ -61,7 +61,7 @@ on:
       # the run passes, the committed fake report and this workflow.
       - "scripts/run_fake_conformu.sh"
       - "scripts/check_conformu_reports.py"
-      - "AlpacaCore/conformu/SkyWatcher/Fake/**"
+      - "AlpacaCore/conformu/Sky-Watcher/Fake/**"
       - ".github/workflows/conformu-fake.yml"
   schedule:
     - cron: "47 4 * * *"   # after nightly-build.yml (03:17), before osv-scan.yml (05:23)
@@ -79,7 +79,7 @@ jobs:
     # Hardware-free ConformU: the Sky-Watcher driver over FakeSkyWatcherMount,
     # served by the test-only fake_skywatcher_server (not installed or packaged).
     # The report is a CI artifact (Fake-Linux-arm64.txt, "FAKE REPORT:" first line)
-    # and a copy is committed under AlpacaCore/conformu/SkyWatcher/Fake/. It is never
+    # and a copy is committed under AlpacaCore/conformu/Sky-Watcher/Fake/. It is never
     # hardware validation.
     name: ConformU against the fake Sky-Watcher mount (arm64)
     runs-on: ubuntu-24.04-arm
