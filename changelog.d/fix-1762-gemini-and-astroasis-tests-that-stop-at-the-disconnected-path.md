@@ -1,0 +1,3 @@
+### Changed (tests)
+
+- **Gemini flat panel and focuser tests**, Gemini drivers, issue #1762. The firmware-cleared-on-disconnect cases for the Lite, v2 and Pro flat panels now connect to `FakeGeminiFlatPanel` first (`test_gemini_flatpanel.cpp`, `test_gemini_flatpanel_v2.cpp`, `test_gemini_flatpanel_pro.cpp`); the v2 auto-detect index is pinned by a case that picks the second of two ports; connected `OpenCover` and `HaltCover` are pinned on the v2 and Pro panels; and the focuser connect-racing-disconnect case now asserts the driver ends disconnected with one handshake. Test-only, no driver change.

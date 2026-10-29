@@ -17,8 +17,12 @@
 
 #include <functional>
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "catch2_compat.h"
+#include "device_location_test_dir.h"
 #include "driver_rig.h"
 #include "fake_gemini_flatpanel.h"
 
@@ -50,9 +54,19 @@ TEST_CASE("Gemini Flat Panel v2 Driver - Device metadata", "[gemini][flatpanel][
     CHECK(driver->get_unique_id() == "GEMINI_FLATPANEL_V2_3");
 }
 
-TEST_CASE("Gemini Flat Panel v2 Driver - Firmware unavailable when disconnected", "[gemini][flatpanel][unit]") {
-    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, "/dev/ttyUSB0");
+TEST_CASE("Gemini Flat Panel v2 Driver - Firmware unavailable when disconnected", "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, panel.slave_path(), 9600);
+    REQUIRE(driver->get_device_firmware() == std::nullopt);
 
+    // Firmware is read from the panel at connect, so it is only known while
+    // connected. Disconnected, the web UI shows no firmware row: the cached
+    // string from the last connect must be gone.
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_device_firmware() == std::optional<std::string>("107"));
+
+    driver->set_connected(false);
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_device_firmware() == std::nullopt);
 }
@@ -123,6 +137,14 @@ TEST_CASE("Gemini Flat Panel v2 Driver - Motorized cover is a real capability, n
         CHECK(ex.error_code() != alpacacore::AlpacaError::MethodNotImplemented);
         CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
     }
+
+    // Connected, the same members are real operations: neither throws MethodNotImplemented or anything else.
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    auto connected = alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, panel.slave_path(), 9600);
+    connected->set_connected(true);
+    REQUIRE(connected->get_connected());
+    CHECK_NOTHROW(connected->halt_cover());
+    CHECK_NOTHROW(connected->open_cover());
 }
 
 TEST_CASE("Gemini Flat Panel v2 Driver - Value range validation", "[gemini][flatpanel][unit]") {
@@ -170,6 +192,30 @@ TEST_CASE("Gemini Flat Panel v2 Driver - Create by index for auto-detect", "[gem
     REQUIRE(driver->get_device_number() == 1);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_unique_id() == "GEMINI_FLATPANEL_V2_1");
+}
+
+// The index the factory is given must reach the connect-time port search: index 1 picks the second port found.
+TEST_CASE("Gemini Flat Panel v2 Driver - auto-detect connects the port at the factory's index",
+          "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::TempLocationDir store;
+    alpacacore::test::FakeGeminiFlatPanel first;
+    alpacacore::test::FakeGeminiFlatPanel second;
+    alpacacore::vendor::gemini::GeminiFlatPanelScanHooks hooks;
+    hooks.enumerate = [&] {
+        return std::vector<alpacacore::vendor::gemini::GeminiFlatPanelPortInfo>{{first.slave_path(), ""},
+                                                                                {second.slave_path(), ""}};
+    };
+    alpacacore::vendor::gemini::set_gemini_flatpanel_scan_hooks_for_testing(std::move(hooks));
+    struct Unhook {
+        ~Unhook() { alpacacore::vendor::gemini::set_gemini_flatpanel_scan_hooks_for_testing({}); }
+    } unhook;
+
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_v2_by_index(0, 1);
+    driver->assign_unique_id("0b3f5a52-7d2e-4c1a-9a53-2f6a1c0d8e11");
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(second.count(">H#") > 0);
+    CHECK(first.commands().empty());  // index 0 was never opened
 }
 
 TEST_CASE("Gemini Flat Panel v2 Driver - connected, MaxBrightness is 255 and Brightness is 0 while the light is off",

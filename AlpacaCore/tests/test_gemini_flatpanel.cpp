@@ -88,11 +88,19 @@ TEST_CASE("Gemini Flat Panel Driver - Device metadata", "[gemini][flatpanel][uni
     CHECK(driver->get_unique_id() == "GEMINI_FLATPANEL_3");
 }
 
-TEST_CASE("Gemini Flat Panel Driver - Firmware unavailable when disconnected", "[gemini][flatpanel][unit]") {
-    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, "/dev/ttyUSB0");
+TEST_CASE("Gemini Flat Panel Driver - Firmware unavailable when disconnected", "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path(), 9600);
+    REQUIRE(driver->get_device_firmware() == std::nullopt);
 
     // Firmware is read from the panel at connect, so it is only known while
-    // connected. Disconnected, the web UI shows no firmware row.
+    // connected. Disconnected, the web UI shows no firmware row: the cached
+    // string from the last connect must be gone.
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_device_firmware() == std::optional<std::string>("107"));
+
+    driver->set_connected(false);
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_device_firmware() == std::nullopt);
 }

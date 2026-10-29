@@ -220,6 +220,23 @@ TEST_CASE("Gemini Focuser Driver - a connect racing a disconnect settles once (#
         driver->set_connected(false);
     }
     CHECK_FALSE(driver->get_connected());
+
+    // Fixed order: the disconnect is asked for while the connect is mid-handshake. Serialized by the
+    // transition lock it runs after the connect and wins, so the driver ends disconnected with one
+    // handshake on the wire. Unserialized, the disconnect returns early and the connect wins.
+    const int connects_before = fake.connects();
+    std::thread up(flip, true);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (fake.connects() == connects_before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(fake.connects() == connects_before + 1);
+    std::thread down(flip, false);
+    up.join();
+    down.join();
+    CHECK(failures.load() == 0);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.connects() == connects_before + 1);
 }
 
 TEST_CASE("Gemini Focuser Driver - connect/disconnect cycles reuse the port cleanly (#333)",
