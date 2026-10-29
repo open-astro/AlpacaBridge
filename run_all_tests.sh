@@ -163,4 +163,18 @@ check_http_floor "AlpacaHTTP (vendors ${CORE_VENDORS})" "${BUILD_DIR}" "${CORE_B
 # ci_preflight.sh alike (issue #586). Requires CMake >= 3.18. It catches only an
 # EMPTY tree; the floors above catch a shrunken suite (issue #592). One ctest
 # over the whole tree runs both suites in one parallel pool.
-ctest --test-dir "${BUILD_DIR}" --output-on-failure --no-tests=error --timeout "${CTEST_TIMEOUT}" -j "${CTEST_PARALLEL}"
+if ! ctest --test-dir "${BUILD_DIR}" --output-on-failure --no-tests=error --timeout "${CTEST_TIMEOUT}" -j "${CTEST_PARALLEL}"; then
+  # CTEST_RERUN_FAILED=1 (the nightly jobs set it): the failed cases run once
+  # more, alone and serially, and that run is the verdict. The all-vendors
+  # suite is ~3800 cases that wait on fake hardware in real time; at 2x nproc
+  # under ASan + UBSan a different case lost a scheduler race on five nights
+  # out of seven (runs 40665928481, 40775992105, 40853696579, 40862920401,
+  # 40958614341), and each per-case fix was followed by the next case. A
+  # sanitizer finding is deterministic and fails again here; a case that only
+  # loses under oversubscription passes, and the first run's output above
+  # still names it. PR CI keeps the single run: the oversubscription is what
+  # surfaces a scheduler-dependent assertion (see CTEST_PARALLEL above).
+  [ "${CTEST_RERUN_FAILED:-0}" = "1" ] || exit 1
+  echo "== Rerunning the failed tests alone (-j 1); this run is the verdict =="
+  ctest --test-dir "${BUILD_DIR}" --rerun-failed --output-on-failure --timeout "${CTEST_TIMEOUT}" -j 1
+fi
