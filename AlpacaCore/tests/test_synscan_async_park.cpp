@@ -53,6 +53,7 @@ struct FakeSynScanState {
     alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
     std::atomic<bool> goto_seen{false};
     std::atomic<bool> no_motion{false};  // GOTO acked, mount stays put, L says idle
+    std::atomic<bool> silent_position{false};  // position reads go unanswered once a GOTO was seen
     std::atomic<int> goto_count{0};
     // The next N precise GOTOs end this many RA counts (of 2^32) past their aim: the ~49' miss of #1105.
     std::atomic<int> miss_gotos{0};
@@ -108,6 +109,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'E':
             case 'z':
             case 'Z': {
+                if (st->silent_position.load() && st->goto_seen.load()) return "";
                 std::lock_guard<std::mutex> lock(st->mutex);
                 return st->position;  // parseable 16/24-bit position pair
             }
@@ -123,7 +125,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
                     std::lock_guard<std::mutex> lock(st->mutex);
                     st->gotos.push_back(chunk);
                     // A precise GOTO lands on its aim, so the landing check after it (#1105) sees an arrival.
-                    if (chunk[0] == 'r' && chunk.size() >= 18 && !st->no_motion.load()) {
+                    if ((chunk[0] == 'r' || chunk[0] == 'b') && chunk.size() >= 18 && !st->no_motion.load()) {
                         st->position = chunk.substr(1, 17) + "#";
                         if (st->miss_gotos.load() > 0) {
                             st->miss_gotos.fetch_sub(1);
@@ -1155,6 +1157,54 @@ TEST_CASE("SynScan - a park that misses by 49 arcmin twice fails", "[park][synsc
                                            alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_at_park());
     CHECK(st->goto_count.load() == 2);
+    driver->set_connected(false);
+}
+
+// An AZ GOTO mount parks in alt/az: the check compares the alt/az reply with the saved azimuth and altitude.
+TEST_CASE("SynScan - an alt-az park the mount does not reach fails and one it reaches parks", "[park][synscan]") {
+    for (const bool moves : {false, true}) {
+        alpacacore::test::FakeTaskClock clock;
+        auto st = std::make_shared<FakeSynScanState>();
+        st->clock = &clock;
+        st->model_id.store(128);  // AZ GOTO
+        st->set_position("40000000,20000000#");
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = mk(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_park();  // az 90, alt 45
+        st->set_position("00000000,00000000#");
+        st->no_motion.store(!moves);
+        driver->park();
+        REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+        if (moves) {
+            CHECK(driver->get_at_park());
+        } else {
+            alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
+                                                   alpacacore::AlpacaError::DriverException);
+            CHECK_FALSE(driver->get_at_park());
+        }
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("SynScan - a park whose position check cannot read the mount fails without a repeat GOTO",
+          "[park][synscan]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_park();
+    st->silent_position.store(true);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
+                                           alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(st->goto_count.load() == 1);
     driver->set_connected(false);
 }
 

@@ -163,15 +163,21 @@ inline void run_park_slew(OperationContext& ctx, std::unique_lock<std::mutex>& l
     }
     if (hooks.verify_at_target) {
         std::string miss;
+        // A check that throws fails the park at once: a repeat GOTO would not fix a position that cannot be read.
+        std::string check_error;
         try {
             miss = hooks.verify_at_target();
         } catch (const std::exception& ex) {
-            miss = std::string("Park: position check failed: ") + ex.what();
+            check_error = std::string("Park: position check failed: ") + ex.what();
         } catch (...) {
-            miss = "Park: position check failed with unknown exception";
+            check_error = "Park: position check failed with unknown exception";
         }
         if (hooks.superseded && hooks.superseded()) {
             hooks.abandon();
+            return;
+        }
+        if (!check_error.empty()) {
+            hooks.fail(check_error);
             return;
         }
         if (!miss.empty()) {

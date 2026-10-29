@@ -1188,10 +1188,12 @@ public:
                     if (miss_arcsec <= kLandingRefineLimitArcsec) {
                         return {};
                     }
-                    return "Park ended " + std::to_string(static_cast<long>(miss_arcsec)) +
-                           " arcsec from the park position (limit " +
-                           std::to_string(static_cast<long>(kLandingRefineLimitArcsec)) +
-                           " arcsec): the mount did not reach it";
+                    const std::string message = "Park ended " + std::to_string(static_cast<long>(miss_arcsec)) +
+                                                " arcsec from the park position (limit " +
+                                                std::to_string(static_cast<long>(kLandingRefineLimitArcsec)) +
+                                                " arcsec): the mount did not reach it";
+                    ALPACA_LOG_WARN("SynScan", message);
+                    return message;
                 };
                 hooks.complete = [&] {
                     if (superseded()) {
