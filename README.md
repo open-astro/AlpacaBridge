@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Debian%2013%20arm64-orange.svg)](#supported-hardware)
 [![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](docs/development.md)
-[![Authored code](https://img.shields.io/badge/Authored%20code-260k%20lines-informational.svg)](docs/architecture.md#modules)
+[![Authored code](https://img.shields.io/badge/Authored%20code-274k%20lines-informational.svg)](docs/architecture.md#modules)
 
 **The engine at the telescope.**
 
