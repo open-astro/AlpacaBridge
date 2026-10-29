@@ -62,6 +62,10 @@ public:
 
     ~FakeGeminiFocuser() {
         stop_.store(true);
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex_);  // wake a reader parked on the gate
+        }
+        gate_cv_.notify_all();
         if (reader_.joinable()) {
             reader_.join();
         }
@@ -142,9 +146,9 @@ public:
     /// One shot, then spent: the next reply is held until release_reply(), with no timer. wait_reply_held() blocks
     /// until the reader thread is holding it.
     void gate_next_reply() { gate_armed_.store(true); }
-    void wait_reply_held() {
+    bool wait_reply_held(std::chrono::milliseconds bound) {
         std::unique_lock<std::mutex> lock(gate_mutex_);
-        gate_cv_.wait(lock, [this] { return gate_held_; });
+        return gate_cv_.wait_for(lock, bound, [this] { return gate_held_; });
     }
     void release_reply() {
         std::lock_guard<std::mutex> lock(gate_mutex_);

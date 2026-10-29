@@ -341,7 +341,7 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
     const int moving_reads = fake.count(":01#");
     const int temperature_reads = fake.count(":06#");
     clock.advance(kTick);
-    fake.wait_reply_held();
+    REQUIRE(fake.wait_reply_held(kBound));
 
     std::thread disconnect([&] { driver->set_connected(false); });
     while (driver->get_connected()) std::this_thread::yield();  // teardown has started
@@ -351,6 +351,38 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
     CHECK(fake.count(":01#") == moving_reads);
     CHECK(fake.count(":06#") == temperature_reads);
     CHECK(driver->get_link_fault().empty());
+}
+
+// Falsified by: gemini_focuser_driver.cpp: ~GeminiFocuserDriver() delete the poll_cancelled_ store before
+// state_.stop_and_join() (removing a connected focuser during a poll waits for the ":01#" and ":06#" exchanges too).
+TEST_CASE("Gemini Focuser Snapshot - destroying a connected focuser during a poll waits for the exchange in flight only",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    fake.gate_next_reply();
+    const int moving_reads = fake.count(":01#");
+    const int temperature_reads = fake.count(":06#");
+    clock.advance(kTick);
+    REQUIRE(fake.wait_reply_held(kBound));
+
+    std::atomic<bool> destroying{false};
+    std::thread destroy([&] {
+        destroying.store(true);
+        driver.reset();
+    });
+    // The destructor has no observable "joining" state: yield (no sleep) so it reaches the poll join first. A
+    // late destructor only makes the case fail, never pass.
+    while (!destroying.load()) std::this_thread::yield();
+    for (int i = 0; i < 20000; ++i) std::this_thread::yield();
+    fake.release_reply();
+    destroy.join();
+
+    CHECK(fake.count(":01#") == moving_reads);
+    CHECK(fake.count(":06#") == temperature_reads);
 }
 
 // Falsified by: gemini_focuser_driver.cpp: device_state_age() delete the override (the TimeStamp is the request time,
