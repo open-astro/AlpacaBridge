@@ -115,6 +115,29 @@ test('vendorSelectState keeps a one-member group when only one Sky-Watcher drive
     assert.ok(kept.shown.includes('skywatcher') && !kept.shown.includes('synscan'));
 });
 
+// The group comes from the catalog's vendorLabel alone: no list of keys.
+test('vendorSelectState does not group the Sky-Watcher drivers once the catalog drops their label', () => {
+    const { vendorSelectState } = schema();
+    const unlabelled = catalog.map((d) => {
+        const { vendorLabel, ...rest } = d;
+        return d.deviceType === 'telescope' ? rest : d;
+    });
+    const none = vendorSelectState(unlabelled, 'telescope', '', '', vendorOrder());
+    assert.ok(none.shown.includes('synscan') && none.shown.includes('skywatcher'), JSON.stringify(none.shown));
+    assert.deepEqual(vendorSelectState(unlabelled, 'telescope', 'skywatcher', '', vendorOrder()).group, ['skywatcher']);
+});
+
+test('vendorSelectState groups any two vendors of one device type that share a vendorLabel', () => {
+    const { vendorSelectState } = schema();
+    const paired = catalog.map((d) => (d.deviceType === 'telescope' && (d.vendor === 'celestron' || d.vendor === 'onstep')
+        ? { ...d, available: true, vendorLabel: 'Shared Mounts' } : d));
+    const none = vendorSelectState(paired, 'telescope', '', '', vendorOrder());
+    assert.ok(none.shown.includes('celestron') && !none.shown.includes('onstep'), JSON.stringify(none.shown));
+    const picked = vendorSelectState(paired, 'telescope', 'onstep', '', vendorOrder());
+    assert.deepEqual(picked.group, ['celestron', 'onstep']);
+    assert.ok(picked.shown.includes('onstep') && !picked.shown.includes('celestron'), JSON.stringify(picked.shown));
+});
+
 function wholeFunction(name) {
     const start = app.indexOf(`function ${name}(`);
     assert.ok(start >= 0, `app.js has no function ${name}`);
@@ -212,6 +235,19 @@ test('the #vendor change handler starts with updateVendorConnection, and the con
         'the #vendor change handler does not start with updateVendorConnection()');
     assert.ok(/document\.getElementById\('sky-watcher-connection'\)\.addEventListener\('change', selectVendorConnection\);/.test(app),
         'the connection select does not run selectVendorConnection on change');
+});
+
+test('the grouping and connection code names no vendor key', () => {
+    const sources = {
+        'catalog_schema.js': readWeb('catalog_schema.js'),
+        updateVendorConnection: wholeFunction('updateVendorConnection'),
+        selectVendorConnection: wholeFunction('selectVendorConnection'),
+    };
+    for (const vendor of new Set(catalog.map((d) => d.vendor))) {
+        for (const [where, source] of Object.entries(sources)) {
+            assert.doesNotMatch(source, new RegExp(`['"\`]${vendor}['"\`]`), `${where} names the vendor ${vendor}`);
+        }
+    }
 });
 
 // The device form's submit handler, run with `scope` for its free names.
