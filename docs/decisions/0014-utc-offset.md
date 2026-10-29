@@ -20,7 +20,7 @@ This refines one sentence of 0005. "Never for LST or UTCDate" means the value: L
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
-1. A driver's UTCDate value stays on `std::chrono::system_clock`; only the elapsed time since a write is measured, through `util::UtcOffset` with `now` from the driver's clock. Scope: `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp`, `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`, `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp`, `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp`, `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp`, `AlpacaCore/include/alpacacore/util/utc_offset.h`. Checked by: `AlpacaCore/tests/test_utc_offset.cpp`, review.
+1. A telescope driver not on the [decision 0001](0001-skywatcher-pointing-clock.md) host-clock offset model keeps its UTCDate value on `std::chrono::system_clock` and measures only the elapsed time since a write, through `util::UtcOffset` with `now` from the driver's clock. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`, `AlpacaCore/include/alpacacore/util/utc_offset.h`. Checked by: `AlpacaCore/tests/test_utc_offset.cpp`, review.
 2. `util::UtcOffset` holds no clock, has no virtuals, is not a base class and is guarded by the driver `mutex_`. Scope: `AlpacaCore/include/alpacacore/util/utc_offset.h`. Checked by: review.
 3. An adopter clears the stored value on connect and on disconnect. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: review.
 
