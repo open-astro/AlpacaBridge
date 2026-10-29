@@ -1426,8 +1426,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects without a site and refu
         }
     };
     const auto refuse_all = [&] {
-        refused([&] { static_cast<void>(driver->get_site_latitude()); });
-        refused([&] { static_cast<void>(driver->get_site_longitude()); });
         refused([&] { static_cast<void>(driver->get_right_ascension()); });
         refused([&] { static_cast<void>(driver->get_declination()); });
         refused([&] { static_cast<void>(driver->get_altitude()); });
@@ -1441,6 +1439,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects without a site and refu
         refused([&] { driver->set_tracking(true); });
         refused([&] { driver->pulse_guide(0, 100); });
     };
+    refused([&] { static_cast<void>(driver->get_site_latitude()); });
+    refused([&] { static_cast<void>(driver->get_site_longitude()); });
     refuse_all();
     CHECK_FALSE(driver->get_tracking());
     CHECK_FALSE(driver->get_at_park());
