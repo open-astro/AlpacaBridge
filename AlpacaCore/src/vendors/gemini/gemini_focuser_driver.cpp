@@ -70,7 +70,9 @@ public:
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
         // Joins the poll body before the members it touches go away; a driver
-        // that never finished a connect has no body, so this is a no-op.
+        // that never finished a connect has no body, so this is a no-op. Cancel first: removing a
+        // connected focuser waits for the exchange in flight, not all three.
+        poll_cancelled_.store(true);
         state_.stop_and_join();
         if (connected_.load()) {
             try {
@@ -403,7 +405,9 @@ private:
     StateFrame probe() {
         StateFrame frame;
         // A disconnect waits for one exchange, not three: once it has started, the partial frame is
-        // returned and dropped by the state_.reset() that follows the join.
+        // returned (published, then dropped by the state_.reset() after the join). It starts from the
+        // last frame so a getter that overlaps the disconnect keeps the old moving and temperature.
+        if (const auto last = state_.read()) frame = last->value;
         frame.position = protocol_.get_position();
         if (poll_cancelled_.load()) return frame;
         frame.moving = protocol_.is_moving();

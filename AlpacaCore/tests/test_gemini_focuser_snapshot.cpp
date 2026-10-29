@@ -355,8 +355,9 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
 
 // Falsified by: gemini_focuser_driver.cpp: ~GeminiFocuserDriver() delete the poll_cancelled_ store before
 // state_.stop_and_join() (removing a connected focuser during a poll waits for the ":01#" and ":06#" exchanges too).
-TEST_CASE("Gemini Focuser Snapshot - destroying a connected focuser during a poll waits for the exchange in flight only",
-          "[gemini][focuser][snapshot][unit][fake]") {
+TEST_CASE(
+    "Gemini Focuser Snapshot - destroying a connected focuser during a poll waits for the exchange in flight only",
+    "[gemini][focuser][snapshot][unit][fake]") {
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
