@@ -221,6 +221,7 @@ public:
             // serve (decisions 0010 and 0016).
             state_.reset();
             temperature_retry_at_.reset();
+            poll_cancelled_.store(false);
             if (!state_.start()) {
                 state_.stop_and_join();
                 state_.reset();
@@ -254,6 +255,7 @@ public:
             firmware_.clear();
         }
         connected_.store(false);
+        poll_cancelled_.store(true);  // the poll in flight ends after its current exchange
         // Join the poll before the transport closes; its body takes no
         // lock this thread holds (transition_mutex_, firmware_mutex_).
         state_.stop_and_join();
@@ -400,8 +402,12 @@ private:
     // Position and IsMoving, and is not retried for kTemperatureRetry.
     StateFrame probe() {
         StateFrame frame;
+        // A disconnect waits for one exchange, not three: once it has started, the partial frame is
+        // returned and dropped by the state_.reset() that follows the join.
         frame.position = protocol_.get_position();
+        if (poll_cancelled_.load()) return frame;
         frame.moving = protocol_.is_moving();
+        if (poll_cancelled_.load()) return frame;
         const auto now = clock_.now();
         if (!temperature_retry_at_ || now >= *temperature_retry_at_) {
             try {
@@ -436,6 +442,7 @@ private:
     util::ConnectionResolver<ConnectionConfig> connection_resolver_;
     bool connection_resolved_ = false;
     std::atomic<bool> connected_;
+    std::atomic<bool> poll_cancelled_{false};  // set by teardown before the poll join; probe() stops between exchanges
     GeminiProtocolWrapper protocol_;
     // Poll thread, and connect before it starts; never concurrent.
     std::optional<util::TaskClock::clock::time_point> temperature_retry_at_;
