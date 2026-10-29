@@ -16,6 +16,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -70,5 +71,8 @@ Cfw3ConnectionConfig resolve_qhy_cfw3_filterwheel_by_index(int wheel_index, cons
  */
 std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int device_number, int wheel_index = 0,
                                                                         const Cfw3Settings& settings = {});
+
+/// Test seam: runs hook inside get_position(), after its connection check and before it takes the state lock.
+void set_position_read_gap_hook_for_testing(FilterWheelDriver& driver, std::function<void()> hook);
 
 }  // namespace alpacacore::vendor::qhy

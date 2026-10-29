@@ -21,6 +21,7 @@
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -208,7 +209,12 @@ public:
 
     int get_position() const override {
         ensure_connected();
+        run_position_read_gap_hook();
         std::lock_guard<std::mutex> lock(mutex_);
+        // Re-assert under the lock: a disconnect that landed since the check
+        // above has cleared the cache, which must read NotConnected, not the
+        // "position unknown" DriverException below (#1699).
+        ensure_connected();
         // -1 while a goto is in flight: the wheel is silent until it arrives,
         // and the move body publishes the arrival slot into the cache.
         if (pending_target_.has_value()) return -1;
@@ -312,7 +318,24 @@ public:
         apply_default_names_locked();
     }
 
+    void set_position_read_gap_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> hook_lock(test_hook_mutex_);
+        position_read_gap_hook_ = std::move(hook);
+    }
+
 private:
+    // Test seam: runs in get_position() between its connection check and mutex_, with no driver lock held.
+    void run_position_read_gap_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(test_hook_mutex_);
+            hook = position_read_gap_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     // Slot body: block on the arrival reply, then publish. Everything that
     // can throw is caught here and kept as move_failure_ (not the slot's last
     // failure: teardown clears it without a start).
@@ -479,6 +502,8 @@ private:
     // mutex_ (ADR 0006 rule 4).
     std::mutex move_start_mutex_;
     std::atomic<bool> move_cancel_{false};
+    mutable std::mutex test_hook_mutex_;
+    std::function<void()> position_read_gap_hook_;  // guarded by test_hook_mutex_
     // Declared last: destroyed first, joining the body before any member it
     // touches goes away. The driver refuses a second goto while one is in
     // flight, so the generation is this slot's alone.
@@ -533,6 +558,12 @@ std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int devi
     return create_qhy_cfw3_filterwheel_deferred(device_number, [wheel_index, settings] {
         return resolve_qhy_cfw3_filterwheel_by_index(wheel_index, settings);
     });
+}
+
+void set_position_read_gap_hook_for_testing(FilterWheelDriver& driver, std::function<void()> hook) {
+    if (auto* cfw3 = dynamic_cast<QhyCfw3FilterWheelDriver*>(&driver)) {
+        cfw3->set_position_read_gap_hook_for_testing(std::move(hook));
+    }
 }
 
 }  // namespace alpacacore::vendor::qhy
