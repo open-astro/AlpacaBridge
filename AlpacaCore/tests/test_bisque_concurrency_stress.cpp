@@ -30,6 +30,9 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_bisque_mount.h"
+#include "fake_mount_server.h"
+#include "fake_task_clock.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -85,4 +88,33 @@ TEST_CASE("Bisque telescope - concurrent connect/disconnect/operate stress (mute
 TEST_CASE("Bisque telescope - destruction races an in-flight connect", "[bisque][telescope][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::bisque::create_bisque_telescope(0, refused_endpoint()); });
+}
+
+TEST_CASE("Bisque UTCDate - connected fake lifecycle stress", "[bisque][telescope][utcdate][stress]") {
+    alpacacore::test::FakeBisqueMount mount;
+    alpacacore::test::FakeMountServer server(mount.responder());
+    alpacacore::test::FakeTaskClock clock;
+    REQUIRE(server.ok());
+    auto endpoint = refused_endpoint();
+    endpoint.tcp_port = server.port();
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, endpoint, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_utc_date() ==
+            std::chrono::system_clock::time_point(std::chrono::milliseconds(mount.utc_millis)));
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::StressCallGuard writes(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::PropertyNotImplemented});
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard, &writes](AlpacaDriver& d) {
+        auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
+        guard([&] { (void)scope.get_utc_date(); });
+        guard([&] { (void)scope.get_device_state(); });
+        writes([&] { scope.set_utc_date({}); });
+    });
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    INFO(writes.report());
+    CHECK(writes.unexpected_count() == 0);
+    CHECK(writes.total_calls() > 0);
 }

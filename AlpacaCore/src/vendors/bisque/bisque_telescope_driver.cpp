@@ -18,6 +18,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -52,7 +53,7 @@ static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must under
 constexpr int kPositionLinkFailureThreshold = 3;
 
 // One polled frame of operational state. Small and copyable: the snapshot copies it under its mutex. A field the
-// last read could not fill keeps its previous value (`*_known` false only before the first answer).
+// last read could not fill keeps its previous value; an explicit unavailable UTC mode clears its anchor.
 struct PolledFrame {
     double ra_hours = 0.0;
     double dec_degrees = 0.0;
@@ -64,6 +65,10 @@ struct PolledFrame {
     bool pier_known = false;
     bool tracking = false;
     bool tracking_known = false;
+    util::UtcOffset utc;
+    util::TaskClock::clock::time_point utc_sampled_at{};
+    std::string utc_error;
+    int utc_error_code = AlpacaError::InvalidOperation;
 };
 
 // Sidereal rate in arcseconds per second (INDI TRACKRATE_SIDEREAL).
@@ -650,12 +655,27 @@ public:
     }
 
     std::chrono::system_clock::time_point get_utc_date() const override {
-        // TheSkyX uses the host computer's clock — return system time.
-        return std::chrono::system_clock::now();
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto frame = served_frame_locked();
+        if (const auto anchor = frame.value.utc.current(frame.value.utc_sampled_at)) {
+            const auto elapsed = clock_.now() - frame.value.utc_sampled_at;
+            // Remote input can be near system_clock's limit; UtcOffset assumes ordinary dates.
+            if (anchor->time_since_epoch().count() > 0 &&
+                elapsed > std::chrono::system_clock::time_point::max() - *anchor) {
+                throw AlpacaException("TheSkyX UTCDate exceeds the supported time range", AlpacaError::DriverException);
+            }
+            return *anchor + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+        }
+        throw AlpacaException(
+            frame.value.utc_error.empty() ? "TheSkyX UTCDate has not been established" : frame.value.utc_error,
+            frame.value.utc_error_code);
     }
 
     void set_utc_date(std::chrono::system_clock::time_point /*utc*/) override {
-        // TheSkyX manages time from the host computer — no mount time to set.
+        std::lock_guard<std::mutex> lock(mutex_);
+        (void)served_frame_locked();
+        throw AlpacaException("UTCDate writes are not supported; set the clock on the TheSkyX computer",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     // ── Telescope methods ──
@@ -1187,7 +1207,7 @@ private:
 
     // One sample, taken without mutex_ (the protocol wrapper serialises each exchange). The position is
     // mandatory, so a failed read throws and the tick ends there; the other fields keep the last value when
-    // their own read fails. `previous` is the frame the sample refines.
+    // their own read fails. An explicit unavailable UTC mode clears its anchor. `previous` is the frame refined.
     PolledFrame sample_frame(const PolledFrame& previous) const {
         auto& protocol = BisqueProtocolWrapper::instance();
         PolledFrame frame = previous;
@@ -1195,6 +1215,21 @@ private:
         frame.ra_hours = pos.ra_hours;
         frame.dec_degrees = pos.dec_degrees;
         frame.equatorial_known = true;
+        frame.utc_error.clear();
+        try {
+            const auto utc = protocol.get_utc_date();
+            frame.utc_sampled_at = clock_.now();  // Stamp this reply, not the end of the remaining telemetry queries.
+            frame.utc.set(utc, frame.utc_sampled_at);
+        } catch (const AlpacaException& e) {
+            if (e.error_code() == AlpacaError::InvalidOperation) {
+                frame.utc.clear();
+            }
+            frame.utc_error = e.what();
+            frame.utc_error_code = e.error_code();
+        } catch (const std::exception& e) {
+            frame.utc_error = e.what();
+            frame.utc_error_code = AlpacaError::DriverException;
+        }
         try {
             const auto altaz = protocol.get_alt_az();
             frame.alt_degrees = altaz.altitude_degrees;
