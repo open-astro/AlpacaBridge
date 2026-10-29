@@ -1,0 +1,3 @@
+### Fixed
+
+- **ToupTek and Altair camera getters no longer wait for the connect**, ToupTek camera driver, issue #1844. The SDK open and the camera configuration now run under a transition lock instead of the driver state lock, so `Name` and `Connected` answer during a slow connect, and the disconnect closes the handle after it has released the state lock. Covered by `ToupTek camera - identity getters and Connected do not wait for a connect held in the SDK open (#1844)` and `ToupTek camera - a disconnect sent during a held SDK open leaves the camera disconnected (#1844)` in `AlpacaCore/tests/test_touptek_fake_sdk.cpp`.
