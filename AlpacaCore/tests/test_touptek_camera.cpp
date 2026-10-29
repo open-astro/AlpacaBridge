@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <future>
 #include <thread>
@@ -523,4 +524,201 @@ TEST_CASE("ToupTek Camera Driver - an unknown SensorName is empty", "[touptek][c
     alpacacore::test::FakeToupTekSDK fake;  // no camera attached
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
     CHECK(driver->get_sensor_name().empty());
+}
+
+// ── Connected members over the SDK fake ─────────────────────────────────────
+
+namespace {
+
+using alpacacore::test::FakeToupTekSDK;
+
+bool near(double actual, double expected) { return std::fabs(actual - expected) < 1e-6; }
+
+FakeToupTekSDK fake_with_one_camera() {
+    FakeToupTekSDK fake;
+    fake.cameras.push_back(FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    return fake;
+}
+
+}  // namespace
+
+TEST_CASE("ToupTek Camera Driver - Connected geometry and capability members report the fake's camera",
+          "[touptek][camera][unit]") {
+    // Falsified by: get_camera_y_size returning max_width, get_max_bin_x returning the smallest bin, get_max_adu
+    // ignoring bit_depth_max, either pixel size returning the other axis, get_image_array_variant returning
+    // "Int16", get_exposure_resolution returning 0.001, or get_sensor_type returning RGGB for a mono sensor.
+    auto fake = fake_with_one_camera();
+    fake.cameras[0].max_height = 1080;
+    fake.pixel_size_um = {3.75F, 4.5F};
+    fake.raw_format = {0x59595959, 12};  // mono 'YYYY', 12 bits
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    CHECK(driver->get_camera_y_size() == 1080);
+    CHECK(driver->get_max_bin_x() == 4);
+    CHECK(driver->get_max_bin_y() == 4);
+    CHECK(driver->get_max_adu() == 4095);
+    CHECK(near(driver->get_pixel_size_x(), 3.75));
+    CHECK(near(driver->get_pixel_size_y(), 4.5));
+    CHECK(driver->get_image_array_variant() == "Int32");
+    CHECK(driver->get_exposure_resolution() == 0.000001);
+    CHECK(driver->get_sensor_type() == alpacacore::SensorType::Monochrome);
+    CHECK_FALSE(driver->get_can_fast_readout());
+    CHECK(driver->get_can_set_ccd_temperature());
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - Connected exposure and gain ranges come from the SDK in the ASCOM unit",
+          "[touptek][camera][unit]") {
+    // Falsified by: get_exposure_max or get_exposure_min skipping the microsecond-to-second division, swapping
+    // min and max, or get_gain_min/get_gain_max reading the other bound.
+    auto fake = fake_with_one_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    // The fake's range is 100 us .. 3600000000 us, gain 100 .. 300.
+    CHECK(near(driver->get_exposure_min(), 0.0001));
+    CHECK(near(driver->get_exposure_max(), 3600.0));
+    CHECK(driver->get_gain_min() == 100);
+    CHECK(driver->get_gain_max() == 300);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - Connected members the driver does not implement answer 0x400",
+          "[touptek][camera][unit]") {
+    // Falsified by: any of these returning a value, or throwing another code; a mono sensor has no Bayer
+    // offsets either.
+    auto fake = fake_with_one_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    const int not_implemented = alpacacore::AlpacaError::PropertyNotImplemented;
+    require_alpaca_error([&] { (void)driver->get_fast_readout(); }, not_implemented);
+    require_alpaca_error([&] { driver->set_fast_readout(true); }, not_implemented);
+    require_alpaca_error([&] { (void)driver->get_gains(); }, not_implemented);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, not_implemented);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, not_implemented);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - A colour camera reports RGGB with the offsets its Bayer pattern implies",
+          "[touptek][camera][unit]") {
+    // Falsified by: swapping a row of the offset table (GR and GB then trade places), or get_sensor_type
+    // returning Monochrome for a colour camera.
+    struct Row {
+        unsigned four_cc;
+        int offset_x;
+        int offset_y;
+    };
+    // The raw-format four-CC the SDK reports: RGGB, BGGR, GRBG, GBRG.
+    const Row row =
+        GENERATE(Row{0x42474752, 0, 0}, Row{0x52474742, 1, 1}, Row{0x47425247, 1, 0}, Row{0x47524247, 0, 1});
+    CAPTURE(row.four_cc);
+
+    auto fake = fake_with_one_camera();
+    fake.raw_format = {row.four_cc, 16};
+    fake.cameras[0].is_color = true;  // ADR 0015 rule 4: the enumerated colour flag agrees with the raw format
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    CHECK(driver->get_sensor_type() == alpacacore::SensorType::RGGB);
+    CHECK(driver->get_bayer_offset_x() == row.offset_x);
+    CHECK(driver->get_bayer_offset_y() == row.offset_y);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - Connected binning and start position keep their InvalidValue boundaries",
+          "[touptek][camera][unit]") {
+    // Falsified by: set_bin_x accepting a bin outside supported_bins (3, 0), get_bin_y not following the bin,
+    // set_start_x/set_start_y accepting a negative value, or a rejected write changing the stored start.
+    auto fake = fake_with_one_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    CHECK(driver->get_bin_x() == 1);
+    CHECK(driver->get_bin_y() == 1);
+    driver->set_bin_x(2);
+    CHECK(driver->get_bin_x() == 2);
+    CHECK(driver->get_bin_y() == 2);
+    driver->set_bin_y(4);
+    CHECK(driver->get_bin_x() == 4);
+    CHECK(driver->get_bin_y() == 4);
+    const int invalid = alpacacore::AlpacaError::InvalidValue;
+    require_alpaca_error([&] { driver->set_bin_x(3); }, invalid);
+    require_alpaca_error([&] { driver->set_bin_y(0); }, invalid);
+    CHECK(driver->get_bin_x() == 4);
+
+    driver->set_start_x(10);
+    driver->set_start_y(20);
+    CHECK(driver->get_start_x() == 10);
+    CHECK(driver->get_start_y() == 20);
+    require_alpaca_error([&] { driver->set_start_x(-1); }, invalid);
+    require_alpaca_error([&] { driver->set_start_y(-1); }, invalid);
+    CHECK(driver->get_start_x() == 10);
+    CHECK(driver->get_start_y() == 20);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - Connected cooler members read and write the TEC registers",
+          "[touptek][camera][unit]") {
+    // Falsified by: set_cooler_on not reaching put_tec_enable, get_cooler_on not reading get_tec_enable,
+    // set_set_ccd_temperature dropping the deci-degree scaling, get_set_ccd_temperature reading the live
+    // temperature, or get_heat_sink_temperature returning something other than the sensor reading (21.0 C).
+    auto fake = fake_with_one_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    CHECK_FALSE(driver->get_cooler_on());
+    driver->set_cooler_on(true);
+    CHECK(fake.call_count("put_tec_enable") == 1);
+    CHECK(driver->get_cooler_on());
+    driver->set_cooler_on(false);
+    CHECK_FALSE(driver->get_cooler_on());
+
+    driver->set_set_ccd_temperature(-10.4);
+    CHECK(fake.call_count("put_tec_target_deciC") == 1);
+    CHECK(near(driver->get_set_ccd_temperature(), -10.4));
+    CHECK(near(driver->get_heat_sink_temperature(), 21.0));
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - A camera without a TEC refuses cooler on", "[touptek][camera][unit]") {
+    // Falsified by: set_cooler_on(true) silently succeeding, writing the TEC register of a camera without
+    // one, or get_can_set_ccd_temperature returning true.
+    auto fake = fake_with_one_camera();
+    fake.cameras[0].supports_cooler = false;
+    fake.cameras[0].supports_tec_onoff = false;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    CHECK_FALSE(driver->get_can_set_ccd_temperature());
+    require_alpaca_error([&] { driver->set_cooler_on(true); }, alpacacore::AlpacaError::NotImplemented);
+    CHECK(fake.call_count("put_tec_enable") == 0);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - Range and thermal members throw NotConnected while disconnected",
+          "[touptek][camera][unit]") {
+    // Falsified by: any of these answering a value, or another code, without a handle (ensure_connected()
+    // alone is redundant with with_handle() for them: removing it does not change the answer).
+    auto fake = fake_with_one_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+
+    const int not_connected = alpacacore::AlpacaError::NotConnected;
+    require_alpaca_error([&] { (void)driver->get_exposure_min(); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_exposure_max(); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_gain_min(); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_gain_max(); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_cooler_on(); }, not_connected);
+    require_alpaca_error([&] { driver->set_cooler_on(true); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_set_ccd_temperature(); }, not_connected);
+    require_alpaca_error([&] { driver->set_set_ccd_temperature(0.0); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_heat_sink_temperature(); }, not_connected);
 }
