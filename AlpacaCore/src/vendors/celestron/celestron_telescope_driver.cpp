@@ -55,6 +55,10 @@ namespace alpacacore::vendor::celestron {
 namespace {
 
 constexpr double kHoursToDegrees = 15.0;
+// A Park that ends farther than this from the saved park position did not arrive (a GOTO the handset acked and never
+// ran). An arrival test, not a pointing-accuracy test: it also covers sidereal drift over the settle time. The same
+// 600 arcsec as the SynScan landing limit.
+constexpr double kParkArrivalToleranceArcsec = 600.0;
 // Decision 0010, Celestron adoption. A poll body samples the mount every kStatusPollPeriod (start to start; ticks
 // missed behind a slow link are skipped, never made up): the slewing flag and the equatorial pair on every tick, the
 // slower-moving fields (alt/az, pier side, tracking mode) on every kSlowPollEvery-th. A full frame is up to five
@@ -1123,6 +1127,21 @@ public:
                     }
                 };
                 hooks.fail = [&](const std::string& message) { fail_park(lock, message, ctx); };
+                hooks.verify_at_target = [&]() -> std::string {
+                    const auto [ra_hours, dec_degrees] = measure_equatorial(lock);
+                    if (!still_mine(ctx)) {
+                        return {};  // taken over while the mount was read: complete() returns for the same reason
+                    }
+                    const double miss_arcsec = util::angular_separation_arcsec(ra_hours * kHoursToDegrees, dec_degrees,
+                                                                               park_ra * kHoursToDegrees, park_dec);
+                    if (miss_arcsec <= kParkArrivalToleranceArcsec) {
+                        return {};
+                    }
+                    return "Park ended " + std::to_string(static_cast<long>(miss_arcsec)) +
+                           " arcsec from the park position (limit " +
+                           std::to_string(static_cast<long>(kParkArrivalToleranceArcsec)) +
+                           " arcsec): the mount did not reach it";
+                };
                 hooks.complete = [&] {
                     // The position is read first; AtPark and Slewing then flip in one locked step, beside the
                     // position the mount stopped at.
