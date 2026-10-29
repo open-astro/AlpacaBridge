@@ -1434,6 +1434,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects without a site and refu
         refused([&] { static_cast<void>(driver->get_destination_side_of_pier(6.0, 30.0)); });
         refused([&] { static_cast<void>(driver->get_sidereal_time()); });
         refused([&] { driver->find_home(); });
+        refused([&] { driver->park(); });
         refused([&] { driver->sync_to_coordinates(6.0, 30.0); });
         refused([&] { driver->slew_to_coordinates_async(6.0, 30.0); });
         refused([&] { driver->set_tracking(true); });
@@ -1444,14 +1445,26 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects without a site and refu
     refuse_all();
     CHECK_FALSE(driver->get_tracking());
     CHECK_FALSE(driver->get_at_park());
-    CHECK(mount.count_command(0x10, 0x04) == 0);  // no motion command was sent
+    CHECK(mount.count_command(0x10, 0x24) == 0);  // no motion command was sent
+    CHECK(mount.count_command(0x10, 0x26) == 0);
 
     driver->set_site_latitude(-33.856784);
-    refuse_all();  // one coordinate is not enough
+    refuse_all();  // latitude alone is not enough
     driver->set_site_longitude(151.215297);
     CHECK(driver->get_site_longitude() == 151.215297);
     CHECK_NOTHROW(static_cast<void>(driver->get_sidereal_time()));
     CHECK_NOTHROW(static_cast<void>(driver->get_destination_side_of_pier(6.0, 30.0)));
+
+    // Longitude alone is not enough either: sidereal time and pier side still refuse.
+    alpacacore::test::FakeCelestronCgxMount longitude_mount;
+    REQUIRE(longitude_mount.ok());
+    auto longitude_info = test_info();
+    longitude_info.port_path = longitude_mount.slave_path();
+    longitude_info.site_latitude_degrees.reset();
+    longitude_info.site_longitude_degrees = 151.215297;
+    driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, longitude_info);
+    driver->set_connected(true);
+    refuse_all();
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - pins guide polarity in both hemispheres and pointing branches",

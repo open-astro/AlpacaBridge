@@ -1408,9 +1408,6 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         require_site_locked();
-    }
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
         if (parked_) throw AlpacaException("Cannot sync while parked", AlpacaError::InvalidWhileParked);
     }
     MotionTransition transition(*this);
