@@ -2604,7 +2604,7 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 // pause seam pauses its poll (no failed poll, so no latch); a focuser fake is muted or made to answer garbage
 // so the one poll the clock step wakes fails, which stays under every latch threshold.
 // The loss case fails kSnapshotLatchPolls polls (a latch needs three where an adopter has one), then passes the
-// bound: SynScan, Celestron (telescope) and Bisque lose the link from the latched fault's age; Sky-Watcher, QHY
+// bound: SynScan, OnStep, Celestron (telescope) and Bisque lose the link from the latched fault's age; Sky-Watcher, QHY
 // and Astroasis also from the age of the frame.
 // The roster is kSnapshotAdopterRoster (contract_sweep.h); rule 6 of scripts/check_contract_sweep.py holds it,
 // and the hooks below, to the ADR table.
@@ -2834,6 +2834,57 @@ std::unique_ptr<SnapshotRig> snapshot_rig_synscan_telescope() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ONSTEP
+// The idle OnStepX of test_onstep_telescope_snapshot.cpp (SnapshotMount): tracking, no GOTO, not parked.
+std::string snapshot_onstep_reply(const std::atomic<bool>& mute, const std::string& chunk) {
+    if (mute.load()) return "";
+    if (chunk.rfind(":GVP", 0) == 0) return "OnStep#";
+    if (chunk.rfind(":GVN", 0) == 0) return "10.23a#";
+    if (chunk.rfind(":GXEE", 0) == 0) return "1";
+    if (chunk.rfind(":GU", 0) == 0) return "NpEW180#";
+    if (chunk.rfind(":GRa", 0) == 0) return "12:00:00.0000#";
+    if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
+    if (chunk.rfind(":GA", 0) == 0) return "+45*00:00#";
+    if (chunk.rfind(":GZ", 0) == 0) return "180*00:00#";
+    if (chunk.rfind(":GL", 0) == 0) return "10:20:30#";
+    if (chunk.rfind(":GC", 0) == 0) return "10/28/26#";
+    if (chunk.rfind(":GG", 0) == 0) return "+00:00#";
+    if (chunk.rfind(":R", 0) == 0) return "";
+    if (chunk.rfind(":S", 0) == 0) return "1";
+    return "0#";
+}
+
+// Recipe of test_onstep_telescope_snapshot.cpp (Rig): paused poll, one direct tick for the loss.
+std::unique_ptr<SnapshotRig> snapshot_rig_onstep_telescope() {
+    namespace ons = alpacacore::vendor::onstep;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto mute = std::make_shared<std::atomic<bool>>(false);
+    auto server = std::make_shared<alpacacore::test::FakeMountServer>(
+        [mute](const std::string& c) { return snapshot_onstep_reply(*mute, c); });
+    REQUIRE(server->ok());
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server->port();
+    info.response_timeout_ms = 300;
+    rig.fake = std::make_shared<std::pair<decltype(mute), decltype(server)>>(mute, server);
+    rig.driver = ons::create_onstep_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, false, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = rig.driver.get();
+    rig.hold_frame = [driver] {
+        ons::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), true);
+    };
+    rig.lose_link = [driver, mute] {
+        mute->store(true);
+        ons::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), false);
+    };
+    rig.tick = [driver] { ons::poll_status_now_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver)); };
+    return rig_owner;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_CELESTRON
 struct SnapshotNexStar {
     std::atomic<bool> mute{false};
@@ -3034,6 +3085,11 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #else
 #define CS3_SYNSCAN(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+#define CS3_ONSTEP(X) X(onstep_telescope, snapshot_telescope_getters(true))
+#else
+#define CS3_ONSTEP(X)
+#endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #define CS3_GEMINI(X) X(gemini_focuser, snapshot_focuser_getters())
 #else
@@ -3050,7 +3106,8 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_ASTROASIS(X)
 #endif
 #define CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(X) \
-    CS3_ZWO(X) CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_GEMINI(X) CS3_QHY(X) CS3_ASTROASIS(X)
+    CS3_ZWO(X) CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_ONSTEP(X) CS3_GEMINI(X) CS3_QHY(X) \
+        CS3_ASTROASIS(X)
 // clang-format on
 
 // Every getter must answer on the live link first: a getter that throws here is a setup defect of the hook,
