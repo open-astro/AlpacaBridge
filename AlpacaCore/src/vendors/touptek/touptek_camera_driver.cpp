@@ -379,7 +379,8 @@ public:
         if (handle) {
             try {
                 sdk.stop(handle);
-            } catch (const std::exception&) {
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG(branding_.label, "Stop before close failed: " + std::string(e.what()));
             }
             sdk.close_camera(handle);
         }
