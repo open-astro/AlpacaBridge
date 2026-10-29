@@ -43,5 +43,6 @@ The rules a change is checked against. Each names where it applies and what chec
 
 ## Links
 
+- Open defect under rule 3: the Celestron CGX driver refuses Connect without a site ([#1830](https://github.com/open-astro/AlpacaBridge/issues/1830)).
 - Issues [#274](https://github.com/open-astro/AlpacaBridge/issues/274), [#1470](https://github.com/open-astro/AlpacaBridge/issues/1470) (item 5), [#1474](https://github.com/open-astro/AlpacaBridge/issues/1474); hemisphere paths [#250](https://github.com/open-astro/AlpacaBridge/issues/250), [#253](https://github.com/open-astro/AlpacaBridge/issues/253), [#432](https://github.com/open-astro/AlpacaBridge/issues/432).
 - [Sky-Watcher instructions](../../.github/instructions/skywatcher.instructions.md).

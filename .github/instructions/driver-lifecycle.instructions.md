@@ -106,8 +106,9 @@ vendor-agnostic; do them in the driver from the start.
   Identity, limits and capabilities (`Name`, `Max*`, `Can*`, names
   lists) are published at the end of connect (the `UniqueID` is the router's stored ID, decision 0018); `Connected` is lock-free. Lock order in
   a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) →
-  SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
-  operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`
+  SDK-wrapper mutex. A camera's operations keep `mutex_` →
+  operation lock (`readout_mutex_`, …) → SDK-wrapper mutex, and a driver not yet converted is a
+  `partial` row in the decision 0016 Adoption table; the `AsyncOperation`
   slot mutex, the `StateSnapshot` mutex, the `util::PolledState` mutexes (a driver
   that composes `PolledState` for its poll-fed frame) and the `util::CaptureSession` mutex (a
   camera that composes the session; it never nests with the slot mutex) are leaves that nest
@@ -135,9 +136,12 @@ vendor-agnostic; do them in the driver from the start.
 - An SDK call on a closable handle is safe only if the handle can't be closed
   underneath it. In a converted driver, `set_connected(false)` clears state under
   `mutex_` and releases it, then takes the I/O lock across the close, so the I/O
-  lock is never taken under `mutex_`. In a camera or unconverted driver it takes the
-  op-lock (`readout_mutex_`, …) nested under `mutex_` across the close, as the old
-  order requires. In both, the operation also re-checks `ensure_connected()`/`!handle_` under
+  lock is never taken under `mutex_`. A camera's disconnect follows the same sequence,
+  with its operation lock (`readout_mutex_`, `image_operation_mutex_`, …) in the place of
+  the I/O lock: it clears state under `mutex_`, releases it, then takes the operation lock
+  across the close (decision 0016 items 4 and 6). A driver that still takes the op-lock (`readout_mutex_`,
+  …) nested under `mutex_` across the close is a `partial` row in the decision 0016
+  Adoption table, with its issue. In both, the operation also re-checks `ensure_connected()`/`!handle_` under
   that lock before the SDK call. A snapshot-then-call gap with no re-check is a
   use-after-close.
 - **A "copy the handle out, then call the SDK" helper is a trap** — returning the
@@ -147,8 +151,9 @@ vendor-agnostic; do them in the driver from the start.
   Reviewers will flag these one method at a time; convert the whole class at once.
   **Camera exception:** the ToupTek and gphoto camera drivers (`with_handle`) and the ZWO,
   Player One and SVBONY cameras (`with_camera`, issue #116) hold `mutex_` across
-  short SDK calls, and that stays allowed until a measurement shows a getter
-  stall; a camera converts to the rule above only then. The exposure body (a
+  short SDK calls during operations. A camera's connect and disconnect are not
+  operations and run under the transition lock with `mutex_` released, like any driver. A
+  camera moves its operational calls to the rule above only after a measurement shows a getter stall. The exposure body (a
   `CaptureSession` body, or a worker not yet converted) keeps
   a bare snapshot — it must not hold any lock across a blocking image wait
   (`WaitImageV4`, `SVBGetVideoData`, `POAGetImageData`), and its close is
