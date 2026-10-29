@@ -27,6 +27,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -1278,4 +1279,79 @@ TEST_CASE("ToupTek thermal switch - a dead link refuses reads after three failed
     fake.throw_from.clear();
     CHECK(thermal->get_switch_value(0) == 0.0);
     thermal->set_connected(false);
+}
+
+namespace {
+
+// Holds open_camera_by_id on the fake's before_call hook until released, so a
+// test can probe the driver while its connect sits inside the SDK open.
+struct OpenLatch {
+    std::mutex m;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+
+    void install(FakeToupTekSDK& fake) {
+        fake.before_call = [this](const std::string& fn) {
+            if (fn != "open_camera_by_id") return;
+            std::unique_lock<std::mutex> lock(m);
+            entered = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return released; });
+        };
+    }
+    bool wait_entered() {
+        std::unique_lock<std::mutex> lock(m);
+        return cv.wait_for(lock, std::chrono::seconds(2), [&] { return entered; });
+    }
+    void release() {
+        std::lock_guard<std::mutex> lock(m);
+        released = true;
+        cv.notify_all();
+    }
+};
+
+}  // namespace
+
+TEST_CASE("ToupTek camera - identity getters and Connected do not wait for a connect held in the SDK open (#1844)",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    OpenLatch latch;
+    latch.install(fake);
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    std::thread connector([&] { driver->set_connected(true); });
+    const bool entered = latch.wait_entered();
+
+    std::promise<std::pair<std::string, bool>> result;
+    auto future = result.get_future();
+    std::thread reader([&] { result.set_value({driver->get_name(), driver->get_connected()}); });
+    const bool returned = entered && future.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+
+    latch.release();  // always release, so a failing run cannot hang the join
+    connector.join();
+    reader.join();
+
+    REQUIRE(entered);
+    CHECK(returned);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - a disconnect sent during a held SDK open leaves the camera disconnected (#1844)",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    OpenLatch latch;
+    latch.install(fake);
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->connect();
+    REQUIRE(latch.wait_entered());
+    driver->disconnect();
+    latch.release();
+
+    REQUIRE(eventually([&] { return !driver->get_connecting(); }, std::chrono::seconds(5)));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.ref_count("fake-cam-0") == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
 }
