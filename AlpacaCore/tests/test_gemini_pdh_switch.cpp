@@ -300,10 +300,13 @@ TEST_CASE("Gemini PDH Protocol Wrapper - Status frame parsing", "[gemini][switch
 // streamed frames vs. pending requests, and the commanded-value write paths.
 // ---------------------------------------------------------------------------
 
+#include <alpacacore/util/logging.h>
 #include <time.h>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 
 #include "fake_gemini_pdh.h"
@@ -605,48 +608,72 @@ TEST_CASE("Gemini PDH Switch Driver - Old firmware is refused at connect", "[gem
     CHECK_FALSE(hub.received(">G#"));
 }
 
+// Falsified by: gemini_pdh_switch_driver.cpp set_switch / set_switch_value drop their write_mutex_ lock
+//   (each alone, or both): the value write finishes while the mode write is still parked.
 TEST_CASE("Gemini PDH Switch Driver - Concurrent DEW value and mode writes never disagree",
           "[gemini][switch][unit][fake]") {
     FakeGeminiPdh hub;
+    hub.set_sensors_attached(false);
     auto driver = connect_fake_hub(hub);
 
-    // One writer flips DEW6's mode between Manual and Switch while another
-    // writes the DEW6 output at whatever max the driver currently reports.
-    // Writes are serialized under the driver's write mutex, so the recorded
-    // value must always sit inside the range of the mode it was validated
-    // against -- an out-of-range InvalidValue here would mean a value was
-    // checked against a mode that changed underneath it (PR #236 review).
-    std::atomic<int> invalid_value_errors{0};
-    std::atomic<int> other_errors{0};
-    auto value_writer = [&] {
-        for (int i = 0; i < 150; ++i) {
-            try {
-                driver->set_switch(11, (i % 2) == 0);
-            } catch (const alpacacore::AlpacaException& e) {
-                if (e.error_code() == alpacacore::AlpacaError::InvalidValue) {
-                    invalid_value_errors.fetch_add(1);
-                } else {
-                    other_errors.fetch_add(1);
-                }
-            }
-        }
+    // The mode write to Auto logs a warning (sensors missing) from inside dispatch_write, under the driver's write
+    // mutex and before the mode is recorded. Park the mode writer there: a value write must wait for it, because
+    // its range is validated against the mode (PR #236 review).
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool parked = false;
+    bool released = false;
+    const auto previous = alpacacore::logging::get_log_sink();
+    struct Restore {
+        alpacacore::logging::LogSink sink;
+        ~Restore() { alpacacore::logging::set_log_sink(sink); }
+    } restore{previous};
+    alpacacore::logging::set_log_sink([&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+        if (message.find("Auto mode requested") == std::string_view::npos) return;
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        parked = true;
+        gate_cv.notify_all();
+        gate_cv.wait(lock, [&] { return released; });
+    });
+    auto release = [&] {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        released = true;
+        gate_cv.notify_all();
     };
-    auto mode_writer = [&] {
-        for (int i = 0; i < 150; ++i) {
-            try {
-                driver->set_switch_value(13, (i % 2) == 0 ? 2.0 : 1.0);
-            } catch (const alpacacore::AlpacaException&) {
-                other_errors.fetch_add(1);
-            }
+
+    std::atomic<bool> done{false};
+    std::atomic<int> errors{0};
+    std::thread mode_writer([&] {
+        try {
+            driver->set_switch_value(13, 0.0);  // Auto
+        } catch (const alpacacore::AlpacaException&) {
+            errors.fetch_add(1);
         }
-    };
-    std::thread t1(value_writer);
-    std::thread t2(mode_writer);
-    t1.join();
-    t2.join();
-    CHECK(invalid_value_errors.load() == 0);
-    CHECK(other_errors.load() == 0);
-    // Final state is self-consistent: value within the max of the final mode.
+    });
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        if (!gate_cv.wait_for(lock, std::chrono::seconds(5), [&] { return parked; })) {
+            lock.unlock();
+            release();
+            mode_writer.join();
+            FAIL("mode writer never reached the Auto warning");
+        }
+    }
+    std::thread value_writer([&] {
+        try {
+            driver->set_switch(11, true);
+        } catch (const alpacacore::AlpacaException&) {
+            errors.fetch_add(1);
+        }
+        done.store(true);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const bool value_finished_early = done.load();
+    release();
+    mode_writer.join();
+    value_writer.join();
+    CHECK_FALSE(value_finished_early);
+    CHECK(errors.load() == 0);
     CHECK(driver->get_switch_value(11) <= driver->get_max_switch_value(11));
     CHECK(driver->get_switch_value(11) >= 0.0);
 }

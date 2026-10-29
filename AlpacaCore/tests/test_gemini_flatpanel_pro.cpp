@@ -18,6 +18,7 @@
 #include <chrono>
 #include <functional>
 #include <optional>
+#include <string>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -52,9 +53,19 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Device metadata", "[gemini][flatpanel]
     CHECK(driver->get_unique_id() == "GEMINI_FLATPANEL_PRO_3");
 }
 
-TEST_CASE("Gemini Flat Panel Pro Driver - Firmware unavailable when disconnected", "[gemini][flatpanel][unit]") {
-    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, "/dev/ttyUSB0");
+TEST_CASE("Gemini Flat Panel Pro Driver - Firmware unavailable when disconnected", "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, panel.slave_path(), 9600);
+    REQUIRE(driver->get_device_firmware() == std::nullopt);
 
+    // Firmware is read from the panel at connect, so it is only known while
+    // connected. Disconnected, the web UI shows no firmware row: the cached
+    // string from the last connect must be gone.
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_device_firmware() == std::optional<std::string>("107"));
+
+    driver->set_connected(false);
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_device_firmware() == std::nullopt);
 }
@@ -124,6 +135,14 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Motorized cover is a real capability, 
         CHECK(ex.error_code() != alpacacore::AlpacaError::MethodNotImplemented);
         CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
     }
+
+    // Connected, the same members are real operations: neither throws MethodNotImplemented or anything else.
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    auto connected = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, panel.slave_path(), 9600);
+    connected->set_connected(true);
+    REQUIRE(connected->get_connected());
+    CHECK_NOTHROW(connected->halt_cover());
+    CHECK_NOTHROW(connected->open_cover());
 }
 
 TEST_CASE("Gemini Flat Panel Pro Driver - Value range validation", "[gemini][flatpanel][unit]") {
@@ -195,6 +214,13 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Unsupported methods", "[gemini][flatpa
     require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->close_cover(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
+
+    // Connected, HaltCover functions (no wire command, but no throw either).
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    auto connected = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, panel.slave_path(), 9600);
+    connected->set_connected(true);
+    REQUIRE(connected->get_connected());
+    CHECK_NOTHROW(connected->halt_cover());
 }
 
 // ---------------------------------------------------------------------------
