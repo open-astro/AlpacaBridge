@@ -111,6 +111,11 @@ system libusb the other camera SDKs load. Exposure needs a malicious or faulty U
 device on the host. ToupTek has not been asked for the embedded version or a
 build against the system libusb (issue #1758).
 
+The SVBONY static archive `libSVBCameraSDK.a` also defines `libusb_init`,
+`libusb_open` and `libusb_get_version`. Unlike the two shared libraries above,
+it is linked into the daemon, and `--exclude-libs` hides its symbols from other
+vendors' libraries (#1211).
+
 ## Additional Resources
 
 - [Driver Development Guide](../../docs/development.md#building-drivers) - Complete guide to building drivers
