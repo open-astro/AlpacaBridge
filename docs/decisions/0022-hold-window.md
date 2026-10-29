@@ -1,6 +1,6 @@
 # Hold window
 
-Status: proposed
+Status: accepted
 
 ## Context
 
@@ -49,7 +49,7 @@ The rules a change is checked against.
 
 ## How to reverse
 
-Delete the header and its test file and restore the two Sky-Watcher fields from the commit before this record. No other driver depends on the header until its follow-up. Mark this record `Status: superseded by NNNN`. Hold lengths are unchanged, so no user-visible timing changes to undo.
+Delete the header and its test file and restore the two Sky-Watcher fields from the commit before this record. No other driver depends on the header until its follow-up. Mark this record `Status: retired (#NNNN)`, or `superseded by NNNN` when a successor record replaces it. Hold lengths are unchanged, so no user-visible timing changes to undo.
 
 ## Links
 
