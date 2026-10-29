@@ -378,6 +378,195 @@ TEST_CASE("ZWO moving warmup timestamp uses its partial frame before the first m
     CHECK(rig.driver->get_link_fault().empty());
 }
 
+TEST_CASE("ZWO commanded reads refuse a fault and recover without getter I/O",
+          "[zwo][telescope][telemetry][faulted-reads]") {
+    Rig rig;
+    rig.connect();
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.driver->get_right_ascension_rate() == 0.0);
+    CHECK(rig.driver->get_declination_rate() == 0.0);
+    const auto rate = rig.driver->get_tracking_rate();
+    const auto guide = rig.driver->get_guide_rate();
+    rig.fail(":GU", true);
+    rig.tick();
+    rig.tick();
+    rig.tick();
+    REQUIRE(rig.driver->get_connected());
+    const auto fault = rig.driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const auto commands = rig.mount.commands();
+    error([&] { rig.driver->get_is_pulse_guiding(); }, AlpacaError::DriverException, fault);
+    error([&] { rig.driver->get_right_ascension_rate(); }, AlpacaError::DriverException, fault);
+    error([&] { rig.driver->get_declination_rate(); }, AlpacaError::DriverException, fault);
+    error([&] { rig.driver->get_tracking_rate(); }, AlpacaError::DriverException, fault);
+    error([&] { rig.driver->get_guide_rate(); }, AlpacaError::DriverException, fault);
+    CHECK(rig.driver->get_device_state().empty());
+    CHECK(rig.mount.commands() == commands);
+    rig.fail(":GU", false);
+    rig.tick();
+    REQUIRE(rig.driver->get_link_fault().empty());
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.driver->get_right_ascension_rate() == 0.0);
+    CHECK(rig.driver->get_declination_rate() == 0.0);
+    CHECK(rig.driver->get_tracking_rate() == rate);
+    CHECK(rig.driver->get_guide_rate().ra == guide.ra);
+    CHECK(rig.driver->get_guide_rate().dec == guide.dec);
+}
+
+TEST_CASE("ZWO an in-flight failed pair faults an active pulse without reporting completion",
+          "[zwo][telescope][telemetry][faulted-reads]") {
+    Rig rig(5000);
+    rig.connect();
+    rig.fail(":GR", true);
+    rig.tick();
+    rig.tick();
+    REQUIRE(rig.driver->get_link_fault().empty());
+    // The third pair is already in flight when the guide pauses subsequent polls.
+    rig.mount.hold_reply(":GR");
+    rig.clock.advance(250ms);
+    REQUIRE(rig.mount.wait_until_held(5s));
+    rig.driver->pulse_guide(0, 10000);
+    REQUIRE(rig.driver->get_is_pulse_guiding());
+    rig.mount.release();
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
+    REQUIRE(eventually([&] { return rig.mount.count(":Mg") == 1; }));
+    REQUIRE(rig.clock.wait_for_waiters(2, 5s));
+    const auto fault = rig.driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    REQUIRE(rig.driver->get_connected());
+    const auto commands = rig.mount.commands();
+    error([&] { rig.driver->get_is_pulse_guiding(); }, AlpacaError::DriverException, fault);
+    CHECK(rig.mount.commands() == commands);
+    rig.fail(":GR", false);
+    rig.tick(10s);
+    rig.tick(500ms);  // The guide's existing post-pulse hold precedes telemetry recovery.
+    rig.tick();
+    REQUIRE(rig.driver->get_link_fault().empty());
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+}
+
+TEST_CASE("ZWO site reads refuse faulted and disconnected cached coordinates",
+          "[zwo][telescope][telemetry][faulted-reads]") {
+    const bool written = GENERATE(false, true);
+    Rig rig;
+    rig.connect();
+    if (written) {
+        rig.driver->set_site_latitude(45.0);
+        rig.driver->set_site_longitude(-90.0);
+    }
+    const auto latitude = rig.driver->get_site_latitude();
+    const auto longitude = rig.driver->get_site_longitude();
+    rig.fail(":GU", true);
+    rig.tick();
+    rig.tick();
+    rig.tick();
+    REQUIRE(rig.driver->get_connected());
+    const auto fault = rig.driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const auto commands = rig.mount.commands();
+    error([&] { rig.driver->get_site_latitude(); }, AlpacaError::DriverException, fault);
+    error([&] { rig.driver->get_site_longitude(); }, AlpacaError::DriverException, fault);
+    CHECK(rig.mount.commands() == commands);
+    rig.fail(":GU", false);
+    rig.tick();
+    REQUIRE(rig.driver->get_link_fault().empty());
+    CHECK(rig.driver->get_site_latitude() == latitude);
+    CHECK(rig.driver->get_site_longitude() == longitude);
+    rig.driver->set_connected(false);
+    // Offline configuration remains writable, but operational reads require a connection.
+    rig.driver->set_site_latitude(40.0);
+    rig.driver->set_site_longitude(-80.0);
+    error([&] { rig.driver->get_site_latitude(); }, AlpacaError::NotConnected);
+    error([&] { rig.driver->get_site_longitude(); }, AlpacaError::NotConnected);
+    rig.connect();
+    CHECK(rig.driver->get_site_latitude() == 40.0);
+    CHECK(rig.driver->get_site_longitude() == -80.0);
+}
+
+TEST_CASE("ZWO commanded getters themselves expire a fault while the wire is held",
+          "[zwo][telescope][telemetry][faulted-reads][getter-stall]") {
+    const int member = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
+    CAPTURE(member);
+    Rig rig(5000);
+    rig.connect();
+    const std::vector<std::function<void()>> reads{
+        [&] { rig.driver->get_is_pulse_guiding(); },     [&] { rig.driver->get_slewing(); },
+        [&] { rig.driver->get_right_ascension_rate(); }, [&] { rig.driver->get_declination_rate(); },
+        [&] { rig.driver->get_tracking_rate(); },        [&] { rig.driver->get_guide_rate(); },
+        [&] { rig.driver->get_site_latitude(); },        [&] { rig.driver->get_site_longitude(); }};
+    rig.fail(":GU", true);
+    rig.tick();
+    rig.tick();
+    rig.tick();
+    const auto fault = rig.driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    REQUIRE(rig.driver->get_connected());
+    rig.mount.hold_reply(":GU");
+    rig.clock.advance(250ms);
+    REQUIRE(rig.mount.wait_until_held(5s));
+    rig.clock.advance(29749ms);
+    const auto commands = rig.mount.commands();
+    error(reads[member], AlpacaError::DriverException, fault);
+    rig.clock.advance(1ms);
+    const auto begin = std::chrono::steady_clock::now();
+    error(reads[member], AlpacaError::NotConnected);
+    CHECK(std::chrono::steady_clock::now() - begin < 100ms);
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(rig.driver->get_device_state().empty());
+    CHECK(rig.driver->get_link_fault() == fault);
+    CHECK(rig.mount.commands() == commands);
+    rig.mount.release();
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
+    rig.fail(":GU", false);
+    rig.clock.advance(1s);
+    CHECK_FALSE(rig.driver->get_connected());
+    const auto probes = rig.mount.count(":GVP");
+    rig.connect();
+    CHECK(rig.mount.count(":GVP") > probes);
+    REQUIRE_NOTHROW(reads[member]());
+}
+
+TEST_CASE("ZWO motion shortcuts refuse faults while both axis stops remain available",
+          "[zwo][telescope][telemetry][faulted-reads]") {
+    const int motion = GENERATE(0, 1, 2, 3, 4, 5);
+    CAPTURE(motion);
+    Rig rig;
+    rig.mount.set_slew_duration(60s);
+    rig.connect();
+    if (motion < 2)
+        rig.driver->move_axis(motion, 0.1);
+    else if (motion < 4)
+        rig.driver->park();
+    else
+        rig.driver->find_home();
+    REQUIRE(rig.driver->get_slewing());
+    if (motion == 3 || motion == 5) rig.tick(2500ms);  // Also exercise beyond the startup force window.
+    rig.fail(":GU", true);
+    rig.tick();
+    rig.tick();
+    rig.tick();
+    REQUIRE(rig.driver->get_connected());
+    const auto fault = rig.driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const auto commands = rig.mount.commands();
+    error([&] { rig.driver->get_slewing(); }, AlpacaError::DriverException, fault);
+    error([&] { rig.driver->get_at_park(); }, AlpacaError::DriverException, fault);
+    error([&] { rig.driver->get_at_home(); }, AlpacaError::DriverException, fault);
+    error([&] { rig.driver->move_axis(0, 0.1); }, AlpacaError::DriverException, fault);
+    CHECK(rig.mount.commands() == commands);
+    const auto aborts = rig.mount.count(":Q");
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    REQUIRE(rig.mount.wait_for_count(":Q", aborts + 1, 1s));
+    for (int axis : {0, 1}) {
+        const auto first = axis == 0 ? ":Qe" : ":Qn";
+        const auto second = axis == 0 ? ":Qw" : ":Qs";
+        const auto first_count = rig.mount.count(first), second_count = rig.mount.count(second);
+        REQUIRE_NOTHROW(rig.driver->move_axis(axis, 0.0));
+        CHECK(rig.mount.wait_for_count(first, first_count + 1, 1s));
+        CHECK(rig.mount.wait_for_count(second, second_count + 1, 1s));
+    }
+}
+
 TEST_CASE("ZWO mandatory telemetry alone controls fault recovery and loss", "[zwo][telescope][telemetry]") {
     const int failure = GENERATE(0, 1, 2, 3);
     CAPTURE(failure);
@@ -512,6 +701,45 @@ TEST_CASE("ZWO TCP reset is lost immediately and needs an explicit reconnect", "
     rig.driver->set_connected(true);
     CHECK(rig.driver->get_connected());
     CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE("ZWO completed Park without the GU stopped flag waits for the guard and final pair",
+          "[zwo][telescope][telemetry][arrival]") {
+    Rig rig(5000);
+    rig.connect();
+    rig.driver->park();
+    // AM5 USB trace: Gps reports Completed while GU still lacks uppercase N.
+    rig.mount.override_reply(":GU", "nGM040001895");
+    rig.mount.override_reply(":Gps", "2");
+    rig.tick(4750ms);
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.driver->get_slewing());
+    rig.mount.hold_reply(":GR");
+    rig.clock.advance(250ms);
+    REQUIRE(rig.mount.wait_until_held(5s));
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.driver->get_slewing());
+    rig.mount.release();
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
+    for (int poll = 0; poll < 3; ++poll) {
+        CHECK(rig.driver->get_at_park());
+        CHECK_FALSE(rig.driver->get_slewing());
+        rig.tick();
+    }
+    rig.fail(":GU", true);
+    rig.tick();
+    rig.tick();
+    rig.tick();
+    error([&] { rig.driver->get_at_park(); }, AlpacaError::DriverException);
+    error([&] { rig.driver->get_slewing(); }, AlpacaError::DriverException);
+    rig.fail(":GU", false);
+    rig.mount.override_reply(":GU", "nGM040001895");
+    rig.tick();
+    rig.mount.override_reply(":Gps", "0");
+    rig.driver->unpark();
+    rig.tick(2500ms);
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.driver->get_slewing());  // Unpark must restore the ordinary motion-status path.
 }
 
 TEST_CASE("ZWO Park inference cannot complete without its measured final pair",
@@ -683,6 +911,9 @@ TEST_CASE("ZWO fault recovery races disconnect without reviving a frame", "[zwo]
             while (!stop.load()) {
                 guard([&] { rig.driver->get_slewing(); });
                 guard([&] { rig.driver->get_right_ascension(); });
+                guard([&] { rig.driver->get_is_pulse_guiding(); });
+                guard([&] { rig.driver->get_site_latitude(); });
+                guard([&] { rig.driver->get_site_longitude(); });
                 guard([&] { rig.driver->get_device_state(); });
                 std::this_thread::yield();
             }
