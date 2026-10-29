@@ -922,10 +922,23 @@ public:
     // Marks the link lost for good: the sticky flag makes every later
     // link_alive() and exchange() report NotConnected even when an exchange in
     // flight holds io_mutex_ and the close has to wait for it.
+    //
+    // The verdict is re-checked and latched under health_mutex_, which is also
+    // what disconnect_locked() takes to reset link_health_ (open-astro#1707):
+    // a relink that landed after link_alive()'s verdict leaves no stale fault
+    // here, so the new session is never marked lost. Lock order: io_mutex_ (a
+    // relink) -> health_mutex_ -> link_lost_at_'s leaf lock; this path takes
+    // io_mutex_ (try_lock only) after health_mutex_ is released.
     void lose_stale_link() {
-        keep_fault_text();
-        note_link_lost();
-        link_lost_.store(true);
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (!link_health_.fault_stale(clock().now())) {
+                return;
+            }
+            lost_fault_ = link_health_.fault();
+            note_link_lost();
+            link_lost_.store(true);
+        }
         std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
         if (lock.owns_lock() && connected_.load()) {
             const std::string reason = link_fault();
