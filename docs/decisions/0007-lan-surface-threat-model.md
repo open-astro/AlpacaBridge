@@ -78,20 +78,20 @@ The transport-level refusals (408, 413, 431, 501, the header 400s, and the 400 "
 Accepted by the board on 2026-09-30; they bind as part of this record.
 
 - **R1. A device config accepts any `portPath`, `host`, `tcpPort` or `hidPath`, so `LastConnectError` is a LAN reachability oracle.** A configuring host can register a device pointing at any host and port, connect it, and read the driver refusal (`configureddevices`, `LastConnectError`, `Router::handle_configured_devices()`). Accepted because a LAN host can already probe the LAN directly. Kept: no driver puts a credential in a connect error.
-- **R2. Duplicate query and form parameters resolve by position and the two parsers differ.** The query parser keeps the last value (`Request::parse_query_string()`, `AlpacaHTTP/src/core/request.cpp`); the form body keeps the first (`get_form_value`, `router.cpp`). Accepted because both are deterministic, no security check depends on a duplicate, and the caller is a trusted LAN host; it would matter only behind a proxy or filter that decides on the other occurrence, which is unsupported.
+- **R2. Duplicate query and form parameters resolve by position and the two parsers differ.** The query parser keeps the last value (`Request::parse_query_string()`, `AlpacaHTTP/src/core/request.cpp`); the form body keeps the first (`get_form_value`, `AlpacaHTTP/src/http/device_call.cpp`). Accepted because both are deterministic, no security check depends on a duplicate, and the caller is a trusted LAN host; it would matter only behind a proxy or filter that decides on the other occurrence, which is unsupported.
 - **R3. The udev rules install `MODE=0666` on whole vendor IDs** (`AlpacaCore/external/**/*.rules`), so any local user can open the device. Accepted because the board is a single-purpose appliance and group access would break the companion projects that dlopen the same libraries. Unacceptable on a shared machine; the README must say so.
 - **R4. `GET /management/v1/wifi/scan` holds the Wi-Fi mutex for 1.5 s.** Accepted because today the 32-worker pool and the global connection limit bound it (there is no per-host cap yet; the proposed cap is NS-03+05, open), it degrades only the Wi-Fi card, and a host that reaches the board can disconnect it by other means. The scan changes no state, so it stays a GET.
 
 ### Reviewer check for any new route or persisted config field
 
-A change passes only when every rule in the Rules section below holds, or the exception is written in the change.
+A change passes only when every rule in the Rules section below holds.
 
 ### Known gaps (open)
 
 - No framing or CSP headers (NS-08).
 - No per-host connection cap (NS-03+05).
 - Driver-reaching device PUTs are not origin-guarded; safe while no CORS preflight is answered. The DNS-rebinding path to them is open by default: the Host allowlist (NS-02) closes it only when `http.host_check_enabled` is on. The reviewer check holds the rest.
-- Unbounded detached threads per shutdown and restart request; tracked with the NS-14 low-severity items.
+- Unbounded detached threads per shutdown and restart request ([#1739](https://github.com/open-astro/AlpacaBridge/issues/1739)).
 - 28 unaudited `innerHTML`-class sinks in `app.js`; tracked with the NS-14 items (web UI item).
 
 ### Finding map
@@ -106,8 +106,8 @@ A change passes only when every rule in the Rules section below holds, or the ex
 | NS-07 | Device API, Management API | fixed | JSON output replaces invalid UTF-8 with U+FFFD instead of throwing (`error_handler_t::replace` in `Response::set_body`, `AlpacaHTTP/src/core/response.cpp`, issue #764) |
 | NS-08 | Web UI | open | framing headers and CSP |
 | NS-09 | Device API | fixed | the iOptron telescope no longer changes the mount altitude limit (`:SAL`) or meridian treatment (`:SMT`); a GOTO the firmware refuses is reported and not retried (issue #763) |
-| NS-10 | Management API | open | the WeeWX feed URL has no scheme allowlist, follows redirects and reads an unbounded body (`http_get()` in `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp`) |
-| NS-11 | Management API | open | the `gpioChip` config path is checked only for a `/dev/` prefix before `gpiod_chip_open` |
+| NS-10 | Management API | open | the WeeWX feed URL follows redirects and reads an unbounded body (`http_get()` in `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp`); its scheme is limited to `http,https` for the request and every redirect |
+| NS-11 | Management API | fixed | a device config may name only the board's own GPIO chip and lines (`AlpacaCore/include/alpacacore/util/hardware_config_refusal.h`, issue #765, PR #818) |
 | NS-12 | Device API | open | an image array request holds the whole frame (`CameraDriver::get_image_array()`, `AlpacaCore/include/alpacacore/camera_driver.h`); memory per request has no stated constant |
 | NS-13 | Discovery, Management API | fixed | the discovery non-Alpaca datagram and the unmatched setup path log at DEBUG, the path cut to 256 bytes (issue #740) |
 | NS-14 | several | open | split into separate low-severity changes: HTTP framing from parsed headers; strict URL decoding; config clamps and join-on-every-path for discovery, shutdown and restart; input length and count bounds; PulseGuide range; clock-step log pruning; atomic config writes; streamed log download. Four NS-14 items are the accepted risks R1 to R4. |
@@ -118,7 +118,7 @@ When a finding lands, set its row to `fixed` in the same change (rule 12).
 
 The reviewer check, for any new route or persisted config field. Each rule names where it applies and what checks it.
 
-1. A state change is never a GET; the Wi-Fi scan (R4) is the documented exception. Scope: `AlpacaHTTP/src/**`. Checked by: review.
+1. A state change is never a GET. Scope: `AlpacaHTTP/src/**`. Checked by: review.
 2. The origin guard covers a route on the path that reaches the driver, not only on the wrong-verb path. Scope: `AlpacaHTTP/src/http/router.cpp`. Checked by: review.
 3. A change that answers a CORS preflight, adds an `Access-Control-*` header or handles OPTIONS passes every driver-reaching PUT through the origin guard in the same PR. Scope: `AlpacaHTTP/src/**`. Checked by: review.
 4. The body and every string field have a byte bound, and integers are range-checked before a narrowing cast, so nothing wraps. Scope: `AlpacaHTTP/src/**`, `AlpacaCore/src/catalog/*.cpp`. Checked by: review.
@@ -144,8 +144,8 @@ The update check URL `update_packages_url` (`server:` key in the YAML config and
 
 ## Consequences
 
-- Reviewers get one list for any new route or config field. The rule stays at the instruction owners; this record keeps the reason.
-- Gaps with a filed upstream issue name it in the finding map (NS-02 issue #392, NS-04 issue #741, NS-07 issue #764 and NS-13 issue #740, all four landed). The other open rows have a proposed fix and no owner or issue yet; this record does not promise one. The device PUT guard rests on the Host allowlist and the reviewer check; the detached threads and the `innerHTML` audit go with the NS-14 low-severity items.
+- Reviewers get one list for any new route or config field: the Rules above. The instruction files link here rather than restating it.
+- Gaps with a filed upstream issue name it in the finding map (NS-02 issue #392, NS-04 issue #741, NS-07 issue #764 and NS-13 issue #740, all four landed). The other open rows have a proposed fix and no owner or issue yet; this record does not promise one. The device PUT guard rests on the Host allowlist and the reviewer check; the detached threads are [#1739](https://github.com/open-astro/AlpacaBridge/issues/1739) and the `innerHTML` audit goes with the NS-14 low-severity items.
 - Accepted by the board on 2026-09-30 (R1 to R4 accepted as residual risk).
 - NS-09 to NS-14 are not decided here; each carrier decides its fix and must pass the reviewer check.
 - ConformU and other non-browser clients are unaffected by every control named here.
@@ -154,6 +154,6 @@ The update check URL `update_packages_url` (`server:` key in the YAML config and
 
 - Guard: `AlpacaHTTP/src/http/router.cpp` (`reject_cross_origin_request`); limits: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/include/alpacahttp/config.h`, `AlpacaHTTP/include/alpacahttp/request.h`.
 - Discovery: `AlpacaHTTP/src/discovery/discovery.cpp`. Wi-Fi: `debian/alpacabridge.polkit-rules`, `debian/alpacabridge.service`, `docs/wifi-manager-design.md`.
-- Owners of the reviewer check: [AlpacaHTTP conformance](../../.github/instructions/alpaca-http-conformance.instructions.md), [WiFi manager](../../.github/instructions/wifi-manager.instructions.md).
+- Instruction files that link the reviewer check: [AlpacaHTTP conformance](../../.github/instructions/alpaca-http-conformance.instructions.md), [WiFi manager](../../.github/instructions/wifi-manager.instructions.md).
 - Related: [Server thread ownership](0002-server-thread-ownership.md), [Device catalog](0004-device-catalog.md).
 - Upstream issues [#392](https://github.com/open-astro/AlpacaBridge/issues/392), [#711](https://github.com/open-astro/AlpacaBridge/issues/711), [#713](https://github.com/open-astro/AlpacaBridge/issues/713), [#740](https://github.com/open-astro/AlpacaBridge/issues/740), [#741](https://github.com/open-astro/AlpacaBridge/issues/741) and [#764](https://github.com/open-astro/AlpacaBridge/issues/764).

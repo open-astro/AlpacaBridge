@@ -1945,20 +1945,23 @@ public:
 private:
     // Ends a running exposure and discards it. Returns at once when the
     // exposure already finished, so a completed frame survives an abort;
-    // a completed failure is cleared instead.
+    // a completed failure is cleared instead. A watchdog failure whose
+    // worker is still blocked in the frame call (exposure_thread_running_)
+    // is not completed: it is cancelled like a Working exposure.
     void cancel_running_exposure() {
         ensure_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (exposure_status_ == QHYExposureStatus::Failed) {
-                // A failure from an already completed exposure is discarded.
-                exposure_status_ = QHYExposureStatus::Idle;
-                exposure_failure_.clear();
-                image_ready_ = false;
-                last_exposure_valid_ = false;
-                return;
-            }
-            if (exposure_status_ != QHYExposureStatus::Working) {
+                if (!(exposure_thread_running_ && exposure_thread_running_->load())) {
+                    // A failure from an already completed exposure is discarded.
+                    exposure_status_ = QHYExposureStatus::Idle;
+                    exposure_failure_.clear();
+                    image_ready_ = false;
+                    last_exposure_valid_ = false;
+                    return;
+                }
+            } else if (exposure_status_ != QHYExposureStatus::Working) {
                 return;
             }
         }
@@ -1969,7 +1972,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
-            if (exposure_status_ != QHYExposureStatus::Working) {
+            if (exposure_status_ != QHYExposureStatus::Working && exposure_status_ != QHYExposureStatus::Failed) {
                 return;
             }
             // A late successful SDK return after AbortExposure is not an accepted image.
@@ -1985,6 +1988,7 @@ private:
 
         std::lock_guard<std::mutex> lock(mutex_);
         exposure_status_ = QHYExposureStatus::Idle;
+        exposure_failure_.clear();
         exposure_deadline_valid_ = false;
         image_ready_ = false;
         last_exposure_valid_ = false;

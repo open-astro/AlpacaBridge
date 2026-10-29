@@ -1,6 +1,6 @@
 # Camera capture session
 
-Status: proposed
+Status: accepted
 
 ## Context
 
@@ -55,7 +55,7 @@ Symbol: `CaptureSession`
 
 ## How to reverse
 
-Each camera adopts in its own PR; reverting that PR restores the camera's thread code. To drop the rule, supersede this record, mark the Adoption rows `planned` or remove them, and restore the camera exposure-worker text in the driver lifecycle instructions. The module is additive and stays unused by a camera that has not adopted it.
+Each camera adopts in its own PR; reverting that PR restores the camera's thread code. To drop the rule, retire this record (`Status: retired (#NNNN)`, or `superseded by NNNN` when a successor replaces it), mark the Adoption rows `planned` or remove them, and restore the camera exposure-worker text in the driver lifecycle instructions. The module is additive and stays unused by a camera that has not adopted it.
 
 ## Links
 

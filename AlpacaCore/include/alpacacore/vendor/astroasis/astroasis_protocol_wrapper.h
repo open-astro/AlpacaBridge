@@ -92,6 +92,12 @@ public:
 
     bool is_connected() const;
 
+    /**
+     * @brief False once a HID write or read errored (the hidraw node is gone), until the next
+     * connect(). A read timeout does not count. Lock-free: safe in a getter.
+     */
+    bool link_alive() const noexcept;
+
     struct Status {
         int position = 0;
         bool moving = false;

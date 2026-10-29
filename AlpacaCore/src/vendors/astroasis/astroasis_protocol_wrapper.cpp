@@ -16,6 +16,7 @@
 #include <hidapi.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -180,6 +181,7 @@ public:
             throw AlpacaException("Astroasis focuser: connect() called while already connected (caller bug)",
                                   AlpacaError::DriverException);
         }
+        link_lost_.store(false);
         open_ = transport_->open(hid_path);
         if (!open_) {
             throw AlpacaException("Failed to open Astroasis focuser HID device: " + hid_path,
@@ -223,6 +225,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
     }
+
+    // Lock-free on purpose: the driver's Connected getter must not queue behind an exchange.
+    bool link_alive() const noexcept { return !link_lost_.load(); }
 
     AstroasisProtocolWrapper::Status get_status() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -333,6 +338,7 @@ private:
 
         const int written = transport_->write(out.data(), out.size());
         if (written < 0) {
+            link_lost_.store(true);
             throw AlpacaException("Astroasis HID write failed", AlpacaError::DriverException);
         }
 
@@ -341,7 +347,14 @@ private:
         // byte directly -- unverified against real hardware.
         std::array<std::uint8_t, kReportSize - 1> in{};
         const int bytes_read = transport_->read(in.data(), in.size(), timeout_ms);
-        if (bytes_read <= 0) {
+        if (bytes_read < 0) {
+            // hid_read_timeout returns -1 on an error (a removed hidraw node), 0 on a timeout.
+            link_lost_.store(true);
+        }
+        if (bytes_read < 0) {
+            throw AlpacaException("Astroasis HID read failed", AlpacaError::DriverException);
+        }
+        if (bytes_read == 0) {
             throw AlpacaException("Astroasis HID read timed out", AlpacaError::DriverException);
         }
         // hidraw delivers full 64-byte reports today, but guard against a
@@ -363,6 +376,8 @@ private:
     std::unique_ptr<AstroasisHidTransport> transport_;
     bool open_ = false;
     bool connected_ = false;
+    // A hid write or read errored (not a timeout): the node is gone. Only connect() clears it.
+    std::atomic<bool> link_lost_{false};
 };
 
 AstroasisProtocolWrapper::AstroasisProtocolWrapper() : impl_(std::make_unique<Impl>(nullptr)) {}
@@ -375,6 +390,8 @@ void AstroasisProtocolWrapper::connect(const std::string& hid_path) { impl_->con
 void AstroasisProtocolWrapper::disconnect() { impl_->disconnect(); }
 
 bool AstroasisProtocolWrapper::is_connected() const { return impl_->is_connected(); }
+
+bool AstroasisProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
 
 AstroasisProtocolWrapper::Status AstroasisProtocolWrapper::get_status() { return impl_->get_status(); }
 

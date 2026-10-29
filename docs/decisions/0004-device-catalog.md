@@ -4,15 +4,15 @@ Status: accepted
 
 ## Context
 
-What a device's configuration looks like is written in several places. `AlpacaHTTP/src/http/router.cpp` builds every driver in a chain of registration arms, one per (vendor, device), validates and normalizes their configs there, and strips secrets in a separate chain of sanitize arms. That makes the router include vendor headers from all 16 vendors (40 includes). `AlpacaHTTP/web/app.js` and `AlpacaHTTP/web/index.html` keep a second, hand-written copy of the field lists, the vendor availability blocks, the edit-population chain and `INDEX_FIELDS`. Adding a device, or a field, touches both libraries and the UI, and the copies drift: #508 lists saved configs that are dropped, mis-parsed or persisted out of range. Upstream design review #584 names this as the first candidate.
+What a device's configuration looks like is written in several places. `AlpacaHTTP/src/http/router.cpp` builds every driver in a chain of registration arms, one per (vendor, device), validates and normalizes their configs there, and strips secrets in a separate chain of sanitize arms. That made the router include vendor headers from every vendor (40 includes at the time). `AlpacaHTTP/web/app.js` and `AlpacaHTTP/web/index.html` keep a second, hand-written copy of the field lists, the vendor availability blocks, the edit-population chain and `INDEX_FIELDS`. Adding a device, or a field, touches both libraries and the UI, and the copies drift: #508 lists saved configs that are dropped, mis-parsed or persisted out of range. Upstream design review #584 names this as the first candidate.
 
 ## Decision
 
 One descriptor per (vendor, device) in AlpacaCore declares the fields once, in a typed config with no JSON: scalars, string lists (filter names) and nested configs for record lists (a switch's ports). Each field has a role (EnumerationIndex, DeviceId, PortPath, Host, Secret, Discriminator, Plain) and an optional applies_when for fields that only apply under one discriminator value, such as ToupTek's switch type.
 
-The descriptor is two files in the vendor's directory. The schema half compiles in every build and includes no vendor header. The factory half compiles under the vendor's build option. So every build can list all 16 vendors, with whether each one is available.
+The descriptor is two files in the vendor's directory. The schema half compiles in every build and includes no vendor header. The factory half compiles under the vendor's build option. So every build can list every vendor, with whether each one is available.
 
-AlpacaHTTP bridges JSON to the typed config in one place and includes no vendor headers; the layering gate enforces zero once the migration is done. It serves the schema at /management/v1/devicecatalog in the management envelope, as a compact custom shape pinned by a committed fixture.
+AlpacaHTTP bridges JSON to the typed config in one place and includes no vendor headers; the layering gate enforces zero now that the migration is done. It serves the schema at /management/v1/devicecatalog in the management envelope, as a compact custom shape pinned by a committed fixture.
 
 API configs are rejected on validation failure; persisted configs are normalized with a warning, as the router did before the catalog (#380, PR #353). Sanitize keeps every declared non-secret field; only the UI honours applies_when. Aliases, such as iOptron's iCAM routed to the Player One camera driver, are explicit descriptors that delegate construction. Test descriptors register through the same catalog.
 
@@ -37,5 +37,5 @@ The router's registration and sanitize arms, and its vendor includes, went away 
 ## Links
 
 - Upstream design review [#584](https://github.com/open-astro/AlpacaBridge/issues/584) (candidate 1); issues [#508](https://github.com/open-astro/AlpacaBridge/issues/508), [#380](https://github.com/open-astro/AlpacaBridge/issues/380), [#577](https://github.com/open-astro/AlpacaBridge/issues/577), [#572](https://github.com/open-astro/AlpacaBridge/issues/572); PR [#353](https://github.com/open-astro/AlpacaBridge/pull/353).
-- Current owners of the rule this replaces: `AlpacaHTTP/src/http/router.cpp` (`register_device_from_config()`, `sanitize_device_config()`), `AlpacaHTTP/web/app.js` (`INDEX_FIELDS`, `updateVendorOptions`, `startEditDevice`).
+- Owners of the rule before the migration (`INDEX_FIELDS` is gone): `AlpacaHTTP/src/http/router.cpp` (`register_device_from_config()`, `sanitize_device_config()`), `AlpacaHTTP/web/app.js` (`INDEX_FIELDS`, `updateVendorOptions`, `startEditDevice`).
 - Module overview: [architecture](../architecture.md#modules).
