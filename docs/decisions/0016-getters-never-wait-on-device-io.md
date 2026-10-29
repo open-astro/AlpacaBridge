@@ -30,7 +30,7 @@ The how-to and its history stay in the [driver lifecycle instructions](../../.gi
 
 ## Adoption
 
-The roster of drivers checked against the Rules above, from a full audit on 2026-10-29. A `partial` row names the issue that fixes it. `scripts/check_docs_drift.py` check 23 holds it to the code; a Symbol cell names the lock a driver uses when it has no `transition_mutex_`.
+The roster of drivers checked against the Rules above, from a full audit on 2026-10-29. A `partial` row names the issue that fixes it. `scripts/check_docs_drift.py` check 23 holds it to the code; a Symbol cell names the lock, or the class it delegates to, of a driver that has no `transition_mutex_`.
 
 Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
 Symbol: `transition_mutex_`

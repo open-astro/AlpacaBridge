@@ -100,7 +100,16 @@ own redistribution terms still apply to the SDK files themselves.
 The QHY/ToupTek/SVBONY subsets carry no written redistribution grant from the
 vendor; they are vendored unmodified from the vendors' public SDK downloads so
 builds are turnkey. If any vendor objects, the subset will be removed and that
-vendor's driver will return to download-the-SDK-yourself builds.
+vendor's driver will return to download-the-SDK-yourself builds. Decision
+(issue #1758): no written permission is requested; the subsets stay on this basis.
+
+The ToupTek `libtoupcam.so` and Altair `libaltaircam.so` (arm64 glibc builds)
+carry a private, statically linked libusb of unknown version: neither lists
+`libusb` in its `NEEDED` entries, and both contain the `libusb_init` /
+`libusb_open` error strings. `apt upgrade` never patches that copy, unlike the
+system libusb the other camera SDKs load. Exposure needs a malicious or faulty USB
+device on the host. ToupTek has not been asked for the embedded version or a
+build against the system libusb (issue #1758).
 
 ## Additional Resources
 
