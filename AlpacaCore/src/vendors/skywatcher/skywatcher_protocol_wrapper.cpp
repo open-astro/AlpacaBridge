@@ -756,14 +756,17 @@ public:
         // Decision 0009: a fault that has stood past the staleness bound is a
         // lost link, on UDP and serial alike.
         if (fault_stale()) {
-            if (after_stale_verdict_) {
-                after_stale_verdict_();
+            run_link_loss_hook(LinkLossPoint::AfterStaleVerdict);
+            if (lose_stale_link()) {
+                return false;
             }
-            lose_stale_link();
-            return false;
+            // The verdict belonged to a session a relink has since replaced:
+            // judge the current one.
+            return connected_.load() && !link_lost_.load();
         }
 #ifndef _WIN32
         bool present = true;
+        const std::uint64_t generation = session_generation();
         {
             std::lock_guard<std::mutex> lock(link_id_mutex_);
             if (!link_path_.empty()) {
@@ -778,15 +781,20 @@ public:
             }
         }
         if (!present) {
+            run_link_loss_hook(LinkLossPoint::AfterNodeCheck);
             // Best-effort teardown: if an exchange holds io_mutex_ right now,
             // this call reports the loss without closing the fd. The next
             // poll, the in-flight exchange's own node check, or a relink all
             // retry the close; nothing is lost, but until one of those runs
             // the stale fd stays open with Connected already reading false.
-            keep_fault_text();
-            note_link_lost();
+            // The node check judged the session of `generation`; a relink since
+            // then (it bumps the generation under health_mutex_) gets neither
+            // the stamp nor the close (open-astro#1707).
+            if (!note_loss_if_current(generation)) {
+                return connected_.load() && !link_lost_.load();
+            }
             std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
-            if (lock.owns_lock() && connected_.load()) {
+            if (lock.owns_lock() && connected_.load() && session_generation() == generation) {
                 ALPACA_LOG_WARN("SkyWatcher", "Serial device " + info_.port_path + " has gone away; link closed");
                 disconnect_locked();
             }
@@ -900,9 +908,8 @@ public:
 
     void set_task_clock(util::TaskClock& clock) { clock_.store(&clock); }
 
-    // Test seam: runs between link_alive()'s stale verdict and its latch, so a
-    // test can relink exactly there (open-astro#1707).
-    void set_after_stale_verdict(std::function<void()> hook) { after_stale_verdict_ = std::move(hook); }
+    // Test seam: see SkyWatcherProtocolWrapper::set_link_loss_hook_for_test.
+    void set_link_loss_hook(std::function<void(LinkLossPoint)> hook) { link_loss_hook_ = std::move(hook); }
 
     // Decision 0009 point 5: a loss keeps the latched fault text for
     // get_link_fault() until the next connect or disconnect. Call before
@@ -912,6 +919,31 @@ public:
         if (link_health_.faulted()) {
             lost_fault_ = link_health_.fault();
         }
+    }
+
+    void run_link_loss_hook(LinkLossPoint point) {
+        if (link_loss_hook_) {
+            link_loss_hook_(point);
+        }
+    }
+
+    // Bumped by disconnect_locked() under health_mutex_, which every relink
+    // passes through: a verdict taken on one generation never acts on the next.
+    std::uint64_t session_generation() {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        return session_generation_;
+    }
+
+    bool note_loss_if_current(std::uint64_t generation) {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        if (session_generation_ != generation) {
+            return false;
+        }
+        if (link_health_.faulted()) {
+            lost_fault_ = link_health_.fault();
+        }
+        note_link_lost();
+        return true;
     }
 
     bool fault_stale() {
@@ -929,22 +961,27 @@ public:
     // here, so the new session is never marked lost. Lock order: io_mutex_ (a
     // relink) -> health_mutex_ -> link_lost_at_'s leaf lock; this path takes
     // io_mutex_ (try_lock only) after health_mutex_ is released.
-    void lose_stale_link() {
+    // Returns whether it latched; false means the verdict was stale.
+    bool lose_stale_link() {
         {
             std::lock_guard<std::mutex> lock(health_mutex_);
             if (!link_health_.fault_stale(clock().now())) {
-                return;
+                return false;
             }
             lost_fault_ = link_health_.fault();
             note_link_lost();
             link_lost_.store(true);
         }
+        run_link_loss_hook(LinkLossPoint::AfterStaleLatch);
+        // Only connect and disconnect clear link_lost_, both under io_mutex_:
+        // a flag still set here belongs to the session this call latched.
         std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
-        if (lock.owns_lock() && connected_.load()) {
+        if (lock.owns_lock() && connected_.load() && link_lost_.load()) {
             const std::string reason = link_fault();
             ALPACA_LOG_WARN("SkyWatcher", "Motor controller link lost: " + reason + "; link closed");
             disconnect_locked();
         }
+        return true;
     }
 
     // Finishes the close a loss left pending because an exchange held
@@ -1014,6 +1051,7 @@ private:
             // open-astro#505: a fault belongs to the session that latched it.
             std::lock_guard<std::mutex> lock(health_mutex_);
             link_health_.reset();
+            ++session_generation_;
         }
 #ifndef _WIN32
         // SerialLink::close() drops TIOCEXCL (open-astro#912: the flag lives on
@@ -1711,8 +1749,9 @@ private:
     // Decision 0009: the link was lost (transport gone, or a fault past the
     // staleness bound). Sticky until the next connect or disconnect.
     std::atomic<bool> link_lost_{false};
-    std::function<void()> after_stale_verdict_;
+    std::function<void(LinkLossPoint)> link_loss_hook_;  // tests only; set before the call, never concurrently
     std::string connect_failure_;  // under io_mutex_: why the last connect() failed
+    std::uint64_t session_generation_ = 0;  // under health_mutex_
     std::string lost_fault_;  // under health_mutex_: fault text kept after a loss
     std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
     // open-astro#505: per-exchange evidence, written only under io_mutex_ by
@@ -1769,8 +1808,8 @@ std::uint64_t SkyWatcherProtocolWrapper::link_recovery_epoch() { return pimpl_->
 
 void SkyWatcherProtocolWrapper::finish_lost_close() { pimpl_->finish_lost_close(); }
 
-void SkyWatcherProtocolWrapper::set_after_stale_verdict_for_test(std::function<void()> hook) {
-    pimpl_->set_after_stale_verdict(std::move(hook));
+void SkyWatcherProtocolWrapper::set_link_loss_hook_for_test(std::function<void(LinkLossPoint)> hook) {
+    pimpl_->set_link_loss_hook(std::move(hook));
 }
 
 void SkyWatcherProtocolWrapper::note_link_lost_at(std::chrono::steady_clock::time_point at) {

@@ -174,8 +174,11 @@ public:
     // (the loss path only try-locks). Call with no exchange of your own in
     // flight. No-op unless a loss is pending.
     void finish_lost_close();
-    // Test seam: `hook` runs between link_alive()'s stale verdict and its latch.
-    void set_after_stale_verdict_for_test(std::function<void()> hook);
+    // Test seam (open-astro#1707): `hook` runs inside link_alive() at each
+    // point where a loss verdict is taken and not yet acted on, so a test can
+    // relink exactly there.
+    enum class LinkLossPoint { AfterStaleVerdict, AfterStaleLatch, AfterNodeCheck };
+    void set_link_loss_hook_for_test(std::function<void(LinkLossPoint)> hook);
     // Stamps the lost-at time from the driver's own evidence (first stamp wins).
     void note_link_lost_at(std::chrono::steady_clock::time_point at);
 
