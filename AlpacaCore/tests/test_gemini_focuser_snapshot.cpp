@@ -326,6 +326,33 @@ TEST_CASE(
     CHECK(driver->get_link_fault().empty());
 }
 
+// Falsified by: gemini_focuser_driver.cpp: probe() delete the cancel checks between the exchanges (a disconnect
+// during a poll waits for the ":01#" and ":06#" exchanges too, each up to one serial timeout).
+TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the exchange in flight only",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    // The next poll's first exchange (":00#") is held by the fake.
+    fake.gate_next_reply();
+    const int moving_reads = fake.count(":01#");
+    const int temperature_reads = fake.count(":06#");
+    clock.advance(kTick);
+    fake.wait_reply_held();
+
+    std::thread disconnect([&] { driver->set_connected(false); });
+    while (driver->get_connected()) std::this_thread::yield();  // teardown has started
+    fake.release_reply();
+    disconnect.join();
+
+    CHECK(fake.count(":01#") == moving_reads);
+    CHECK(fake.count(":06#") == temperature_reads);
+    CHECK(driver->get_link_fault().empty());
+}
+
 // Falsified by: gemini_focuser_driver.cpp: device_state_age() delete the override (the TimeStamp is the request time,
 // not the frame's).
 TEST_CASE("Gemini Focuser Snapshot - DeviceState TimeStamp is when the frame was measured",
