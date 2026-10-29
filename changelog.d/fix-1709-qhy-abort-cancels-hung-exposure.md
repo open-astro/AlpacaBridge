@@ -1,0 +1,2 @@
+### Fixed
+- **QHY camera AbortExposure now cancels an exposure the watchdog already marked failed** (AlpacaCore, issue #1709): while the worker is still blocked in the frame call, abort cancels the SDK exposure, joins the worker (bounded) and leaves CameraState Idle instead of reporting Idle with the SDK exposure still running. Test: `AbortExposure cancels the SDK exposure behind a watchdog failure` in `test_qhy_camera.cpp`.
