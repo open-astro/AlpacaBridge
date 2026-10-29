@@ -1131,6 +1131,7 @@ int main() {
         straddle_config.set_discovery_enabled(false);
         straddle_config.set_server_name("TestServerRestartStraddle");
         straddle_config.set_max_connections(3);
+        straddle_config.set_thread_pool_size(2);  // One slow request and one restart worker expose stolen wakeups.
         alpacahttp::Server straddle_server(straddle_config);
 
         std::mutex parked_mutex;
