@@ -94,10 +94,10 @@ public:
 
     // Lock-free: two atomic reads, so a Connected poll landing during an
     // in-flight connect answers at once instead of waiting out the ~1.1 s HID
-    // handshake. A poll that has gone unanswered for util::kLinkStalenessBound
-    // latches the loss in state_ (decision 0009), and Connected reads false
-    // without a reconnect.
-    bool get_connected() const override { return connected_.load() && !state_.link_lost(); }
+    // handshake. A failed HID exchange (the hidraw node is gone) or a poll that
+    // has gone unanswered for util::kLinkStalenessBound (decision 0009) makes
+    // Connected read false without a reconnect.
+    bool get_connected() const override { return connected_.load() && link_up(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -135,7 +135,7 @@ public:
         // against a lost link reconnects instead of taking the idempotency
         // return. The disconnect gate takes the raw connected_, so Connected=false
         // still tears down a lost link (QHY Q-Focuser shape, decision 0009).
-        const bool live = connected_.load() && !state_.link_lost();
+        const bool live = connected_.load() && link_up();
         // See AsyncConnectable's class comment for why these gates run before
         // the idempotency check.
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
@@ -333,8 +333,10 @@ private:
     };
 
     // The single fault text (decision 0009, point 5): the latched poll fault,
-    // kept after the link is lost so the management listing says why.
+    // kept after the link is lost so the management listing says why. A HID error comes first:
+    // probe() keeps failing after it, and that poll fault must not replace the transport text.
     std::string get_link_fault() const override {
+        if (connected_.load() && !protocol_.link_alive()) return "HID transport error";
         auto fault = state_.fault();
         if (!fault.empty()) return fault;
         return state_.link_lost() ? "no answer to the state poll" : std::string();
@@ -343,11 +345,14 @@ private:
     // The TimeStamp of DeviceState is when the frame was measured (decision 0010).
     std::optional<std::chrono::nanoseconds> device_state_age() const override { return state_.age(); }
 
+    // True while the transport is up and the poll has not declared the link lost.
+    bool link_up() const { return protocol_.link_alive() && !state_.link_lost(); }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
-        if (state_.link_lost()) {
+        if (!link_up()) {
             throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
                                   AlpacaError::NotConnected);
         }
@@ -363,6 +368,12 @@ private:
     // The poll's one exchange, on the poll thread with no driver lock held
     // (the protocol wrapper serialises it).
     StateFrame probe() {
+        // A HID error already lost the link: release the transport and stop writing to the dead node
+        // (decision 0009, point 3). disconnect() keeps the latch, so link_alive() stays false.
+        if (!protocol_.link_alive()) {
+            protocol_.disconnect();
+            throw AlpacaException("HID transport error", AlpacaError::NotConnected);
+        }
         const auto status = protocol_.get_status();
         StateFrame frame;
         frame.position = status.position;
