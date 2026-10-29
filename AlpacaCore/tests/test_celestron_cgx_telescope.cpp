@@ -1403,6 +1403,70 @@ TEST_CASE("Celestron CGX USB Telescope Driver - rejects a Celestron AUX bus with
     CHECK(mount.count_command(0x11, 0x0b) == 0);
 }
 
+TEST_CASE("Celestron CGX USB Telescope Driver - connects without a site and refuses what needs one",
+          "[celestron][cgx][telescope][integration]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    info.site_latitude_degrees.reset();
+    info.site_longitude_degrees.reset();
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    const auto refused = [&](const std::function<void()>& call) {
+        try {
+            call();
+            FAIL("expected InvalidOperation");
+        } catch (const alpacacore::AlpacaException& error) {
+            CHECK(error.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(std::string(error.what()).find("Site") != std::string::npos);
+        }
+    };
+    const auto refuse_all = [&] {
+        refused([&] { static_cast<void>(driver->get_right_ascension()); });
+        refused([&] { static_cast<void>(driver->get_declination()); });
+        refused([&] { static_cast<void>(driver->get_altitude()); });
+        refused([&] { static_cast<void>(driver->get_azimuth()); });
+        refused([&] { static_cast<void>(driver->get_side_of_pier()); });
+        refused([&] { static_cast<void>(driver->get_destination_side_of_pier(6.0, 30.0)); });
+        refused([&] { static_cast<void>(driver->get_sidereal_time()); });
+        refused([&] { driver->find_home(); });
+        refused([&] { driver->park(); });
+        refused([&] { driver->sync_to_coordinates(6.0, 30.0); });
+        refused([&] { driver->slew_to_coordinates_async(6.0, 30.0); });
+        refused([&] { driver->set_tracking(true); });
+        refused([&] { driver->pulse_guide(0, 100); });
+    };
+    refused([&] { static_cast<void>(driver->get_site_latitude()); });
+    refused([&] { static_cast<void>(driver->get_site_longitude()); });
+    refuse_all();
+    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(mount.count_command(0x10, 0x24) == 0);  // no motion command was sent
+    CHECK(mount.count_command(0x10, 0x26) == 0);
+
+    driver->set_site_latitude(-33.856784);
+    refuse_all();  // latitude alone is not enough
+    driver->set_site_longitude(151.215297);
+    CHECK(driver->get_site_longitude() == 151.215297);
+    CHECK_NOTHROW(static_cast<void>(driver->get_sidereal_time()));
+    CHECK_NOTHROW(static_cast<void>(driver->get_destination_side_of_pier(6.0, 30.0)));
+
+    // Longitude alone is not enough either: sidereal time and pier side still refuse.
+    alpacacore::test::FakeCelestronCgxMount longitude_mount;
+    REQUIRE(longitude_mount.ok());
+    auto longitude_info = test_info();
+    longitude_info.port_path = longitude_mount.slave_path();
+    longitude_info.site_latitude_degrees.reset();
+    longitude_info.site_longitude_degrees = 151.215297;
+    driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, longitude_info);
+    driver->set_connected(true);
+    refuse_all();
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - pins guide polarity in both hemispheres and pointing branches",
           "[celestron][cgx][telescope][integration]") {
     for (const double latitude : {45.0, -45.0}) {
