@@ -688,8 +688,7 @@ TEST_CASE("ToupTek Camera Driver - Connected cooler members read and write the T
     driver->set_connected(false);
 }
 
-TEST_CASE("ToupTek Camera Driver - A camera without a TEC refuses cooler on",
-          "[touptek][camera][unit]") {
+TEST_CASE("ToupTek Camera Driver - A camera without a TEC refuses cooler on", "[touptek][camera][unit]") {
     // Falsified by: set_cooler_on(true) silently succeeding, writing the TEC register of a camera without
     // one, or get_can_set_ccd_temperature returning true.
     auto fake = fake_with_one_camera();
