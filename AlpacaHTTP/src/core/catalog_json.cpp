@@ -332,6 +332,7 @@ nlohmann::json describe_json(const alpacacore::catalog::DeviceCatalog& catalog) 
         descriptor["vendor"] = view.key.vendor;
         descriptor["deviceType"] = to_lower(alpacacore::device_type_to_string(view.key.type));
         descriptor["displayName"] = std::string(view.display_name);
+        if (!view.vendor_label.empty()) descriptor["vendorLabel"] = std::string(view.vendor_label);
         descriptor["available"] = view.available;
         descriptor["buildOption"] = std::string(view.build_option);
         nlohmann::json fields = nlohmann::json::array();

@@ -11,9 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // The SynScan telescope schema. No vendor header: compiles in every build
-// (including vendors-OFF). The display name's first word is the router's
-// vendor_label(), so it keeps "SynScan support not enabled ..." as the arm
-// spelled it.
+// (including vendors-OFF). The vendor label "Sky-Watcher" is the router's
+// vendor_label(), so the refusal reads "Sky-Watcher support not enabled ...";
+// the web UI groups this and the direct telescope under it.
 //
 // Cross-field rules, in the arm's order: alignment mode (#860), connection
 // type, then the endpoint. The API is refused; a saved config is registered so
@@ -82,7 +82,8 @@ NormalizeResult normalize_synscan(const DeviceConfig& in, Source source) {
 void register_synscan_schema(DeviceCatalog& catalog) {
     Schema schema;
     schema.key = DeviceKey{"synscan", DeviceType::Telescope};
-    schema.display_name = "SynScan";
+    schema.display_name = "Sky-Watcher (SynScan hand controller)";
+    schema.vendor_label = "Sky-Watcher";
     schema.build_option = "ALPACACORE_ENABLE_SYNSCAN";
     schema.fields = synscan_telescope_fields();
     schema.normalize = normalize_synscan;

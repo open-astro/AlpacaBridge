@@ -3,7 +3,7 @@ paths:
   - "AlpacaCore/src/vendors/synscan/**"
   - "AlpacaCore/include/alpacacore/vendor/synscan/**"
   - "AlpacaCore/tests/*synscan*"
-  - "AlpacaCore/conformu/SynScan/**"
+  - "AlpacaCore/conformu/Sky-Watcher/**"
 ---
 
 Before working on these files, read `.github/instructions/synscan.instructions.md` in full.
