@@ -13,11 +13,10 @@
 // OnStep getters never wait on a serial exchange (decision 0016, issue #1449).
 // The driver talks to a loopback FakeMountServer that holds every reply for
 // kLatency, so a getter that waits for the driver's state lock while a command
-// or a Park/FindHome body is on the wire pays at least one held reply. The
-// driver runs on a FakeTaskClock that the cases never advance (except the
-// MoveAxis re-send case), so its 2 s status and position caches stay fresh:
-// every getter here answers without asking the mount. A getter whose cache is
-// stale still asks, and waits for the wire, as decision 0016 allows.
+// or a Park/FindHome body is on the wire pays at least one held reply. Since
+// #1783 every getter answers from the status poll's frame (decision 0010) and
+// never asks the mount; the driver runs on a FakeTaskClock, so the poll ticks
+// only when a case advances it.
 // Decision 0005: the budget is wall time spent in a getter, not a driver
 // timeout; no case waits on a task-clock deadline.
 
@@ -198,7 +197,7 @@ std::vector<Getter> stateless_getters() {
     };
 }
 
-// Members served from the 2 s status and position caches while they are fresh.
+// Members served from the snapshot frame (decision 0010); none asks the mount. (`cached` is the old name.)
 std::vector<Getter> all_getters() {
     auto list = stateless_getters();
     const std::vector<Getter> cached = {
@@ -221,8 +220,8 @@ std::vector<Getter> all_getters() {
 // thread, and returns the slowest read of each. One thread per getter keeps a
 // getter stuck behind the state lock from hiding the ones queued after it. A
 // round counts only when the command was still in flight when it ended: once
-// it is over, a cache it invalidated is refilled with a held reply, which is a
-// live read, not a wait behind another member's exchange.
+// it is over, the poll tick it woke reads with a held reply, which is the
+// poll's own exchange, not a wait behind another member's exchange.
 struct Sampled {
     std::vector<std::pair<std::string, milliseconds>> worst;
     int rounds = 0;
@@ -369,14 +368,16 @@ TEST_CASE("OnStep getters - none waits behind a Park or FindHome body on the wir
 
 // The #1378 re-send tick reads :GU#, the altitude and its limits, then
 // re-sends the move (#1449 names it). The case advances the clock past the
-// re-send interval, so the position caches are stale and their getters ask
-// the mount; only the members that never ask are timed.
+// re-send interval, which also wakes the poll tick; the getters read the frame
+// and never ask the mount, and the members that never read the frame are timed too.
 TEST_CASE("OnStep getters - none waits behind the MoveAxis re-send tick", "[onstep][getter-locks]") {
     Rig rig;
     REQUIRE(rig.server.ok());
     rig.driver->set_connected(true);
     REQUIRE(rig.driver->get_connected());
     rig.mount->moving = true;  // the mount shows the move ('g'), so the tick re-sends it
+    // The rendezvous below counts the re-send body's waits; the status poll (#1783) would add its own.
+    onstep::set_status_poll_paused_for_testing(*rig.driver, true);
 
     const auto waits = rig.clock.wait_count();
     rig.driver->move_axis(0, 1.0);
@@ -395,10 +396,11 @@ TEST_CASE("OnStep getters - none waits behind the MoveAxis re-send tick", "[onst
     rig.driver->move_axis(0, 0.0);
 }
 
-// A getter whose cache is stale asks the mount, and that one read takes the
-// operation lock: it never lands inside a command's sequence. :GE# answers for
-// the command right before it, so a :GU# between :hC# and :GE# would make the
-// home read the status read's code.
+// The status poll's tick (before #1783, a getter whose cache was stale) takes
+// the operation lock for its reads: it never lands inside a command's
+// sequence. :GE# answers for the command right before it, so a :GU# between
+// :hC# and :GE# would make the home read the status read's code. Each clock
+// step wakes a tick while the readers and the FindHome run.
 TEST_CASE("OnStep getters - a stale-cache read never lands between a command's exchanges", "[onstep][getter-locks]") {
     Rig rig;
     REQUIRE(rig.server.ok());
@@ -406,7 +408,7 @@ TEST_CASE("OnStep getters - a stale-cache read never lands between a command's e
     REQUIRE(rig.driver->get_connected());
     rig.mount->latency_ms = 20;
     for (int i = 0; i < 5; ++i) {
-        rig.clock.advance(std::chrono::seconds(3));  // past the 2 s caches: every read below asks the mount
+        rig.clock.advance(std::chrono::seconds(3));  // wakes a poll tick
         std::atomic<bool> done{false};
         std::vector<std::thread> readers;
         for (int r = 0; r < 3; ++r) {
@@ -448,69 +450,6 @@ TEST_CASE("OnStep getters - a stale-cache read never lands between a command's e
     CHECK(homes == 5);
 }
 
-// A Slewing read whose status cache is stale drops mutex_ for its :GU#. A slew
-// sent by another client in that gap is not "the slew that just ended": the
-// read must not clear its tracking-restore flag or restart tracking during it.
-TEST_CASE("OnStep getters - a slew sent during a Slewing read's status wait is not taken as ended",
-          "[onstep][getter-locks]") {
-    Rig rig;
-    REQUIRE(rig.server.ok());
-    rig.driver->set_connected(true);
-    REQUIRE(rig.driver->get_connected());
-    rig.mount->set_status("pEW180#");  // a GOTO runs, tracking on
-    rig.clock.advance(std::chrono::milliseconds(2100));
-    REQUIRE(rig.driver->get_slewing());  // the driver has seen it running
-    rig.mount->set_status("NpEW180#");   // it ended
-    rig.clock.advance(std::chrono::milliseconds(2100));
-
-    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, [&] {
-        // A second client's GOTO lands between this read's unlock and its :GU#.
-        std::thread other([&] { rig.driver->slew_to_coordinates_async(2.0, 20.0); });
-        other.join();
-        rig.mount->set_status("nNpEW180#");  // the new GOTO not shown yet, tracking reads off
-    });
-    const bool slewing = rig.driver->get_slewing();
-    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, nullptr);
-
-    REQUIRE(rig.mount->count(":MS#") == 1);
-    CHECK(slewing);  // the new slew's grace
-    // No tracking restore for the slew that "ended" (:ST60.164275#).
-    CHECK(rig.mount->count(":ST") == 0);
-}
-
-// A getter whose cache is stale waits for the operation lock. A Disconnect and
-// Connect that win that race open a new session; the getter must not read it,
-// but answer NotConnected as check_connected() would, without touching the wire.
-TEST_CASE("OnStep getters - a stale-cache read that waited out a reconnect reads nothing", "[onstep][getter-locks]") {
-    Rig rig;
-    REQUIRE(rig.server.ok());
-    rig.driver->set_connected(true);
-    REQUIRE(rig.driver->get_connected());
-    rig.clock.advance(std::chrono::milliseconds(2100));  // past the position cache
-
-    std::size_t served_after_reconnect = 0;
-    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, [&] {
-        std::thread other([&] {
-            rig.driver->set_connected(false);
-            rig.driver->set_connected(true);
-        });
-        other.join();
-        served_after_reconnect = rig.mount->served();
-    });
-    int error = 0;
-    try {
-        (void)rig.driver->get_right_ascension();
-    } catch (const alpacacore::AlpacaException& e) {
-        error = e.error_code();
-    }
-    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, nullptr);
-
-    REQUIRE(served_after_reconnect > 0);
-    CHECK(error == alpacacore::AlpacaError::NotConnected);
-    CHECK(rig.mount->served() == served_after_reconnect);  // nothing sent for the stale read
-    CHECK(rig.driver->get_connected());                    // the new session stands
-}
-
 // Decision 0006 rule 3 (#1728 review): the re-send tick drops mutex_ for its
 // :GU#, altitude and limit reads, so a cancel or a cleared re-send flag can land
 // before the re-send. The seam ends the move in that gap; the tick must re-check
@@ -522,6 +461,8 @@ TEST_CASE("OnStep getters - a MoveAxis ended between the re-send tick's reads an
     rig.driver->set_connected(true);
     REQUIRE(rig.driver->get_connected());
     rig.mount->moving = true;  // the mount shows the move ('g'), so the tick would re-send it
+    // The rendezvous below counts the re-send body's waits; the status poll (#1783) would add its own.
+    onstep::set_status_poll_paused_for_testing(*rig.driver, true);
 
     const auto waits = rig.clock.wait_count();
     rig.driver->move_axis(0, 1.0);
@@ -540,148 +481,6 @@ TEST_CASE("OnStep getters - a MoveAxis ended between the re-send tick's reads an
     REQUIRE(rig.mount->count(":Go#") >= 1);    // the tick got through its reads
     CHECK(rig.mount->count(":Me#") == moves);  // and re-sent nothing
     rig.mount->moving = false;
-}
-
-// A site getter whose site is not cached reads :Gt#/:Gg# through the single
-// read. A Disconnect and Connect that win the race for the operation lock end
-// that read with NotConnected; the getter must report it, not answer from the
-// cache, and must not mark the new session's site unread (#1728 review).
-TEST_CASE("OnStep getters - a site read that waited out a reconnect reads as not connected", "[onstep][getter-locks]") {
-    Rig rig(false, false);
-    REQUIRE(rig.server.ok());
-    rig.mount->garble_site = true;  // the connect cannot read the site
-    rig.driver->set_connected(true);
-    REQUIRE(rig.driver->get_connected());
-    rig.mount->garble_site = false;
-    rig.clock.advance(std::chrono::milliseconds(2100));  // past the site retry delay
-
-    std::size_t sites_after_reconnect = 0;
-    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, [&] {
-        std::thread other([&] {
-            rig.driver->set_connected(false);
-            rig.driver->set_connected(true);  // reads the site again
-        });
-        other.join();
-        sites_after_reconnect = rig.mount->count(":Gt");
-    });
-    int error = 0;
-    try {
-        (void)rig.driver->get_site_latitude();
-    } catch (const alpacacore::AlpacaException& e) {
-        error = e.error_code();
-    }
-    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, nullptr);
-
-    REQUIRE(sites_after_reconnect >= 2);  // the first connect's read and the reconnect's
-    CHECK(error == alpacacore::AlpacaError::NotConnected);
-    // The new session's site stands: served from its cache, with no further read.
-    rig.clock.advance(std::chrono::milliseconds(2100));
-    CHECK(std::fabs(rig.driver->get_site_latitude() - 40.5) < 1e-9);
-    CHECK(rig.mount->count(":Gt") == sites_after_reconnect);
-}
-
-// The tracking restore a Slewing read sends when a GOTO ends is a single read
-// too: it drops mutex_ and waits for the operation lock. A GOTO sent in that
-// gap owns the mount; the restore must not go out behind it (#1728 review).
-namespace {
-
-// A GOTO started with tracking on has ended with tracking off, so the next
-// Slewing read owes a tracking restore (:ST60.164275#). Its first single read
-// is the :GU#; the second, the restore. `intruder` runs on another thread in
-// front of the restore, while the read waits for the operation lock. Returns
-// what that Slewing read answered.
-bool slewing_with_command_before_restore(Rig& rig, const std::function<void()>& intruder) {
-    REQUIRE(rig.server.ok());
-    rig.driver->set_connected(true);
-    REQUIRE(rig.driver->get_connected());
-    REQUIRE(rig.driver->get_tracking());
-    rig.driver->slew_to_coordinates_async(2.0, 20.0);  // starts with tracking on: a restore is owed
-    rig.mount->set_status("pEW180#");                  // the GOTO runs, tracking on
-    rig.clock.advance(std::chrono::milliseconds(2100));
-    REQUIRE(rig.driver->get_slewing());
-    rig.mount->set_status("nNpEW180#");  // it ended with tracking off: the next read restores it
-    rig.clock.advance(std::chrono::milliseconds(2100));
-
-    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, [&] {
-        onstep::set_single_read_before_io_hook_for_testing(*rig.driver, [&] {
-            std::thread other([&] {
-                try {
-                    intruder();
-                } catch (const std::exception& e) {
-                    FAIL_CHECK(e.what());
-                }
-            });
-            other.join();
-        });
-    });
-    const bool slewing = rig.driver->get_slewing();
-    onstep::set_single_read_before_io_hook_for_testing(*rig.driver, nullptr);
-    return slewing;
-}
-
-}  // namespace
-
-TEST_CASE("OnStep getters - a slew sent while a Slewing read waits to restore tracking gets no restore",
-          "[onstep][getter-locks]") {
-    Rig rig;
-    const bool slewing = slewing_with_command_before_restore(
-        rig, [&] { rig.driver->slew_to_alt_az_async(45.0, 180.0); });  // allowed: tracking off
-
-    REQUIRE(rig.mount->count(":MS#") == 2);  // the second GOTO went out in the gap
-    CHECK(rig.mount->count(":ST60") == 0);   // and no :ST60.164275# behind it
-    CHECK(slewing);                          // the new slew's grace
-}
-
-// The client's Tracking write decides tracking: the restore must not undo it.
-TEST_CASE("OnStep getters - a Tracking write sent while a Slewing read waits to restore tracking gets no restore",
-          "[onstep][getter-locks]") {
-    Rig rig;
-    (void)slewing_with_command_before_restore(rig, [&] { rig.driver->set_tracking(false); });
-
-    REQUIRE(rig.mount->count(":ST0#") == 1);  // the write went out in the gap
-    CHECK(rig.mount->count(":ST60") == 0);    // and no restore behind it
-}
-
-// A Park or FindHome the mount takes ends with tracking off on purpose (#1218).
-TEST_CASE("OnStep getters - a Park or FindHome taken while a Slewing read waits to restore tracking gets no restore",
-          "[onstep][getter-locks]") {
-    for (const bool home : {false, true}) {
-        CAPTURE(home);
-        Rig rig;
-        (void)slewing_with_command_before_restore(rig, [&] {
-            if (home) {
-                rig.driver->find_home();
-            } else {
-                rig.driver->park();
-            }
-        });
-
-        REQUIRE(rig.mount->count(home ? ":hC#" : ":hP#") == 1);  // a still mount: sent at once, and taken
-        CHECK(rig.mount->count(":ST60") == 0);
-    }
-}
-
-// A Park or FindHome on a moving mount sends AbortSlew's stops first (#1430);
-// those decide tracking too, before the body parks or homes.
-TEST_CASE(
-    "OnStep getters - the stops before a Park or FindHome sent while a Slewing read waits to restore tracking "
-    "leave no restore",
-    "[onstep][getter-locks]") {
-    for (const bool home : {false, true}) {
-        CAPTURE(home);
-        Rig rig;
-        (void)slewing_with_command_before_restore(rig, [&] {
-            rig.mount->set_status("nNpgEW180#");  // a guide move runs: the call stops it first
-            if (home) {
-                rig.driver->find_home();
-            } else {
-                rig.driver->park();
-            }
-        });
-
-        REQUIRE(rig.mount->count(":Q#") >= 1);  // the stops went out in the gap
-        CHECK(rig.mount->count(":ST60") == 0);
-    }
 }
 
 // Setters with no wire I/O take the state lock alone (#1728 review): they never
@@ -761,15 +560,16 @@ TEST_CASE("OnStep setters - a target written during a sync's exchanges stands", 
     CHECK(rig.driver->get_target_declination() == 20.0);
 }
 
-// A slew's or sync's own checks can read the mount first: with the status
-// cache older than 2 s, the Tracking and GOTO checks send :GU#. A target
-// written during that read stands too (#1728 review bot).
+// A slew's or sync's own checks read the mount first: the GOTO check sends
+// :GU# (#1783: on every call). A target written during that read stands too
+// (#1728 review bot). The status poll is paused, so the first exchange is the
+// check's own.
 TEST_CASE("OnStep setters - a target written during a slew's status check stands", "[onstep][getter-locks]") {
     Rig rig;
     REQUIRE(rig.server.ok());
     rig.driver->set_connected(true);
     REQUIRE(rig.driver->get_connected());
-    rig.clock.advance(std::chrono::milliseconds(2100));  // past the status cache: the check asks the mount
+    onstep::set_status_poll_paused_for_testing(*rig.driver, true);
 
     rig.mount->latency_ms = static_cast<int>(kLatency.count());
     const std::size_t before = rig.mount->served();
@@ -793,7 +593,7 @@ TEST_CASE("OnStep setters - a target written during a sync's status check stands
     REQUIRE(rig.server.ok());
     rig.driver->set_connected(true);
     REQUIRE(rig.driver->get_connected());
-    rig.clock.advance(std::chrono::milliseconds(2100));  // past the status cache: the GOTO check asks the mount
+    onstep::set_status_poll_paused_for_testing(*rig.driver, true);
 
     rig.mount->latency_ms = static_cast<int>(kLatency.count());
     const std::size_t before = rig.mount->served();
@@ -915,6 +715,8 @@ TEST_CASE("OnStep setters - a site read that fails before a site write is logged
     REQUIRE(rig.driver->get_connected());
     REQUIRE(warnings.lines().size() == 1);  // the connect's read
     CHECK(warnings.lines()[0].find("Invalid OnStep site info response") != std::string::npos);
+    // The status poll retries an unread site too (#1783): paused, so the :Gt# reads below are the setter's.
+    onstep::set_status_poll_paused_for_testing(*rig.driver, true);
 
     // Past the retry delay, so the setter reads again; that failure is not logged a second time.
     rig.clock.advance(milliseconds(2100));
@@ -940,31 +742,6 @@ TEST_CASE("OnStep setters - a site read that fails before a site write is logged
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).find("Mount rejected site latitude") != std::string::npos);
     }
-}
-
-// Wire's single read records the operation lock for the read, so a nested
-// wire() or check_connected() inside it does not take io_mutex_ again (#1728
-// review).
-TEST_CASE("OnStep getters - a stale-cache read holds the operation lock as its own", "[onstep][getter-locks]") {
-    Rig rig;
-    REQUIRE(rig.server.ok());
-    rig.driver->set_connected(true);
-    REQUIRE(rig.driver->get_connected());
-    rig.clock.advance(std::chrono::milliseconds(2100));  // past the position cache
-
-    bool hook_ran = false;
-    bool held_inside = false;
-    onstep::set_single_read_in_io_hook_for_testing(*rig.driver, [&] {
-        hook_ran = true;
-        held_inside = onstep::holds_operation_lock_for_testing(*rig.driver);
-    });
-    CHECK_FALSE(onstep::holds_operation_lock_for_testing(*rig.driver));
-    (void)rig.driver->get_right_ascension();
-    onstep::set_single_read_in_io_hook_for_testing(*rig.driver, nullptr);
-
-    REQUIRE(hook_ran);
-    CHECK(held_inside);
-    CHECK_FALSE(onstep::holds_operation_lock_for_testing(*rig.driver));  // released with the read
 }
 
 TEST_CASE("OnStep getters - a connect on the wire holds up no getter and reads as not connected",

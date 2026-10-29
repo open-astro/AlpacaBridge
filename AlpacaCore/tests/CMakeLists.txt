@@ -207,6 +207,8 @@ if(TARGET alpacacore_onstep)
     # Getters never wait behind a command or a Park/FindHome body on the wire
     # (decision 0016, issue #1449).
     list(APPEND TEST_SOURCES test_onstep_getter_locks.cpp)
+    # Getters and DeviceState served from the polled snapshot (issue #1783).
+    list(APPEND TEST_SOURCES test_onstep_telescope_snapshot.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
