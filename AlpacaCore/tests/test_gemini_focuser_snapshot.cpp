@@ -19,10 +19,13 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
+#include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <thread>
@@ -52,6 +55,22 @@ bool wire_saw(const FakeGeminiFocuser& fake, const std::string& prefix) {
         std::this_thread::sleep_for(5ms);
     }
     return fake.count(prefix) == 1;
+}
+
+// Waits up to kBound until thread `tid` (once set) is asleep in the kernel (state S in /proc), for example in a
+// join; returns whether it got there.
+bool wait_asleep(const std::atomic<pid_t>& tid) {
+    while (tid.load() == 0) std::this_thread::yield();
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::ifstream stat("/proc/self/task/" + std::to_string(tid.load()) + "/stat");
+        std::string line;
+        std::getline(stat, line);
+        const auto name_end = line.rfind(')');  // the state follows the thread name, which may hold spaces
+        if (name_end != std::string::npos && name_end + 2 < line.size() && line[name_end + 2] == 'S') return true;
+        std::this_thread::yield();
+    }
+    return false;
 }
 
 // Advances one tick and waits for the poll body to be waiting again.
@@ -369,11 +388,18 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
     clock.advance(kTick);
     REQUIRE(fake.wait_reply_held(kBound));
 
-    std::thread disconnect([&] { driver->set_connected(false); });
-    while (driver->get_connected()) std::this_thread::yield();  // teardown has started
+    std::atomic<pid_t> disconnect_tid{0};
+    std::thread disconnect([&] {
+        disconnect_tid.store(::gettid());
+        driver->set_connected(false);
+    });
+    // Before the poll join teardown blocks only on uncontended mutexes, so the disconnecting thread is first asleep
+    // in that join, after the cancel store.
+    const bool joining = wait_asleep(disconnect_tid);
     fake.release_reply();
     disconnect.join();
 
+    REQUIRE(joining);
     CHECK(fake.count(":01#") == moving_reads);
     CHECK(fake.count(":06#") == temperature_reads);
     CHECK(driver->get_link_fault().empty());
@@ -396,18 +422,18 @@ TEST_CASE(
     clock.advance(kTick);
     REQUIRE(fake.wait_reply_held(kBound));
 
-    std::atomic<bool> destroying{false};
+    std::atomic<pid_t> destroy_tid{0};
     std::thread destroy([&] {
-        destroying.store(true);
+        destroy_tid.store(::gettid());
         driver.reset();
     });
-    // The destructor has no observable "joining" state: yield (no sleep) so it reaches the poll join first. A
-    // late destructor only makes the case fail, never pass.
-    while (!destroying.load()) std::this_thread::yield();
-    for (int i = 0; i < 20000; ++i) std::this_thread::yield();
+    // Before the poll join the destructor blocks only on an uncontended mutex, so the destroying thread is first
+    // asleep in that join, after the cancel store.
+    const bool joining = wait_asleep(destroy_tid);
     fake.release_reply();
     destroy.join();
 
+    REQUIRE(joining);
     CHECK(fake.count(":01#") == moving_reads);
     CHECK(fake.count(":06#") == temperature_reads);
 }
