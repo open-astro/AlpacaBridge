@@ -80,24 +80,25 @@ void set_park_home_spawn_for_testing(TelescopeDriver& driver, std::function<std:
 /// anything else is ignored.
 void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
-/// Test seam: `hook` runs once, on the next getter thread that reads the mount
-/// because its cache is stale, after it has released the driver's state lock and
-/// before it takes the operation lock (decision 0016, #1449), so a case can land
-/// a command, a disconnect or a reconnect in that gap. Pass an empty function to
-/// clear it. `driver` must come from the factories above; anything else is ignored.
-void set_single_read_before_io_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
-
-/// Test seam: `hook` runs once, on the next getter thread that reads the mount
-/// because its cache is stale, with the operation lock taken and just before the
-/// read itself, so a case can see what a nested call inside the read sees (#1728
-/// review). Pass an empty function to clear it. `driver` must come from the
-/// factories above; anything else is ignored.
-void set_single_read_in_io_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
-
-/// Test seam: true when the calling thread holds the driver's operation lock, as
-/// the driver's own nested calls see it. False for anything the factories above
-/// did not make.
-bool holds_operation_lock_for_testing(const TelescopeDriver& driver);
+/// Test seams of the status poll (decision 0010, #1783). `driver` must come from the factories above; anything
+/// else is ignored (poll_status_now_for_testing returns false).
+/// Stops the poll body and joins it (true), so it parks no waiter on a fake task clock and a connect does not
+/// start it, or starts it again (false). Call with no driver call in flight on the calling thread.
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+/// One poll tick on the calling thread, paused or not; `full` reads Alt/Az and retries an unread site too.
+/// False when the connection is gone or lost.
+bool poll_status_now_for_testing(TelescopeDriver& driver, bool full = true);
+/// False once the poll body is cancelled (a disconnect has taken it), even while it is still sampling.
+bool status_poll_running_for_testing(const TelescopeDriver& driver);
+/// Runs between a tick's sample and its publish, with no driver lock held, so a case can land a client write
+/// there. Pass an empty function to clear it.
+void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// False once the current pulse-end body has returned, or when none was started.
+bool pulse_measurement_running_for_testing(const TelescopeDriver& driver);
+/// Runs in PulseGuide after it releases the driver locks and before the pulse-end body starts, with no driver
+/// lock held: the gap in which an earlier pulse's body can take the operation lock. Pass an empty function to
+/// clear it.
+void set_pulse_guide_gap_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seam: `hook` runs in a MoveAxis re-send tick after its status and
 /// altitude reads and before the re-send, with the driver locks held; when it

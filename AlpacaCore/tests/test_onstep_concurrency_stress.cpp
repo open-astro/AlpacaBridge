@@ -242,8 +242,8 @@ TEST_CASE("OnStep telescope - destruction mid-operation (MoveAxis re-send or Par
     CHECK(mount->parks.load() == 0);  // every Park body was ended before the mount stopped
 }
 
-// Decision 0016 (#1449): the getters take the state lock alone, and refresh a
-// stale cache with one read under the operation lock, while Park and FindHome
+// Decision 0016 (#1449): the getters take the state lock alone and read the
+// snapshot frame (the poll tick reads the mount under the operation lock), while Park and FindHome
 // and their park_home_ body, AbortSlew, MoveAxis and its re-send, and a
 // disconnect and reconnect hold the operation lock and drop the state lock for
 // each exchange. A storm of all of them, so both locks, the thread-local lock
