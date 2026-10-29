@@ -15,11 +15,10 @@
 // Goto-jump pumping for Sky-Watcher cases whose fake board (the UDP mount or
 // the serial one) runs on a FakeTaskClock (open-astro#715; one home since open-astro#1221).
 //
-// The fake integrates motion against the FakeTaskClock; the driver stays on the
-// wall clock, so nothing here waits on the clock and
-// FakeTaskClock::wait_for_waiters() has nothing to rendezvous with. The
-// rendezvous is the board traffic instead: each step waits for the driver's
-// next frame, then decides how virtual time moves:
+// The fake integrates motion against the FakeTaskClock; the driver may stay on
+// the wall clock or run on the same clock. The rendezvous is the board traffic:
+// each step waits for the driver's next frame, then decides how virtual time
+// moves:
 //   - while an axis runs a goto, jump far enough that it lands at once (a
 //     goto's duration is what these suites spent most of their real time on);
 //   - otherwise let virtual time follow wall time, so a tracking RA axis and
@@ -36,10 +35,12 @@
 // still while the driver's wall-clock timer runs out. That includes a teardown
 // stop on a mount with a stop ramp.
 //
-// These helpers assume the driver is on the wall clock. A case that also puts
-// the driver on the clock steps time after the driver's waiters park on it
-// instead (step_until() in test_skywatcher_backlash.cpp, run_clock_until() in
-// test_skywatcher_async.cpp).
+// The pumps also serve a driver on the same clock (clocked_driver() in
+// test_skywatcher_motion_limits.cpp): before a goto jump pump_until() waits,
+// bounded, for the driver's poll and goto body to park on the clock. Cases
+// that step the clock only after the driver's waiters park on it use their
+// own helpers (step_until() in test_skywatcher_backlash.cpp, run_clock_until()
+// in test_skywatcher_async.cpp).
 
 #include <chrono>
 #include <functional>
