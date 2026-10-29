@@ -1167,6 +1167,34 @@ public:
                     invalidate_readback_tick_locked();
                 };
                 hooks.fail = [&](const std::string& message) { fail_park_locked(message, ctx, lock); };
+                // The park GOTO runs no landing refinement, so a miss gets the one repeat GOTO a slew gets (#1105).
+                hooks.repeat_on_miss = true;
+                hooks.verify_at_target = [&]() -> std::string {
+                    const RawSample raw =
+                        without_lock(lock, [this] { return sample_raw(use_precise_commands_, true); });
+                    if (superseded()) {
+                        return {};  // a newer operation owns the state; the flow abandons
+                    }
+                    const PolledFrame landed = decode_sample_locked(raw, use_precise_commands_, PolledFrame{});
+                    if (park_altaz && !landed.altaz_known) {
+                        return "Park: the mount did not report its altitude and azimuth";
+                    }
+                    const double miss_arcsec =
+                        park_altaz
+                            ? util::angular_separation_arcsec(landed.az_degrees, landed.alt_degrees, park_target_first,
+                                                              park_target_second)
+                            : util::angular_separation_arcsec(landed.ra_hours * kHoursToDegrees, landed.dec_degrees,
+                                                              park_target_first * kHoursToDegrees, park_target_second);
+                    if (miss_arcsec <= kLandingRefineLimitArcsec) {
+                        return {};
+                    }
+                    const std::string message = "Park ended " + std::to_string(static_cast<long>(miss_arcsec)) +
+                                                " arcsec from the park position (limit " +
+                                                std::to_string(static_cast<long>(kLandingRefineLimitArcsec)) +
+                                                " arcsec): the mount did not reach it";
+                    ALPACA_LOG_WARN("SynScan", message);
+                    return message;
+                };
                 hooks.complete = [&] {
                     if (superseded()) {
                         return;
