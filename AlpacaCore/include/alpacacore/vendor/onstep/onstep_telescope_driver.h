@@ -93,6 +93,12 @@ bool status_poll_running_for_testing(const TelescopeDriver& driver);
 /// Runs between a tick's sample and its publish, with no driver lock held, so a case can land a client write
 /// there. Pass an empty function to clear it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// False once the current pulse-end body has returned, or when none was started.
+bool pulse_measurement_running_for_testing(const TelescopeDriver& driver);
+/// Runs in PulseGuide after it releases the driver locks and before the pulse-end body starts, with no driver
+/// lock held: the gap in which an earlier pulse's body can take the operation lock. Pass an empty function to
+/// clear it.
+void set_pulse_guide_gap_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seam: `hook` runs in a MoveAxis re-send tick after its status and
 /// altitude reads and before the re-send, with the driver locks held; when it

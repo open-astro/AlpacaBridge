@@ -679,4 +679,41 @@ TEST_CASE("OnStep snapshot - a tick's publish drops an older tick that is still 
     CHECK(std::abs(rig.driver->get_right_ascension() - (12.0 + 20.0 / 3600.0)) < 1e-6);
 }
 
+// A pulse-end body of an earlier pulse that takes the operation lock in the gap between a newer PulseGuide's
+// unlock and its start() has not been replaced yet (decision 0006 rule 6): the newer pulse supersedes it under the
+// lock, so the body's own check sees it and it sends no tracking restore and publishes no frame.
+TEST_CASE("OnStep snapshot - a pulse-end body superseded by a newer PulseGuide sends no restore and publishes nothing",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);  // starts with tracking on: a restore is owed
+    rig.mount->set_status("npEW180#");                 // the GOTO runs, tracking off: the poll ticks restore nothing
+    rig.clock.advance(seconds(3));                     // past the slew grace
+    REQUIRE(rig.clock.wait_for_woken_settled(seconds(5)));
+    const auto waits = rig.clock.wait_count();
+    rig.driver->pulse_guide(2, 500);  // the old pulse-end body waits 550 ms
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, seconds(2)));
+    rig.mount->set_status("nNpEW180#");  // the GOTO ended with tracking off: only a tick that reads it restores
+    rig.mount->ra_seconds = 9;           // what a published frame would show
+    const auto restores = rig.mount->count(":ST") + rig.mount->count(":Te");
+    const auto reads = rig.mount->count(":GU#");
+    bool body_returned = false;
+    onstep::set_pulse_guide_gap_hook_for_testing(*rig.driver, [&] {
+        // The newer pulse has unlocked and not yet started: the old body wakes now and takes the operation lock.
+        rig.clock.advance(milliseconds(550));
+        (void)rig.clock.wait_for_woken_settled(seconds(5));
+        for (int i = 0; i < 5000 && onstep::pulse_measurement_running_for_testing(*rig.driver); ++i) {
+            std::this_thread::sleep_for(milliseconds(1));  // real time for the body to return, not a driver timer
+        }
+        body_returned = !onstep::pulse_measurement_running_for_testing(*rig.driver);
+    });
+    rig.driver->pulse_guide(3, 500);  // the newer pulse supersedes it
+    onstep::set_pulse_guide_gap_hook_for_testing(*rig.driver, nullptr);
+    REQUIRE(body_returned);
+    CHECK(rig.mount->count(":ST") + rig.mount->count(":Te") == restores);  // no restore from the old body
+    CHECK(rig.mount->count(":GU#") == reads);                              // it did not even sample
+    CHECK(std::abs(rig.driver->get_right_ascension() - 12.0) < 1e-6);      // its frame is not published
+}
+
 #endif  // !_WIN32

@@ -2498,10 +2498,19 @@ TEST_CASE("OnStep Telescope Driver - AbortSlew and a MoveAxis stop on its axis e
 
 namespace {
 
+// run_clock's rendezvous waits for one waiter: the Park or FindHome body's. The status poll (#1783) is a
+// waiter too and could satisfy it before the body reaches its wait, so these cases pause the poll and read
+// Slewing with poll_status_now_for_testing().
+void pause_poll(alpacacore::TelescopeDriver& driver) {
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(driver, true);
+}
+
 // Moves the fake clock `total` in 100 ms steps, letting each woken task run.
 void run_clock(ParkHomeFake& mount, std::chrono::milliseconds total) {
     for (auto t = std::chrono::milliseconds(0); t < total; t += std::chrono::milliseconds(100)) {
-        (void)mount.clock.wait_for_waiters(1, std::chrono::milliseconds(200));  // a body reaches its wait first
+        // A body reaches its wait first. None within the bound means it has ended (the poll is paused), so
+        // nothing is left to advance for.
+        if (!mount.clock.wait_for_waiters(1, std::chrono::seconds(1))) break;
         mount.clock.advance(std::chrono::milliseconds(100));
         (void)mount.clock.wait_for_woken_settled(std::chrono::seconds(5));
     }
@@ -2550,6 +2559,7 @@ TEST_CASE("OnStep Telescope Driver - a newer command ends a Park still finishing
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
     start_move(*driver, *mount, 0, 1.0);
     REQUIRE_NOTHROW(driver->park());
     REQUIRE(mount->count(":hP#") == 0);
@@ -2585,6 +2595,7 @@ TEST_CASE("OnStep Telescope Driver - a newer command before Park's background pa
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
     start_move(*driver, *mount, 0, 1.0);
     alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, [&] { driver->abort_slew(); });
 
@@ -2592,6 +2603,7 @@ TEST_CASE("OnStep Telescope Driver - a newer command before Park's background pa
     alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, nullptr);
     run_clock(*mount, std::chrono::seconds(10));
     CHECK(mount->count(":hP#") == 0);  // the AbortSlew won
+    REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*driver));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2606,6 +2618,7 @@ TEST_CASE("OnStep Telescope Driver - a FindHome started before an older Park's b
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
     start_move(*driver, *mount, 0, 1.0);
     alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, [&] {
         alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, nullptr);
@@ -2788,6 +2801,7 @@ TEST_CASE("OnStep Telescope Driver - an AbortSlew between Park's in-motion retri
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
 
     REQUIRE_NOTHROW(driver->park());  // the first try, refused "in motion", then the background retries
     REQUIRE(mount->count(":hP#") == 1);
@@ -2808,6 +2822,7 @@ TEST_CASE("OnStep Telescope Driver - a FindHome taken at once ends a Park still 
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
 
     REQUIRE_NOTHROW(driver->park());  // refused "in motion": the retries go to the background
     REQUIRE(mount->count(":hP#") == 1);

@@ -1248,6 +1248,11 @@ public:
         // implementation there is no background stop thread to manage here —
         // is_pulse_guiding() just compares against the known end time.
         wire().pulse_guide(direction, duration);
+        // Supersede the pulse-end body of an earlier pulse here, under the locks and before the flags (decision
+        // 0006 rule 3): a body that wakes or takes the operation lock in the gap before start() replaces it sees
+        // the bump when its wait returns or at its next stopped() check and acts on nothing (rule 6), so it sends
+        // no tracking restore and publishes no frame. start() bumps again for the new body.
+        pulse_measurement_generation_.bump();
         pulse_guiding_active_ = true;
         pulse_guide_axis_ = direction >= 2 ? 0 : 1;  // East/West is axis 0, North/South axis 1
         pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(duration);
@@ -1258,10 +1263,9 @@ public:
         const auto wait = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(duration) +
                                                                                kPulseGuideSettle);
         lock.unlock();
+        run_pulse_guide_gap_hook();
         // A Disconnect can land between the unlock and the start: the slot's body is then harmless, because
         // poll_status_once() checks the connection under the operation lock and the destructor joins the slot.
-        // A body from an earlier pulse can take the operation lock in the same gap and run one tick before
-        // start() replaces it: it re-checks after its reads and sends, and changes nothing once superseded.
         start_pulse_measurement(wait);
     }
 
@@ -1691,6 +1695,14 @@ public:
         status_poll_after_sample_hook_ = std::move(hook);
     }
 
+    // False once the pulse-end body has returned (or none was started).
+    bool pulse_measurement_running_for_testing() const { return pulse_measurement_.running(); }
+
+    void set_pulse_guide_gap_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
+        pulse_guide_gap_hook_ = std::move(hook);
+    }
+
 private:
     // Test seam: runs in the re-send tick after its reads, under mutex_ and io_mutex_; true makes the tick
     // end the move there, as a cancel landing between the reads and the re-send would.
@@ -1709,6 +1721,19 @@ private:
         {
             std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
             hook = status_poll_after_sample_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    // Test seam: runs in pulse_guide() after it unlocks and before the pulse-end body starts, with no driver lock
+    // held: the gap in which an earlier pulse's body can take the operation lock.
+    void run_pulse_guide_gap_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
+            hook = pulse_guide_gap_hook_;
         }
         if (hook) {
             hook();
@@ -3289,6 +3314,7 @@ private:
     mutable std::mutex disconnect_hook_mutex_;
     std::function<void()> disconnect_before_close_hook_;
     std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> pulse_guide_gap_hook_;
     std::function<bool()> move_axis_resend_before_send_hook_;
     // The tail of a Park or FindHome that must first wait for motion to end
     // (#1430). Declared last with the re-send slot, for the same reason.
@@ -3400,6 +3426,17 @@ bool status_poll_running_for_testing(const TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
         onstep->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+bool pulse_measurement_running_for_testing(const TelescopeDriver& driver) {
+    const auto* onstep = dynamic_cast<const OnStepTelescopeDriver*>(&driver);
+    return onstep != nullptr && onstep->pulse_measurement_running_for_testing();
+}
+
+void set_pulse_guide_gap_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_pulse_guide_gap_hook_for_testing(std::move(hook));
     }
 }
 
