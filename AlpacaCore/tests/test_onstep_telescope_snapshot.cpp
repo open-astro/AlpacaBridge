@@ -431,6 +431,8 @@ TEST_CASE(
     "OnStep snapshot - the poll restores tracking after a GOTO that ended without it, but not while a Park is "
     "pending",
     "[onstep][telescope][snapshot]") {
+    // Declared before the rig: the held Park thread polls it until the rig's teardown joins that thread.
+    std::atomic<bool> held{true};
     Rig rig;
     rig.connect();
     rig.pause();
@@ -448,7 +450,6 @@ TEST_CASE(
     SECTION("a Park refused in motion and still retrying gets none") {
         // The park's first try is refused "in motion" (22), so its body is to retry; the spawn seam holds that
         // body, and the tick runs while the Park is pending.
-        std::atomic<bool> held{true};
         onstep::set_park_home_spawn_for_testing(*rig.driver, [&held](std::function<void()> body) {
             return std::thread([&held, body = std::move(body)] {
                 while (held.load()) std::this_thread::sleep_for(milliseconds(1));
