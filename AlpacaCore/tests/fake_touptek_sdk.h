@@ -99,6 +99,13 @@ public:
     // What is_guiding() answers: the SDK side of a pulse the driver started.
     bool guiding = false;
     std::optional<std::pair<unsigned, unsigned>> delivered_dimensions;
+    // What get_raw_format() answers as {four_cc, bits}; unset = mono 'YYYY', 16 bits. The driver re-reads
+    // colour, Bayer pattern and bit depth from it at connect, so ToupCameraInfo::is_color/bayer/bit_depth_max
+    // alone do not steer them.
+    std::optional<std::pair<unsigned, unsigned>> raw_format;
+    // What get_pixel_size() answers as {x, y} microns; unset = 3.76 square. The driver overwrites the
+    // ToupCameraInfo pixel size with it at connect.
+    std::optional<std::pair<float, float>> pixel_size_um;
     std::vector<std::uint8_t> frame_bytes;
     // Thread-safe view of `calls` (the driver's background threads hit the
     // fake concurrently with the test body).
@@ -338,8 +345,8 @@ public:
     void get_raw_format(HToupcam h, unsigned& four_cc, unsigned& bits) override {
         hit("get_raw_format");
         require_open(h);
-        four_cc = 0x59595959;  // 'YYYY'
-        bits = 16;
+        four_cc = raw_format ? raw_format->first : 0x59595959;  // 'YYYY'
+        bits = raw_format ? raw_format->second : 16;
     }
 
     int get_temperature_deciC(HToupcam h) override {
@@ -466,8 +473,8 @@ public:
     void get_pixel_size(HToupcam h, unsigned, float& x, float& y) override {
         hit("get_pixel_size");
         require_open(h);
-        x = 3.76F;
-        y = 3.76F;
+        x = pixel_size_um ? pixel_size_um->first : 3.76F;
+        y = pixel_size_um ? pixel_size_um->second : 3.76F;
     }
 
     void pulse_guide(HToupcam h, ToupGuideDirection, unsigned) override {
