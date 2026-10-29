@@ -90,6 +90,8 @@ public:
     // --- Fake hardware state (readable/settable by tests) ---
 
     void set_firmware(int version) { firmware_.store(version); }
+    /// Status frames report the AHT20 and DS18B20 as detached (A0T0) instead of attached (A1T1).
+    void set_sensors_attached(bool attached) { sensors_attached_.store(attached); }
     /// One shot, then spent: the reply to the next ">H#" identity handshake (the only command that spends it; the
     /// driver's connect sends it first) is held for @p delay. A connect waiting on that reply stays open that long;
     /// used by the contract sweep to make Connecting observable.
@@ -240,7 +242,7 @@ private:
         for (int ch = 2; ch <= 5; ++ch) f += outputs_[static_cast<std::size_t>(ch)] ? '1' : '0';
         f += 'U';
         for (int ch = 6; ch <= 11; ++ch) f += outputs_[static_cast<std::size_t>(ch)] ? '1' : '0';
-        f += "A1T1";
+        f += sensors_attached_.load() ? "A1T1" : "A0T0";
         f += "D" + std::string(dew_enabled_[0] ? "1" : "0") + "M" + std::to_string(dew_mode_[0]);
         f += "D" + std::string(dew_enabled_[1] ? "1" : "0") + "M" + std::to_string(dew_mode_[1]);
         f += "B" + std::to_string(dew_pwm_[0]) + "C" + std::to_string(dew_pwm_[1]);
@@ -291,6 +293,7 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<int> hold_ms_{0};
     std::atomic<int> firmware_{308};
+    std::atomic<bool> sensors_attached_{true};
     std::atomic<int> stream_ms_{0};
     std::atomic<bool> muted_{false};
     std::atomic<bool> garble_at_wrong_baud_{false};
