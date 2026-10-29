@@ -2196,7 +2196,7 @@ private:
                                               std::chrono::steady_clock::time_point now) const {
         // AM5 can omit GU's N even after Gps explicitly reports Park completed.
         if (park_command_active_ && mount_status && !mount_status->stop_or_tracking &&
-            park_status != ParkStatus::Completed && park_status != ParkStatus::Error) {
+            park_status != ParkStatus::Completed) {
             park_motion_seen_ = true;
             return ParkEvaluation::InProgress;
         }
