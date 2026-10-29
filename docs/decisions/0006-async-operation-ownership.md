@@ -4,7 +4,7 @@ Status: accepted
 
 ## Context
 
-The Sky-Watcher, Celestron and SynScan telescope drivers each hand-roll the same background-task machinery. `task_wait_for` (in `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`, `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` and `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`) is a condition-variable wait on `task_mutex_` with a cancel-flag predicate. `reap_slew_task`, in all three files, sets the cancel flag, notifies, moves the thread out under `task_mutex_` and joins it with no bound. Every new slew, park or home calls it on the HTTP thread, so a new command waits for the whole of the old body, including a serial transaction that is blocked until its own timeout. Sky-Watcher also has a per-axis `reap_stop_task(int axis)` and a `MoveAxis(axis, 0)` stop-completion body that checks the driver-wide `motion_generation_` at its tail, so that a slew, park, home or pulse that took over while it polled makes it skip its tracking restore. That check is the only place in the tree that tells a cancelled body from a superseded one, the distinction [CONTEXT.md](../../CONTEXT.md) names.
+Before this record, the Sky-Watcher, Celestron and SynScan telescope drivers each hand-rolled the same background-task machinery. `task_wait_for` (in `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`, `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` and `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`) is a condition-variable wait on `task_mutex_` with a cancel-flag predicate. `reap_slew_task`, in all three files, sets the cancel flag, notifies, moves the thread out under `task_mutex_` and joins it with no bound. Every new slew, park or home calls it on the HTTP thread, so a new command waits for the whole of the old body, including a serial transaction that is blocked until its own timeout. Sky-Watcher also has a per-axis `reap_stop_task(int axis)` and a `MoveAxis(axis, 0)` stop-completion body that checks the driver-wide `motion_generation_` at its tail, so that a slew, park, home or pulse that took over while it polled makes it skip its tracking restore. That check is the only place in the tree that tells a cancelled body from a superseded one, the distinction [CONTEXT.md](../../CONTEXT.md) names.
 
 ## Decision
 
@@ -31,7 +31,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 ## Alternatives rejected
 
-Join the old body on start, today's `reap_slew_task` shape: it blocks the HTTP thread for as long as a blocked transaction lasts. Detach the old body: AGENTS.md forbids detaching a thread that touches `this`. An unbounded stale list: a hung link would grow threads without limit, one per client retry. Waking bodies across slots on a generation bump: one slot would have to take another slot's mutex, which needs a cross-slot lock order that nothing else requires. Cancelled winning over superseded: a superseded body would send a stop to axes a newer operation owns.
+Join the old body on start, the former `reap_slew_task` shape: it blocks the HTTP thread for as long as a blocked transaction lasts. Detach the old body: AGENTS.md forbids detaching a thread that touches `this`. An unbounded stale list: a hung link would grow threads without limit, one per client retry. Waking bodies across slots on a generation bump: one slot would have to take another slot's mutex, which needs a cross-slot lock order that nothing else requires. Cancelled winning over superseded: a superseded body would send a stop to axes a newer operation owns.
 
 ## Consequences
 
@@ -78,5 +78,5 @@ Symbol: `AsyncOperation`
 
 - Upstream design review [#584](https://github.com/open-astro/AlpacaBridge/issues/584); issue [#717](https://github.com/open-astro/AlpacaBridge/issues/717); related [#535](https://github.com/open-astro/AlpacaBridge/issues/535).
 - [Decision 0005](0005-task-clock.md) (task clock); [CONTEXT.md](../../CONTEXT.md) ("Cancelled vs superseded").
-- Machinery this replaces: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`, `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp`, `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`.
+- Machinery this replaced (removed): `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`, `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp`, `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`.
 - Module overview in [architecture](../architecture.md#modules).

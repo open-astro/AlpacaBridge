@@ -36,6 +36,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -49,6 +50,8 @@ struct FakeCelestronState {
     alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
     alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
     std::atomic<bool> goto_seen{false};
+    std::atomic<bool> no_motion{false};  // GOTO acked, mount never moves, L/slew-done say idle
+    std::atomic<int> pos_variant{0};
     std::atomic<int> goto_count{0};
     std::atomic<int> level_start_count{0};
     std::atomic<Clock::rep> goto_started{0};
@@ -141,7 +144,7 @@ struct FakeCelestronState {
     }
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
-        if (!goto_seen.load()) return false;
+        if (!goto_seen.load() || no_motion.load()) return false;
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
         return now() - started < kGotoDuration;
     }
@@ -161,7 +164,8 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                 if (const int hold = st->e_hold_ms.exchange(0); hold > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(hold));
                 }
-                return "12AB0500,20000500#";  // parseable 16/24-bit position pair
+                return st->pos_variant.load() == 0 ? "12AB0500,20000500#"
+                                                   : "32AB0500,20000500#";  // parseable 16/24-bit position pair
             case 'r':
             case 'R':
             case 'b':
@@ -1360,6 +1364,55 @@ TEST_CASE("Celestron initiator supersede - a superseded slew body does not learn
     rig.driver->slew_to_coordinates_async(kTargetRa, 20.0);
     REQUIRE(wait_until([&] { return rig.st->goto_requests.load() >= 3; }, 5000));
     CHECK(rig.st->goto_text() == after_learning);  // slew 2's measurement was dropped
+}
+
+// Case A: park GOTO acked, mount never moves, 3 h of RA (45 deg) from the saved park position.
+TEST_CASE("Celestron case A - refused park GOTO must not report AtPark", "[park][celestron]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_park();        // park target = position variant 0
+    st->pos_variant.store(1);  // mount now reads 3 h of RA away from it
+    st->no_motion.store(true);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    const bool err = read_slewing_error(*driver);
+    bool at_park = false;
+    try {
+        at_park = driver->get_at_park();
+    } catch (const alpacacore::AlpacaException&) {
+    }
+    CHECK(st->goto_count.load() == 1);
+    CHECK_FALSE(at_park);
+    CHECK(err);
+    driver->set_connected(false);
+}
+
+// Case B (control): mount already at the saved park position, GOTO acked, never slews.
+TEST_CASE("Celestron case B - already at park target still parks", "[park][celestron]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_park();
+    st->no_motion.store(true);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    bool at_park = false;
+    try {
+        at_park = driver->get_at_park();
+    } catch (const alpacacore::AlpacaException&) {
+    }
+    CHECK(at_park);
+    CHECK_FALSE(read_slewing_error(*driver));
+    driver->set_connected(false);
 }
 
 #endif  // !_WIN32

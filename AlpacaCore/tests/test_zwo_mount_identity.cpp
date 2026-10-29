@@ -208,6 +208,8 @@ TEST_CASE("ZWO mount identity accepts only supported models on TCP and serial",
             driver->set_connected(true);
             CHECK(driver->get_connected());
             CHECK(driver->get_right_ascension() == 12.0);
+            // Reuse this fake serial stream only after its initial poll has finished replying.
+            REQUIRE(rig.clock.wait_for_waiters(1, 5s));
             driver.reset();
             if (serial) CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
         }
@@ -477,6 +479,7 @@ TEST_CASE("ZWO Disconnect preserves the admitted serial until driver recreation"
           "[zwo][telescope][identity][issue1581]") {
     const bool asynchronous = GENERATE(false, true);
     const bool serial = GENERATE(false, true);
+    CAPTURE(asynchronous, serial);
     IdentityRig rig;
     REQUIRE(rig.server.ok());
     test::PtyResponder tty([&](const std::string& chunk) { return rig.respond(chunk); });
@@ -488,6 +491,7 @@ TEST_CASE("ZWO Disconnect preserves the admitted serial until driver recreation"
     rig.make_driver(info);
     rig.driver->set_connected(true);
     REQUIRE(rig.driver->get_connected());
+    REQUIRE(rig.clock.wait_for_waiters(1, 5s));
     if (asynchronous) {
         rig.driver->disconnect();
         REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
@@ -505,6 +509,8 @@ TEST_CASE("ZWO Disconnect preserves the admitted serial until driver recreation"
     rig.set_serial("012345abcdef#");
     CHECK_NOTHROW(rig.driver->set_connected(true));
     REQUIRE(rig.driver->get_connected());
+    // Identity retention is under test, not a late poll reply crossing a recreated serial session.
+    REQUIRE(rig.clock.wait_for_waiters(1, 5s));
     rig.driver.reset();
     rig.set_serial("FEDCBA543210#");
     rig.make_driver(info);

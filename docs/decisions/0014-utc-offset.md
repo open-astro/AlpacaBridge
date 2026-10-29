@@ -12,7 +12,7 @@ Several telescope drivers keep the same anchor pair for UTCDate readback: the UT
 2. **A clock-free value type.** `util::UtcOffset` (`AlpacaCore/include/alpacacore/util/utc_offset.h`) has `set(utc, now)`, `current(now)`, `valid()` and `clear()`. It holds no clock; every method that needs the time takes `now`, the shape of `util::StreamLinkHealth`. It is copyable, has no virtuals, is not a base class, and is guarded by the driver's `mutex_`. Overflow of the duration cast in `current()` is not guarded.
 3. **Lifetime.** The stored value lives until the next connect or disconnect; a driver calls `clear()` on both. Each driver that adopts the type states in its PR what changed for it. Celestron changes from clearing on connect only to connect and disconnect.
 4. **Seeding stays in the driver.** Reading the mount clock on the first `get_utc_date`, the connect-time host sync and `util::ClientUtcWarning::warn_once` call `set()` or stay as they are; the type does not know where a value came from.
-5. **Adoption.** Celestron is the pilot. SynScan and iOptron are already on the task clock ([decision 0005](0005-task-clock.md)), so when they adopt they pass `clock_.now()`. OnStep and the ZWO mount adopt in their task-clock tickets and pass `std::chrono::steady_clock::now()` until their driver is on the clock. Sky-Watcher and Celestron CGX are out: both keep the [decision 0001](0001-skywatcher-pointing-clock.md) host-clock offset model (step detection through `util::HostClock`), which the Alternatives section rejects for `UtcOffset`.
+5. **Adoption.** Celestron was the pilot. SynScan, iOptron, OnStep and the ZWO mount followed, each passing `clock_.now()` from the task clock ([decision 0005](0005-task-clock.md)); the Adoption table is the roster. Sky-Watcher and Celestron CGX are out: both keep the [decision 0001](0001-skywatcher-pointing-clock.md) host-clock offset model (step detection through `util::HostClock`), which the Alternatives section rejects for `UtcOffset`.
 
 This refines one sentence of 0005. "Never for LST or UTCDate" means the value: LST and the UTC a client wrote stay off the task clock. The elapsed time since a UTCDate write is a deadline-style duration and reads the task clock through `UtcOffset`. 0001 is not changed.
 
@@ -20,7 +20,7 @@ This refines one sentence of 0005. "Never for LST or UTCDate" means the value: L
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
-1. A driver's UTCDate value stays on `std::chrono::system_clock`; only the elapsed time since a write is measured, through `util::UtcOffset` with `now` from the driver's clock. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`, `AlpacaCore/include/alpacacore/util/utc_offset.h`. Checked by: `AlpacaCore/tests/test_utc_offset.cpp`, review.
+1. A telescope driver not on the [decision 0001](0001-skywatcher-pointing-clock.md) host-clock offset model keeps its UTCDate value on `std::chrono::system_clock` and measures only the elapsed time since a write, through `util::UtcOffset` with `now` from the driver's clock. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`, `AlpacaCore/include/alpacacore/util/utc_offset.h`. Checked by: `AlpacaCore/tests/test_utc_offset.cpp`, review.
 2. `util::UtcOffset` holds no clock, has no virtuals, is not a base class and is guarded by the driver `mutex_`. Scope: `AlpacaCore/include/alpacacore/util/utc_offset.h`. Checked by: review.
 3. An adopter clears the stored value on connect and on disconnect. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: review.
 
@@ -34,7 +34,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 ## Consequences
 
-One header, one test file and this record. Celestron's `last_utc_set_`, `last_utc_set_monotonic_` and `last_utc_valid_` become one `UtcOffset`, read with `clock_.now()`. The other drivers keep their fields until their tickets.
+One header, one test file and this record. Celestron's `last_utc_set_`, `last_utc_set_monotonic_` and `last_utc_valid_` become one `UtcOffset`, read with `clock_.now()`. The other adopters made the same change in their own PRs.
 
 ## How to reverse
 

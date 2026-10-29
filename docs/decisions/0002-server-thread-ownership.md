@@ -17,8 +17,8 @@ Status: accepted
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
 1. Every path that reads, moves, assigns or joins `server_thread_` goes through `join_server_thread()`, so exactly one caller owns the join and other callers wait for it. Scope: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/include/alpacahttp/server.h`. Checked by: `AlpacaHTTP/tests/test_server_socket.cpp` (concurrent-stop, same-object retry and stop()/wait() race cases).
-2. Every lifecycle thread join in `stop()`, `wait()` and `join_orphaned_threads()` uses `join_or_abandon()`, which never retries a failed join and never rethrows. Scope: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/src/http/thread_join.h`. Checked by: `AlpacaHTTP/tests/test_thread_join.cpp`.
-3. A thread is detached only as the `join_or_abandon()` fault fallback, never as the normal teardown path. Scope: `AlpacaHTTP/src/http/server.cpp`. Checked by: review.
+2. Every lifecycle thread join in `stop()`, `wait()` and `join_orphaned_threads()` uses `join_or_abandon()`, which never retries a failed join and never rethrows. Scope: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/src/http/thread_join.h`, `AlpacaHTTP/src/http/thread_join.cpp`. Checked by: `AlpacaHTTP/tests/test_thread_join.cpp`.
+3. A thread is detached only as the `join_or_abandon()` fault fallback, never as the normal teardown path. Scope: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/src/http/router.cpp`. Checked by: review.
 
 ## Alternatives rejected
 
@@ -32,5 +32,6 @@ A failed bind remains a recoverable start failure. A stop caller returns only af
 
 - Issue [#402](https://github.com/open-astro/AlpacaBridge/issues/402); PR [#428](https://github.com/open-astro/AlpacaBridge/pull/428).
 - Issue [#507](https://github.com/open-astro/AlpacaBridge/issues/507); PR [#541](https://github.com/open-astro/AlpacaBridge/pull/541) (the `join_or_abandon()` fallback and the `wait()`-race test).
-- Implementation: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/include/alpacahttp/server.h`, `AlpacaHTTP/src/http/thread_join.h` (`join_or_abandon()` and `abandoned_threads()` moved here, issue #561).
+- Implementation: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/include/alpacahttp/server.h`, `AlpacaHTTP/src/http/thread_join.h` and `AlpacaHTTP/src/http/thread_join.cpp` (`join_or_abandon()` and `abandoned_threads()` moved here, issue #561).
+- Open defect under rule 3: the router's shutdown and restart handlers detach a thread that captures `this` ([#1739](https://github.com/open-astro/AlpacaBridge/issues/1739)).
 - Regression tests: `AlpacaHTTP/tests/test_server_socket.cpp` port-conflict, same-object retry, concurrent-stop, stop()/wait() race, and `join_or_abandon()`-fallback (issue #561) cases; `AlpacaHTTP/tests/test_thread_join.cpp` for the fallback in isolation.

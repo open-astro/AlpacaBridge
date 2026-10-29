@@ -15,7 +15,9 @@
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/task_clock.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <functional>
 #include <mutex>
@@ -27,8 +29,8 @@ namespace alpacacore::util {
  * The asynchronous Park flow shared by the Celestron and SynScan telescope
  * drivers (ascom-contract.instructions.md, "Telescope Park / MoveAxis(axis, 0) are asynchronous
  * initiators"): dispatch the park GOTO, poll the hardware until the slew has
- * ended, wait out the settle time, stop tracking, then publish AtPark and
- * Slewing in one locked step. The driver keeps what differs between mounts
+ * ended, wait out the settle time, stop tracking, check the mount landed at the park
+ * target, then publish AtPark and Slewing in one locked step. The driver keeps what differs between mounts
  * (the target, the wire commands, the state it clears) in the hooks.
  *
  * Every hook is entered and left with the driver mutex held. The flow itself
@@ -59,6 +61,14 @@ struct ParkSlewHooks {
     /// A failed step: stop hardware and record failure while this body still
     /// owns the park. If cancelled or superseded, the newer operation owns state.
     std::function<void(const std::string&)> fail;
+    /// Optional; empty means no check. Reads where the mount landed and returns an empty string when it is within
+    /// tolerance of the park target, else the failure message. Run after the tracking stop on every completion,
+    /// because a mount that acked the GOTO and never moved ends the poll like one that arrived. Like the other hooks
+    /// it may throw; it checks `superseded` itself when it releases the mutex.
+    std::function<std::string()> verify_at_target;
+    /// When set, a miss reported by `verify_at_target` repeats the whole flow once (dispatch to verify) before it
+    /// fails: a handset that ends a GOTO far off its aim lands on it when the GOTO is sent again (#1105).
+    bool repeat_on_miss = false;
     /// Publishes AtPark true and Slewing false in the same locked step.
     std::function<void()> complete;
 };
@@ -150,6 +160,36 @@ inline void run_park_slew(OperationContext& ctx, std::unique_lock<std::mutex>& l
     if (hooks.superseded && hooks.superseded()) {
         hooks.abandon();
         return;
+    }
+    if (hooks.verify_at_target) {
+        std::string miss;
+        // A check that throws fails the park at once: a repeat GOTO would not fix a position that cannot be read.
+        std::string check_error;
+        try {
+            miss = hooks.verify_at_target();
+        } catch (const std::exception& ex) {
+            check_error = std::string("Park: position check failed: ") + ex.what();
+        } catch (...) {
+            check_error = "Park: position check failed with unknown exception";
+        }
+        if (hooks.superseded && hooks.superseded()) {
+            hooks.abandon();
+            return;
+        }
+        if (!check_error.empty()) {
+            hooks.fail(check_error);
+            return;
+        }
+        if (!miss.empty()) {
+            if (hooks.repeat_on_miss) {
+                ParkSlewHooks again = hooks;
+                again.repeat_on_miss = false;
+                run_park_slew(ctx, lock, clock, settle_seconds, again);
+                return;
+            }
+            hooks.fail(miss);
+            return;
+        }
     }
     hooks.complete();
 }
