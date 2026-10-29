@@ -34,6 +34,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -382,35 +383,61 @@ constexpr const char* kSerialOwner = "ZWO mount";
 // Explicit pairs keep their existing sharing policy; Auto and probes require an unused endpoint.
 class NetworkEndpointClaim {
 public:
+    enum class Kind : std::uint8_t { Probe, AutoLink, ExplicitLink };
+    enum class Result : std::uint8_t { Acquired, Held, TimedOut, Cancelled };
     ~NetworkEndpointClaim() {
         auto& reg = registry();
-        std::lock_guard lock(reg.mutex);
-        reg.holders.erase(this);
+        {
+            std::lock_guard lock(reg.mutex);
+            reg.holders.erase(this);
+        }
+        reg.released.notify_all();
     }
     NetworkEndpointClaim() = default;
     NetworkEndpointClaim(const NetworkEndpointClaim&) = delete;
     NetworkEndpointClaim& operator=(const NetworkEndpointClaim&) = delete;
 
-    bool claim(const sockaddr_in& address, bool exclusive) {
+    Result claim(const sockaddr_in& address, Kind kind, const std::atomic<bool>* cancelled = nullptr) {
         auto& reg = registry();
-        std::lock_guard lock(reg.mutex);
-        for (const auto& [owner, holder] : reg.holders) {
-            if (holder.address.sin_addr.s_addr == address.sin_addr.s_addr &&
-                holder.address.sin_port == address.sin_port && (exclusive || holder.exclusive)) {
-                return false;
+        std::unique_lock lock(reg.mutex);
+        std::optional<std::chrono::steady_clock::time_point> deadline;
+        for (;;) {
+            if (cancelled && cancelled->load()) return Result::Cancelled;
+            bool probe = false;
+            for (const auto& [owner, holder] : reg.holders) {
+                if (holder.address.sin_addr.s_addr != address.sin_addr.s_addr ||
+                    holder.address.sin_port != address.sin_port)
+                    continue;
+                if (kind != Kind::ExplicitLink || holder.kind == Kind::AutoLink) return Result::Held;
+                probe = probe || holder.kind == Kind::Probe;
             }
+            // Never admit after the deadline, even if the probe released just before it.
+            if (deadline && std::chrono::steady_clock::now() >= *deadline) return Result::TimedOut;
+            if (!probe) {
+                reg.holders.emplace(this, Holder{address, kind});
+                return Result::Acquired;
+            }
+            if (!deadline) {
+                deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+                lock.unlock();
+                ALPACA_LOG_DEBUG("ZWO", "Waiting up to 1500 ms for a network discovery probe to release its endpoint");
+                lock.lock();
+                continue;  // Logging runs unlocked; recheck before waiting or admitting a link.
+            }
+            // Cancellation is lock-free; bounded slices avoid needing its caller to take the registry lock.
+            reg.released.wait_until(
+                lock, std::min(*deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(50)));
         }
-        reg.holders.emplace(this, Holder{address, exclusive});
-        return true;
     }
 
 private:
     struct Holder {
         sockaddr_in address;
-        bool exclusive;
+        Kind kind;
     };
     struct Registry {
         std::mutex mutex;
+        std::condition_variable released;
         std::map<const NetworkEndpointClaim*, Holder> holders;
     };
     static Registry& registry() {
@@ -514,7 +541,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     sockaddr_in addr{};
     if (!resolve_network_endpoint(host, port, addr)) return "";
     NetworkEndpointClaim claim;
-    if (!claim.claim(addr, true)) {
+    if (claim.claim(addr, NetworkEndpointClaim::Kind::Probe) != NetworkEndpointClaim::Result::Acquired) {
         ALPACA_LOG_DEBUG("ZWO", "Auto-detect: skipping held network endpoint " + host + ":" + std::to_string(port));
         return "";
     }
@@ -709,6 +736,9 @@ public:
     }
 
     bool connect(const ConnectionInfo& info) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Cancellation stays latched until this fresh attempt; connect_locked must never clear it.
+        closing_.store(false);
         if (info.type == ConnectionType::Auto) {
             // Auto-detect the transport: probe USB serial ports and the mount's
             // WiFi AP, then connect to the first ZWO mount that answers. The
@@ -716,7 +746,6 @@ public:
             // a second auto connect) cannot establish a link that this path
             // silently tears down mid-probe — the probes open their own fds
             // and do not touch the wrapper's connection state.
-            std::lock_guard<std::mutex> lock(mutex_);
             if (connected_) {
                 disconnect_locked();
             }
@@ -729,6 +758,7 @@ public:
             const auto devices = discovery_candidates_ ? enumerate_zwo_mounts(*discovery_candidates_, timeout)
                                                        : enumerate_zwo_mounts(timeout);
             for (const auto& dev : devices) {
+                if (closing_.load()) break;
                 ConnectionInfo candidate = info;
                 candidate.type = dev.type;
                 candidate.port_path = dev.port_path;
@@ -753,10 +783,10 @@ public:
                 }
             }
             ALPACA_LOG_DEBUG("ZWO", "Auto-detect: no ZWO mount found on USB or WiFi");
+            if (closing_.load()) last_connect_error_ = "ZWO mount connection cancelled";
             return false;
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
         return connect_locked(info);
     }
 
@@ -779,6 +809,10 @@ public:
         connection_info_ = info;
         last_connect_error_.clear();
         identity_verified_ = false;
+        if (closing_.load()) {
+            last_connect_error_ = "ZWO mount connection cancelled";
+            return false;
+        }
 
         bool ok = false;
         if (info.type == ConnectionType::Serial) {
@@ -788,9 +822,13 @@ public:
         }
 
         connected_ = ok;
+        if (closing_.load()) {
+            disconnect_locked();
+            last_connect_error_ = "ZWO mount connection cancelled";
+            return false;
+        }
         reply_owed_ = false;
         link_lost_.store(false);
-        closing_.store(false);
         return ok;
     }
 
@@ -1193,9 +1231,22 @@ private:
         sockaddr_in addr{};
         if (!resolve_network_endpoint(host, port, addr)) return false;
         auto claim = std::make_unique<NetworkEndpointClaim>();
-        if (!claim->claim(addr, automatic)) {
+        const auto result = claim->claim(
+            addr, automatic ? NetworkEndpointClaim::Kind::AutoLink : NetworkEndpointClaim::Kind::ExplicitLink,
+            &closing_);
+        if (result != NetworkEndpointClaim::Result::Acquired) {
             last_connect_error_ = "ZWO mount network endpoint is held by another ZWO entry or discovery probe";
+            if (result == NetworkEndpointClaim::Result::TimedOut)
+                last_connect_error_ =
+                    "ZWO mount network endpoint claim deadline expired after waiting up to 1500 ms for a discovery "
+                    "probe; retry Connect";
+            if (result == NetworkEndpointClaim::Result::Cancelled)
+                last_connect_error_ = "ZWO mount connection cancelled";
             ALPACA_LOG_DEBUG("ZWO", "Skipping held network endpoint " + host + ":" + std::to_string(port));
+            return false;
+        }
+        if (closing_.load()) {
+            last_connect_error_ = "ZWO mount connection cancelled";
             return false;
         }
         socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
