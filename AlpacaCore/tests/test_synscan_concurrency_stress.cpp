@@ -106,6 +106,12 @@ void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
     guard([&] { static_cast<void>(scope.get_right_ascension()); });
     guard([&] { static_cast<void>(scope.get_declination()); });
     guard([&] { static_cast<void>(scope.get_slewing()); });
+    guard([&] { static_cast<void>(scope.get_is_pulse_guiding()); });
+    guard([&] { static_cast<void>(scope.get_at_home()); });
+    guard([&] { static_cast<void>(scope.get_at_park()); });
+    guard([&] { static_cast<void>(scope.get_declination_rate()); });
+    guard([&] { static_cast<void>(scope.get_right_ascension_rate()); });
+    guard([&] { static_cast<void>(scope.get_tracking_rate()); });
     // The newly-fixed thread paths: async slew and pulse guiding issued
     // while the lifecycle threads disconnect underneath them.
     guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });

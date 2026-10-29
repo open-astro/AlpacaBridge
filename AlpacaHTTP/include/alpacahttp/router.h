@@ -172,6 +172,12 @@ public:
         return std::chrono::milliseconds(sync_slew_wait_limit_ms_.load(std::memory_order_relaxed));
     }
 
+    // open-astro#1705: Server::stop() sets this before it joins the workers so
+    // a worker in the sync-slew or connect wait leaves it at once; start()
+    // clears it, so a restart waits as before.
+    void set_stopping(bool stopping) { stopping_.store(stopping, std::memory_order_relaxed); }
+    bool stopping() const { return stopping_.load(std::memory_order_relaxed); }
+
     // open-astro#392: extra names route() accepts as a request's Host, on
     // top of the built-in ones (IP literals, localhost, this machine's name,
     // *.local, *.home.arpa, *.internal). An entry with a leading dot is a
@@ -245,6 +251,7 @@ private:
         std::chrono::duration_cast<std::chrono::milliseconds>(alpacacore::util::kClientSilenceStopInterval).count()};
 
     // open-astro#776.
+    std::atomic<bool> stopping_{false};
     std::atomic<std::chrono::milliseconds::rep> connect_wait_limit_ms_{60000};
     std::atomic<std::chrono::milliseconds::rep> sync_slew_wait_limit_ms_{90000};
 

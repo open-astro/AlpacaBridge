@@ -606,12 +606,14 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         return at_home_;
     }
 
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         return parked_;
     }
 
@@ -636,6 +638,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         const auto now = clock_.now();
         for (std::size_t axis = 0; axis < pulse_guiding_active_.size(); ++axis) {
             if (pulse_guiding_active_[axis] && now >= pulse_guide_end_time_[axis]) {
@@ -709,6 +712,7 @@ public:
 
     double get_declination_rate() const override {
         check_connected();
+        throw_if_link_faulted();
         return 0.0;
     }
 
@@ -720,12 +724,13 @@ public:
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         const int mode = served_frame_locked().value.tracking_mode;
         if (mode < 0) {
             throw AlpacaException("SynScan tracking state is not known yet: the handset has not answered a status poll",
                                   AlpacaError::DriverException);
         }
-        return mode != 0;
+        return mode != 0 && !ra_stop_unconfirmed_;
     }
 
     // The `T` goes out in its wire turn (decision 0006, "Claim"), after the stop and tracking restore of any motion
@@ -762,6 +767,7 @@ public:
         }
         set_tracking_mode_cached_locked(mode);
         tracking_mode_valid_ = true;
+        ra_stop_unconfirmed_ = false;  // the write landed, so the mode is known again
         invalidate_readback_tick_locked();
     }
 
@@ -778,6 +784,7 @@ public:
 
     GuideRate get_guide_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         return guide_rate_;
     }
 
@@ -808,6 +815,7 @@ public:
 
     double get_right_ascension_rate() const override {
         check_connected();
+        throw_if_link_faulted();
         return 0.0;
     }
 
@@ -836,6 +844,7 @@ public:
         util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
         }
@@ -873,6 +882,7 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         // No handset read here: the poll retries an unread site (decision 0010), so DeviceState costs no transaction.
         return util::local_sidereal_hours(sidereal_wall_now(), site_longitude_cached_);
     }
@@ -896,6 +906,7 @@ public:
 
     double get_site_latitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         require_site_known_locked();
         return site_latitude_cached_;
     }
@@ -914,6 +925,7 @@ public:
 
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         require_site_known_locked();
         return site_longitude_cached_;
     }
@@ -935,10 +947,11 @@ public:
         check_connected();
         // open-astro#575: surface a stored async-slew failure as an error
         // instead of a silent false, until AbortSlew or a new slew initiator
-        // clears it (see last_slew_error_).
+        // clears it (see last_slew_error_). It names the failed operation, so it precedes the link fault.
         if (!last_slew_error_.empty()) {
             throw AlpacaException(last_slew_error_);
         }
+        throw_if_link_faulted();
         return get_slewing_locked();
     }
 
@@ -973,6 +986,7 @@ public:
     }
 
     int get_tracking_rate() const override {
+        throw_if_link_faulted();
         return 0;
     }
 
@@ -988,6 +1002,7 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
         throw AlpacaException("The mount clock could not be read; set UTCDate first", AlpacaError::InvalidOperation);
     }
@@ -1119,6 +1134,7 @@ public:
             guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            ra_stop_unconfirmed_ = false;
             at_home_ = false;
             parking_ = true;
             bump_motion_generation();
@@ -1474,6 +1490,11 @@ public:
                 // AbortSlew/MoveAxis(0) or disconnect clears it.
                 if (connected_) {
                     manual_axis_slewing_[axis] = true;
+                    // The restore may not have landed. Keep the captured mode for AbortSlew/MoveAxis(0) to restore;
+                    // Tracking reports false until one of them, a Park, a disconnect or a Tracking write clears this.
+                    if (end_tracking_mode > 0) {
+                        ra_stop_unconfirmed_ = true;
+                    }
                 }
             }
         }
@@ -1823,6 +1844,9 @@ public:
             }
         }
         manual_axis_slewing_[axis] = moving;
+        if (axis == 0) {
+            ra_stop_unconfirmed_ = false;
+        }
         if (moving) {
             parked_ = false;
             at_home_ = false;
@@ -1838,20 +1862,29 @@ public:
         // resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked). The mode is read at the turn, as
         // AbortSlew's: a Tracking write queued ahead has sent its `T` by then.
         int restore_mode = 0;
-        if (!send_in_turn(
-                lock,
-                [&] {
-                    restore_mode = !moving && axis == 0 ? tracking_mode_cached_ : 0;
-                    return motion_generation_ == owner_generation && connected_;
-                },
-                [&] {
-                    protocol.move_axis_variable_rate(axis, moving ? rate : 0.0);
-                    if (restore_mode > 0) {
-                        protocol.set_tracking_mode(restore_mode);
-                    }
-                })) {
-            check_connected();
-            return;  // overtaken before its turn (disconnect): the rate was never sent
+        try {
+            if (!send_in_turn(
+                    lock,
+                    [&] {
+                        restore_mode = !moving && axis == 0 ? tracking_mode_cached_ : 0;
+                        return motion_generation_ == owner_generation && connected_;
+                    },
+                    [&] {
+                        protocol.move_axis_variable_rate(axis, moving ? rate : 0.0);
+                        if (restore_mode > 0) {
+                            protocol.set_tracking_mode(restore_mode);
+                        }
+                    })) {
+                check_connected();
+                return;  // overtaken before its turn (disconnect): the rate was never sent
+            }
+        } catch (...) {
+            // A restore that did not land leaves the RA motor stopped under a cached mode (#1722): Tracking reads
+            // false.
+            if (restore_mode > 0) {
+                ra_stop_unconfirmed_ = true;
+            }
+            throw;
         }
         if (restore_mode > 0) {
             set_tracking_mode_cached_locked(restore_mode);  // written through, as AbortSlew's restore
@@ -1968,6 +2001,7 @@ public:
             position_override_until_ = util::TaskClock::clock::time_point::min();
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            ra_stop_unconfirmed_ = false;
             if (restore_mode > 0) {
                 // Stopping an RA guide pulse also stops sidereal tracking.
                 // AbortSlew owns this stop, so restore the currently
@@ -1975,6 +2009,7 @@ public:
                 // state is already clear, so a throwing write cannot leave
                 // Slewing true over stopped axes (#830).
                 if (restore_error) {
+                    ra_stop_unconfirmed_ = true;  // the RA motor may be stopped under the cached mode (#1722)
                     std::rethrow_exception(restore_error);
                 }
                 // Written through, so a poll sampled during the RA stop (tracking off) cannot publish over it.
@@ -2065,6 +2100,7 @@ private:
         guide_position_valid_ = false;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
+        ra_stop_unconfirmed_ = false;
         position_link_health_.reset();
         publish_link_fault_locked();
         snapshot_.reset();
@@ -3037,6 +3073,15 @@ private:
                               AlpacaError::DriverException);
     }
 
+    // Rate getters must not queue behind the coarse state lock's device exchanges.
+    void throw_if_link_faulted() const {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        if (!link_fault_text_.empty()) {
+            throw AlpacaException("SynScan mount communications compromised: " + link_fault_text_,
+                                  AlpacaError::DriverException);
+        }
+    }
+
     // `fresh` asks the handset for the end of the answer (the PulseGuide gate), not the polled frame.
     bool get_slewing_locked(bool fresh = false) const {
         // A park in flight reports Slewing until the park task flips AtPark
@@ -3181,7 +3226,7 @@ private:
             tracking_mode_cached_ = SynScanProtocolWrapper::instance().get_tracking_mode();
             tracking_mode_valid_ = true;
         }
-        return tracking_mode_cached_ != 0;
+        return tracking_mode_cached_ != 0 && !ra_stop_unconfirmed_;
     }
 
     AlignmentMode alignment_mode_locked() const {
@@ -3689,6 +3734,11 @@ private:
     mutable util::UtcOffset utc_offset_;
     mutable int tracking_mode_cached_;
     mutable bool tracking_mode_valid_;
+    // A pulse-guide end whose tracking restore failed: the RA motor may be off while the cache still holds the mode.
+    // Only the public Tracking read consults it. A GOTO is refused while it is set; a pulse end that fails while a
+    // GOTO reaps it sets the flag after the Tracking gate, and it stays set across the GOTO because that T never
+    // landed.
+    mutable bool ra_stop_unconfirmed_ = false;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
     // ValueNotSet until that property itself has been written. One shared flag

@@ -442,6 +442,7 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         // AtHome is affected only by FindHome failures. A failed goto or Park
         // still surfaces through Slewing without making this independent flag
         // unreadable.
@@ -455,6 +456,7 @@ public:
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         return parked_;
     }
 
@@ -479,6 +481,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         const auto now = clock_.now();
         bool active = false;
         for (std::size_t axis = 0; axis < pulse_guide_active_.size(); ++axis) {
@@ -565,6 +568,7 @@ public:
 
     double get_declination_rate() const override {
         check_connected();
+        throw_if_link_faulted();
         return 0.0;
     }
 
@@ -576,6 +580,7 @@ public:
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         return get_tracking_locked();
     }
 
@@ -629,6 +634,7 @@ public:
         if (!has_autoguider_port_) {
             throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
         }
+        throw_if_link_faulted();
         return guide_rate_;
     }
 
@@ -674,6 +680,7 @@ public:
 
     double get_right_ascension_rate() const override {
         check_connected();
+        throw_if_link_faulted();
         return 0.0;
     }
 
@@ -685,6 +692,7 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         if (!hc_available_) {
             return -1;
         }
@@ -705,6 +713,7 @@ public:
         util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         if (!site_info_valid_) {
             return -1;
         }
@@ -739,6 +748,7 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         return util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_cached_);
     }
 
@@ -761,6 +771,7 @@ public:
 
     double get_site_latitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         if (!site_info_valid_) {
             throw AlpacaException("SiteLatitude not available — location not set on mount",
                                   AlpacaError::ValueNotSet);
@@ -782,6 +793,7 @@ public:
 
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         if (!site_info_valid_) {
             throw AlpacaException("SiteLongitude not available — location not set on mount",
                                   AlpacaError::ValueNotSet);
@@ -806,10 +818,11 @@ public:
         check_connected();
         // open-astro#575: surface a stored async-slew failure as an error
         // instead of a silent false, until AbortSlew or a new slew initiator
-        // clears it (see last_slew_error_).
+        // clears it (see last_slew_error_). It names the failed operation, so it precedes the link fault.
         if (!last_slew_error_.empty()) {
             throw AlpacaException(last_slew_error_);
         }
+        throw_if_link_faulted();
         return get_slewing_locked();
     }
 
@@ -844,6 +857,7 @@ public:
     }
 
     int get_tracking_rate() const override {
+        throw_if_link_faulted();
         return 0;
     }
 
@@ -859,6 +873,7 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         ensure_utc_cached(lock);
         if (const auto utc = utc_offset_.current(clock_.now())) {
             return *utc;
@@ -3161,6 +3176,15 @@ private:
     [[noreturn]] void throw_position_link_fault_locked() const {
         throw AlpacaException("Celestron mount communications compromised: " + position_link_health_.fault(),
                               AlpacaError::DriverException);
+    }
+
+    // Rate getters must not queue behind the coarse state lock's device exchanges.
+    void throw_if_link_faulted() const {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        if (!link_fault_text_.empty()) {
+            throw AlpacaException("Celestron mount communications compromised: " + link_fault_text_,
+                                  AlpacaError::DriverException);
+        }
     }
 
     // What the control path alone decides about Slewing, or nothing when the mount's own flag decides.

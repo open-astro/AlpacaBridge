@@ -23,6 +23,7 @@
 #include <alpacahttp/config.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <alpacahttp/server.h>
 #include <alpacahttp/software_update.h>
 #include <alpacahttp/util/error_mapping.h>
 #include <alpacahttp/util/host_timezone.h>
@@ -1589,6 +1590,80 @@ int main() {
             EXPECT(error_of(path) == 0);
         }
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9775);
+    }
+
+    {
+        // case: Server::stop() ends the waits of synchronous slews and connects (#1705)
+        // A worker parked in the 90 s slew wait or the 60 s connect wait made
+        // a stop or restart last as long as the wait. stop() now tells the
+        // router, the waits leave their loops, the slew is not aborted, and
+        // start() clears the flag so a restart waits as before.
+        using Ms = std::chrono::milliseconds;
+        const auto elapsed_ms = [](std::chrono::steady_clock::time_point since) {
+            return std::chrono::duration_cast<Ms>(std::chrono::steady_clock::now() - since).count();
+        };
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9776);
+        scope->can_slew_flags = true;
+        EXPECT(registry.register_device(scope));
+        auto slow = std::make_shared<LockedSlowConnectStubDriver>(9777, Ms(4000));
+        EXPECT(registry.register_device(slow));
+
+        alpacahttp::Config stop_config;
+        stop_config.set_http_port(0);
+        stop_config.set_discovery_enabled(false);
+        alpacahttp::Server stop_server(stop_config);
+        auto& stop_router = stop_server.router_for_test();
+        const auto put = [&](const std::string& path, const std::string& body) {
+            return nlohmann::json::parse(route_request(stop_router, "PUT", path, body).body(), nullptr, false);
+        };
+        const auto stop_after = [&](Ms delay) {
+            return std::thread([&stop_server, delay] {
+                std::this_thread::sleep_for(delay);
+                stop_server.stop();
+            });
+        };
+
+        // Slew wait, default 90 s limit.
+        stop_server.start_async();
+        scope->slewing_polls_left = 1000000;
+        auto stopper = stop_after(Ms(300));
+        auto started = std::chrono::steady_clock::now();
+        auto json = put("/api/v1/telescope/9776/slewtotarget", "");
+        const auto slew_ms = elapsed_ms(started);
+        stopper.join();
+        EXPECT(slew_ms < 2000);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x500);
+        EXPECT(json.value("ErrorMessage", "").find("stopping") != std::string::npos);
+        EXPECT(json.value("ErrorMessage", "").find("poll Slewing") != std::string::npos);
+
+        // Connect wait, default 60 s limit.
+        stop_server.start_async();
+        stopper = stop_after(Ms(300));
+        started = std::chrono::steady_clock::now();
+        json = put("/api/v1/covercalibrator/9777/connected", "Connected=true&ClientID=1");
+        const auto connect_ms = elapsed_ms(started);
+        stopper.join();
+        EXPECT(connect_ms < 2000);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x500);
+        EXPECT(json.value("ErrorMessage", "").find("stopping") != std::string::npos);
+        EXPECT(json.value("ErrorMessage", "").find("after ") == std::string::npos);
+
+        // Restart: start() cleared the flag, the slew waits to its limit again.
+        stop_server.start_async();
+        stop_router.set_sync_slew_wait_limit(Ms(600));
+        scope->slewing_polls_left = 1000000;
+        started = std::chrono::steady_clock::now();
+        json = put("/api/v1/telescope/9776/slewtotarget", "");
+        EXPECT(elapsed_ms(started) >= 550);
+        EXPECT(json.value("ErrorMessage", "").find("stopping") == std::string::npos);
+        EXPECT(json.value("ErrorMessage", "").find("poll Slewing") != std::string::npos);
+        stop_server.stop();
+        for (int i = 0; i < 100 && slow->get_connecting(); ++i) {
+            std::this_thread::sleep_for(Ms(100));
+        }
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9776);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9777);
     }
 
     {

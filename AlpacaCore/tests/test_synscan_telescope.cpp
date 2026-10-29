@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -796,6 +797,194 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
         }
     }
 
+    driver->set_connected(false);
+}
+
+// Steps the fake clock until `pred` holds, so a pulse timer parked on it fires without a sleep. Each step waits for
+// the woken task to settle; the 10 s bound is real time (the handset's response timeouts run on it).
+bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!pred() && std::chrono::steady_clock::now() < deadline) {
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    return pred();
+}
+
+// A failed `T` restore after an RA stop leaves the handset in an unknown tracking state (the stop itself ends
+// sidereal tracking), so the cached mode must not be served by the next Tracking read.
+TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop drops the cached mode",
+          "[synscan][telescope][unit]") {
+    auto fail_t = std::make_shared<std::atomic<bool>>(false);
+    auto handset_mode = std::make_shared<std::atomic<char>>(1);
+    alpacacore::test::FakeMountServer server([fail_t, handset_mode](const std::string& command) {
+        switch (command.empty() ? '\0' : command[0]) {
+            case 'K':
+                return std::string(1, command.size() > 1 ? command[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return std::string("12AB0500,20000500#");
+            case 't':
+                return std::string(1, handset_mode->load()) + "#";
+            case 'T':
+                if (fail_t->load()) {
+                    handset_mode->store(0);  // the RA stop halted tracking and the restore never landed
+                    return std::string();    // no reply: the write times out
+                }
+                return std::string("#");
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'L':
+                return std::string("0#");
+            default:
+                return std::string("#");
+        }
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    SECTION("AbortSlew") {
+        driver->move_axis(0, 1.0);
+        REQUIRE(driver->get_slewing());
+        fail_t->store(true);
+        CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    }
+    SECTION("MoveAxis stop") {
+        driver->move_axis(0, 1.0);
+        REQUIRE(driver->get_slewing());
+        fail_t->store(true);
+        CHECK_THROWS_AS(driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+    }
+    SECTION("PulseGuide end") {
+        driver->pulse_guide(2, 300);  // East, RA
+        fail_t->store(true);          // the pulse end's tracking restore fails on all three attempts
+        // The failed stop reports the axis as still slewing, in the same locked step that drops the cached mode.
+        REQUIRE(advance_until(clock, [&] { return driver->get_slewing(); }));
+    }
+
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+// After a failed pulse-guide end restore the axis still runs at guide rate with tracking off. AbortSlew must restore
+// the mode captured before the pulse, not the 0 the handset now reports mid-motion.
+// Falsified by: synscan_telescope_driver.cpp pulse-guide failure branch, set tracking_mode_valid_ = false instead of
+// ra_stop_unconfirmed_ = true.
+TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end restores tracking",
+          "[synscan][telescope][unit]") {
+    auto fail_t = std::make_shared<std::atomic<bool>>(false);
+    auto handset_mode = std::make_shared<std::atomic<char>>(1);
+    alpacacore::test::FakeMountServer server([fail_t, handset_mode](const std::string& command) {
+        switch (command.empty() ? '\0' : command[0]) {
+            case 'K':
+                return std::string(1, command.size() > 1 ? command[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return std::string("12AB0500,20000500#");
+            case 't':
+                return std::string(1, handset_mode->load()) + "#";
+            case 'T':
+                if (fail_t->load()) {
+                    handset_mode->store(0);
+                    return std::string();
+                }
+                handset_mode->store(command.size() > 1 ? command[1] : 0);
+                return std::string("#");
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'L':
+                return std::string("0#");
+            default:
+                return std::string("#");
+        }
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(driver->get_tracking());
+
+    auto fail_pulse_end = [&] {
+        driver->pulse_guide(2, 300);  // East, RA
+        fail_t->store(true);
+        REQUIRE(advance_until(clock, [&] { return driver->get_slewing(); }));
+        CHECK_FALSE(driver->get_tracking());  // the restore failed
+        fail_t->store(false);
+    };
+
+    SECTION("AbortSlew restores the captured mode") {
+        fail_pulse_end();
+        driver->abort_slew();
+        CHECK(handset_mode->load() != 0);  // AbortSlew sent the captured mode
+        CHECK(driver->get_tracking());
+    }
+
+    // Falsified by: synscan_telescope_driver.cpp set_tracking() not clearing ra_stop_unconfirmed_ after the write.
+    SECTION("a successful Tracking write clears the unconfirmed stop") {
+        fail_pulse_end();
+        driver->set_tracking(true);
+        CHECK(driver->get_tracking());
+    }
+
+    // Falsified by: synscan_telescope_driver.cpp disconnect, remove the ra_stop_unconfirmed_ = false.
+    SECTION("a disconnect and reconnect clears the unconfirmed stop") {
+        fail_pulse_end();
+        driver->set_connected(false);
+        handset_mode->store(1);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(driver->get_tracking());
+    }
+
+    // Falsified by: synscan_telescope_driver.cpp move_axis, remove the ra_stop_unconfirmed_ = false for axis 0.
+    SECTION("MoveAxis on the RA axis clears the unconfirmed stop") {
+        fail_pulse_end();
+        driver->move_axis(0, 0.0);
+        handset_mode->store(1);
+        CHECK(driver->get_tracking());
+    }
+
+    // A GOTO needs Tracking true, so it is refused with InvalidOperation while the stop is unconfirmed.
+    // Falsified by: synscan_telescope_driver.cpp:1518, bypass the sync Tracking check (only the sync assert fails).
+    // Falsified by: synscan_telescope_driver.cpp:1557, bypass the async Tracking check (only the async assert fails).
+    SECTION("a GOTO is refused while the stop is unconfirmed") {
+        fail_pulse_end();
+        require_alpaca_error([&]() { driver->slew_to_coordinates(5.0, 20.0); },
+                             alpacacore::AlpacaError::InvalidOperation);
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(5.0, 20.0); },
+                             alpacacore::AlpacaError::InvalidOperation);
+    }
+    // Falsified by: synscan_telescope_driver.cpp park, remove the ra_stop_unconfirmed_ = false.
+    SECTION("Park clears the unconfirmed stop") {
+        fail_pulse_end();
+        driver->park();
+        handset_mode->store(1);  // as the sections above: the handset runs sidereal again for the next poll tick
+        CHECK(advance_until(clock, [&] { return driver->get_tracking(); }));
+    }
     driver->set_connected(false);
 }
 

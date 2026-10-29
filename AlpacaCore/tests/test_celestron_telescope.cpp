@@ -507,6 +507,9 @@ TEST_CASE("Celestron Telescope Driver - a Dec pulse does not cut the chunk chain
     });
     REQUIRE(server.ok());
     auto driver = connect_pulse_guide_mount(server);
+    // The canned mount cannot answer the status poll, and three failed polls latch a fault IsPulseGuiding refuses;
+    // this case is about the pulse timers, so the poll stays off.
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
     const auto t0 = std::chrono::steady_clock::now();
     driver->pulse_guide(2, 5000);  // East, RA: 255 cs now, 245 cs chained at ~2.55 s
@@ -529,6 +532,9 @@ TEST_CASE("Celestron Telescope Driver - a short Dec pulse does not end IsPulseGu
     });
     REQUIRE(server.ok());
     auto driver = connect_pulse_guide_mount(server);
+    // The canned mount cannot answer the status poll, and three failed polls latch a fault IsPulseGuiding refuses;
+    // this case is about the pulse timers, so the poll stays off.
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
     const auto t0 = std::chrono::steady_clock::now();
     driver->pulse_guide(2, 2000);  // East, RA, 2.0 s (one chunk)

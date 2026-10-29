@@ -36,6 +36,7 @@
 #include <system_error>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -82,6 +83,7 @@ struct FakeCelestronState {
     std::atomic<bool> invalid_next_home_status{false};
     std::atomic<bool> mute{false};
     std::atomic<bool> tracking_on{true};      // what the 't' query answers: EQ-North when on, Off when not
+    std::atomic<int> requests{0};
     std::atomic<unsigned char> model_id{24};  // CGX-L
     std::atomic<unsigned char> firmware_major{5};
     std::atomic<unsigned char> firmware_minor{35};
@@ -128,6 +130,7 @@ struct FakeCelestronState {
 
 alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shared_ptr<FakeCelestronState>& st) {
     return [st](const std::string& chunk) -> std::string {
+        st->requests.fetch_add(1);
         if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'T' || chunk[0] == 'P' || chunk[0] == 'M') {
@@ -442,8 +445,13 @@ TEST_CASE("Celestron async - HC completion-poll failure persists through Slewing
     st->mute.store(true);  // The hand controller stops answering its "L" status query.
 
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
-    CHECK(message.find("Slew completion polling failed") != std::string::npos);
+    // The poll's link fault may be latched before the slew body stores its own error: wait for the stored one.
+    REQUIRE(wait_until(
+        [&] {
+            return read_slewing(*driver, &message) == SlewingRead::Threw &&
+                   message.find("Slew completion polling failed") != std::string::npos;
+        },
+        10000));
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
 }
@@ -626,8 +634,13 @@ TEST_CASE("Celestron async - motor-controller completion-poll failure persists t
     st->mute.store(true);  // The motor controllers stop answering MC_SLEW_DONE.
 
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
-    CHECK(message.find("Slew completion polling failed") != std::string::npos);
+    // The poll's link fault may be latched before the slew body stores its own error: wait for the stored one.
+    REQUIRE(wait_until(
+        [&] {
+            return read_slewing(*driver, &message) == SlewingRead::Threw &&
+                   message.find("Slew completion polling failed") != std::string::npos;
+        },
+        10000));
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
 }
@@ -1106,6 +1119,125 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
         CHECK(std::abs(during - held) < 1e-5);
         driver->set_connected(false);
     }
+}
+
+TEST_CASE("Celestron pulse state refuses a latched link fault and recovers",
+          "[celestron][telescope][link][pulseguiding]") {
+    const bool guiding = GENERATE(false, true);
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE_NOTHROW(driver->set_tracking(true));
+    if (guiding) REQUIRE_NOTHROW(driver->pulse_guide(0, 25000));
+    REQUIRE(driver->get_is_pulse_guiding() == guiding);
+    const double altitude = driver->get_altitude();
+    // The status poll reads the mount (the getters serve its frame): pause its own ticks and drive it.
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    st->mute.store(true);
+    for (int i = 0; i < 3; ++i) {
+        alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    }
+    REQUIRE(driver->get_connected());
+    const auto fault = driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const int requests = st->requests.load();
+    try {
+        (void)driver->get_is_pulse_guiding();
+        FAIL("A faulted link must not answer from pulse timers");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()) == "Celestron mount communications compromised: " + fault);
+    }
+    // Active guides have an independent hardware-chunk worker; only idle has no background wire traffic.
+    if (!guiding) CHECK(st->requests.load() == requests);
+    st->mute.store(false);
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    CHECK(driver->get_altitude() == altitude);
+    CHECK(driver->get_link_fault().empty());
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron commanded state refuses a latched fault while safety stops still reach the handset",
+          "[celestron][telescope][link]") {
+    const bool moving = GENERATE(false, true);
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    driver->set_utc_date(std::chrono::system_clock::now());  // UTCDate is not served before the clock is set
+    const std::vector<std::pair<const char*, std::function<void()>>> reads{
+        {"AtHome", [&] { (void)driver->get_at_home(); }},
+        {"AtPark", [&] { (void)driver->get_at_park(); }},
+        {"Slewing", [&] { (void)driver->get_slewing(); }},
+        {"Tracking", [&] { (void)driver->get_tracking(); }},
+        {"DeclinationRate", [&] { (void)driver->get_declination_rate(); }},
+        {"RightAscensionRate", [&] { (void)driver->get_right_ascension_rate(); }},
+        {"TrackingRate", [&] { (void)driver->get_tracking_rate(); }},
+        {"GuideRate", [&] { (void)driver->get_guide_rate(); }},
+        {"SideOfPier", [&] { (void)driver->get_side_of_pier(); }},
+        {"DestinationSideOfPier", [&] { (void)driver->get_destination_side_of_pier(5.0, 20.0); }},
+        {"SiteLatitude", [&] { (void)driver->get_site_latitude(); }},
+        {"SiteLongitude", [&] { (void)driver->get_site_longitude(); }},
+        {"SiderealTime", [&] { (void)driver->get_sidereal_time(); }},
+        {"UTCDate", [&] { (void)driver->get_utc_date(); }},
+    };
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        REQUIRE_NOTHROW(read());
+    }
+    if (moving) driver->move_axis(1, 0.01);
+    REQUIRE(driver->get_slewing() == moving);
+    (void)driver->get_altitude();
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    st->mute.store(true);
+    for (int i = 0; i < 3; ++i) {
+        alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    }
+    const auto fault = driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const int requests = st->requests.load();
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        try {
+            read();
+            CHECK(false);
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(e.what()) == "Celestron mount communications compromised: " + fault);
+        }
+    }
+    CHECK(st->requests.load() == requests);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_can_pulse_guide());
+    CHECK_FALSE(driver->get_name().empty());
+    for (const auto& value : driver->get_device_state()) {
+        CHECK(value.name == "TimeStamp");
+    }
+    st->mute.store(false);  // replies work again, but no status poll has cleared the latch
+    const int before_stop = st->command_count('P');
+    REQUIRE_NOTHROW(driver->move_axis(1, 0.0));
+    CHECK(st->command_count('P') > before_stop);
+    const int before_abort = st->command_count('P');
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(st->command_count('P') > before_abort);
+    CHECK(driver->get_link_fault() == fault);
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    CHECK(driver->get_link_fault().empty());
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        CHECK_NOTHROW(read());
+    }
+    driver->set_connected(false);
 }
 
 TEST_CASE("Celestron position - stale cache faults after repeated failed polls and recovers",

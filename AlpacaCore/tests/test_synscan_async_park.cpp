@@ -540,7 +540,9 @@ TEST_CASE("SynScan async - a new Park starts its failure count at zero", "[synsc
     REQUIRE(advance_until(clock, [&] {
         try {
             return !driver->get_slewing();
-        } catch (const alpacacore::AlpacaException&) {
+        } catch (const alpacacore::AlpacaException& ex) {
+            // The poll's fault may precede the park body's own error; the failure is the stored one.
+            if (std::string(ex.what()).find("communications compromised") != std::string::npos) return false;
             park_failed = true;
             return true;
         }
@@ -552,7 +554,14 @@ TEST_CASE("SynScan async - a new Park starts its failure count at zero", "[synsc
     driver->park();
     REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
     st->drop_slew_status.store(1);
-    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
+    // The first Park's fault stays latched until a poll is answered, and AtPark refuses meanwhile.
+    REQUIRE(advance_until(clock, [&] {
+        try {
+            return driver->get_at_park();
+        } catch (const alpacacore::AlpacaException&) {
+            return false;
+        }
+    }));
     driver->set_connected(false);
 }
 
@@ -944,7 +953,9 @@ TEST_CASE("SynScan async - malformed Park status reply persists through Slewing"
     }
     REQUIRE(surfaced);
     CHECK(st->slew_status_polls.load() > 0);
-    CHECK_FALSE(driver->get_at_park());
+    // The three bad replies also latched the link fault (decision 0009 rule 1): AtPark refuses with its text.
+    alpacacore::test::require_alpaca_error([&] { (void)driver->get_at_park(); },
+                                           alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
 }
 
@@ -1203,7 +1214,13 @@ TEST_CASE("SynScan - a park whose position check cannot read the mount fails wit
     REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
     alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
                                            alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(driver->get_at_park());
+    // Whether the three unread positions have latched the link fault yet is timing: AtPark is false, or the fault.
+    try {
+        const bool at_park = driver->get_at_park();  // a CHECK around the call would record the throw as a failure
+        CHECK_FALSE(at_park);
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
     CHECK(st->goto_count.load() == 1);
     driver->set_connected(false);
 }

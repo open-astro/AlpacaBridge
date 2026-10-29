@@ -857,10 +857,17 @@ void require_can_slew(const alpacacore::TelescopeDriver& telescope) {
 // Waits while Slewing is true, up to limit (Router::sync_slew_wait_limit(),
 // 90 s: under the 100 s long-call timeout of ASCOM Alpaca clients, so they
 // read this error and not their own timeout). On expiry the slew is NOT
-// aborted. An exception from get_slewing() propagates as is.
-void wait_for_slew_end(const alpacacore::TelescopeDriver& telescope, std::chrono::milliseconds limit) {
+// aborted. A stopping server (open-astro#1705) ends the wait the same way, so
+// a stop does not wait out the limit. An exception from get_slewing()
+// propagates as is.
+void wait_for_slew_end(const alpacacore::TelescopeDriver& telescope, std::chrono::milliseconds limit,
+                       const std::atomic<bool>& stopping) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
     while (telescope.get_slewing()) {
+        if (stopping.load(std::memory_order_relaxed)) {
+            throw alpacacore::AlpacaException("The server is stopping; the slew continues, poll Slewing for its end",
+                                              alpacacore::AlpacaError::DriverException);
+        }
         if (std::chrono::steady_clock::now() >= deadline) {
             throw alpacacore::AlpacaException(
                 "The slew was still running after " +
@@ -2586,7 +2593,7 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                     }
                     const auto limit = connect_wait_limit();
                     const auto deadline = std::chrono::steady_clock::now() + limit;
-                    while (device->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+                    while (device->get_connecting() && !stopping() && std::chrono::steady_clock::now() < deadline) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
                     }
                     if (device->get_connecting()) {
@@ -2597,6 +2604,11 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                         // when the connect returns.
                         if (unregister_client_connection(device.get(), client_key) == 0) {
                             device->disconnect();
+                        }
+                        if (stopping()) {
+                            throw alpacacore::AlpacaException(
+                                device->get_name() + ": the server is stopping; the connect was abandoned",
+                                alpacacore::AlpacaError::DriverException);
                         }
                         throw alpacacore::AlpacaException(
                             device->get_name() + " was still connecting after " +
@@ -3407,7 +3419,7 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 // async initiator, then a bounded wait for Slewing to clear.
                 require_can_slew(*telescope);
                 telescope->slew_to_target_async();
-                wait_for_slew_end(*telescope, sync_slew_wait_limit());
+                wait_for_slew_end(*telescope, sync_slew_wait_limit(), stopping_);
                 return call.ok_void();
             }
             else if (method_name == "slewtotargetasync") {
@@ -3419,7 +3431,7 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 double ra = call.get_double("RightAscension");
                 double dec = call.get_double("Declination");
                 telescope->slew_to_coordinates_async(ra, dec);
-                wait_for_slew_end(*telescope, sync_slew_wait_limit());
+                wait_for_slew_end(*telescope, sync_slew_wait_limit(), stopping_);
                 return call.ok_void();
             }
             else if (method_name == "slewtocoordinatesasync") {

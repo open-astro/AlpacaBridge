@@ -9,10 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [5.0.1] - 2026-10-26
+## [5.0.2] - 2026-10-29
+
+### Fixed
+- **A server stop or restart no longer waits out a synchronous slew or connect** - AlpacaHTTP, issue #1705. `Server::stop()` now tells the router, so a `SlewToCoordinates`/`SlewToTarget` request leaves its wait at once with a `DriverException` saying the server is stopping and the slew continues (poll Slewing), and a `PUT connected` leaves its connect wait and withdraws the connect with a `DriverException` saying the server is stopping and the connect was abandoned; before, a stop during a long slew could take the full 90 s and end in SIGKILL. The slew is not aborted. Covered by `Server::stop() ends the waits of synchronous slews and connects` in `AlpacaHTTP/tests/test_routing.cpp`, which also checks that a restart waits as before.
+- **SynScan no longer reports Tracking true after a failed tracking restore** (SynScan, issue #1722): when the `T` write that restores tracking after AbortSlew, a MoveAxis stop, or a timed move fails, the cached tracking mode is dropped and the next `Tracking` read asks the handset (tests "failed tracking restore after an RA stop drops the cached mode" and "a failed tracking restore after the RA landing move drops the cached mode"). When the restore at the end of an RA pulse fails, the captured mode is kept so a later AbortSlew still restores tracking, and `Tracking` reads false until AbortSlew, an RA MoveAxis, a Park, a disconnect or a `Tracking` write (tests "AbortSlew after a failed pulse-guide end restores tracking" and its section "a successful Tracking write clears the unconfirmed stop").
+- **SynScan and Celestron NexStar refuse faulted commanded-state reads** (AlpacaCore, issue #1681): pulse, slew, park/home, tracking, rate, pier-side and mount-derived site/time reads now report the communication fault while a link fault is latched, instead of answering with stale values; operational getters check the existing link-health latch without sending a device command, rate checks use the narrow fault mutex, and position replies still restore service automatically; safety-stop commands retain their existing paths. A client that sees the communication error retries after the handset responds or reconnects.
+
+<details>
+<summary><strong>[5.0.1] - 2026-10-26</strong></summary>
 
 ### Fixed
 - **Telescope `CanSlew` reads the driver's value again, and `SlewToCoordinates` and `SlewToTarget` are served** (issue #1660, AlpacaHTTP): 5.0.0 hard-coded `CanSlew` false and refused both calls (issue #775), which stopped NINA manual control and TPPA from slewing. `CanSlew` now returns the driver's value (`test_routing.cpp`, "telescope synchronous slews follow the driver's CanSlew"). For a mount that can slew, the two calls start the async slew and wait up to 90 s for `Slewing` to clear; at the limit they answer a `DriverException` that says the slew continues and to poll `Slewing`, and the slew is not aborted. A mount that cannot slew still gets `MethodNotImplemented` (0x400) before any parse or driver call. `CanSlewAltAz` stays false and `SlewToAltAz` stays refused. This corrects the #775 entry in Breaking changes of 5.0.0 and its release notes, which say `CanSlew` reads false.
+
+</details>
 
 <details>
 <summary><strong>[5.0.0] - 2026-10-21</strong></summary>

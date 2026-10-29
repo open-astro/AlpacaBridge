@@ -159,6 +159,7 @@ void Server::start() {
 
     shutdown_requested_ = false;
     reset_queues_for_start();
+    router_.set_stopping(false);
     running_ = true;
     run_server();
 }
@@ -177,6 +178,7 @@ void Server::start_async() {
 
     shutdown_requested_ = false;
     reset_queues_for_start();
+    router_.set_stopping(false);
     running_ = true;
     {
         // Same guard as join_server_thread(): the assignment is the other half
@@ -224,6 +226,7 @@ void Server::stop() {
     }
 
     util::log_info("Stopping HTTP server...");
+    router_.set_stopping(true);
     running_ = false;
     const auto current_id = std::this_thread::get_id();
     // Phases 1 and 2 run under lifecycle_mutex_, serialized against

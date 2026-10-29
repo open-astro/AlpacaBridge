@@ -554,11 +554,17 @@ TEST_CASE("Celestron async - Park completion poll failure persists through Slewi
     REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
     st->silent.store(true);
     std::string message;
+    // The poll's link fault may be latched before the park body stores its own error: wait for the stored one.
     REQUIRE(advance_until(
-        clock, [&] { return read_slewing_error(*driver, &message); }, std::chrono::milliseconds(250), 48));
-    CHECK(message.find("Park slew status polling failed") != std::string::npos);
+        clock,
+        [&] {
+            return read_slewing_error(*driver, &message) &&
+                   message.find("Park slew status polling failed") != std::string::npos;
+        },
+        std::chrono::milliseconds(250), 48));
     CHECK(read_slewing_error(*driver));
-    CHECK_FALSE(driver->get_at_park());
+    // The failed polls also latched the link fault (decision 0009 rule 1): AtPark refuses with its text.
+    CHECK_THROWS_AS(driver->get_at_park(), alpacacore::AlpacaException);
     driver->set_connected(false);
 }
 
