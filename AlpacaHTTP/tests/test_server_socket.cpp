@@ -1217,6 +1217,142 @@ int main() {
                                                                              kStraddleDevice);
     }
 
+    // The wake permit released at start for a worker that outlives a restart
+    // is not reserved for it: while it is still busy, a new worker takes it,
+    // finds the queue empty and waits again. When the old worker finishes, the
+    // next permit it can take is a queued connection's. If it exits on the
+    // generation check without passing that permit on, the connection waits in
+    // the queue with no worker woken for it (nightly ASan run 40775992105).
+    // Both new workers are kept busy so the old one is the only waiter when the
+    // client arrives; the semaphore guarantees no wake order.
+    {
+        // case: a worker leaving after a restart passes on the permit it took
+        constexpr int kOldDevice = 9550;
+        constexpr int kBusyDeviceA = 9551;
+        constexpr int kBusyDeviceB = 9552;
+        auto old_slew = std::make_shared<WatchdogStubTelescope>(kOldDevice);
+        auto busy_a = std::make_shared<WatchdogStubTelescope>(kBusyDeviceA);
+        auto busy_b = std::make_shared<WatchdogStubTelescope>(kBusyDeviceB);
+        old_slew->slew_sleep_ms.store(4000);
+        busy_a->slew_sleep_ms.store(7000);
+        busy_b->slew_sleep_ms.store(7000);
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(old_slew));
+        EXPECT(registry.register_device(busy_a));
+        EXPECT(registry.register_device(busy_b));
+
+        alpacahttp::Config permit_config;
+        permit_config.set_http_port(0);
+        permit_config.set_discovery_enabled(false);
+        permit_config.set_server_name("TestServerRestartPermit");
+        permit_config.set_thread_pool_size(2);
+        permit_config.set_max_connections(8);
+        alpacahttp::Server permit_server(permit_config);
+
+        std::mutex parked_mutex;
+        std::vector<std::thread> parked;
+        {
+            Watchdog watchdog(std::chrono::seconds(60), "worker permit across a restart");
+            alpacahttp::detail::ScopedJoinHooksForTest hooks(
+                [&](std::thread& t, const char* context) {
+                    if (std::strcmp(context, "stop (worker_threads_)") == 0 &&
+                        t.get_id() == old_slew->slew_thread.load()) {
+                        std::lock_guard<std::mutex> lock(parked_mutex);
+                        parked.push_back(std::move(t));
+                        return;
+                    }
+                    t.join();
+                },
+                [](std::thread& t, const char*) { t.detach(); });
+
+            permit_server.start_async();
+            const std::uint16_t old_port = permit_server.is_running() ? wait_for_bound_port(permit_server, 2000) : 0;
+            EXPECT(old_port != 0);
+
+            struct timeval tv = {};
+            tv.tv_sec = 12;
+            const auto slow_request = [](int device) {
+                return "PUT /api/v1/telescope/" + std::to_string(device) +
+                       "/slewtocoordinatesasync?RightAscension=5&Declination=10"
+                       " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            };
+            const auto wait_in_slew = [](const WatchdogStubTelescope& stub) {
+                for (int i = 0; i < 500 && stub.slew_thread.load() == std::thread::id{}; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                return stub.slew_thread.load() != std::thread::id{};
+            };
+
+            const int old_fd = connect_local(old_port);
+            EXPECT(old_fd >= 0);
+            ::setsockopt(old_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            send_all(old_fd, slow_request(kOldDevice));
+            EXPECT(wait_in_slew(*old_slew));
+            const auto old_slew_started = std::chrono::steady_clock::now();
+
+            const int restarter = connect_local(old_port);
+            EXPECT(restarter >= 0);
+            ::setsockopt(restarter, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string restart_carry;
+            send_all(restarter, "PUT /management/restart HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+            EXPECT(read_one_response(restarter, restart_carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            // Kept alive, so stop() closing it is the proof the restart ran;
+            // until then the old generation would serve the busy requests.
+            EXPECT(peer_closed(restarter, 5000));
+            ::close(restarter);
+            EXPECT(wait_for_restart_done(permit_server, 5000));
+            const std::uint16_t new_port = wait_for_bound_port(permit_server, 2000);
+            EXPECT(new_port != 0);
+
+            // Occupy both new workers past the end of the old worker's request.
+            int busy_fds[2] = {-1, -1};
+            const int busy_devices[2] = {kBusyDeviceA, kBusyDeviceB};
+            for (int i = 0; i < 2; ++i) {
+                busy_fds[i] = connect_local(new_port);
+                EXPECT(busy_fds[i] >= 0);
+                ::setsockopt(busy_fds[i], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                send_all(busy_fds[i], slow_request(busy_devices[i]));
+            }
+            EXPECT(wait_in_slew(*busy_a));
+            EXPECT(wait_in_slew(*busy_b));
+            // Otherwise the old worker finished first and the case proves nothing.
+            EXPECT(std::chrono::steady_clock::now() - old_slew_started < std::chrono::milliseconds(3500));
+
+            std::string old_carry;
+            EXPECT(read_one_response(old_fd, old_carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(old_fd);
+            // Real time: the old worker closing its connection and waiting on the semaphore again.
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+            const int fresh = connect_local(new_port);
+            EXPECT(fresh >= 0);
+            ::setsockopt(fresh, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string fresh_carry;
+            send_all(fresh, "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            EXPECT(read_one_response(fresh, fresh_carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(fresh);
+
+            for (const int fd : busy_fds) {
+                std::string carry;
+                EXPECT(read_one_response(fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
+                ::close(fd);
+            }
+
+            permit_server.stop();
+            std::vector<std::thread> to_join;
+            {
+                std::lock_guard<std::mutex> lock(parked_mutex);
+                to_join.swap(parked);
+            }
+            for (auto& t : to_join) {
+                t.join();
+            }
+        }
+        for (const int device : {kOldDevice, kBusyDeviceA, kBusyDeviceB}) {
+            registry.unregister_device(alpacacore::DeviceType::Telescope, device);
+        }
+    }
+
     // open-astro#713: is_running() stays true for the WHOLE of a restart.
     // handle_restart_request() runs stop() then start_async() on the
     // endpoint's detached thread, and stop() clears running_ FIRST and only
