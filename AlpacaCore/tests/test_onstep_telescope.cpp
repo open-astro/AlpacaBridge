@@ -797,7 +797,7 @@ struct MoveAxisFake {
     std::shared_ptr<std::atomic<int>> horizon = std::make_shared<std::atomic<int>>(0);
     std::shared_ptr<std::atomic<int>> overhead = std::make_shared<std::atomic<int>>(90);
     // Every driver timer runs on this (decision 0005): the re-send interval,
-    // the 2 s status cache. Declared before `server` and the driver, so it
+    // the poll tick. Declared before `server` and the driver, so it
     // outlives both.
     alpacacore::test::FakeTaskClock clock;
     alpacacore::test::FakeMountServer server;
@@ -862,7 +862,11 @@ struct MoveAxisFake {
         conn.host = "127.0.0.1";
         conn.tcp_port = server.port();
         conn.response_timeout_ms = 50;
-        return alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
+        auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
+        // These cases count the re-send body's :GU# reads and rendezvous on its
+        // waits: the status poll (#1783) would add reads and a waiter of its own.
+        alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*driver, true);
+        return driver;
     }
 
     // Moves virtual time by `d` and waits until every task it woke has run
@@ -931,30 +935,29 @@ TEST_CASE("OnStep Telescope Driver - a pulse guide does not end a running MoveAx
     driver->set_connected(false);
 }
 
-// #1378 (review): Tracking patches the status cache without a :GU# read, so
-// the 'g' it keeps is from before the move and must not end the move.
+// #1378 (review): a Tracking write is written through to the frame without a
+// :GU# read, so the frame's status, from before the move, must not end it.
 TEST_CASE("OnStep Telescope Driver - a Tracking write right after MoveAxis does not end the move",
           "[onstep][telescope][unit]") {
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    namespace ons = alpacacore::vendor::onstep;
 
-    // A first move teaches the driver that this firmware sends 'g': a :GU#
-    // read past the 2 s cache, while the move runs.
+    // A first move teaches the driver that this firmware sends 'g': a poll
+    // tick (#1783) reads :GU# while the move runs.
     fake.guide_active->store(true);
     fake.start_move(*driver, 0, 1.0);
-    fake.advance(std::chrono::milliseconds(2100));
+    REQUIRE(ons::poll_status_now_for_testing(*driver, false));
     REQUIRE(driver->get_slewing());
     fake.guide_active->store(false);
     driver->move_axis(0, 0.0);
-    fake.advance(std::chrono::milliseconds(2100));
-    (void)driver->get_tracking();                   // a :GU# without 'g' is now in the cache
-    fake.advance(std::chrono::milliseconds(2100));  // and stale
+    REQUIRE(ons::poll_status_now_for_testing(*driver, false));  // the frame now holds a :GU# without 'g'
 
     fake.guide_active->store(true);
     fake.start_move(*driver, 0, 1.0);
-    driver->set_tracking(true);  // marks the stale cache fresh without a :GU# read
+    driver->set_tracking(true);  // writes Tracking through, without a :GU# read
     CHECK(driver->get_slewing());
 
     driver->move_axis(0, 0.0);
@@ -1069,7 +1072,7 @@ TEST_CASE("OnStep Telescope Driver - Slewing drops when OnStepX ends a MoveAxis 
     REQUIRE(driver->get_slewing());
 
     fake.guide_active->store(false);
-    fake.advance(std::chrono::milliseconds(2100));  // past the 2 s status cache
+    REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*driver));  // #1783: the poll reads :GU#
     CHECK_FALSE(driver->get_slewing());
 
     const auto after_end = fake.count(":Ms#");
@@ -1629,20 +1632,25 @@ struct ScriptedOnStep {
 };
 
 // The driver runs on `clock` (decision 0005): moves virtual time past the
-// 2 s status cache and the slew grace, so the next Slewing read fetches the
-// scripted in-progress status with a :GU#, and the driver has seen the slew
-// running and will notice its end. Call right after set_status().
+// slew grace and takes one status-poll tick (#1783: the poll fetches the
+// scripted in-progress status with a :GU#; the getters read its frame), so
+// the driver has seen the slew running and will notice its end. Call right
+// after set_status().
 void observe_slewing(alpacacore::TelescopeDriver& driver, ScriptedOnStep& mount,
                      alpacacore::test::FakeTaskClock& clock) {
     const std::size_t polls_before = mount.count(":GU#");
     clock.advance(std::chrono::milliseconds(2100));
+    (void)clock.wait_for_woken_settled(std::chrono::seconds(5));
+    REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(driver));
     REQUIRE(driver.get_slewing());
     REQUIRE(mount.count(":GU#") > polls_before);
 }
 
-// Moves virtual time past the status cache; true when Slewing then reads false.
+// Moves virtual time past the slew grace and takes one poll tick; true when Slewing then reads false.
 bool wait_slew_done(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock) {
     clock.advance(std::chrono::milliseconds(2100));
+    (void)clock.wait_for_woken_settled(std::chrono::seconds(5));
+    REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(driver));
     return !driver.get_slewing();
 }
 
@@ -2330,8 +2338,8 @@ TEST_CASE(
 
 // OnStep 4.x answers a park of a parked mount with 9 ("already parked",
 // Park.ino park()) and a home of one with 18 ("mount parked", Home.ino
-// goHome() -> validateGoto()); the driver meets them when its status cache
-// still read the mount unparked. ASCOM: Park on a parked mount is a no-op,
+// goHome() -> validateGoto()); the driver meets them when its last :GU# read
+// the mount unparked. ASCOM: Park on a parked mount is a no-op,
 // and FindHome while parked is InvalidWhileParked.
 TEST_CASE(
     "OnStep Telescope Driver - a park answered already parked is a no-op and a home answered parked is "
@@ -2355,7 +2363,7 @@ TEST_CASE(
         mount->silent_after_ge = true;  // the re-read of :GU# after the code gets no reply
         REQUIRE_NOTHROW(driver->park());
         CHECK(mount->count(":hP#") == 1);
-        CHECK(driver->get_at_park());  // from the mount's 9: the one failed read serves the cache
+        CHECK(driver->get_at_park());  // from the mount's 9: the one failed read leaves the frame as it was
         {
             std::lock_guard<std::mutex> lock(mount->mutex);
             mount->silent = false;
@@ -2413,7 +2421,7 @@ TEST_CASE("OnStep Telescope Driver - a no-op Park or FindHome drops an earlier b
             std::lock_guard<std::mutex> lock(mount->mutex);
             mount->parked = true;  // the handset parked it
         }
-        mount->clock.advance(std::chrono::milliseconds(2100));  // past the status cache
+        mount->clock.advance(std::chrono::milliseconds(2100));  // wakes the poll; Park reads :GU# itself
         REQUIRE_NOTHROW(driver->park());
     }
     SECTION("the mount was homed meanwhile, then FindHome") {
@@ -2441,7 +2449,7 @@ TEST_CASE("OnStep Telescope Driver - a slew or sync while the mount homes is ref
         std::lock_guard<std::mutex> lock(mount->mutex);
         mount->homing = true;
     }
-    mount->clock.advance(std::chrono::milliseconds(2100));  // past the status cache
+    mount->clock.advance(std::chrono::milliseconds(2100));  // wakes the poll; FindHome reads :GU# itself
     const auto stops_before = mount->count(":Q");
     const auto require_refused = [](const std::function<void()>& fn, const std::string& who) {
         try {
@@ -2490,10 +2498,19 @@ TEST_CASE("OnStep Telescope Driver - AbortSlew and a MoveAxis stop on its axis e
 
 namespace {
 
+// run_clock's rendezvous waits for one waiter: the Park or FindHome body's. The status poll (#1783) is a
+// waiter too and could satisfy it before the body reaches its wait, so these cases pause the poll and read
+// Slewing with poll_status_now_for_testing().
+void pause_poll(alpacacore::TelescopeDriver& driver) {
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(driver, true);
+}
+
 // Moves the fake clock `total` in 100 ms steps, letting each woken task run.
 void run_clock(ParkHomeFake& mount, std::chrono::milliseconds total) {
     for (auto t = std::chrono::milliseconds(0); t < total; t += std::chrono::milliseconds(100)) {
-        (void)mount.clock.wait_for_waiters(1, std::chrono::milliseconds(200));  // a body reaches its wait first
+        // A body reaches its wait first. None within the bound means it has ended (the poll is paused), so
+        // nothing is left to advance for.
+        if (!mount.clock.wait_for_waiters(1, std::chrono::seconds(1))) break;
         mount.clock.advance(std::chrono::milliseconds(100));
         (void)mount.clock.wait_for_woken_settled(std::chrono::seconds(5));
     }
@@ -2542,6 +2559,7 @@ TEST_CASE("OnStep Telescope Driver - a newer command ends a Park still finishing
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
     start_move(*driver, *mount, 0, 1.0);
     REQUIRE_NOTHROW(driver->park());
     REQUIRE(mount->count(":hP#") == 0);
@@ -2577,6 +2595,7 @@ TEST_CASE("OnStep Telescope Driver - a newer command before Park's background pa
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
     start_move(*driver, *mount, 0, 1.0);
     alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, [&] { driver->abort_slew(); });
 
@@ -2584,6 +2603,7 @@ TEST_CASE("OnStep Telescope Driver - a newer command before Park's background pa
     alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, nullptr);
     run_clock(*mount, std::chrono::seconds(10));
     CHECK(mount->count(":hP#") == 0);  // the AbortSlew won
+    REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*driver));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
@@ -2598,6 +2618,7 @@ TEST_CASE("OnStep Telescope Driver - a FindHome started before an older Park's b
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
     start_move(*driver, *mount, 0, 1.0);
     alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, [&] {
         alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, nullptr);
@@ -2712,13 +2733,10 @@ TEST_CASE("OnStep Telescope Driver - a command refused for a link fault leaves a
         std::lock_guard<std::mutex> lock(mount->mutex);
         mount->silent = true;
     }
-    mount->clock.advance(std::chrono::milliseconds(2100));  // past the 2 s caches
+    // Three failed status-poll ticks latch the fault (#1783: the poll is the only reader).
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*driver, true);
     for (int i = 0; i < 3; ++i) {
-        try {
-            (void)driver->get_right_ascension();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
-            // the third throws: the fault latched
-        }
+        (void)alpacacore::vendor::onstep::poll_status_now_for_testing(*driver);
     }
     REQUIRE_FALSE(driver->get_link_fault().empty());
     // Slewing refuses too while the Park is pending, though it asks the mount
@@ -2753,9 +2771,9 @@ TEST_CASE("OnStep Telescope Driver - a command refused for a link fault leaves a
         std::lock_guard<std::mutex> lock(mount->mutex);
         mount->silent = false;
     }
-    mount->clock.advance(std::chrono::milliseconds(2100));  // past the faulted-read back-off
-    // Slewing asks nothing while the Park is pending, so a read that asks the
-    // mount clears the fault first, as a client's position poll does.
+    // A good poll tick clears the fault first, and the poll runs again so Slewing sees the park end.
+    REQUIRE(alpacacore::vendor::onstep::poll_status_now_for_testing(*driver));
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*driver, false);
     REQUIRE_NOTHROW((void)driver->get_right_ascension());
     REQUIRE(driver->get_link_fault().empty());
     const auto waits_before = mount->clock.wait_count();
@@ -2783,6 +2801,7 @@ TEST_CASE("OnStep Telescope Driver - an AbortSlew between Park's in-motion retri
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
 
     REQUIRE_NOTHROW(driver->park());  // the first try, refused "in motion", then the background retries
     REQUIRE(mount->count(":hP#") == 1);
@@ -2803,6 +2822,7 @@ TEST_CASE("OnStep Telescope Driver - a FindHome taken at once ends a Park still 
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    pause_poll(*driver);
 
     REQUIRE_NOTHROW(driver->park());  // refused "in motion": the retries go to the background
     REQUIRE(mount->count(":hP#") == 1);
@@ -3209,6 +3229,9 @@ TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its sle
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     REQUIRE(driver->get_tracking());
+    // run_synchronous_slew() steps the clock while the slew's own wait is the only waiter: the status poll
+    // (#1783) would be a second one. The helpers below tick it by hand.
+    alpacacore::vendor::onstep::set_status_poll_paused_for_testing(*driver, true);
 
     // A slew the driver did not start (handset, another program) that ends
     // with tracking off: a left-over flag would restart tracking here.
@@ -3433,7 +3456,7 @@ TEST_CASE("OnStep Telescope Driver - an Alt/Az slew is refused while Tracking is
 // refuses the new slew first, so the running GOTO, park or home keeps going.
 TEST_CASE("OnStep Telescope Driver - a slew while a GOTO runs is refused and the GOTO keeps going",
           "[onstep][telescope][unit]") {
-    alpacacore::test::FakeTaskClock clock;  // the slew grace and the 2 s cache (decision 0005); outlives the driver
+    alpacacore::test::FakeTaskClock clock;  // the slew grace and the poll (decision 0005); outlives the driver
     auto mount = std::make_shared<ScriptedOnStep>();
     mount->set_status("NpEW180#");  // tracking, not slewing
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
@@ -3514,7 +3537,7 @@ TEST_CASE("OnStep Telescope Driver - a slew while a GOTO runs is refused and the
 
     SECTION("a GOTO started elsewhere (handset)") {
         mount->set_status("pEW180#");                    // slewing, tracking: not ours
-        clock.advance(std::chrono::milliseconds(2100));  // past the status cache
+        clock.advance(std::chrono::milliseconds(2100));  // wakes the poll; the slew reads :GU# itself
         refused_and_left_running([&]() { driver->slew_to_coordinates_async(13.0, 40.0); }, "SlewToCoordinatesAsync");
     }
 
@@ -3628,7 +3651,7 @@ TEST_CASE("OnStep Telescope Driver - a refused GOTO reports the mount's reason",
 // the :GE# reason; a '0' that :GE# then calls no error is taken (as for :hP#).
 TEST_CASE("OnStep Telescope Driver - a Tracking write SetPark Unpark or Sync the mount refuses throws",
           "[onstep][telescope][unit]") {
-    alpacacore::test::FakeTaskClock clock;  // the 2 s status cache (decision 0005); outlives the driver
+    alpacacore::test::FakeTaskClock clock;  // the poll (decision 0005); outlives the driver
     auto mount = std::make_shared<ScriptedOnStep>();
     mount->set_status("NpEW180#");  // tracking, not slewing, not parked
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
@@ -3652,7 +3675,7 @@ TEST_CASE("OnStep Telescope Driver - a Tracking write SetPark Unpark or Sync the
     SECTION("a Tracking write the mount refuses throws and leaves Tracking as the mount has it") {
         mount->refuse(":ST", "22#");  // OnStep 4.x: in motion
         refused([&]() { driver->set_tracking(false); }, "Tracking refused by the mount", "mount still in motion");
-        CHECK(driver->get_tracking());  // the cache was not patched to the refused value
+        CHECK(driver->get_tracking());  // the frame was not patched to the refused value
         CHECK(mount->count(":ST0#") == 1);
     }
 
@@ -3718,7 +3741,7 @@ TEST_CASE("OnStep Telescope Driver - a Tracking write SetPark Unpark or Sync the
 
     SECTION("a Sync during a GOTO is refused before anything is sent") {
         mount->set_status("pEW180#");                    // a GOTO runs
-        clock.advance(std::chrono::milliseconds(2100));  // past the status cache
+        clock.advance(std::chrono::milliseconds(2100));  // wakes the poll; the Sync reads :GU# itself
         mount->clear_log();
         const auto error = alpaca_error_of([&]() { driver->sync_to_coordinates(12.0, 45.0); });
         CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);

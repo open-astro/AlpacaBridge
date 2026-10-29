@@ -53,7 +53,7 @@ vendor-agnostic; do them in the driver from the start.
   `set_connected()` against `set_connected()` only; never take it in a getter.
 - **Operation task threads: use the slot where a driver has adopted it.** The Celestron
   (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide, the OnStep
-  telescope's MoveAxis re-send (#1378) and the Gemini focuser and flat panel run their operation bodies (async slew,
+  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), and the Gemini focuser and flat panel run their operation bodies (async slew,
   park, home, pulse-guide timer, slew-completion tail, move re-send) in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](../../docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
@@ -120,10 +120,9 @@ vendor-agnostic; do them in the driver from the start.
   partway through: the wire call drops the state lock around the exchange and takes it
   back after (OnStep's and Sky-Watcher's `Wire::call`). State read before the exchange
   may be stale after it, because another thread can change it in the gap. Re-read it
-  after the exchange, or compare a counter that every change bumps. OnStep's `Slewing`
-  read compares `slew_epoch_` across its exchanges, and its single-read path re-checks
-  `session_generation_` under the I/O lock so a read never lands on a session that
-  ended, or started, while it waited (#1728, #1729;
+  after the exchange, or compare a counter that every change bumps. OnStep's MoveAxis
+  re-send tick re-checks its stop reason and each axis's re-send flag under `mutex_`
+  after its reads, before the re-send (#1728, #1729;
   [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) item 8).
 - A driver that tracks the locks it holds per thread throws `DriverException` before it
   takes any lock when it cannot record one. It never takes `mutex_` untracked: the wire
@@ -131,8 +130,9 @@ vendor-agnostic; do them in the driver from the start.
   [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) items 1
   and 8 and Rule 6 rule out. The tracker is `util::LockGate`
   (`AlpacaCore/include/alpacacore/util/lock_gate.h`), shared by the OnStep and Sky-Watcher
-  telescopes: its `StateLock::lock()` and its single read both refuse on a full table
-  (#1729, #1730). A newly converted driver composes it rather than copying it.
+  telescopes: its `StateLock::lock()` refuses on a full table (#1729, #1730; its single
+  read for a getter went with #1783, since no getter reads the device any more). A newly
+  converted driver composes it rather than copying it.
 - An SDK call on a closable handle is safe only if the handle can't be closed
   underneath it. In a converted driver, `set_connected(false)` clears state under
   `mutex_` and releases it, then takes the I/O lock across the close, so the I/O

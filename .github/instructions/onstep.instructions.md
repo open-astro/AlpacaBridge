@@ -121,7 +121,11 @@ it is never reachable through `router.cpp` or the web UI.
   duration, not polled from the mount, and ends early on a stop that ends the pulse: `AbortSlew`
   and the same stops a `Park` or `FindHome` sends before a moving mount parks or homes (`:Q#` ends
   every guide, OnStepX `Guide::stop()`), and a `MoveAxis(axis, 0)` on the pulse's axis
-  (`:Qe#`/`:Qw#` or `:Qn#`/`:Qs#` end that axis's guides). Unlike SynScan (no native pulse guide), this driver does
+  (`:Qe#`/`:Qw#` or `:Qn#`/`:Qs#` end that axis's guides). Past its end time a pulse still reads
+  as running until the status poll publishes a frame sampled `kPulseGuideSettle` (50 ms) or more after
+  that end, at most `kPulseMeasureBound` (2 s) longer (#1783): a `PulseGuide` starts one extra tick for
+  then, in a slot of its own (`pulse_measurement_`; the 1 s ticks run on through the pulse), so a position read right after `IsPulseGuiding` goes false is not one
+  measured mid-pulse (ConformU's PulseGuide checks compare the RA and Dec around it). Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread. A `Duration` over 9999 ms does not fit the 4-digit field
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
   checked before the connected, link-fault and parked checks, as are `SyncToCoordinates`' and
@@ -137,12 +141,11 @@ it is never reachable through `router.cpp` or the web UI.
   (table below). `get_side_of_pier()` now always computes from hour angle (`LST − synced RA`);
   `:GU#`'s pier side is parsed into `MountStatus` but intentionally unused for this property. Do not
   reintroduce a firmware-flag-preferred branch here without re-validating against ConformU's
-  SideofPier/DestinationSideofPier checks. Also avoid forcing a live position refresh inside
-  `get_side_of_pier()` (a `:GRa#`/`:GDe#` pair, ~25 ms each on the HM-17 at 9600 baud, so ~50 ms,
-  uses about half of a FAST read's 0.1s budget; it was ~0.16s each while `read_response()` slept
-  10 ms after every reply character, #1242) — hour-angle *sign* tolerates a couple of seconds of
-  RA staleness, so reuse whatever is already cached and only force a fetch if never yet populated,
-  or while the link fault is latched (no cache is served then, #1414).
+  SideofPier/DestinationSideofPier checks. `get_side_of_pier()` takes the RA from the polled frame
+  (below) and never reads the mount: a live `:GRa#`/`:GDe#` pair there (~25 ms each on the HM-17 at
+  9600 baud; ~0.16s each while `read_response()` slept 10 ms after every reply character, #1242)
+  cost ConformU's 0.1 s FAST target, and the hour-angle *sign* tolerates the frame's second of RA
+  staleness.
 - **`:GU#` status-character table**, confirmed against real hardware traces (`nNpHrsEo180` etc.
   observed live): `n`/`N` = **NOT** tracking / **NOT** slewing respectively (`== npos` check, i.e.
   the character's *absence* means the state is active — this is the opposite polarity of what
@@ -207,17 +210,19 @@ it is never reachable through `router.cpp` or the web UI.
   for 20 s moved for about 10 s.
   - **On the task clock (decision 0005).** The driver takes a `util::TaskClock&` (factories
     `create_onstep_telescope()` / `create_onstep_telescope_with_site()`, default the real clock),
-    the re-send slot waits through it, and the other deadlines read it too: the 2 s status and
-    position cache ages, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
+    the re-send slot waits through it, and the other deadlines read it too: the status poll's period
+    and the age of its frame, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
     sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
     connect and on disconnect), and the #521 relink outage:
     the driver hands its clock to the process-wide wrapper at connect
     (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
     when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
     clock. A change of clock forgets those stamps: one taken on another driver's clock is not timed
-    as an outage (#1460; production keeps one clock). The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
-    `advance()` it (7 s per re-send tick, 2.1 s past a cache, 250 ms steps through a synchronous
-    slew, 2 s past the relink window, 60 s past a UTCDate write).
+    as an outage (#1460; production keeps one clock). The re-send, tracking-restore, snapshot and
+    relink-window tests inject a `FakeTaskClock` and `advance()` it (7 s per re-send tick, 1 s per
+    poll tick, 250 ms steps through a synchronous slew, 2 s past the relink window, 60 s past a
+    UTCDate write); a case that pins exchanges of its own pauses the poll
+    (`set_status_poll_paused_for_testing()`) and drives ticks with `poll_status_now_for_testing()`.
   - **Only while the mount shows the move.** Each tick reads `:GU#` first and re-sends only when
     that read shows `g` (a guide-style move runs, either axis). A move the firmware let lapse stays
     ended: its time limit, or the 5 s `GUIDE_TIME_NO_LIMITS` cap it applies while its soft limits
@@ -319,10 +324,9 @@ it is never reachable through `router.cpp` or the web UI.
   `:Q#` sent mid-GOTO), so nothing has to restore tracking after them.
   The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
   the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
-  an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
-  no poll thread (only a running `MoveAxis` re-send checks the link, every 7 s, and on firmware
-  without `g` only once, #1461), and the router reads `Connected` before every Connect, so the first to notice
-  can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
+  an auto-detect re-scan included. It is not timed from when the loss was noticed: the status poll
+  checks the link once a second, but the router reads `Connected` before every Connect, so the
+  first to notice can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
   lost. `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
   still the current link (a generation counter under `link_id_mutex_`): a Disconnect or a relink that
   lands between its `stat()` and the record leaves no loss behind and does not close the new link, and
@@ -330,53 +334,44 @@ it is never reachable through `router.cpp` or the web UI.
   re-checks under `mutex_` that the link is still connected and still lost (#1289).
 - **A mount that stops answering with the adapter still plugged in latches a fault, then a loss**
   (#1414, decision 0009): mount unpowered, or the cable pulled at the mount end, so the node and the
-  fd stay healthy and nothing answers. Before, the status and position caches swallowed every
-  failure once filled, so `Connected` stayed true and every read served old values after waiting
-  out the response timeout. Now each failed `:GU#`, `:GRa#`/`:GDe#` or `:GA#`/`:GZ#` read counts
-  in `util::PolledLinkHealth`: the first two in a row still serve the cache (logged WARN), the
-  third latches a fault (ERROR) and those reads throw `DriverException` "OnStep mount
-  communications compromised" while `Connected` stays true and `get_link_fault()` reads "Mount not
-  answering (...)"; while faulted no status or position cache is served (not inside the 2 s
-  window, not `SideOfPier`): a status or position read asks the mount, and one good reply clears
-  the fault (INFO). The reads of mount values the connect read, `SiteLatitude`, `SiteLongitude`,
-  `UTCDate`, `SiderealTime`, `DestinationSideOfPier` and `DoesRefraction`, throw the fault too
-  (decision 0009 rule 1); they used to answer from the connect's values, and a site the connect
-  could not read was fetched again with no fault check (#1659). `SideOfPier` reads the position
-  first, so it still asks the mount, and a good reply clears the fault and lets the site be read.
-  Commanded state the driver tracks throws too, as in Sky-Watcher (open-astro#882):
-  `IsPulseGuiding`, `Slewing` (also while a `Park` or `FindHome` is pending or within the slew
-  grace; `AbortSlew` and `MoveAxis(axis, 0)` still send their stops) and the rate getters
-  (`DeclinationRate`, `RightAscensionRate`, `TrackingRate`, which read lock-free from the
-  latched fault text so they never wait behind serial I/O). The client's own values answer, as in
-  Sky-Watcher: `TargetRightAscension`/`TargetDeclination`, `SlewSettleTime`, `SiteElevation` (the
-  device config), `GuideRate` (informational) and the `Can*` constants.
-  Within 2 s (`kFaultedReadBackoff`) of a read that failed while faulted, the reads throw the
-  fault without asking, so a faulted `DeviceState` costs one reply timeout instead of one per
-  getter (#1626). A read that finds the link lost (`NotConnected`) throws it even while a cache is
-  valid (#1626). Writes throw the
-  same `DriverException` (`refuse_while_faulted_locked()`; the motion and state commands and the
-  site and `UTCDate` writes (#1626), not the
-  raw `command_blind`/`command_bool` pass-through): the commands are blind, so on a
-  healthy fd they cannot fail and would otherwise report success to a mount that is not
-  listening. `AbortSlew` and `MoveAxis(axis, 0)` send their stops first and then throw, so the stop
-  is still tried and the client learns it may not have arrived (`AbortSlew` makes its #1230
-  tracking decision before it throws, so a faulted abort gives up the restore); `Slewing` during a
-  `MoveAxis` rethrows the fault like any read; a new `MoveAxis` move is refused
-  before it ends a waiting `Park` or `FindHome`. A refused write checks the staleness bound too,
-  so a client that only writes still sees the link lost. A fault that has
-  stood for `util::kLinkStalenessBound` (30 s, on the driver's task clock; tests advance a
-  `FakeTaskClock`) is a lost link: `OnStepProtocolWrapper::declare_link_lost()` records the reason and the
-  loss time and closes the port, as for a pulled adapter, so `Connected` reads false, calls throw
-  `NotConnected`, `DeviceState` is empty, and the next Connect relinks (and runs the #521 stops
-  after a long outage). That outage runs from the loss, not from the last good reply: the failed
-  reads still found the fd alive, so a Connect right after the loss stops nothing, and one after
-  the preserve window sends the stops. There is no poll thread: the reads are the client's, so the time to latch
-  is the client's poll cadence times three, each failed read costing the response timeout.
+  fd stay healthy and nothing answers. Each failed poll tick (below; it ends at its first failed
+  exchange) and each failed control-path `:GU#` read counts in `util::PolledLinkHealth`: the first two
+  in a row are logged WARN and the frame is still served, the third latches a fault (ERROR): the
+  getters throw `DriverException` "OnStep mount communications compromised" while `Connected` stays
+  true and `get_link_fault()` reads "Mount not answering (...)". The poll keeps asking every second,
+  and one good tick clears the fault (INFO). A failed `:GA#`/`:GZ#` read on a slow tick is logged and
+  keeps the last Alt/Az; it does not count. Altitude and Azimuth can therefore be older than
+  `DeviceState`'s `TimeStamp` when `:GA#`/`:GZ#` reads fail while `:GU#` and RA/Dec answer, because they keep
+  their last values. The reads that answer from the driver's own state,
+  `SiteLatitude`, `SiteLongitude`, `UTCDate`, `SiderealTime`, `DestinationSideOfPier`,
+  `DoesRefraction`, `IsPulseGuiding`, `Slewing` (also while a `Park` or `FindHome` is pending or within
+  the slew grace) and the rate getters (`DeclinationRate`, `RightAscensionRate`, `TrackingRate`, which
+  read lock-free from the latched fault text), throw the fault too (decision 0009 rule 1, as in
+  Sky-Watcher, open-astro#882). The client's own values answer: `TargetRightAscension`/
+  `TargetDeclination`, `SlewSettleTime`, `SiteElevation` (the device config), `GuideRate`
+  (informational) and the `Can*` constants. A getter asks the mount nothing while faulted, so a faulted
+  `DeviceState` costs no reply timeout (the 2 s back-off of #1626 is gone with the getter reads). Writes
+  throw the same `DriverException` (`refuse_while_faulted_locked()`; the motion and state commands and
+  the site and `UTCDate` writes (#1626), not the raw `command_blind`/`command_bool` pass-through): the
+  commands are blind, so on a healthy fd they cannot fail and would otherwise report success to a mount
+  that is not listening. `AbortSlew` and `MoveAxis(axis, 0)` send their stops first and then throw, so
+  the stop is still tried and the client learns it may not have arrived (`AbortSlew` gives up its
+  #1230 tracking restore without asking the mount); a new `MoveAxis` move is refused before it ends a
+  waiting `Park` or `FindHome`. A fault that has stood for `util::kLinkStalenessBound` (30 s, on the
+  driver's task clock) is a lost link: the next failed poll tick, or a refused write, calls
+  `OnStepProtocolWrapper::declare_link_lost()`, which records the reason and the loss time and closes
+  the port, as for a pulled adapter, so `Connected` reads false, calls throw `NotConnected`,
+  `DeviceState` is empty, the poll body ends, and the next Connect relinks (and runs the #521 stops
+  after a long outage). A getter, which takes no operation lock, only throws the fault; the poll finds
+  the bound within a tick. That outage runs from the loss, not from the last good reply: the failed
+  reads still found the fd alive, so a Connect right after the loss stops nothing, and one after the
+  preserve window sends the stops. A silent mount latches in about three poll periods plus three
+  reply timeouts.
 - **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
   `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
   `Tracking` reads false, after the coordinate validation (which comes before the connection check)
-  and the parked check, and before any target or GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
-  just written counts as off. `SlewToAltAz(Async)` skips this check and has the opposite one
+  and the parked check, and before any target or GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, from the polled frame,
+  so a `Tracking=false` just written counts as off. `SlewToAltAz(Async)` skips this check and has the opposite one
   (refused while Tracking is true, #1377, see below), then converts to RA/Dec and calls
   `start_slew_locked()`. OnStepX turns tracking on at a GOTO only on the first GOTO after a
   home reset (`firstGoto`) or one that starts from home (`Goto.cpp`; an HM-17 run on 2026-10-18 read `Tracking`
@@ -392,9 +387,10 @@ it is never reachable through `router.cpp` or the web UI.
   too, which the second `:MS#` would also have stopped. A home with home sensors runs as a guide
   move, not a GOTO (`:GU#` shows `h` with `N`), so it is refused separately ("<member> is not allowed
   while the mount is homing"), the syncs included: before, the slew ended the waiting `FindHome` and
-  the mount refused it as already moving (reply `8`). It reads the 2 s status cache, as the GOTO
-  check does, so a home started from the handset less than 2 s before the slew is not seen. `AbortSlew` ends the grace and the status cache,
-  so the next slew asks the mount; it goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
+  the mount refused it as already moving (reply `8`). Outside the slew grace the check reads `:GU#`
+  on each slew and sync, never the polled frame alone, so a GOTO or home started from the handset is
+  seen at once (before #1783 it read the 2 s status cache); inside the grace it refuses without a read.
+  `AbortSlew` ends the grace, so the next slew goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
   GOTO state while it brakes after `:Q#` (HM-17 2026-10-24: about 1.6 s), and a slew in that time
   is refused, as the firmware would refuse it (reply `5`). A `:MS#` the mount refuses reports its reply digit and reason (the digits are
   listed under "Commands this driver sends"; 4 parked is `InvalidWhileParked`), not "below horizon
@@ -414,43 +410,70 @@ it is never reachable through `router.cpp` or the web UI.
   (`check_alt_az_slew_locked()`). With Tracking off the driver converts to RA/Dec and runs the same
   GOTO as an equatorial slew; it does not use OnStepX's `:MA#`.
 - **`Connected` is read lock-free** (#910): `set_connected(true)` holds `transition_mutex_` and the
-  operation lock for the whole connect (port open, handshake, site and time sync, cache warm-up, an
+  operation lock for the whole connect (port open, handshake, site and time sync, the first frame, an
   auto-detect scan with no explicit port), so `get_connected()` reads the atomic `published_connected_`
   instead, plus `link_alive()`, which takes no lock a connect holds. The flag is raised only after the warm-up and dropped before any disconnect,
   so `Connected` stays false while `Connecting` is true (the tier-2 contract sweep checks it). The
   internal `connected_` goes true right after the port opens, before the warm-up, because the warm-up's
   own helpers check it; a disconnect clears it, with `published_connected_`, before the close.
+- **Getters and `DeviceState` are served from a polled snapshot, never from the mount** (#1783,
+  [decision 0010](../../docs/decisions/0010-snapshot-served-state.md), the SynScan and Celestron shape).
+  One status poll per connection runs in an `AsyncOperation` slot (`status_poll_`), started at the end
+  of a connect (its first tick 1 s later: the connect seeds the frame) and joined before a disconnect or
+  a relink closes the port, with no driver lock held. Every `kStatusPollPeriod` (1 s, start to start on
+  the task clock, missed ticks skipped) it reads `:GU#` then `:GRa#`/`:GDe#`, and every
+  `kSlowPollEvery`-th (2nd) tick `:GA#`/`:GZ#` and, while the site is not known, `:Gt#`/`:Gg#` (every
+  `kSiteInfoRetryDelay` at most), into `util::StateSnapshot<PolledFrame>`. A `PulseGuide` adds one
+  tick, in a slot of its own, that measures the pulse's end (see the pulse guiding bullet). The tick holds
+  the operation lock for its exchanges, so it never lands inside a command's sequence, drops `mutex_`
+  for each, and publishes under `mutex_` alone after `begin_poll()`. A tick ends at its first failed
+  exchange of `:GU#` or the position, so a Disconnect waits for one reply timeout. Served from the
+  frame, stale or not (`kSnapshotMaxAge` 3 s is the freshness bound; stale never refuses, decision 0010
+  rule 6): `RightAscension`, `Declination`, `Altitude`, `Azimuth`, `Tracking`, `AtPark`, `AtHome`,
+  `Slewing` (with the driver's own MoveAxis flags, slew grace and pending Park/FindHome), `SideOfPier`
+  (from the frame's RA) and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
+  (`device_state_age()`). A field the mount has not answered yet throws `DriverException` "not
+  available"; a latched fault and a lost link refuse as above. Client commands write through
+  (`snapshot_.write()`): a sync's position, `Tracking`, `Unpark`, a slew start (`Slewing` true), a park
+  or home the mount took, and a pulse, a MoveAxis start and AbortSlew drop the tick in flight, so a tick
+  that sampled before the command cannot publish over it. Control paths keep their direct reads and
+  write them through (`refresh_status_locked()`, only a status that differs from the frame's, so a loop
+  that re-reads `:GU#` does not drop every tick): the slews' and syncs' GOTO check (their Tracking
+  check reads the frame, as the getter does), Park and FindHome and their
+  body, the synchronous slew's wait (which publishes a full measurement where the slew ends; a failed one
+  keeps the last values and counts toward the fault, as a failed tick), AbortSlew's
+  tracking decision and the MoveAxis re-send tick. The tracking restore a coordinate slew owes (#1230)
+  is sent by the tick that first reads the GOTO ended past the slew grace (not during a MoveAxis or
+  while a Park or FindHome is pending), under the same operation lock as its `:GU#`. Test seams:
+  `set_status_poll_paused_for_testing()`, `poll_status_now_for_testing()`,
+  `set_status_poll_after_sample_hook_for_testing()`, `status_poll_running_for_testing()`,
+  `pulse_measurement_running_for_testing()`, `set_pulse_guide_gap_hook_for_testing()`. Tests: `test_onstep_telescope_snapshot.cpp`.
 - **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
   #1449, the shape of Sky-Watcher's #1530). Order: `transition_mutex_` (`set_connected()` against
   `set_connected()`; no getter takes it) -> `io_mutex_` (the operation lock) -> `mutex_` (the state lock, a
-  leaf) -> the protocol wrapper's own lock. Every command holds `io_mutex_` for the whole command through a
-  `StateLock` (Mode::Io, the default), which also holds `mutex_`; its `unlock()` releases both, so the places
-  that let other commands in (a task-clock wait, a slot start) are unchanged. Every exchange goes through
-  `Wire` (`wire()`), which drops `mutex_` for the call and takes it back after (the shared `util::LockGate`,
-  #1729: its held-lock table, `StateLock` and single read, which refuse on a full table, decision 0016 Rule 6; the session re-check, the single-read test seams
-  and the epochs stay in the driver), so `mutex_` is never held across serial I/O, and sequences that must stay together (`:hP#` or `:hC#` then `:GE#`, `:Sr#`/`:Sd#` then `:MS#` or
-  `:CM#`, the re-send tick's reads and move) stay together under `io_mutex_`. A getter takes `mutex_` alone
-  (`StateLock::Mode::State`) and answers from the state and the 2 s caches; when a cache is stale (or the fault
-  is latched) its read goes through `Wire`, which then takes `io_mutex_` for that one exchange (dropping
-  `mutex_` first, retaking it before `io_mutex_` is released, so the reply is stored before another command's
-  exchange lands): a live read waits for the wire, as 0016 allows. While a connect runs a getter reads
-  `NotConnected` (`check_connected()`: `published_connected_` unless the thread holds `io_mutex_`), and a
-  disconnect clears `connected_` before the close. The single read re-checks the session under `io_mutex_`
-  (`connected_` and `session_generation_`, bumped by every connect and disconnect): a Disconnect or a
-  reconnect that won the race makes it throw `NotConnected` without touching the wire. A `Slewing` read
-  whose `:GU#` dropped `mutex_` decides "the slew just ended" only if no slew was sent meanwhile
-  (`slew_epoch_`), so a newer GOTO keeps its tracking-restore flag; the `:ST` restore that read sends is a
-  single read too, and goes out only if no slew, Tracking write, Park or FindHome the mount took, or the
-  stops before one, went out while it waited for `io_mutex_` (`tracking_epoch_`). A site read that waited out a Disconnect throws `NotConnected` and leaves
-  the site cache alone. The stops (AbortSlew, `MoveAxis(axis, 0)`, Park/FindHome's
-  pre-stops, a refused re-send, the #521 relink) all go through `send_stops_locked()`. A getter changes
-  state between a command's exchanges only from what it already holds: anything it learns from the mount
-  needs a read, and so the operation lock. A new command takes a default `StateLock` and calls `wire()`, never
-  `OnStepProtocolWrapper::instance()` for an exchange; a new getter takes `Mode::State`, and so does a setter
-  that sends nothing (`TargetRightAscension`, `TargetDeclination`, `DoesRefraction`): a target written while a
-  slew or sync runs, its checks' reads included, stands (each entry point notes the target writes before
-  any check, and the command sets only a target nobody wrote since). Tests:
-  `test_onstep_getter_locks.cpp`, and the Park/FindHome storm in `test_onstep_concurrency_stress.cpp`.
+  leaf) -> the protocol wrapper's own lock; the `StateSnapshot` and slot mutexes are leaves under `mutex_`.
+  Every command, and each poll tick, holds `io_mutex_` for the whole command through a `StateLock`
+  (Mode::Io, the default), which also holds `mutex_`; its `unlock()` releases both, so the places that let
+  other commands in (a task-clock wait, a slot start) are unchanged. Every exchange goes through `Wire`
+  (`wire()`), which drops `mutex_` for the call and takes it back after (the shared `util::LockGate`, #1729:
+  its held-lock table and `StateLock`, which refuse on a full table, decision 0016 Rule 6), so `mutex_` is
+  never held across serial I/O, and sequences that must stay together (`:hP#` or `:hC#` then `:GE#`,
+  `:Sr#`/`:Sd#` then `:MS#` or `:CM#`, the re-send tick's reads and move, a poll tick's reads and its
+  tracking restore) stay together under `io_mutex_`. `Wire` refuses an exchange from a thread without the
+  operation lock (`DriverException`). A getter takes `mutex_` alone (`StateLock::Mode::State`) and answers
+  from the frame and the driver's state; it never reaches the wire (the 2 s caches and their single read
+  under `io_mutex_` (`LockGate::single_read()`), with its session re-check and the
+  `slew_epoch_`/`tracking_epoch_` epochs, went with #1783). While a connect runs a getter reads `NotConnected` (`check_connected()`: `published_connected_`
+  unless the thread holds `io_mutex_`), and a disconnect clears `connected_` before the close. The stops
+  (AbortSlew, `MoveAxis(axis, 0)`, Park/FindHome's pre-stops, a refused re-send, the #521 relink) all go
+  through `send_stops_locked()`. A getter changes state between a command's exchanges only from what it
+  already holds (the `Slewing` read that finds a MoveAxis ended in the frame). A new command takes a
+  default `StateLock` and calls `wire()`, never `OnStepProtocolWrapper::instance()` for an exchange; a new
+  getter takes `Mode::State`, and so does a setter that sends nothing (`TargetRightAscension`,
+  `TargetDeclination`, `DoesRefraction`): a target written while a slew or sync runs, its checks' reads
+  included, stands (each entry point notes the target writes before any check, and the command sets only
+  a target nobody wrote since). Tests: `test_onstep_getter_locks.cpp`, and the Park/FindHome storm in
+  `test_onstep_concurrency_stress.cpp`.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
   without waiting for the park or home to finish (a running motion is stopped first, #1430, below;
   optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
@@ -473,8 +496,8 @@ it is never reachable through `router.cpp` or the web UI.
     `:GE#` right after a refused `:hP#` and after every `:hC#` (any later command replaces the code;
     checked on the HM-17: `22` during braking, `25` after an accepted park, `00` after an accepted
     home), and returns. A park answered `9` (already parked) is ASCOM's no-op and a home answered
-    `18` (mount parked) is `InvalidWhileParked`, as when the status cache shows the mount parked:
-    OnStep 4.x gives them (`Park.ino` `park()`, `Home.ino` `goHome()`) when the cache was stale;
+    `18` (mount parked) is `InvalidWhileParked`, as when the call's `:GU#` read shows the mount parked:
+    OnStep 4.x gives them (`Park.ino` `park()`, `Home.ino` `goHome()`) when it parked after that read;
     OnStepX takes a park of a parked mount as done (`Park::request()`); a refusal a retry cannot change (no park position set, outside limits)
     throws `InvalidOperation` with the reason from the call (HM-17: 0.15 s).
   - **When the mount moves** (the driver's `MoveAxis` flags, or `:GU#` showing `g`, `G`, a GOTO or
@@ -515,18 +538,12 @@ it is never reachable through `router.cpp` or the web UI.
     takes about 1 s longer) and `:hC#` hold the operation lock, so nothing lands between `:hP#` and
     its `:GE#`, and run with `mutex_` free (decision 0016, #1449; see "Locks" above). A `Park` while one
     runs (`I`), or a `FindHome` while one runs (`h`), is a no-op.
-- **A slow first post-Connect `DeviceState` means the connect did not run** (#1242). A
-  ConformU-style preamble from one ClientID (`Connected=True` → `Connected=False` → `Connect()`,
-  poll `Connecting`) gets its first `DeviceState` in 3-5 ms with no serial reads: the connect's
-  warm-up fills the status and position caches (ConformU, which adds its own client overhead,
-  times it at 0.025s in the HM-17 report). A slow one appears when another ClientID is still
-  connected (the web UI, a script, NINA): the server keeps the device open for it, so ConformU's
-  `Connected=False` and `Connect()` change nothing, the caches are past their 2 s TTL, and
-  `DeviceState` refreshes `:GA#`/`:GZ#`/`:GU#`/`:GRa#`/`:GDe#`. That measured ~0.65s while each
-  reply cost ~10 ms per character on top of ~20-25 ms per command (the sleep fixed in #1242). On the HM-17 those five
-  commands now take ~0.11s together (each timed through the wrapper; the five took ~0.66s before),
-  still over the 0.1s target. For a validation run, connect nothing else to the
-  mount before ConformU starts; with an explicit port there is no auto-detect scan to pre-pay.
+- **The first post-Connect `DeviceState` reads no serial port** (#1242, #1783). The connect seeds
+  the frame (`:GU#`, `:GRa#`/`:GDe#`, the site when the config did not set it, `:GA#`/`:GZ#`), and
+  from then on the getters and `DeviceState` answer from memory, so a `DeviceState` never waits on the
+  mount, whether ConformU's preamble reconnected or another client (the web UI, a script, NINA) kept
+  the device open. Before #1783 the second case refreshed the five reads, ~0.11 s on the HM-17 (~0.65 s
+  while each reply character cost 10 ms, fixed in #1242).
 - **Other slow first FAST reads in old ConformU 4.5.0 runs were not a cold-start window
   either.** Two runs showed `AlignmentMode` (~0.135s), `Declination` (~0.318s),
   `EquatorialSystem` (~0.136s) and `SideOfPier Read` (~0.140s) outside the 0.1s FAST target.
@@ -534,7 +551,7 @@ it is never reachable through `router.cpp` or the web UI.
   time is spent in ConformU, not the driver; these two and `SideOfPier` are the first reads of
   an enum type, which matches ConformU's first-use JIT cost on enum-typed members
   (`.github/instructions/ioptron.instructions.md`; worse in the arm64 4.5.0 build, see "ConformU version" in `.github/instructions/testing.instructions.md`).
-  `Declination` is a live position refresh, a `:GRa#`/`:GDe#` pair, and its ~0.318s is consistent
+  `Declination` was then a live position refresh, a `:GRa#`/`:GDe#` pair, and its ~0.318s is consistent
   with ~0.16s each, what that pair measured on the HM-17 while the per-character sleep fixed in
   #1242 was in place. The HM-17 runs on ConformU 4.5.2-rc.1 and 4.5.3, with nothing else connected, have
   every member within its timing target.
@@ -589,7 +606,11 @@ it is never reachable through `router.cpp` or the web UI.
   the reason, with no further read, until a `UTCDate` write or the next connect. The LST
   computations still fall back to the host clock, without storing it. `SiteElevation` throws
   `InvalidOperation` until the device config or a client sets it: the protocol has no elevation
-  command, so it is client-side only.
+  command, so it is client-side only. `SiteLatitude` and `SiteLongitude` throw `InvalidOperation`
+  (with the reason the last `:Gt#`/`:Gg#` read failed) until the coordinate is known: written from
+  the device config at connect, by a client, or read from the mount at connect or by the status poll
+  (#1783; they answered a default 0.0 before, decision 0019). `SiderealTime`, `SideOfPier`,
+  `DestinationSideOfPier` and `SlewToAltAz` still use longitude 0 until it is known.
 - **No `gps_status` action: OnStep cannot report a GPS fix** (#1653). iOptron and Celestron answer
   `gps_status` (#1574) so a client lets the mount's site win only on a fix; OnStep has no reply that
   says the site or time came from GPS. OnStepX (`097cc579`, `Site.cpp` `gpsCheck()`) puts a GPS

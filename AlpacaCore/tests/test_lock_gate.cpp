@@ -97,23 +97,13 @@ TEST_CASE("LockGate - a full lock table refuses before it takes any lock", "[loc
     CHECK_FALSE(ninth.gate.holds_io());
     CHECK_FALSE(ninth.gate.holds_state());
 
-    // So does a single read from a thread that holds none of the ninth gate's locks, before its hook.
-    bool before_io_ran = false;
-    bool read_ran = false;
-    CHECK(alpaca_error_of([&] { ninth.gate.single_read([&] { before_io_ran = true; }, [&] { read_ran = true; }); }) ==
-          AlpacaError::DriverException);
-    CHECK_FALSE(before_io_ran);
-    CHECK_FALSE(read_ran);
-    CHECK(free_elsewhere(ninth.io));
-
     // One slot freed: the ninth gate locks.
     held.back().unlock();
     StateLock lock(ninth.gate, StateLock::Mode::State);
     CHECK(ninth.gate.holds_state());
 }
 
-TEST_CASE("LockGate - an exchange or a single read that throws gives the locks back as it found them",
-          "[lock_gate][unit]") {
+TEST_CASE("LockGate - an exchange that throws gives the locks back as it found them", "[lock_gate][unit]") {
     Driver driver;
 
     // exchange() under a command's locks: the state lock is dropped for the call and back after the throw.
@@ -133,47 +123,6 @@ TEST_CASE("LockGate - an exchange or a single read that throws gives the locks b
     }
     CHECK_FALSE(driver.gate.holds_state());
     CHECK(free_elsewhere(driver.state));
-    CHECK(free_elsewhere(driver.io));
-
-    // single_read() from a getter: the state lock is back and the operation lock released after the throw.
-    {
-        StateLock lock(driver.gate, StateLock::Mode::State);
-        CHECK_THROWS_AS(driver.gate.single_read([] {}, [] { throw std::runtime_error("wire failed"); }),
-                        std::runtime_error);
-        CHECK(driver.gate.holds_state());
-        CHECK_FALSE(driver.gate.holds_io());
-        CHECK_FALSE(free_elsewhere(driver.state));
-        CHECK(free_elsewhere(driver.io));
-    }
-    CHECK(free_elsewhere(driver.state));
-}
-
-TEST_CASE("LockGate - a single read holds the operation lock as its own for the call", "[lock_gate][unit]") {
-    Driver driver;
-    StateLock lock(driver.gate, StateLock::Mode::State);
-
-    bool before_io_saw_no_lock = false;
-    bool read_saw_io = false;
-    bool nested_saw_io = false;
-    const int value = driver.gate.single_read(
-        [&] {
-            before_io_saw_no_lock = !driver.gate.holds_state() && !driver.gate.holds_io() &&
-                                    free_elsewhere(driver.state) && free_elsewhere(driver.io);
-        },
-        [&] {
-            read_saw_io = driver.gate.holds_io() && !driver.gate.holds_state() && !free_elsewhere(driver.io);
-            // A nested exchange sees the operation lock as held and calls straight through.
-            return driver.gate.exchange([&] {
-                nested_saw_io = driver.gate.holds_io();
-                return 42;
-            });
-        });
-    CHECK(value == 42);
-    CHECK(before_io_saw_no_lock);
-    CHECK(read_saw_io);
-    CHECK(nested_saw_io);
-    CHECK_FALSE(driver.gate.holds_io());
-    CHECK(driver.gate.holds_state());
     CHECK(free_elsewhere(driver.io));
 }
 
@@ -199,20 +148,5 @@ TEST_CASE("LockGate - the operation lock is taken before the state lock", "[lock
         io.unlock();
         command.join();
         CHECK(locked.load());
-    }
-
-    // A single read drops the state lock before it waits for the operation lock.
-    {
-        std::unique_lock<std::mutex> io(driver.io);
-        std::promise<void> waiting;
-        auto waiting_future = waiting.get_future();
-        std::thread getter([&] {
-            StateLock lock(driver.gate, StateLock::Mode::State);
-            driver.gate.single_read([&] { waiting.set_value(); }, [] {});
-        });
-        REQUIRE(waiting_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
-        CHECK(free_elsewhere(driver.state));
-        io.unlock();
-        getter.join();
     }
 }

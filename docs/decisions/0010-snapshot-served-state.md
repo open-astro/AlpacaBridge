@@ -44,6 +44,11 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 - The slew Tracking gate reads TheSkyX live, writes the result through, and falls back to the frame's value when that read fails. When the frame never knew Tracking, the gate treats it as off, where the Tracking getter throws.
 - Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies.
 
+#### OnStep telescope adoption (#1783)
+
+- One status poll per connection, 1 s start to start, fills `StateSnapshot<PolledFrame>`: the `:GU#` status, the `:GRa#`/`:GDe#` pair, and every second tick `:GA#`/`:GZ#` (and a site the connect could not read). The tick takes the operation lock for its exchanges, as a command does (decision 0016), and publishes under `mutex_` with it released. A `PulseGuide` adds one tick, in a slot of its own, 50 ms after the pulse's end (the 1 s ticks run on through the pulse), and `IsPulseGuiding` stays true until a frame sampled then is published (at most 2 s more), so a position read after the pulse is not one from mid-pulse. `kSnapshotMaxAge` is 3 s and stale is served, never refused.
+- Served from the frame: RightAscension, Declination, Altitude, Azimuth, Tracking, AtPark, AtHome, Slewing, SideOfPier (from the frame's RA), DeviceState (`TimeStamp` is `measured_at`). The three 2 s caches and the getters' single read under the operation lock are gone, `util::LockGate::single_read()` with them. Client commands write through; control paths (the slew and sync GOTO checks, Park and FindHome and their body, the synchronous slew's wait, AbortSlew's tracking decision, the MoveAxis re-send tick) keep their direct `:GU#` reads and write them through, a status equal to the frame's left unwritten so a re-reading loop does not drop every tick. The synchronous slew publishes a full measurement where it ends (a failed one counts as a failed tick). The tracking restore an ended GOTO owes is sent by the tick that reads the end.
+- Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies; three failed ticks latch the fault, a tick ends at its first failed exchange, and the poll's failed ticks turn a fault standing past the bound into a lost link (a getter only throws the fault).
 
 ## Rules
 
@@ -92,7 +97,7 @@ Symbol: `StateSnapshot`
 | QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
 | Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
 | Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320, #1643 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
-| OnStep telescope | `StateSnapshot` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | — | |
+| OnStep telescope | `StateSnapshot` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1783 | 1 s; OnStep telescope adoption above |
 | iOptron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
 | ZWO telescope | `StateSnapshot` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1531 | 250 ms after each poll; 5 s freshness threshold; `device_state_age()` uses `mandatory_at` from accepted GU plus a complete RA/Dec pair, independent of later GU-only or optional publication; before the first mandatory pair it uses the partial frame's `measured_at`; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |
 
