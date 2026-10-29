@@ -69,7 +69,6 @@ vendor-agnostic; do them in the driver from the start.
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in the
   ZWO telescope (`goto_thread_`, `pulse_thread_`, `disconnect_thread_`),
-  the QHYCFW3 move thread,
   the exposure workers of cameras not yet on `util::CaptureSession` (Player One is; decision 0020),
   the QHY cooler-off and temperature workers and the GPIO
   soft-PWM workers; the list is a sample, not a roster.
@@ -146,7 +145,7 @@ vendor-agnostic; do them in the driver from the start.
   exactly the snapshot-then-call gap. Use a `with_handle([&](auto h){ return
   sdk.foo(h); })`-style helper that holds the I/O lock across the SDK call.
   Reviewers will flag these one method at a time; convert the whole class at once.
-  **Camera exception:** the ToupTek camera driver (`with_handle`) and the ZWO,
+  **Camera exception:** the ToupTek and gphoto camera drivers (`with_handle`) and the ZWO,
   Player One and SVBONY cameras (`with_camera`, issue #116) hold `mutex_` across
   short SDK calls, and that stays allowed until a measurement shows a getter
   stall; a camera converts to the rule above only then. The exposure body (a

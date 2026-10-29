@@ -76,5 +76,5 @@ Symbol: `TaskClock`
 ## Links
 
 - Upstream design review [#584](https://github.com/open-astro/AlpacaBridge/issues/584); issues [#535](https://github.com/open-astro/AlpacaBridge/issues/535), [#547](https://github.com/open-astro/AlpacaBridge/issues/547), [#608](https://github.com/open-astro/AlpacaBridge/issues/608), [#1463](https://github.com/open-astro/AlpacaBridge/issues/1463).
-- Current waits this replaces: `task_wait_for` in `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`, `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` and `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`.
+- Waits this replaced (`task_wait_for`, now removed) in `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`, `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` and `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`.
 - Related: [decision 0001](0001-skywatcher-pointing-clock.md) (pointing time); module overview in [architecture](../architecture.md#modules).

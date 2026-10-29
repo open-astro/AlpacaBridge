@@ -16,7 +16,7 @@ Decided 2026-10-21 on issue #1470 (item 5): allow Connect without a site, and re
 
 - **Connect does not need a site.** `Connected=true` and Platform 7 `Connect` succeed without one and send the mount no command whose meaning depends on the hemisphere.
 - **The site getters throw until set.** `SiteLatitude` and `SiteLongitude` throw `InvalidOperation` until they are set by the device config or a client write. `SiteElevation` throws `InvalidOperation` until elevation itself is set; it does not wait for the coordinates.
-- **Members that depend on the hemisphere or longitude throw until both are set.** They throw `InvalidOperation`, naming the missing setting. The set covers every member whose answer or motion goes through `hemisphere_south_locked()` or uses the longitude: `RightAscension`, `Declination`, `SiderealTime`, the slew and sync members, `Tracking=true`, `MoveAxis`, `PulseGuide`, and `RightAscensionRate` and `DeclinationRate`. Members that do not depend on the site (`Connected`, capabilities, `AtPark`, `Slewing`, `AbortSlew`, `Tracking` reads) keep answering.
+- **Members that depend on the hemisphere or longitude throw until both are set.** They throw `InvalidOperation`, naming the missing setting. The set covers every member whose answer or motion goes through `hemisphere_south_locked()` or uses the longitude: `RightAscension`, `Declination`, `Altitude`, `Azimuth`, `SideOfPier`, `DestinationSideOfPier`, `SiderealTime`, the slew and sync members, `Tracking=true`, `MoveAxis`, `PulseGuide`, and `RightAscensionRate` and `DeclinationRate`. Members that do not depend on the site (`Connected`, capabilities, `AtPark`, `Slewing`, `AbortSlew`, `Tracking` reads) keep answering.
 - **`DeviceState` omits what throws**, as the base class already does, so a connected mount with no site reports a short list.
 - **Writing the second coordinate makes the mount usable** without a reconnect.
 - **`configuredevice` keeps requiring both coordinates.** This record changes the driver only; the web UI still asks for a site when a device is created.
@@ -27,7 +27,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 1. A Sky-Watcher Connect succeeds without a site and sends no hemisphere-dependent command. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("connects without a site and refuses what needs one").
 2. Every member whose result or motion depends on `hemisphere_south_locked()` or on the longitude throws `InvalidOperation` until both site coordinates are set; the site getters throw `InvalidOperation` until set. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("connects without a site and refuses what needs one", "one configured coordinate is not enough to point"), review of every `hemisphere_south_locked()` call site. <!-- allowed -->
-3. A new mount driver whose controller stores no site follows rules 1 and 2 instead of refusing Connect. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: review.
+3. A mount driver whose controller stores no site follows rules 1 and 2 instead of refusing Connect. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: review.
 
 ## Alternatives rejected
 
