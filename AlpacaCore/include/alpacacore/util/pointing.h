@@ -15,6 +15,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <string>
@@ -138,6 +139,18 @@ inline void validate_longitude(double degrees) {
     if (!std::isfinite(degrees) || degrees < -180.0 || degrees > 180.0) {
         throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees", AlpacaError::InvalidValue);
     }
+}
+
+/// Great-circle separation in arcseconds between two points given as longitude-like and latitude-like degrees
+/// (RA in degrees and Dec, or azimuth and altitude).
+inline double angular_separation_arcsec(double lon1_deg, double lat1_deg, double lon2_deg, double lat2_deg) {
+    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+    const double dlat = (lat2_deg - lat1_deg) * kDegToRad;
+    const double dlon = (lon2_deg - lon1_deg) * kDegToRad;
+    const double a = std::sin(dlat / 2) * std::sin(dlat / 2) + std::cos(lat1_deg * kDegToRad) *
+                                                                   std::cos(lat2_deg * kDegToRad) * std::sin(dlon / 2) *
+                                                                   std::sin(dlon / 2);
+    return 2.0 * std::asin(std::min(1.0, std::sqrt(a))) / kDegToRad * 3600.0;
 }
 
 /// Latitude first, then longitude.
