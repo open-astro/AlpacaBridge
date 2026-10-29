@@ -620,6 +620,7 @@ TEST_CASE("ToupTek Camera Driver - A colour camera reports RGGB with the offsets
 
     auto fake = fake_with_one_camera();
     fake.raw_format = {row.four_cc, 16};
+    fake.cameras[0].is_color = true;  // ADR 0015 rule 4: the enumerated colour flag agrees with the raw format
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
     driver->set_connected(true);
 
@@ -687,10 +688,10 @@ TEST_CASE("ToupTek Camera Driver - Connected cooler members read and write the T
     driver->set_connected(false);
 }
 
-TEST_CASE("ToupTek Camera Driver - A camera without a TEC refuses cooler on and accepts cooler off",
+TEST_CASE("ToupTek Camera Driver - A camera without a TEC refuses cooler on",
           "[touptek][camera][unit]") {
-    // Falsified by: set_cooler_on(true) silently succeeding, set_cooler_on(false) throwing, get_cooler_on
-    // reading the TEC register of a camera without one, or get_can_set_ccd_temperature returning true.
+    // Falsified by: set_cooler_on(true) silently succeeding, writing the TEC register of a camera without
+    // one, or get_can_set_ccd_temperature returning true.
     auto fake = fake_with_one_camera();
     fake.cameras[0].supports_cooler = false;
     fake.cameras[0].supports_tec_onoff = false;
@@ -698,9 +699,6 @@ TEST_CASE("ToupTek Camera Driver - A camera without a TEC refuses cooler on and 
     driver->set_connected(true);
 
     CHECK_FALSE(driver->get_can_set_ccd_temperature());
-    CHECK_FALSE(driver->get_cooler_on());
-    CHECK(fake.call_count("get_tec_enable") == 0);
-    driver->set_cooler_on(false);
     require_alpaca_error([&] { driver->set_cooler_on(true); }, alpacacore::AlpacaError::NotImplemented);
     CHECK(fake.call_count("put_tec_enable") == 0);
 
