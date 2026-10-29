@@ -56,9 +56,7 @@ struct GetterWaitRig {
     }
 
     // Holds the RA axis position reply (axis 0x10, command 0x01) half-sent.
-    void hold_ra_position_reply() {
-        mount.fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x01});
-    }
+    void hold_ra_position_reply() { mount.fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x01}); }
 
     // get_guide_rate and get_aperture_diameter take mutex_ and need no device access.
     // The bound stays under the 500 ms AUX timeout so a held read cannot release them.
