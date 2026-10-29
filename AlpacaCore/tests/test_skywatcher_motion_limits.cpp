@@ -250,8 +250,8 @@ TEST_CASE("SkyWatcher limits - a refused goto leaves a goto in flight running", 
     // Dec -60 peaks at about -10 deg altitude at this latitude, so it is
     // below the floor at any time of day.
     const double low_ra = ra;
-    require_alpaca_error([&] { pumped(clock, mount, [&] { driver->slew_to_coordinates(low_ra, -60.0); }); },
-                         alpacacore::AlpacaError::InvalidValue);
+    // Not pumped: the refusal is validation before any clock wait, and a pump jumps the goto in flight.
+    require_alpaca_error([&] { driver->slew_to_coordinates(low_ra, -60.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->slew_to_coordinates_async(low_ra, -60.0); },
                          alpacacore::AlpacaError::InvalidValue);
     CHECK(driver->get_slewing());
@@ -365,7 +365,18 @@ TEST_CASE("SkyWatcher limits - AbortSlew supersedes a blocking synchronous slew"
     REQUIRE(follow_until(
         clock, [&] { return mount.axis_in_goto(1) || mount.axis_in_goto(2); }, std::chrono::milliseconds(5000)));
 
-    pumped(clock, mount, [&] { driver->abort_slew(); });
+    // Followed, not pumped: a pump could jump the goto to its target before the abort lands.
+    std::atomic<int> abort_result{-1};
+    std::jthread aborter([&] {
+        try {
+            driver->abort_slew();
+            abort_result.store(0);
+        } catch (...) {
+            abort_result.store(-2);
+        }
+    });
+    REQUIRE(follow_until(clock, [&] { return abort_result.load() != -1; }, std::chrono::milliseconds(5000)));
+    CHECK(abort_result.load() == 0);
     REQUIRE(pump_until(clock, mount, [&] { return result.load() != -1; }, std::chrono::seconds(10)));
     sync_slew.join();
     CHECK(result.load() == alpacacore::AlpacaError::InvalidOperation);
@@ -435,7 +446,8 @@ TEST_CASE("SkyWatcher limits - an out-of-range goto leaves a slew in flight runn
 
     for (const auto& bad : {std::pair<double, double>{24.5, 10.0}, std::pair<double, double>{-1.0, 10.0},
                             std::pair<double, double>{ra, 95.0}, std::pair<double, double>{ra, -95.0}}) {
-        require_alpaca_error([&] { pumped(clock, mount, [&] { driver->slew_to_coordinates(bad.first, bad.second); }); },
+        // Not pumped: the refusal is validation before any clock wait, and a pump jumps the slew in flight.
+        require_alpaca_error([&] { driver->slew_to_coordinates(bad.first, bad.second); },
                              alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&] { driver->slew_to_coordinates_async(bad.first, bad.second); },
                              alpacacore::AlpacaError::InvalidValue);
