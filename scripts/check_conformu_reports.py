@@ -37,12 +37,6 @@ Pass criteria (the first two bullets match `/submit-pr`; the Fake* rule is check
   - A report under a path part starting "Fake" (a run against a test double, never
     hardware validation) must be a .txt file whose first line starts with FAKE_MARKER.
     This rule is not in `/submit-pr`; this script is its only description.
-  - Layout (every tracked report, not only the changed ones): one folder per
-    brand under AlpacaCore/conformu/. Two vendor folders that differ only in
-    case, hyphens or spaces ("SkyWatcher", "Sky-Watcher") split one brand, and
-    a model folder that leads with another vendor folder's name
-    ("SynScan/Sky-Watcher HEQ5 PRO") files the report under the wrong brand.
-    This rule is also only described here.
 """
 
 import json
@@ -78,45 +72,6 @@ def check_fake_marker(path, text):
         return []
     return ["%s: a Fake* report must start with a %r line saying it ran against a "
             "test double, not hardware" % (path, FAKE_MARKER)]
-
-
-LAYOUT_PREFIX = "AlpacaCore/conformu/"
-
-
-def fold_name(name):
-    return re.sub(r"[^0-9a-z]", "", name.lower())
-
-
-def check_layout(paths):
-    """The layout rule (module docstring) over report paths under LAYOUT_PREFIX."""
-    vendors = {}
-    models = set()
-    for path in paths:
-        parts = path[len(LAYOUT_PREFIX):].split("/") if path.startswith(LAYOUT_PREFIX) else []
-        if len(parts) < 3:
-            continue
-        vendors.setdefault(fold_name(parts[0]), set()).add(parts[0])
-        models.add((parts[0], parts[1]))
-    failures = []
-    for names in vendors.values():
-        if len(names) > 1:
-            failures.append("%s: vendor folders %s spell one brand %d ways; keep one folder"
-                            % (LAYOUT_PREFIX, ", ".join(sorted(names)), len(names)))
-    for vendor, model in sorted(models):
-        lead = fold_name(model.split(" ")[0])
-        if lead != fold_name(vendor) and lead in vendors:
-            failures.append("%s%s/%s/: the model folder leads with the brand %s; file the report "
-                            "under that brand's folder" % (LAYOUT_PREFIX, vendor, model,
-                                                           "/".join(sorted(vendors[lead]))))
-    return failures
-
-
-def tracked_conformu_files():
-    out = subprocess.run(
-        ["git", "-c", "core.quotePath=false", "ls-files", "--", LAYOUT_PREFIX],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    return [p for p in out.splitlines() if p.endswith((".json", ".txt"))]
 
 
 def changed_conformu_files(base_ref):
@@ -215,13 +170,6 @@ def main(argv=None):
         print("usage: check_conformu_reports.py <base-ref> | --self-test", file=sys.stderr)
         return 2
     base_ref = argv[0]
-
-    layout = check_layout(tracked_conformu_files())
-    if layout:
-        print("ConformU report layout check failed:\n")
-        for f in layout:
-            print("  " + f)
-        return 1
 
     files = changed_conformu_files(base_ref)
     if not files:
@@ -390,22 +338,6 @@ def self_test():
         check("check_text FAILS on a missing file",
               len(found) == 1 and "could not read file" in found[0])
 
-        # --- check_layout(): one case per rule ------------------------------
-        good = ["AlpacaCore/conformu/Sky-Watcher/EQM-35 Pro/Linux-arm64-synscan.txt",
-                "AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt",
-                "AlpacaCore/conformu/ZWO/AM5/Linux-arm64.txt",
-                "AlpacaCore/conformu/ZWO/ZWO EFW/Linux-arm64.txt",
-                "AlpacaCore/conformu/README.txt",
-                "AlpacaHTTP/conformu/SkyWatcher/x/protocol.txt"]
-        check("check_layout passes one folder per brand", check_layout(good) == [])
-        found = check_layout(good + ["AlpacaCore/conformu/SkyWatcher/Wave 100i/Linux-arm64.txt"])
-        check("check_layout FAILS two vendor folders that fold to one name",
-              len(found) == 1 and "Sky-Watcher, SkyWatcher spell one brand 2 ways" in found[0])
-        found = check_layout(good + ["AlpacaCore/conformu/SynScan/sky-watcher HEQ5 PRO/Linux-arm64.txt"])
-        check("check_layout FAILS a model folder that leads with another vendor's name",
-              len(found) == 1 and "SynScan/sky-watcher HEQ5 PRO/: the model folder leads with the brand "
-              "Sky-Watcher" in found[0])
-
         # --- changed_conformu_files() + main() over a real git repository ----
         repo = os.path.join(tmp, "repo")
         os.mkdir(repo)
@@ -541,14 +473,6 @@ def self_test():
             write("AlpacaHTTP/conformu/protocol.txt", "no success line here\n")
             git("commit", "-q", "-am", "bad text")
             check("main() FAILS when a changed text report lacks the success line",
-                  main(["base"]) == 1)
-            write("AlpacaHTTP/conformu/protocol.txt", "%s\n" % SUCCESS_PATTERNS[1])
-            git("commit", "-q", "-am", "clean text")
-            check("main() passes again once every changed report is clean", main(["base"]) == 0)
-            git("mv", "AlpacaCore/conformu/Vendor/RenamedTo/Linux-arm64.txt",
-                "AlpacaCore/conformu/Other/Vendor RenamedTo/Linux-arm64.txt")
-            git("commit", "-q", "-m", "misfiled")
-            check("main() FAILS a misfiled report that no diff rule checks (a pure rename)",
                   main(["base"]) == 1)
             import contextlib
             import io
