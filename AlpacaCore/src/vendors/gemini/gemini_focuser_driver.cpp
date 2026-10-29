@@ -405,9 +405,7 @@ private:
     StateFrame probe() {
         StateFrame frame;
         // A disconnect waits for one exchange, not three: once it has started, the partial frame is
-        // returned (published, then dropped by the state_.reset() after the join). It starts from the
-        // last frame so a getter that overlaps the disconnect keeps the old moving and temperature.
-        if (const auto last = state_.read()) frame = last->value;
+        // returned (published, then dropped by the state_.reset() after the join).
         frame.position = protocol_.get_position();
         if (poll_cancelled_.load()) return frame;
         frame.moving = protocol_.is_moving();
