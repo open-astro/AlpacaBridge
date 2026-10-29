@@ -360,7 +360,9 @@ public:
         // readout_mutex_ and transition_mutex_ (decision 0016 items 4 and 6): any
         // in-flight get/set_readout_mode / set_gain / set_offset -- which run
         // under readout_mutex_ with a handle snapshot -- has completed before
-        // Toupcam_Close, and a getter never waits for the close. The
+        // Toupcam_Close. A getter does not wait for the SDK close itself, but can
+        // still wait behind a concurrent ReadoutMode read, which holds mutex_ while it
+        // waits on readout_mutex_ (decision 0016 item 6). The
         // exposure_active_ store also belongs under readout_mutex_ (the documented
         // invariant that the flag only changes under that lock).
         std::unique_lock<std::mutex> state_lock(mutex_);

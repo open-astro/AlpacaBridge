@@ -1347,10 +1347,20 @@ TEST_CASE("ToupTek camera - a disconnect sent during a held SDK open leaves the 
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
     driver->connect();
     REQUIRE(latch.wait_entered());
-    driver->disconnect();
-    latch.release();
+    // The synchronous set_connected(false) reaches the record gate in the driver; the async
+    // disconnect() records inside AsyncConnectable and would never reach it.
+    std::promise<void> done;
+    auto future = done.get_future();
+    std::thread disconnector([&] {
+        driver->set_connected(false);
+        done.set_value();
+    });
+    const bool returned = future.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    latch.release();  // always release, so a failing run cannot hang the join
+    disconnector.join();
 
     REQUIRE(eventually([&] { return !driver->get_connecting(); }, std::chrono::seconds(5)));
+    CHECK(returned);
     CHECK_FALSE(driver->get_connected());
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
