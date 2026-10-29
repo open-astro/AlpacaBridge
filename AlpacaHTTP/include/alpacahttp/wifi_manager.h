@@ -76,6 +76,9 @@ public:
     virtual WifiDeviceRoles device_roles() = 0;
     virtual void add_connection(const WifiSettings& settings, bool pin_shared_ip4) = 0;
     virtual void update_connection(const std::string& path, const WifiSettings& settings, bool pin_shared_ip4) = 0;
+    // Read-modify-write: set each given key on the stored profile and keep every
+    // other section and key NetworkManager holds. Update() alone replaces them all.
+    virtual void patch_connection(const std::string& path, const WifiSettings& overrides) = 0;
 
 protected:
     ~WifiProfileBackend() = default;
