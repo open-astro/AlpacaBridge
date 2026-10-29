@@ -51,7 +51,9 @@ public:
     TestConnectable() : AsyncConnectable("Test") {}
     ~TestConnectable() override { shutdown_connection(); }
 
-    bool get_connected() const override { return connected_.load(); }
+    // A lost link reads false while the driver still holds its session, as
+    // the OnStep and Sky-Watcher drivers do (decision 0009).
+    bool get_connected() const override { return connected_.load() && !link_lost_.load(); }
     bool get_connecting() const { return connection_task_active(); }
 
     void set_connected(bool connect) override {
@@ -65,6 +67,7 @@ public:
                 return;
             }
             connected_.store(false);  // cleared FIRST, before the "slow" teardown
+            link_lost_.store(false);
             std::this_thread::sleep_for(op_delay_);
             if (fail_disconnect_.load()) {
                 // Mirrors a throwing SDK close mid-teardown: connected_ is
@@ -93,6 +96,7 @@ public:
             throw std::runtime_error("site latitude and longitude must be set before connecting");
         }
         connected_.store(true);  // set LAST, after the "slow" connect work
+        link_lost_.store(lose_link_on_connect_.load());
         ++connect_completions_;
     }
 
@@ -108,6 +112,7 @@ public:
     std::chrono::milliseconds op_delay_{50};
     std::atomic<bool> fail_disconnect_{false};
     std::atomic<bool> fail_connect_{false};
+    std::atomic<bool> lose_link_on_connect_{false};  ///< the link is lost as the connect ends
     std::atomic<int> connect_completions_{0};
     std::atomic<int> disconnect_completions_{0};
     std::atomic<int> tail_connects_{0};  ///< connects run by a task tail after a disconnect
@@ -117,6 +122,7 @@ private:
     static inline thread_local bool in_disconnect_task = false;
     std::mutex mutex_;
     std::atomic<bool> connected_{false};
+    std::atomic<bool> link_lost_{false};
 };
 
 void wait_until_idle(TestConnectable& d, std::chrono::milliseconds budget = 2s) {
@@ -196,6 +202,25 @@ TEST_CASE("AsyncConnectable - disconnect racing an in-flight connect is never dr
     // The device must end up disconnected: the deferred disconnect the task
     // tail runs after a no-op-looking connect completes.
     CHECK_FALSE(d.get_connected());
+}
+
+TEST_CASE("AsyncConnectable - a disconnect queued against a connect reaches a driver whose link was lost",
+          "[async_connectable][unit]") {
+    // Issue #1289 item 6: the link is lost while the connect runs, so
+    // Connected reads false when the task tail looks. The queued Disconnect
+    // must still reach set_connected(false), or the lost session is never
+    // reset.
+    TestConnectable d;
+    d.op_delay_ = 100ms;
+    d.lose_link_on_connect_.store(true);
+    d.connect();
+    std::this_thread::sleep_for(10ms);  // connect is now in flight
+    d.disconnect();                     // queued against it
+
+    wait_until_idle(d);
+    CHECK(d.connect_completions_.load() == 1);
+    CHECK_FALSE(d.get_connected());
+    CHECK(d.disconnect_completions_.load() == 1);  // the teardown ran
 }
 
 TEST_CASE("AsyncConnectable - disconnect/connect/disconnect chain lands disconnected", "[async_connectable][unit]") {
