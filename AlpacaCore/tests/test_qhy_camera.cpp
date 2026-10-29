@@ -3539,3 +3539,82 @@ TEST_CASE("FakeQHYSDK via LockedQHYSDK - SDK version hook does not wait on an in
 
     connector.join();
 }
+
+// ── Connected members over the SDK fake ─────────────────────────────────────
+
+TEST_CASE("QHY Camera Driver - Connected capability members report the fake's mono camera", "[qhy][camera][unit]") {
+    // Falsified by: get_max_adu returning 255, get_sensor_type returning RGGB, get_image_array_variant
+    // returning "Int16", get_exposure_resolution returning 0.001, or get_can_fast_readout returning true.
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_max_adu() == 65535);
+    CHECK(driver->get_sensor_type() == alpacacore::SensorType::Monochrome);
+    CHECK(driver->get_image_array_variant() == "Int32");
+    CHECK(driver->get_exposure_resolution() == 0.000001);
+    CHECK_FALSE(driver->get_can_fast_readout());
+    CHECK_FALSE(driver->get_can_get_cooler_power());
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - Connected members the driver does not implement answer 0x400", "[qhy][camera][unit]") {
+    // Falsified by: any of these getters returning a value, or throwing another code (a mono camera has no
+    // Bayer offsets either).
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+
+    const int not_implemented = alpacacore::AlpacaError::PropertyNotImplemented;
+    require_alpaca_error([&] { (void)driver->get_fast_readout(); }, not_implemented);
+    require_alpaca_error([&] { driver->set_fast_readout(true); }, not_implemented);
+    require_alpaca_error([&] { (void)driver->get_gains(); }, not_implemented);
+    require_alpaca_error([&] { (void)driver->get_offsets(); }, not_implemented);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, not_implemented);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, not_implemented);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - A colour camera reports RGGB with the offsets its Bayer pattern implies",
+          "[qhy][camera][unit]") {
+    // Falsified by: get_sensor_type returning Monochrome for a colour camera, or swapping the X and Y
+    // rows of the offset table (GBRG and GRBG then trade places).
+    struct Row {
+        uint32_t pattern;
+        int offset_x;
+        int offset_y;
+    };
+    // R position from (0,0): GBRG -> (0,1), GRBG -> (1,0), BGGR -> (1,1), RGGB -> (0,0).
+    const Row row = GENERATE(Row{1, 0, 1}, Row{2, 1, 0}, Row{3, 1, 1}, Row{4, 0, 0});
+    CAPTURE(row.pattern);
+
+    auto fake = make_fake();
+    fake.cameras[0].is_color = true;
+    fake.cameras[0].bayer_pattern = row.pattern;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_sensor_type() == alpacacore::SensorType::RGGB);
+    CHECK(driver->get_bayer_offset_x() == row.offset_x);
+    CHECK(driver->get_bayer_offset_y() == row.offset_y);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - Capability members throw NotConnected while disconnected", "[qhy][camera][unit]") {
+    // Falsified by: dropping ensure_connected() from get_max_adu, get_sensor_type or either Bayer offset.
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    const int not_connected = alpacacore::AlpacaError::NotConnected;
+    require_alpaca_error([&] { (void)driver->get_max_adu(); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_sensor_type(); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, not_connected);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, not_connected);
+}
