@@ -373,7 +373,9 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
   (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`). The ZWO EAF follows it since #1500 for its
   SDK: `NotConnected` from a per-device call (`EAF_ERROR_REMOVED`, `CLOSED`, BLE disconnect, `INVALID_ID`) drops `Connected`
-  at once, and the next Connect rebinds by serial ([ZWO](zwo.instructions.md)). The #237 drivers still treat a
+  at once, and the next Connect rebinds by serial ([ZWO](zwo.instructions.md)). The Astroasis focuser follows it since #1756
+  (`AstroasisProtocolWrapper::link_alive()`, a lock-free latch set by a HID write or read error on the next transaction, which is the
+  state poll; `test_astroasis_focuser.cpp`, `a removed transport drops Connected at once`). The #237 drivers still treat a
   removed node as a fault; that has not been changed. Tests: `sever_link()` on
   `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
 

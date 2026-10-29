@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <mutex>
@@ -123,10 +124,9 @@ public:
     /// At connect and disconnect: drop the frame, the fault and the loss latch.
     void reset() {
         snapshot_.reset();
-        {
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            health_.reset();
-        }
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        health_.reset();
+        ++epoch_;  // after the snapshot reset: a verdict read from the old frame can no longer latch
         lost_.store(false);
         lost_notified_.store(false);
     }
@@ -143,9 +143,10 @@ public:
     /// latched; otherwise the reading, stale or not.
     Reading served() const {
         throw_if_lost();
+        const auto epoch = current_epoch();
         const auto reading = snapshot_.read();
         if (reading.has_value() && clock_.now() - reading->measured_at >= kLinkStalenessBound) {
-            lost_.store(true);
+            latch_lost(epoch);
             throw_if_lost();
         }
         {
@@ -193,6 +194,18 @@ public:
     void poll_now_for_testing() { cycle(); }
 
 private:
+    std::uint64_t current_epoch() const {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        return epoch_;
+    }
+
+    // Sets the loss latch for the connection `epoch` was read in; a reset() since then
+    // made the verdict stale, and the new connection stays up. True when this call latched.
+    bool latch_lost(std::uint64_t epoch) const {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        return epoch == epoch_ && !lost_.exchange(true);
+    }
+
     void throw_if_lost() const {
         if (lost_.load()) {
             throw AlpacaException(config_.log_tag + " link lost; set Connected false then true to reconnect",
@@ -222,6 +235,7 @@ private:
     }
 
     void note_failure() {
+        const auto epoch = current_epoch();
         bool lost = false;
         {
             std::lock_guard<std::mutex> lock(health_mutex_);
@@ -236,7 +250,7 @@ private:
             const auto reading = snapshot_.read();
             lost = reading.has_value() && clock_.now() - reading->measured_at >= kLinkStalenessBound;
         }
-        if (lost && !lost_.exchange(true)) {
+        if (lost && latch_lost(epoch)) {
             ALPACA_LOG_ERROR(
                 config_.log_tag,
                 "Link lost: no answer to the state poll for " +
@@ -285,6 +299,8 @@ private:
     // Narrow: held for a counter or a string, never across an exchange.
     mutable std::mutex health_mutex_;
     PolledLinkHealth health_;
+    // Bumped by reset() under health_mutex_: a loss verdict latches only in the connection it read.
+    std::uint64_t epoch_ = 0;
     mutable std::atomic<bool> lost_{false};
     std::atomic<bool> lost_notified_{false};
     std::atomic<bool> paused_{false};

@@ -781,6 +781,7 @@ elif [ "${RUN_SANITIZERS:-1}" = "1" ]; then
   if CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
      LDFLAGS="-fsanitize=address,undefined" \
      ASAN_OPTIONS="abort_on_error=1:detect_leaks=1" \
+     LSAN_OPTIONS="suppressions=$(pwd)/scripts/lsan_suppressions.txt" \
      UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" \
      ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh; then
     record PASS "sanitizers"
