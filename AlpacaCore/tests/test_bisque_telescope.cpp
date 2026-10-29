@@ -108,6 +108,33 @@ struct ClockedBisque {
 
 } // namespace
 
+TEST_CASE("Bisque UTCDate - disconnected reads and writes are refused", "[bisque][telescope][utcdate]") {
+    alpacacore::test::FakeBisqueMount mount;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()), clock);
+    const auto utc = std::chrono::system_clock::time_point(std::chrono::seconds(946684800));
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_utc_date(utc); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(mount.transactions == 0);
+}
+
+TEST_CASE("Bisque UTCDate - writes are explicitly unsupported without a transaction", "[bisque][telescope][utcdate]") {
+    ClockedBisque rig;
+    SECTION("after a successful seed") {}
+    SECTION("after a failed seed") {
+        rig.driver->set_connected(false);
+        rig.mount.mute = true;
+        REQUIRE_NOTHROW(rig.driver->set_connected(true));
+        REQUIRE(rig.driver->get_connected());
+    }
+    const int before = rig.mount.transactions;
+    require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::time_point{}); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(rig.mount.transactions == before);
+}
+
 TEST_CASE("Bisque Telescope Driver - Defaults", "[bisque][telescope][unit]") {
     alpacacore::vendor::bisque::ConnectionInfo conn;
     conn.host = "localhost";

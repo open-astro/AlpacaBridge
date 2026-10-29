@@ -25,6 +25,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -205,6 +206,29 @@ public:
             throw AlpacaException("Failed to parse Az/Alt from TheSkyX: " + value);
         }
         return altaz;
+    }
+
+    std::chrono::system_clock::time_point get_utc_date() {
+        // Paramount's time source is the TheSkyX computer in UseComputerClock mode (vendor notes).
+        const auto value = send_command(
+            "sky6StarChart.DocumentProperty(5);"
+            "Out = (sky6StarChart.DocPropOut != 0 ? String(new Date().getTime()) : 'unavailable') + '#';",
+            0);
+        if (value == "unavailable") {
+            throw AlpacaException("UTCDate is unavailable: enable Use Computer Clock in TheSkyX",
+                                  AlpacaError::InvalidOperation);
+        }
+        int64_t millis = 0;
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), millis);
+        using clock = std::chrono::system_clock;
+        using std::chrono::duration_cast;
+        using std::chrono::milliseconds;
+        if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+            millis < duration_cast<milliseconds>(clock::duration::min()).count() ||
+            millis > duration_cast<milliseconds>(clock::duration::max()).count()) {
+            throw AlpacaException("Invalid UTC milliseconds from TheSkyX: " + value, AlpacaError::DriverException);
+        }
+        return clock::time_point(duration_cast<clock::duration>(milliseconds(millis)));
     }
 
     void slew_to_ra_dec(double ra_hours, double dec_degrees) {
@@ -515,6 +539,7 @@ bool BisqueProtocolWrapper::is_connected() const { return pimpl_->is_connected()
 bool BisqueProtocolWrapper::handshake() { return pimpl_->handshake(); }
 Position BisqueProtocolWrapper::get_ra_dec() { return pimpl_->get_ra_dec(); }
 AltAz BisqueProtocolWrapper::get_alt_az() { return pimpl_->get_alt_az(); }
+std::chrono::system_clock::time_point BisqueProtocolWrapper::get_utc_date() { return pimpl_->get_utc_date(); }
 void BisqueProtocolWrapper::slew_to_ra_dec(double ra, double dec) { pimpl_->slew_to_ra_dec(ra, dec); }
 bool BisqueProtocolWrapper::is_slew_complete() { return pimpl_->is_slew_complete(); }
 void BisqueProtocolWrapper::sync_to_coordinates(double ra, double dec) { pimpl_->sync_to_coordinates(ra, dec); }

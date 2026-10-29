@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -70,6 +71,10 @@ public:
     std::atomic<int> slew_polls{0};
     std::atomic<int> position_reads{0};
     std::atomic<int> altaz_reads{0};
+    // Models the remote computer clock, not chart JD; this fake does not execute JavaScript.
+    std::atomic<int64_t> utc_millis{946684800123};
+    std::atomic<bool> use_computer_clock{true};
+    std::atomic<int> utc_reads{0};
     std::atomic<int> transactions{0};
     std::atomic<int> latency_ms{0};
     std::atomic<int> find_home_ms{0};
@@ -78,6 +83,7 @@ public:
     std::atomic<int> is_parked_ms{0};
     std::atomic<int> slew_complete_ms{0};
     std::atomic<bool> mute{false};
+    std::atomic<bool> reject_connection{false};
     std::atomic<bool> pier_west{false};
     std::atomic<double> ra_hours{5.5};
     std::atomic<double> dec_degrees{20.0};
@@ -94,9 +100,14 @@ private:
 
     std::string answer(const std::string& command) {
         ++transactions;
-        if (has(command, "ConnectAndDoNotUnpark")) return "1#";
+        if (has(command, "ConnectAndDoNotUnpark")) return reject_connection ? "0#" : "1#";
         if (mute) return "";
         if (latency_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms.load()));
+        if (has(command, "sky6StarChart.DocumentProperty(5)") && has(command, "new Date().getTime()")) {
+            ++utc_reads;
+            return "|No error. Error = 0." +
+                   (use_computer_clock ? std::to_string(utc_millis.load()) : std::string("unavailable")) + "#";
+        }
         if (has(command, "FindHome")) {
             if (find_home_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(find_home_ms.load()));
             return "|No error. Error = 0.OK#";

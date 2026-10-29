@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <ctime>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -99,6 +100,183 @@ using alpacacore::test::timed;
 
 }  // namespace
 
+TEST_CASE("Bisque UTCDate - remote clock is seeded and advances without getter I/O",
+          "[bisque][telescope][snapshot][utcdate]") {
+    Rig rig;
+    const auto remote = std::chrono::system_clock::time_point(milliseconds(946684800123));
+    REQUIRE(rig.mount.utc_reads == 1);
+    CHECK(rig.driver->get_utc_date() == remote);
+    const int before = rig.mount.transactions;
+    rig.clock.advance(milliseconds(5500));
+    CHECK(rig.driver->get_utc_date() == remote + milliseconds(5500));
+    CHECK(rig.mount.transactions == before);
+    CHECK(has_entry(*rig.driver, "UTCDate"));
+
+    rig.mount.utc_millis = 978307199999;  // Remote clock step to 2000-12-31 23:59:59.999 UTC.
+    REQUIRE(rig.poll());
+    rig.clock.advance(milliseconds(2));
+    CHECK(rig.driver->get_utc_date() == std::chrono::system_clock::time_point(milliseconds(978307200001)));
+}
+
+TEST_CASE("Bisque UTCDate - unavailable mode clears time across polls and reconnects",
+          "[bisque][telescope][snapshot][utcdate]") {
+    using alpacacore::test::require_alpaca_error;
+    Rig rig;
+    rig.mount.use_computer_clock = false;
+    REQUIRE(rig.poll());
+    const int before = rig.mount.transactions;
+    require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK_FALSE(has_entry(*rig.driver, "UTCDate"));
+    CHECK(rig.driver->get_right_ascension() == 5.5);
+    CHECK(rig.driver->get_tracking());
+    CHECK(rig.mount.transactions == before);
+
+    rig.driver->set_connected(false);
+    require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->set_utc_date({}); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    rig.mount.use_computer_clock = true;
+    rig.mount.utc_millis = 978307200456;
+    REQUIRE(rig.poll());
+    CHECK(rig.driver->get_utc_date() == std::chrono::system_clock::time_point(milliseconds(978307200456)));
+    rig.driver->set_connected(false);
+    rig.mount.reject_connection = true;
+    CHECK_THROWS_AS(rig.driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
+    rig.mount.reject_connection = false;
+    rig.mount.use_computer_clock = false;
+    rig.driver->set_connected(true);
+    require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("Bisque UTCDate - bad remote replies retain errors and a good poll recovers",
+          "[bisque][telescope][snapshot][utcdate]") {
+    using alpacacore::test::require_alpaca_error;
+    alpacacore::test::FakeBisqueMount mount;
+    FakeTaskClock clock;
+    const std::string bad[] = {"",      "OK",     "946684800123junk",    "NaN",           "Infinity",
+                               "1.5",   "1e12",   "9223372036854775808", "9223372036855", "-9223372036855",
+                               "error", "timeout"};
+    std::atomic<int> reply_index{-1};
+    alpacacore::test::FakeMountServer server([&](const std::string& command) {
+        const auto normal = mount.responder()(command);
+        const int index = reply_index;
+        if (command.find("new Date().getTime()") != std::string::npos && index >= 0) {
+            if (bad[index] == "error") return std::string("|Time query failed. Error = 1.#");
+            if (bad[index] == "timeout") return std::string{};
+            return "|No error. Error = 0." + bad[index] + "#";
+        }
+        return normal;
+    });
+    REQUIRE(server.ok());
+    auto driver = bq::create_bisque_telescope(0, loopback(server.port()), clock);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    bq::set_status_poll_paused_for_testing(*driver, true);
+    for (int i = 0; i < static_cast<int>(std::size(bad)); ++i) {
+        CAPTURE(bad[i]);
+        driver->set_connected(false);
+        reply_index = i;
+        REQUIRE_NOTHROW(driver->set_connected(true));
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::DriverException);
+        CHECK(driver->get_connected());
+        CHECK(driver->get_right_ascension() == 5.5);
+        CHECK_FALSE(has_entry(*driver, "UTCDate"));
+        reply_index = -1;
+        REQUIRE(bq::poll_status_now_for_testing(*driver));
+        const auto anchor = std::chrono::system_clock::time_point(milliseconds(mount.utc_millis));
+        CHECK(driver->get_utc_date() == anchor);
+        clock.advance(milliseconds(1500));
+        reply_index = i;
+        REQUIRE(bq::poll_status_now_for_testing(*driver));
+        CHECK(driver->get_utc_date() == anchor + milliseconds(1500));
+        CHECK(has_entry(*driver, "UTCDate"));
+        reply_index = -1;
+        REQUIRE(bq::poll_status_now_for_testing(*driver));
+        CHECK(driver->get_utc_date() == anchor);
+    }
+}
+
+TEST_CASE("Bisque UTCDate - elapsed time cannot overflow a remote timestamp at the clock limit",
+          "[bisque][telescope][snapshot][utcdate]") {
+    Rig rig;
+    rig.mount.utc_millis = std::chrono::duration_cast<milliseconds>(std::chrono::system_clock::duration::max()).count();
+    REQUIRE(rig.poll());
+    CHECK_NOTHROW(rig.driver->get_utc_date());
+    rig.clock.advance(milliseconds(1));
+    alpacacore::test::require_alpaca_error([&] { (void)rig.driver->get_utc_date(); },
+                                           alpacacore::AlpacaError::DriverException);
+}
+
+TEST_CASE("Bisque UTCDate - elapsed time starts at the time reply before remaining telemetry",
+          "[bisque][telescope][snapshot][utcdate]") {
+    alpacacore::test::FakeBisqueMount mount;
+    FakeTaskClock clock;
+    alpacacore::test::FakeMountServer server([&](const std::string& command) {
+        if (command.find("GetAzAlt") != std::string::npos) clock.advance(seconds(3));
+        return mount.responder()(command);
+    });
+    REQUIRE(server.ok());
+    auto driver = bq::create_bisque_telescope(0, loopback(server.port()), clock);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    bq::set_status_poll_paused_for_testing(*driver, true);
+    CHECK(driver->get_utc_date() == std::chrono::system_clock::time_point(milliseconds(mount.utc_millis)) + seconds(3));
+}
+
+TEST_CASE("Bisque UTCDate - held time reply cannot block getters or overwrite a newer transition",
+          "[bisque][telescope][snapshot][utcdate]") {
+    using alpacacore::test::require_alpaca_error;
+    alpacacore::test::FakeBisqueMount mount;
+    FakeTaskClock clock;
+    std::atomic<bool> hold{false};
+    std::promise<void> entered, release;
+    auto entered_future = entered.get_future();
+    auto released = release.get_future().share();
+    alpacacore::test::FakeMountServer server([&](const std::string& command) {
+        const auto reply = mount.responder()(command);
+        if (command.find("new Date().getTime()") != std::string::npos && hold.exchange(false)) {
+            entered.set_value();
+            released.wait_for(seconds(3));  // Bound teardown even if an assertion fails.
+        }
+        return reply;
+    });
+    REQUIRE(server.ok());
+    auto driver = bq::create_bisque_telescope(0, loopback(server.port(), 5000), clock);
+    driver->set_connected(true);
+    bq::set_status_poll_paused_for_testing(*driver, true);
+    const auto original = driver->get_utc_date();
+    driver->slew_to_coordinates_async(6.0, 10.0);
+    mount.utc_millis = 978307200456;
+    hold = true;
+    auto poll = std::async(std::launch::async, [&] { return bq::poll_status_now_for_testing(*driver); });
+    REQUIRE(entered_future.wait_for(seconds(2)) == std::future_status::ready);
+    CHECK(timed([&] { CHECK(driver->get_utc_date() == original); }) < milliseconds(500));
+    SECTION("abort invalidates the in-flight sample") {
+        auto abort = std::async(std::launch::async, [&] { driver->abort_slew(); });
+        const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+        while (driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        CHECK_FALSE(driver->get_slewing());
+        release.set_value();
+        poll.get();
+        abort.get();
+        CHECK(driver->get_utc_date() == original);
+        return;
+    }
+    SECTION("disconnect discards the sample before an unavailable reconnect") {
+        auto disconnect = std::async(std::launch::async, [&] { driver->set_connected(false); });
+        const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+        while (driver->get_connected() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        CHECK_FALSE(driver->get_connected());
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
+        release.set_value();
+        poll.get();
+        disconnect.get();
+        mount.use_computer_clock = false;
+        driver->set_connected(true);
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    }
+}
+
 TEST_CASE("Bisque snapshot - getters and DeviceState make no TheSkyX transaction at 100 ms per transaction",
           "[bisque][telescope][snapshot]") {
     Rig rig;
@@ -116,6 +294,7 @@ TEST_CASE("Bisque snapshot - getters and DeviceState make no TheSkyX transaction
         {"AtPark", [&] { (void)rig.driver->get_at_park(); }},
         {"AtHome", [&] { (void)rig.driver->get_at_home(); }},
         {"IsPulseGuiding", [&] { (void)rig.driver->get_is_pulse_guiding(); }},
+        {"UTCDate", [&] { (void)rig.driver->get_utc_date(); }},
         {"DeviceState", [&] { (void)rig.driver->get_device_state(); }},
     };
     for (const auto& [name, read] : reads) {
@@ -237,6 +416,10 @@ TEST_CASE("Bisque snapshot - past the staleness bound DeviceState is empty with 
     for (int i = 0; i < 3; ++i) CHECK(rig.poll());
     CHECK_FALSE(rig.driver->get_link_fault().empty());
     CHECK(rig.driver->get_connected());  // a young fault keeps Connected
+    alpacacore::test::require_alpaca_error([&] { (void)rig.driver->get_utc_date(); },
+                                           alpacacore::AlpacaError::DriverException);
+    alpacacore::test::require_alpaca_error([&] { rig.driver->set_utc_date({}); },
+                                           alpacacore::AlpacaError::DriverException);
     try {
         (void)rig.driver->get_right_ascension();
         FAIL("a faulted link must refuse the read");
@@ -248,6 +431,8 @@ TEST_CASE("Bisque snapshot - past the staleness bound DeviceState is empty with 
     rig.clock.advance(alpacacore::util::kLinkStalenessBound + seconds(1));
     CHECK_FALSE(rig.poll());  // the poll body ends: the link is lost
     CHECK_FALSE(rig.driver->get_connected());
+    alpacacore::test::require_alpaca_error([&] { (void)rig.driver->get_utc_date(); },
+                                           alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(
         rig.driver->get_link_fault().empty());  // decision 0009 point 5: the text stays until Connect/Disconnect
     CHECK(rig.driver->get_device_state().empty());
@@ -266,6 +451,7 @@ TEST_CASE("Bisque snapshot - past the staleness bound DeviceState is empty with 
     CHECK(rig.driver->get_right_ascension() == 5.5);
     CHECK(rig.driver->get_link_fault().empty());
     bq::set_status_poll_paused_for_testing(*rig.driver, true);
+    CHECK(rig.driver->get_utc_date() == std::chrono::system_clock::time_point(milliseconds(rig.mount.utc_millis)));
 
     // The async route relinks too: it is not the idempotent no-op either.
     rig.mount.mute = true;
