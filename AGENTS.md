@@ -63,7 +63,8 @@ Each line is a summary; the linked topic file holds the rule and its history.
   Lock order in a converted driver: `transition_mutex_` → I/O lock → `mutex_` (leaf of
   the driver's own locks) → SDK-wrapper mutex; the shared leaf mutexes under `mutex_` are
   listed in [driver-lifecycle](.github/instructions/driver-lifecycle.instructions.md#driver-concurrency--lifecycle-read-before-writing-a-driver).
-  A camera's operations keep `mutex_` → operation lock → SDK-wrapper mutex
+  A camera's operations keep `mutex_` → operation lock → SDK-wrapper mutex; an unconverted
+  driver is a `partial` row in 0016
   ([decision 0016](docs/decisions/0016-getters-never-wait-on-device-io.md)).
 - `set_connected(false)` clears driver state before the SDK close; a connect guards all
   post-open init so a throw closes the handle.

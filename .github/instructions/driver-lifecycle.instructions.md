@@ -136,9 +136,10 @@ vendor-agnostic; do them in the driver from the start.
 - An SDK call on a closable handle is safe only if the handle can't be closed
   underneath it. In a converted driver, `set_connected(false)` clears state under
   `mutex_` and releases it, then takes the I/O lock across the close, so the I/O
-  lock is never taken under `mutex_`. In a camera or unconverted driver it takes the
-  op-lock (`readout_mutex_`, …) nested under `mutex_` across the close, as the old
-  order requires. In both, the operation also re-checks `ensure_connected()`/`!handle_` under
+  lock is never taken under `mutex_`. A camera's disconnect follows the same sequence
+  (decision 0016 items 4 and 6). A driver that still takes the op-lock (`readout_mutex_`,
+  …) nested under `mutex_` across the close is a `partial` row in the decision 0016
+  Adoption table, with its issue. In both, the operation also re-checks `ensure_connected()`/`!handle_` under
   that lock before the SDK call. A snapshot-then-call gap with no re-check is a
   use-after-close.
 - **A "copy the handle out, then call the SDK" helper is a trap** — returning the
