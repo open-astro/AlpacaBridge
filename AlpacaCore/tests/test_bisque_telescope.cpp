@@ -122,6 +122,13 @@ TEST_CASE("Bisque UTCDate - disconnected reads and writes are refused", "[bisque
 
 TEST_CASE("Bisque UTCDate - writes are explicitly unsupported without a transaction", "[bisque][telescope][utcdate]") {
     ClockedBisque rig;
+    SECTION("after a successful seed") {}
+    SECTION("after a failed seed") {
+        rig.driver->set_connected(false);
+        rig.mount.mute = true;
+        REQUIRE_NOTHROW(rig.driver->set_connected(true));
+        REQUIRE(rig.driver->get_connected());
+    }
     const int before = rig.mount.transactions;
     require_alpaca_error([&] { rig.driver->set_utc_date(std::chrono::system_clock::time_point{}); },
                          alpacacore::AlpacaError::PropertyNotImplemented);

@@ -155,15 +155,16 @@ TEST_CASE("Bisque UTCDate - bad remote replies retain errors and a good poll rec
     using alpacacore::test::require_alpaca_error;
     alpacacore::test::FakeBisqueMount mount;
     FakeTaskClock clock;
-    const std::string bad[] = {"",     "OK",   "946684800123junk",    "NaN",           "Infinity",
-                               "1.5",  "1e12", "9223372036854775808", "9223372036855", "-9223372036855",
-                               "error"};
+    const std::string bad[] = {"",      "OK",     "946684800123junk",    "NaN",           "Infinity",
+                               "1.5",   "1e12",   "9223372036854775808", "9223372036855", "-9223372036855",
+                               "error", "timeout"};
     std::atomic<int> reply_index{-1};
     alpacacore::test::FakeMountServer server([&](const std::string& command) {
         const auto normal = mount.responder()(command);
         const int index = reply_index;
         if (command.find("new Date().getTime()") != std::string::npos && index >= 0) {
             if (bad[index] == "error") return std::string("|Time query failed. Error = 1.#");
+            if (bad[index] == "timeout") return std::string{};
             return "|No error. Error = 0." + bad[index] + "#";
         }
         return normal;
@@ -174,15 +175,25 @@ TEST_CASE("Bisque UTCDate - bad remote replies retain errors and a good poll rec
     bq::set_status_poll_paused_for_testing(*driver, true);
     for (int i = 0; i < static_cast<int>(std::size(bad)); ++i) {
         CAPTURE(bad[i]);
+        driver->set_connected(false);
         reply_index = i;
-        REQUIRE(bq::poll_status_now_for_testing(*driver));
+        REQUIRE_NOTHROW(driver->set_connected(true));
         require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::DriverException);
         CHECK(driver->get_connected());
         CHECK(driver->get_right_ascension() == 5.5);
         CHECK_FALSE(has_entry(*driver, "UTCDate"));
         reply_index = -1;
         REQUIRE(bq::poll_status_now_for_testing(*driver));
-        CHECK(driver->get_utc_date() == std::chrono::system_clock::time_point(milliseconds(mount.utc_millis)));
+        const auto anchor = std::chrono::system_clock::time_point(milliseconds(mount.utc_millis));
+        CHECK(driver->get_utc_date() == anchor);
+        clock.advance(milliseconds(1500));
+        reply_index = i;
+        REQUIRE(bq::poll_status_now_for_testing(*driver));
+        CHECK(driver->get_utc_date() == anchor + milliseconds(1500));
+        CHECK(has_entry(*driver, "UTCDate"));
+        reply_index = -1;
+        REQUIRE(bq::poll_status_now_for_testing(*driver));
+        CHECK(driver->get_utc_date() == anchor);
     }
 }
 

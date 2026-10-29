@@ -53,7 +53,7 @@ static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must under
 constexpr int kPositionLinkFailureThreshold = 3;
 
 // One polled frame of operational state. Small and copyable: the snapshot copies it under its mutex. A field the
-// last read could not fill keeps its previous value, except UTC, whose failed query invalidates its anchor.
+// last read could not fill keeps its previous value; an explicit unavailable UTC mode clears its anchor.
 struct PolledFrame {
     double ra_hours = 0.0;
     double dec_degrees = 0.0;
@@ -1207,7 +1207,7 @@ private:
 
     // One sample, taken without mutex_ (the protocol wrapper serialises each exchange). The position is
     // mandatory, so a failed read throws and the tick ends there; the other fields keep the last value when
-    // their own read fails, except UTC, which retains the failure instead. `previous` is the frame the sample refines.
+    // their own read fails. An explicit unavailable UTC mode clears its anchor. `previous` is the frame refined.
     PolledFrame sample_frame(const PolledFrame& previous) const {
         auto& protocol = BisqueProtocolWrapper::instance();
         PolledFrame frame = previous;
@@ -1215,13 +1215,15 @@ private:
         frame.ra_hours = pos.ra_hours;
         frame.dec_degrees = pos.dec_degrees;
         frame.equatorial_known = true;
-        frame.utc.clear();
         frame.utc_error.clear();
         try {
             const auto utc = protocol.get_utc_date();
             frame.utc_sampled_at = clock_.now();  // Stamp this reply, not the end of the remaining telemetry queries.
             frame.utc.set(utc, frame.utc_sampled_at);
         } catch (const AlpacaException& e) {
+            if (e.error_code() == AlpacaError::InvalidOperation) {
+                frame.utc.clear();
+            }
             frame.utc_error = e.what();
             frame.utc_error_code = e.error_code();
         } catch (const std::exception& e) {
