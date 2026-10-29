@@ -1,0 +1,3 @@
+### Changed (tests)
+
+- **ZWO blocking slew setup-retry test**, ZWO AM mount driver, issue #1873. The case "ZWO blocking slew cannot return success during a delayed setup retry" holds ":SMTI" across real-time rendezvous. Under load the hold outlived the 250 ms test reply timeout, ":Sr", ":Sd" and ":MS" timed out behind it, and the empty ":MS" reply counted as an accepted GOTO, so the e3 retry the case checks never ran (nightly ASan + UBSan job). The case now uses a 5 s reply timeout, and it waits for the first poll to park on the clock before the hold (`test_zwo_async_slew_failure.cpp`). Test-only, no driver change.

@@ -45,12 +45,12 @@ using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZwoMount;
 using alpacacore::test::timed;
 
-alpacacore::vendor::zwo::ConnectionInfo endpoint(int port) {
+alpacacore::vendor::zwo::ConnectionInfo endpoint(int port, int response_timeout_ms) {
     alpacacore::vendor::zwo::ConnectionInfo conn;
     conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
     conn.host = "127.0.0.1";
     conn.tcp_port = port;
-    conn.response_timeout_ms = 250;
+    conn.response_timeout_ms = response_timeout_ms;
     return conn;
 }
 
@@ -72,7 +72,9 @@ struct Rig {
     FakeZwoMount mount{clock, "AM5"};
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
 
-    Rig() { driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(mount.port()), clock); }
+    explicit Rig(int response_timeout_ms = 250) {
+        driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(mount.port(), response_timeout_ms), clock);
+    }
     ~Rig() {
         mount.release();
         driver.reset();
@@ -557,10 +559,14 @@ TEST_CASE("ZWO GOTO stays incomplete when Connected refresh polls during setup",
 TEST_CASE("ZWO blocking slew cannot return success during a delayed setup retry", "[zwo][telescope][goto-setup]") {
     const bool use_target = GENERATE(false, true);
     CAPTURE(use_target);
-    Rig rig;
+    // ":SMTI" stays held across real-time rendezvous below. Past a 250 ms reply timeout ":Sr", ":Sd" and ":MS" time
+    // out behind it, and the wrapper takes an empty ":MS" reply as acceptance, so no e3 retry happens (#1873).
+    Rig rig{5000};
     auto& mount = rig.mount;
     auto& driver = rig.driver;
     rig.connect();
+    // The first poll has parked on the clock, so it cannot queue behind the held ":SMTI" and miss the rendezvous.
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
     driver->set_target_right_ascension(6.0);
     driver->set_target_declination(25.0);
     mount.reject_goto("e3", 1);
