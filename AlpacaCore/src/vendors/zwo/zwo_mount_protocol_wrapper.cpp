@@ -411,7 +411,7 @@ public:
                 if (kind != Kind::ExplicitLink || holder.kind == Kind::AutoLink) return Result::Held;
                 probe = probe || holder.kind == Kind::Probe;
             }
-            // Admission must precede expiry, even if a released probe's waiter was scheduled late.
+            // Never admit after the deadline, even if the probe released just before it.
             if (deadline && std::chrono::steady_clock::now() >= *deadline) return Result::TimedOut;
             if (!probe) {
                 reg.holders.emplace(this, Holder{address, kind});

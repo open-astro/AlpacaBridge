@@ -728,8 +728,8 @@ void Server::run_server() {
         }
         // One permit per worker still alive from a previous generation
         // (detached across a restart), so each wakes, sees its generation is
-        // stale, and exits, however many there are. The new pool is counted
-        // below, after this, so none of these permits are consumed by it.
+        // stale, and exits, however many there are. The new pool can consume
+        // these permits as harmless spurious wakes; stale workers return theirs on exit.
         ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
         worker_threads_.reserve(pool_size);
         for (size_t i = 0; i < pool_size; ++i) {
