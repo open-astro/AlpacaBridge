@@ -12,8 +12,9 @@
 
 #pragma once
 
-#include <string>
+#include <chrono>
 #include <memory>
+#include <string>
 
 namespace alpacacore::vendor::bisque {
 
@@ -49,6 +50,9 @@ public:
     // Current position queries.
     Position get_ra_dec();
     AltAz get_alt_az();
+
+    // UTC of the remote TheSkyX computer, only when UseComputerClock is enabled.
+    std::chrono::system_clock::time_point get_utc_date();
 
     // Slew (async — sets Asynchronous=true, fires SlewToRaDec).
     void slew_to_ra_dec(double ra_hours, double dec_degrees);
