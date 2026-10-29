@@ -1715,7 +1715,7 @@ private:
 
     mutable bool parked_ = false;
     uint64_t park_epoch_ = 0;  // under mutex_; bumped by each Park so a stale Park's exit leaves a newer one's parking_
-    bool parking_ = false;  // under mutex_; a Park is sent and its IsParked poll runs; refuses slews like parked_
+    bool parking_ = false;     // under mutex_; a Park is sent and its IsParked poll runs; refuses slews like parked_
     mutable bool at_home_ = false;
     mutable bool homing_ = false;
     mutable bool slewing_cached_ = false;
