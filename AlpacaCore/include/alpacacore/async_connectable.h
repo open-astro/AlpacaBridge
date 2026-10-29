@@ -40,7 +40,8 @@ namespace alpacacore {
  *   would otherwise leave an unjoined thread -> std::terminate).
  * - A disconnect racing an in-flight connect is NEVER dropped: it is recorded
  *   (pending_disconnect_) and either consumed by the connect at entry (newer
- *   request wins, camera stays disconnected) or run by the task's tail.
+ *   request wins, camera stays disconnected) or run by the task's tail, even
+ *   when Connected already reads false (a link lost meanwhile, #1289).
  * - A connect racing an in-flight DISCONNECT is likewise never dropped: it is
  *   recorded (pending_connect_) and run by the disconnect task's tail, with
  *   Connecting staying true across the whole teardown+reconnect. This mirror
@@ -395,7 +396,13 @@ private:
                 if (pending_disconnect_) {
                     pending_disconnect_ = false;
                     pending_connect_ = false;
-                    need_disconnect = connected_now;
+                    // Run it even when Connected already reads false: a link
+                    // lost during the connect reads false too, and only the
+                    // driver's set_connected(false) resets that session
+                    // (#1289). Every driver's disconnect is idempotent: a
+                    // Disconnect on a disconnected device already reaches it
+                    // through the Idle spawn above.
+                    need_disconnect = true;
                 } else if (pending_connect_) {
                     pending_connect_ = false;
                     // A queued connect must NOT run right after a FAILED
