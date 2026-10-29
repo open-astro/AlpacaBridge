@@ -37,6 +37,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -51,7 +52,12 @@ struct FakeSynScanState {
     alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
     alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
     std::atomic<bool> goto_seen{false};
+    std::atomic<bool> no_motion{false};        // GOTO acked, mount stays put, L says idle
+    std::atomic<bool> silent_position{false};  // position reads go unanswered once a GOTO was seen
     std::atomic<int> goto_count{0};
+    // The next N precise GOTOs end this many RA counts (of 2^32) past their aim: the ~49' miss of #1105.
+    std::atomic<int> miss_gotos{0};
+    static constexpr uint32_t kMissCounts = 9764864;  // 2,947"
     std::atomic<Clock::rep> goto_started{0};
     // #742: with `hold_goto` set the next GOTO goes unanswered and sets
     // `goto_held`, which is the test's cue to drop the connection before the
@@ -86,7 +92,7 @@ struct FakeSynScanState {
 
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
-        if (!goto_seen.load()) return false;
+        if (!goto_seen.load() || no_motion.load()) return false;
         if (goto_never_ends.load()) return true;
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
         return now() - started < kGotoDuration;
@@ -103,6 +109,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'E':
             case 'z':
             case 'Z': {
+                if (st->silent_position.load() && st->goto_seen.load()) return "";
                 std::lock_guard<std::mutex> lock(st->mutex);
                 return st->position;  // parseable 16/24-bit position pair
             }
@@ -118,8 +125,16 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
                     std::lock_guard<std::mutex> lock(st->mutex);
                     st->gotos.push_back(chunk);
                     // A precise GOTO lands on its aim, so the landing check after it (#1105) sees an arrival.
-                    if (chunk[0] == 'r' && chunk.size() >= 18) {
+                    if ((chunk[0] == 'r' || chunk[0] == 'b') && chunk.size() >= 18 && !st->no_motion.load()) {
                         st->position = chunk.substr(1, 17) + "#";
+                        if (st->miss_gotos.load() > 0) {
+                            st->miss_gotos.fetch_sub(1);
+                            char ra[9];
+                            std::snprintf(ra, sizeof ra, "%08X",
+                                          static_cast<unsigned>(std::stoul(chunk.substr(1, 8), nullptr, 16)) +
+                                              FakeSynScanState::kMissCounts);
+                            st->position = std::string(ra) + chunk.substr(9, 9) + "#";
+                        }
                     }
                 }
                 st->goto_started.store(st->now().time_since_epoch().count());
@@ -1042,6 +1057,154 @@ TEST_CASE("SynScan sync slew - uncontended slew returns normally", "[synscan][te
     REQUIRE_FALSE(threw.load());
     CHECK(st->goto_count.load() == 1);
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+namespace {
+std::unique_ptr<alpacacore::TelescopeDriver> mk(int port, alpacacore::util::TaskClock& clock) {
+    return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+}
+}  // namespace
+
+// Case A: saved park Dec 0; mount reads Dec +30 deg; GOTO acked, mount never moves.
+TEST_CASE("SynScan case A - refused park GOTO must not report AtPark", "[park][synscan]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+    driver->set_park();                      // RA 0, Dec 0
+    st->set_position("00000000,0AAAAAAB#");  // Dec +30 deg
+    st->no_motion.store(true);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
+                                           alpacacore::AlpacaError::DriverException);
+    bool at_park = false;
+    try {
+        at_park = driver->get_at_park();
+    } catch (const alpacacore::AlpacaException&) {
+    }
+    CHECK(st->goto_count.load() >= 1);
+    CHECK_FALSE(at_park);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan case B - already at park target still parks", "[park][synscan]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+    driver->set_park();
+    st->no_motion.store(true);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    bool at_park = false;
+    try {
+        at_park = driver->get_at_park();
+    } catch (const alpacacore::AlpacaException&) {
+    }
+    CHECK(at_park);
+    driver->set_connected(false);
+}
+
+// #1105: the park GOTO runs no landing refinement, so the handset's far miss gets one repeat GOTO here.
+TEST_CASE("SynScan - a park GOTO the handset ends 49 arcmin off is repeated once and parks", "[park][synscan]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+    driver->set_park();
+    st->miss_gotos.store(1);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    CHECK(driver->get_at_park());
+    CHECK(st->goto_count.load() == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan - a park that misses by 49 arcmin twice fails", "[park][synscan]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+    driver->set_park();
+    st->miss_gotos.store(2);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
+                                           alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(st->goto_count.load() == 2);
+    driver->set_connected(false);
+}
+
+// An AZ GOTO mount parks in alt/az: the check compares the alt/az reply with the saved azimuth and altitude.
+TEST_CASE("SynScan - an alt-az park the mount does not reach fails and one it reaches parks", "[park][synscan]") {
+    for (const bool moves : {false, true}) {
+        alpacacore::test::FakeTaskClock clock;
+        auto st = std::make_shared<FakeSynScanState>();
+        st->clock = &clock;
+        st->model_id.store(128);  // AZ GOTO
+        st->set_position("40000000,20000000#");
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = mk(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_park();  // az 90, alt 45
+        st->set_position("00000000,00000000#");
+        st->no_motion.store(!moves);
+        driver->park();
+        REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+        if (moves) {
+            CHECK(driver->get_at_park());
+        } else {
+            alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
+                                                   alpacacore::AlpacaError::DriverException);
+            CHECK_FALSE(driver->get_at_park());
+        }
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("SynScan - a park whose position check cannot read the mount fails without a repeat GOTO",
+          "[park][synscan]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_park();
+    st->silent_position.store(true);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    alpacacore::test::require_alpaca_error([&] { (void)driver->get_slewing(); },
+                                           alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(st->goto_count.load() == 1);
     driver->set_connected(false);
 }
 
