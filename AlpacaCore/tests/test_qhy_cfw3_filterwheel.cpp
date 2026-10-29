@@ -418,6 +418,24 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect clears a failed move", "[q
     CHECK_NOTHROW(driver->get_position());
 }
 
+TEST_CASE("QHY CFW3 Filter Wheel Driver - A disconnect between Position's check and its read is NotConnected",
+          "[qhy][filterwheel][cfw3][unit]") {
+    // #1699: get_position() checked the connection, then took the state lock,
+    // and a teardown in between had cleared the cache, so the read fell
+    // through to the "position unknown" DriverException.
+    FakeQhyCfw3 fake(7);
+    auto driver = make_driver(fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() >= 0);
+
+    alpacacore::vendor::qhy::set_position_read_gap_hook_for_testing(*driver, [&driver] {
+        alpacacore::vendor::qhy::set_position_read_gap_hook_for_testing(*driver, {});
+        driver->set_connected(false);
+    });
+    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+}
+
 TEST_CASE("QHY CFW3 Filter Wheel Driver - A severed link reads disconnected and reconnects",
           "[qhy][filterwheel][cfw3][unit]") {
     FakeQhyCfw3 fake(7);
