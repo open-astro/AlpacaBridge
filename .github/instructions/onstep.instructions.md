@@ -398,9 +398,14 @@ it is never reachable through `router.cpp` or the web UI.
   armed before the `:MS#` goes out and cleared when the `:MS#` is refused or fails, by AbortSlew and the
   Park/FindHome pre-stops, on connect and disconnect, and at the GOTO's end. Landing never reads the
   window: it is a reading that shows no GOTO, from the poll or a control path, and it clears the window,
-  so a short GOTO reports landed when the mount stops, not at 2 s. `:GU#` shows the GOTO 1 ms after `:MS#`
-  answers (HM-17 OnStepX 10.23a, 2026-10-29), so the window only keeps `Slewing` true until the first
-  reading. A stale reading cannot end the slew or send the tracking restore: a reading and the `:MS#` share
+  so a short GOTO reports landed when the mount stops, not at 2 s. Landing relies on `:MS#` setting the
+  GOTO state before it replies, so the first `:GU#` after it shows the GOTO. From the source: OnStepX
+  `Goto::request()` sets `state = GS_GOTO` (`Goto.cpp`) and `:GU#` writes `N` only for `GS_NONE`
+  (`Status.command.cpp`), read at v10.18a (`c3d28e101b`) and `main` (`0420f16f1b`); OnStep 4.x `goTo()` sets
+  `trackingState=TrackingMoveTo` (`Goto.ino:382`) and `:GU#` writes `N` only otherwise (`Command.ino:714`),
+  read at `3b73bffcfb` and the same at `release-4.24`. On hardware, `:GU#` showed the GOTO 1 ms after `:MS#`
+  answered (HM-17 OnStepX 10.23a, 2026-10-29). So the window only keeps `Slewing` true until the first
+  reading (#1887). A stale reading cannot end the slew or send the tracking restore: a reading and the `:MS#` share
   the operation lock, and the dispatch write-through shows the GOTO until a later reading replaces it (#1835).
   `AbortSlew` ends the grace, so the next slew goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
   GOTO state while it brakes after `:Q#` (HM-17 2026-10-24: about 1.6 s), and a slew in that time

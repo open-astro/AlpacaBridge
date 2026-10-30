@@ -78,8 +78,9 @@ constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 // Decision 0022: Slewing reads true for this long after a GOTO goes out (slew_hold_), so a getter reads true before
 // any :GU# is sampled. Landing never reads the window: it is a :GU# that shows no GOTO, and it clears the window.
 // A stale reading cannot end the slew: a reading and the :MS# share the operation lock, and the dispatch
-// write-through shows the GOTO until a later reading replaces it. The mount shows the GOTO 1 ms after :MS# answers
-// (HM-17, OnStepX 10.23a, 2026-10-29).
+// write-through shows the GOTO until a later reading replaces it. Both firmwares set the GOTO state before :MS#
+// replies, so the first :GU# shows it (source and rig evidence: onstep.instructions.md, "A slew while a GOTO runs
+// is refused", #1887).
 constexpr auto kSlewForceGrace = std::chrono::seconds(2);
 // open-astro#1378: how far inside the horizon and overhead limits a MoveAxis
 // re-send must stay.
