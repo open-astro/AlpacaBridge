@@ -41,7 +41,7 @@ cmake --build . --clean-first --parallel
 
 ## Configuration
 
-The server reads one YAML file: the path given as its first argument, or else `config/default.yaml` in the working directory, or else `AlpacaHTTP/config/default.yaml`. The package service runs in `/var/lib/alpacabridge`, so it reads `/var/lib/alpacabridge/config/default.yaml`. The environment variables `ALPACAHTTP_PORT` and `ALPACAHTTP_DISCOVERY` then override the file.
+The server reads one YAML file: the path given as its first argument, or else `config/default.yaml` in the working directory, or else `AlpacaHTTP/config/default.yaml`. The package service runs in `/var/lib/alpacabridge`, so it reads `/var/lib/alpacabridge/config/default.yaml`. The environment variables `ALPACAHTTP_PORT`, `ALPACAHTTP_DISCOVERY`, `ALPACAHTTP_DISCOVERY_PORT` and `ALPACAHTTP_LOG_LEVEL` then override the file. `Config::apply_environment_overrides` in `src/core/config.cpp` reads further `ALPACAHTTP_*` variables for the other settings.
 
 See `config/default.yaml` for available options. The `http` section also takes `max_connections` and `keep_alive_lifetime_seconds`.
 
