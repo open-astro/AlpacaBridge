@@ -14,7 +14,9 @@
 // construct, disconnected, no fake. The registry is contract_sweep.h; each
 // (driver, case) pair below is its own TEST_CASE so `ctest -N` lists it by name
 // and a failure names the driver. Tier 2 (connected over a roster fake) is further
-// down, one host per kFakeConnectableRoster row.
+// down, one host per kFakeConnectableRoster row. Tier 3 (issue #1861, failure after
+// start) runs over the tier-2 hosts of the camera, telescope, focuser, rotator and
+// filter wheel types, one recipe per host.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/camera_driver.h>
@@ -33,6 +35,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <map>
@@ -1111,6 +1114,19 @@ constexpr const char* kAbsentPort = "/dev/alpacacore-contract-sweep-absent";
     defined(ALPACACORE_ENABLE_ONSTEP)
 // FakeMountServer rows share one shape: a loopback endpoint on the fake for the connect, and a held,
 // never-listening loopback port for the failed connect.
+// The fake behind a FakeMountServer row's Hosted: while `silent` is set the responder answers nothing, as a mount
+// that hangs with the socket open (tier 3).
+struct MountServerHold {
+    std::shared_ptr<std::atomic<bool>> silent = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
+// A FakeMountServer row's driver factory, `Over(port, hold, clock)`, on the default task clock (tier 2).
+template <auto Over>
+std::unique_ptr<AlpacaDriver> on_default_clock(int port, bool hold) {
+    return Over(port, hold, alpacacore::util::default_task_clock());
+}
+
 template <class MakeDriver>
 Tier2Host mount_server_host(const char* id, const char* vendor, const char* registry_id,
                             alpacacore::test::FakeMountServer::Responder responder, MakeDriver make) {
@@ -1121,15 +1137,17 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
     // hold case (make(port, hold)) so the held reply is late, not lost.
     h.connectable = [responder, make](bool hold) {
         auto first = std::make_shared<std::atomic<bool>>(hold);
-        auto held = [responder, first](const std::string& chunk) {
+        auto fake = std::make_shared<MountServerHold>();
+        auto held = [responder, first, silent = fake->silent](const std::string& chunk) {
+            if (silent->load()) return std::string();
             if (first->exchange(false)) std::this_thread::sleep_for(kHold);
             return responder(chunk);
         };
-        auto server = std::make_shared<alpacacore::test::FakeMountServer>(held);
-        REQUIRE(server->ok());
+        fake->server = std::make_shared<alpacacore::test::FakeMountServer>(held);
+        REQUIRE(fake->server->ok());
         Hosted hosted;
-        hosted.driver = make(server->port(), hold);
-        hosted.fake = server;
+        hosted.driver = make(fake->server->port(), hold);
+        hosted.fake = fake;
         return hosted;
     };
     h.failing = [make]() { return host_over_held_port(SOCK_STREAM, [make](int port) { return make(port, false); }); };
@@ -1138,10 +1156,19 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
 #endif
 
 #ifdef ALPACACORE_ENABLE_ZWO
+std::unique_ptr<AlpacaDriver> zwo_telescope_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace zwo = alpacacore::vendor::zwo;
+    zwo::ConnectionInfo info;
+    info.type = zwo::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 250;
+    return zwo::create_zwo_telescope(0, info, clock);
+}
+
 // Recipe of test_zwo_concurrency_stress.cpp: LX200 replies, tracking reported on.
 // Knob, no fake change: the responder also accepts :Sr/:Sd so the target setters succeed.
 Tier2Host tier2_host_zwo_telescope() {
-    namespace zwo = alpacacore::vendor::zwo;
     return mount_server_host(
         "zwo_telescope", "zwo", "zwo_telescope",
         [](const std::string& chunk) -> std::string {
@@ -1157,14 +1184,7 @@ Tier2Host tier2_host_zwo_telescope() {
                        ? "1#"
                        : "0#";
         },
-        [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-            zwo::ConnectionInfo info;
-            info.type = zwo::ConnectionType::Network;
-            info.host = "127.0.0.1";
-            info.tcp_port = port;
-            info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 250;
-            return zwo::create_zwo_telescope(0, info);
-        });
+        on_default_clock<zwo_telescope_over>);
 }
 
 Tier2Host tier2_host_zwo_camera() {
@@ -1261,20 +1281,23 @@ Tier2Host tier2_host_zwo_rotator() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
+std::unique_ptr<AlpacaDriver> celestron_telescope_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace cel = alpacacore::vendor::celestron;
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
+    return cel::create_celestron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                                                     cel::CelestronAlignmentSetting::Auto, clock);
+}
+
 // Recipe of test_celestron_concurrency_stress.cpp: a position-pair sized reply ends every read at once.
 Tier2Host tier2_host_celestron_telescope() {
-    namespace cel = alpacacore::vendor::celestron;
     Tier2Host h = mount_server_host(
         "celestron_telescope", "celestron", "celestron_telescope",
         [](const std::string&) { return std::string("00000000,00000000#"); },
-        [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-            cel::ConnectionInfo info;
-            info.type = cel::ConnectionType::Network;
-            info.host = "127.0.0.1";
-            info.tcp_port = port;
-            info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-            return cel::create_celestron_telescope(0, info);
-        });
+        on_default_clock<celestron_telescope_over>);
     h.move_axis_unavailable =
         "the fixed-reply responder does not answer the variable-rate axis frame, so move_axis() times out and "
         "throws (fake_mount_server.h, celestron_protocol_wrapper move_axis_variable_rate)";
@@ -1343,19 +1366,23 @@ Tier2Host tier2_host_celestron_focuser() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
+std::unique_ptr<AlpacaDriver> synscan_telescope_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace syn = alpacacore::vendor::synscan;
+    syn::ConnectionInfo info;
+    info.type = syn::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
+    return syn::create_synscan_telescope_with_site(0, info, syn::SynScanVersion::V4, std::nullopt, std::nullopt,
+                                                   std::nullopt, std::nullopt, syn::SynScanAlignmentSetting::Auto,
+                                                   clock);
+}
+
 // Recipe of test_synscan_concurrency_stress.cpp: V4 and the default responder's 'K' echo, which the connect gates on.
 Tier2Host tier2_host_synscan_telescope() {
-    namespace syn = alpacacore::vendor::synscan;
     Tier2Host h = mount_server_host("synscan_telescope", "synscan", "synscan_telescope",
                                     alpacacore::test::FakeMountServer::default_responder(),
-                                    [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-                                        syn::ConnectionInfo info;
-                                        info.type = syn::ConnectionType::Network;
-                                        info.host = "127.0.0.1";
-                                        info.tcp_port = port;
-                                        info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-                                        return syn::create_synscan_telescope(0, info, syn::SynScanVersion::V4);
-                                    });
+                                    on_default_clock<synscan_telescope_over>);
     h.park_unavailable =
         "FakeMountServer::default_responder() does not answer the SynScan position read (the driver logs 'Invalid "
         "SynScan RA/Dec response'), so park() throws DriverException before it can start the slew "
@@ -1365,11 +1392,20 @@ Tier2Host tier2_host_synscan_telescope() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
+std::unique_ptr<AlpacaDriver> onstep_telescope_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
+    namespace ons = alpacacore::vendor::onstep;
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
+    return ons::create_onstep_telescope(0, info, clock);
+}
+
 // Recipe of test_onstep_concurrency_stress.cpp, with an idle OnStepX for
 // :GU# and :hP#. The default "0#" has no 'N', so :GU# would report a GOTO that
 // never ends, and Park stops running motion and waits for it first (#1430).
 Tier2Host tier2_host_onstep_telescope() {
-    namespace ons = alpacacore::vendor::onstep;
     auto idle_onstep = [fallback = alpacacore::test::FakeMountServer::default_responder()](const std::string& chunk) {
         if (chunk.rfind(":GU", 0) == 0) {
             return std::string("nNp#");  // not tracking, no GOTO, not parked
@@ -1380,14 +1416,7 @@ Tier2Host tier2_host_onstep_telescope() {
         return fallback(chunk);
     };
     return mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
-                             [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-                                 ons::ConnectionInfo info;
-                                 info.type = ons::ConnectionType::Network;
-                                 info.host = "127.0.0.1";
-                                 info.tcp_port = port;
-                                 info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-                                 return ons::create_onstep_telescope(0, info);
-                             });
+                             on_default_clock<onstep_telescope_over>);
 }
 #endif
 
@@ -2246,6 +2275,1039 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_WANDERERASTRO(X)
 // clang-format on
 
+// ---------------------------------------------------------------------------
+// Tier 3 (issue #1861): failure after start. On a connected host the type's asynchronous operation starts (an
+// exposure, a slew, a move), the fake then fails while it runs, and the completion property (ImageReady, Slewing,
+// IsMoving, FilterWheel Position) must raise the failure: never a clean completion, and never "still running"
+// past the budget (the ASCOM async FAQ, https://ascom-standards.org/AlpacaDeveloper/Async.htm; the shared rule
+// "A failed async operation body keeps its error", ascom-contract.instructions.md). Before the fault the healthy
+// fake keeps the operation running; after it the recipe undoes the fault and the property must still never report
+// done. One recipe per tier-2 host of those five types, listed in CONTRACT_SWEEP_TIER3_HOSTS; the guard case pins
+// the list to the tier-2 hosts.
+// ---------------------------------------------------------------------------
+
+struct Tier3Recipe {
+    // The type's asynchronous initiator, on a healthy fake. It must return normally.
+    std::function<void(Hosted&)> start;
+    // Makes the fake fail while the operation runs.
+    std::function<void(Hosted&)> fail;
+    // Undoes `fail`: the fake answers again and still models the operation running (it never completes it).
+    std::function<void(Hosted&)> recover;
+    // What `fail` does to the fake, quoted in the failure message.
+    const char* fault;
+    // The driver over a fake that can run the operation, when the tier-2 host's fake cannot (its responder does not
+    // model it); empty to use the tier-2 host's connectable. Same contract as Tier2Host::connectable.
+    std::function<Hosted(bool hold)> connectable = {};
+};
+
+bool is_tier3_type(DeviceType t) {
+    return t == DeviceType::Camera || t == DeviceType::Telescope || t == DeviceType::Focuser ||
+           t == DeviceType::Rotator || t == DeviceType::FilterWheel;
+}
+
+// One read of the completion property: `done` when it reports the operation finished; `code` the AlpacaException it
+// raised, -1 when none. Any other exception passes through.
+struct T3Read {
+    bool done = false;
+    int code = -1;
+    std::string message;
+};
+
+T3Read t3_read(AlpacaDriver& d, DeviceType type) {
+    T3Read r;
+    try {
+        switch (type) {
+            case DeviceType::Camera:
+                r.done = dynamic_cast<alpacacore::CameraDriver&>(d).get_image_ready();
+                break;
+            case DeviceType::Telescope:
+                r.done = !dynamic_cast<alpacacore::TelescopeDriver&>(d).get_slewing();
+                break;
+            case DeviceType::Focuser:
+                r.done = !dynamic_cast<alpacacore::FocuserDriver&>(d).get_is_moving();
+                break;
+            case DeviceType::Rotator:
+                r.done = !dynamic_cast<alpacacore::RotatorDriver&>(d).get_is_moving();
+                break;
+            case DeviceType::FilterWheel:
+                // -1 is the moving sentinel (IFilterWheelV3 Position); any slot is a finished move.
+                r.done = dynamic_cast<alpacacore::FilterWheelDriver&>(d).get_position() != -1;
+                break;
+            default:
+                FAIL("no tier-3 completion property for this device type");
+        }
+    } catch (const AlpacaException& e) {
+        r.code = e.error_code();
+        r.message = e.what();
+    }
+    return r;
+}
+
+const char* t3_outcome(const T3Read& r) {
+    return r.code != -1 ? "raised" : (r.done ? "reported done" : "still running");
+}
+
+// The longest real wait after the fault is the QHY CFW3 move wait (12 s from the start, 11 s after the fault): a
+// protocol-wrapper wire deadline on steady_clock (decision 0005 rule 6), in a driver not on the task clock. A recipe
+// whose raise waits on a driver timer on the task clock moves its fake clock past that timer instead (0005 rule 2).
+// The rest is margin so a slow runner does not turn a late raise into "still running".
+constexpr std::chrono::seconds kTier3Budget{20};
+// How long the healthy fake must keep the operation running before the fault.
+constexpr std::chrono::seconds kTier3Control{1};
+// How long the case watches the property after recover. A recipe on the task clock has already stepped its polls
+// in `recover` (t3_on_clock); a driver not on the clock gets three seconds of its real-time status poll to see the
+// answering fake.
+constexpr std::chrono::seconds kTier3RecoverWindow{3};
+
+[[maybe_unused]] void case_t3_failure_after_start(const Tier2Host& h, const Tier3Recipe& r) {
+    REQUIRE(is_tier3_type(h.type));
+    INFO(h.id << " over " << h.fake_header << "; fault: " << r.fault);
+    Hosted hosted = r.connectable ? r.connectable(false) : h.connectable(false);
+    REQUIRE(hosted.driver != nullptr);
+    REQUIRE(connect_and_observe(*hosted.driver).settled);
+    REQUIRE(hosted.driver->get_connected());
+    {
+        int start_code = -1;
+        std::string start_message;
+        try {
+            r.start(hosted);
+        } catch (const AlpacaException& e) {
+            start_code = e.error_code();
+            start_message = e.what();
+        }
+        INFO("the initiator threw " << start_code << ": '" << start_message << "'");
+        REQUIRE(start_code == -1);
+    }
+    // Control: on the healthy fake the operation keeps running, neither raising nor finishing, so the raise below is
+    // the fault's. A fake that finished (or failed) the operation by itself would let a driver that ignores every
+    // failure pass.
+    for (const auto until = Clock::now() + kTier3Control; Clock::now() < until;) {
+        const T3Read rd = t3_read(*hosted.driver, h.type);
+        INFO("completion property before the fault: " << t3_outcome(rd) << " (code " << rd.code << ", '" << rd.message
+                                                      << "')");
+        REQUIRE(rd.code == -1);
+        REQUIRE_FALSE(rd.done);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    r.fail(hosted);
+    T3Read after;
+    for (const auto deadline = Clock::now() + kTier3Budget; Clock::now() < deadline;) {
+        after = t3_read(*hosted.driver, h.type);
+        if (after.done || after.code != -1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    INFO("completion property after the fault: " << t3_outcome(after) << " (code " << after.code << ", '"
+                                                 << after.message << "')");
+    CHECK_FALSE(after.done);
+    REQUIRE(after.code != -1);
+    // Every fault keeps the transport open, and the case ends well inside util::kLinkStalenessBound (30 s), so the
+    // link is faulted, not lost: the read raises the operation's failure, not NotConnected (CONTEXT.md "Connected
+    // vs link health", decision 0009).
+    CHECK(after.code != err::NotConnected);
+    // While the fault lasts the link stays faulted, so the next read raises too (decision 0009 rule 1).
+    CHECK(t3_read(*hosted.driver, h.type).code != -1);
+    // The fake answers again: the next good reply may clear the link fault (0009 rule 1), but the operation it
+    // interrupted never finished, so the property raises a failure the body kept or reports the operation running;
+    // done is a body that swallowed the failure behind the live link fault ("A failed async operation body keeps its
+    // error", ascom-contract.instructions.md).
+    r.recover(hosted);
+    T3Read recovered;
+    for (const auto until = Clock::now() + kTier3RecoverWindow; Clock::now() < until;) {
+        recovered = t3_read(*hosted.driver, h.type);
+        if (recovered.done) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    INFO("completion property after recover: " << t3_outcome(recovered) << " (code " << recovered.code << ", '"
+                                               << recovered.message << "')");
+    CHECK_FALSE(recovered.done);
+}
+
+// Initiators shared by the recipes; [[maybe_unused]] because a build with none of their vendors calls none.
+[[maybe_unused]] void t3_start_slew(Hosted& hosted, double ra_offset_hours, double dec) {
+    auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+    if (t.get_can_set_tracking() && !t.get_tracking()) t.set_tracking(true);
+    t.slew_to_coordinates_async(std::fmod(t.get_right_ascension() + ra_offset_hours + 24.0, 24.0), dec);
+}
+
+// A slew to `ha_hours` west of the meridian, which no mount here takes as a meridian flip.
+[[maybe_unused]] void t3_start_slew_at_hour_angle(Hosted& hosted, double ha_hours, double dec) {
+    auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+    if (t.get_can_set_tracking() && !t.get_tracking()) t.set_tracking(true);
+    t.slew_to_coordinates_async(std::fmod(t.get_sidereal_time() - ha_hours + 24.0, 24.0), dec);
+}
+
+[[maybe_unused]] void t3_start_focuser_move(Hosted& hosted, int steps_away) {
+    auto& f = dynamic_cast<alpacacore::FocuserDriver&>(*hosted.driver);
+    f.move(f.get_absolute() ? f.get_position() + steps_away : steps_away);
+}
+
+[[maybe_unused]] void t3_start_exposure(Hosted& hosted, double seconds) {
+    dynamic_cast<alpacacore::CameraDriver&>(*hosted.driver).start_exposure(seconds, true);
+}
+
+template <class Fake>
+Fake& t3_fake(Hosted& hosted) {
+    return *static_cast<Fake*>(hosted.fake.get());
+}
+
+// A recipe whose raise or recover waits on a driver timer on the task clock (decision 0005 rule 2) builds the driver
+// on one of these and steps it in its own legs, so its case's real-time loops wait on no driver timer, only on wire
+// reads (0005 rule 6). The recipe's lambdas hold it, so it outlives the Hosted driver.
+using T3Clock = std::shared_ptr<alpacacore::test::FakeTaskClock>;
+
+// One poll tick of every driver stepped here (100 ms to 1 s periods); each step waits for the woken threads to
+// settle, as advance_until() in test_celestron_async_slew_failure.cpp does.
+constexpr std::chrono::milliseconds kT3Step{250};
+
+// Steps `clock` until `done` holds, at most `virtual_limit` of virtual time; returns whether `done` held.
+[[maybe_unused]] bool t3_step(alpacacore::test::FakeTaskClock& clock, std::chrono::milliseconds virtual_limit,
+                              const std::function<bool()>& done = {}) {
+    for (std::chrono::milliseconds stepped{0}; stepped < virtual_limit; stepped += kT3Step) {
+        if (done && done()) return true;
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(kT3Step);
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    return done && done();
+}
+
+// `r` on `clock`: `start` steps 3 s so the control leg reads state the healthy polls refreshed; `fail` steps until
+// the property raises or reports done, at most 15 s, so a 3-failure latch on a 1 s poll trips and the link stays
+// inside util::kLinkStalenessBound (30 s); `recover` steps 3 s, three periods of the slowest poll (1 s:
+// kStatusPollPeriod in the Celestron, SynScan and OnStep telescope drivers), so the driver sees the answering fake.
+[[maybe_unused]] Tier3Recipe t3_on_clock(Tier3Recipe r, DeviceType type, T3Clock clock) {
+    r.start = [start = std::move(r.start), clock](Hosted& hosted) {
+        start(hosted);
+        t3_step(*clock, std::chrono::seconds(3));
+    };
+    r.fail = [fail = std::move(r.fail), type, clock](Hosted& hosted) {
+        fail(hosted);
+        t3_step(*clock, std::chrono::seconds(15), [&] {
+            const T3Read rd = t3_read(*hosted.driver, type);
+            return rd.done || rd.code != -1;
+        });
+    };
+    r.recover = [recover = std::move(r.recover), clock](Hosted& hosted) {
+        recover(hosted);
+        t3_step(*clock, std::chrono::seconds(3));
+    };
+    return r;
+}
+
+#if defined(ALPACACORE_ENABLE_ZWO) || defined(ALPACACORE_ENABLE_CELESTRON) || defined(ALPACACORE_ENABLE_SYNSCAN) || \
+    defined(ALPACACORE_ENABLE_ONSTEP)
+// FakeMountServer rows: the tier-2 responders answer a fixed reply and model no goto, so each row's recipe brings a
+// responder whose goto, once started, never ends (the slew status keeps reporting it running). The goto starts, then
+// the mount stops answering with the socket open.
+// `started` is set by the responder when the GOTO reaches it, so the fault lands on a goto the mount is running, not on
+// its dispatch. All four drivers are on the task clock: `make(port, hold, clock)` builds one on the recipe's clock.
+template <class MakeDriver>
+Tier3Recipe tier3_mount_server_recipe(const char* id, const char* vendor, std::shared_ptr<std::atomic<bool>> started,
+                                      alpacacore::test::FakeMountServer::Responder r, MakeDriver make) {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    auto on_clock = [make, clock](int port, bool hold) { return make(port, hold, *clock); };
+    return t3_on_clock({[](Hosted& hosted) { t3_start_slew_at_hour_angle(hosted, 1.0, 30.0); },
+                        [started](Hosted& hosted) {
+                            const auto deadline = Clock::now() + std::chrono::seconds(5);
+                            while (!started->load() && Clock::now() < deadline)
+                                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                            REQUIRE(started->load());
+                            t3_fake<MountServerHold>(hosted).silent->store(true);
+                        },
+                        [](Hosted& hosted) { t3_fake<MountServerHold>(hosted).silent->store(false); },
+                        "FakeMountServer responder silent mid-goto",
+                        mount_server_host(id, vendor, id, std::move(r), on_clock).connectable},
+                       DeviceType::Telescope, clock);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_CELESTRON
+// A NexStar hand controller on a CGX-L (model 24, firmware 5.35), aligned, tracking EQ north; the replies are those
+// of test_celestron_async_slew_failure.cpp. Falsified by: get_slewing() answering from the cached slew flag when the
+// "L" status poll fails.
+Tier3Recipe tier3_recipe_celestron_telescope() {
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto responder = [started](const std::string& chunk) -> std::string {
+        if (chunk.empty()) return "0#";
+        switch (chunk[0]) {
+            case 'm':
+                return std::string(1, static_cast<char>(24)) + "#";
+            case 'V':
+                return std::string("\x05\x23#");
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return "12AB0500,20000500#";
+            case 'r':
+            case 'R':
+            case 'b':
+            case 'B':
+                started->store(true);
+                return "#";
+            case 'L':
+                return started->load() ? "1#" : "0#";
+            case 'J':
+                return "1#";
+            case 'p':
+                return "W#";
+            case 't':
+                return std::string("\x02#");
+            case 'T':
+            case 'W':
+            case 'M':
+                return "#";
+            case 'P': {  // AUX passthrough: P len dev op ...
+                const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
+                if (op == 0xFE) return std::string("\x00\x00#", 3);  // bus device firmware probe
+                if (op == 0x02 || op == 0x17) {                      // MC_GOTO_FAST / MC_GOTO_SLOW
+                    started->store(true);
+                    return "#";
+                }
+                if (op == 0x13)
+                    return started->load() ? std::string("\x00#", 2) : std::string("\xFF#");  // MC_SLEW_DONE
+                return std::string("\xFF#");
+            }
+            default:
+                return "0#";
+        }
+    };
+    return tier3_mount_server_recipe("celestron_telescope", "celestron", started, responder, celestron_telescope_over);
+}
+
+// CGX: homed and tracking (the driver refuses tracking before FindHome), a goto then stays running because the fake
+// stops completing motions, and the mount then stops answering. Falsified by: the slew body swallowing the failed
+// motor-controller read and clearing slewing.
+Tier3Recipe tier3_recipe_celestron_cgx_telescope() {
+    return {[](Hosted& hosted) {
+                auto& fake = t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted);
+                auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+                fake.set_auto_complete_motions(true);
+                t.find_home();
+                const auto deadline = Clock::now() + std::chrono::seconds(10);
+                while (t.get_slewing() && Clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                t.set_tracking(true);
+                fake.set_auto_complete_motions(false);
+                t.slew_to_coordinates_async(std::fmod(t.get_sidereal_time() + 23.0, 24.0), 85.0);
+            },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted).set_muted(false); },
+            "FakeCelestronCgxMount::set_muted(true) mid-goto"};
+}
+
+// Focus motor: a GOTO stays running until complete_move(); the motor then stops answering. Falsified by: the
+// move-poll treating an unanswered position read as arrival.
+Tier3Recipe tier3_recipe_celestron_focuser() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(false); },
+         "FakeCelestronFocuser::set_muted(true) mid-move",
+         [clock](bool) {
+             return host_over(std::make_shared<alpacacore::test::FakeCelestronFocuser>(),
+                              [&](const alpacacore::test::FakeCelestronFocuser& f) -> std::unique_ptr<AlpacaDriver> {
+                                  return alpacacore::vendor::celestron::create_celestron_focuser(0, f.slave_path(),
+                                                                                                 *clock);
+                              });
+         }},
+        DeviceType::Focuser, clock);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+// UDP motor controller: a two-hour goto ramps on the board's axis model, so it is still running when the board stops
+// answering. Falsified by: the slew task ending on a timed-out status read as if the axes had stopped.
+Tier3Recipe tier3_recipe_skywatcher_telescope() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, 30.0); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(false); },
+         "FakeSkyWatcherMount::set_silent(true) mid-goto",
+         [clock](bool) {
+             return host_over(std::make_shared<alpacacore::test::FakeSkyWatcherMount>(),
+                              [&](const alpacacore::test::FakeSkyWatcherMount& m) -> std::unique_ptr<AlpacaDriver> {
+                                  sw::ConnectionInfo info;
+                                  info.type = sw::ConnectionType::Network;
+                                  info.host = "127.0.0.1";
+                                  info.udp_port = m.port();
+                                  info.response_timeout_ms = 250;
+                                  return sw::create_skywatcher_telescope(0, info, 51.477833, -0.0015, 46.0, {}, {},
+                                                                         *clock);
+                              });
+         }},
+        DeviceType::Telescope, clock);
+}
+
+// Serial motor board (a southern site): same recipe, the board stops answering with the port open.
+Tier3Recipe tier3_recipe_skywatcher_telescope_serial() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, -30.0); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(false); },
+         "FakeSkyWatcherSerialBoard::set_muted(true) mid-goto",
+         [clock](bool) {
+             return host_over(
+                 std::make_shared<alpacacore::test::FakeSkyWatcherSerialBoard>(),
+                 [&](const alpacacore::test::FakeSkyWatcherSerialBoard& b) -> std::unique_ptr<AlpacaDriver> {
+                     sw::ConnectionInfo info;
+                     info.type = sw::ConnectionType::Serial;
+                     info.port_path = b.slave_path();
+                     info.baud_rate = 9600;
+                     info.response_timeout_ms = 300;
+                     return sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0, {}, {}, *clock);
+                 });
+         }},
+        DeviceType::Telescope, clock);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+// The firmware reports "slewing" (system status 2) so the goto stays running, then every position and status read
+// fails. Falsified by: the settle loop treating failed status reads as a landed goto.
+Tier3Recipe tier3_recipe_ioptron_telescope() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) {
+             t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_system_status(2);
+             t3_start_slew(hosted, 2.0, 30.0);
+         },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(false); },
+         "FakeIoptronMount::set_fail_reads(true) mid-goto",
+         [clock](bool) {
+             auto mount = std::make_shared<alpacacore::test::FakeIoptronMount>("0012", 12.0);
+             REQUIRE(mount->ok());
+             return host_over(mount, [&](const alpacacore::test::FakeIoptronMount& m) -> std::unique_ptr<AlpacaDriver> {
+                 alpacacore::vendor::ioptron::ConnectionInfo info;
+                 info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+                 info.host = "127.0.0.1";
+                 info.tcp_port = m.port();
+                 return alpacacore::vendor::ioptron::create_ioptron_telescope(0, info, *clock);
+             });
+         }},
+        DeviceType::Telescope, clock);
+}
+
+// iEAF: the motor keeps reporting it is running, then the firmware stops answering. Falsified by: the move poll
+// reporting IsMoving false on a failed :FI# read.
+Tier3Recipe tier3_recipe_ioptron_focuser() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock({[](Hosted& hosted) {
+                            t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_focuser_moving(true);
+                            t3_start_focuser_move(hosted, 500);
+                        },
+                        [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(true); },
+                        [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(false); },
+                        "FakeIoptronIeaf::set_silent(true) mid-move",
+                        [clock](bool) {
+                            return host_over(
+                                std::make_shared<alpacacore::test::FakeIoptronIeaf>(),
+                                [&](const alpacacore::test::FakeIoptronIeaf& f) -> std::unique_ptr<AlpacaDriver> {
+                                    return alpacacore::vendor::ioptron::create_ieaf_focuser(0, f.slave_path(), "ieaf",
+                                                                                            *clock);
+                                });
+                        }},
+                       DeviceType::Focuser, clock);
+}
+
+// The iGuider fake for tier 3. From `start` on, before_frame_return holds each finished frame until `fail` claims it
+// (then until `recover`) or, with no fault, for kHealthyDelay. `fail` sets `stalled` before it moves kHolding to
+// kFaulted, and the hook moves kHolding to kReleased, so exactly one of them wins: a frame already past read_frame()'s
+// stalled check never reaches the driver after the fault (the old 300 ms sleep let one through under load).
+// The driver runs on `clock` (decision 0005 rule 2): `fail` moves it past the exposure deadline.
+struct IGuiderT3Hold : IGuiderV4L2Hold {
+    enum Phase : int { kIdle, kHolding, kReleased, kFaulted };
+    alpacacore::test::FakeTaskClock clock;
+    // Only a run without the fault (the no-op mutant) gets here: inside the 10.7 s deadline, so the exposure ends.
+    static constexpr std::chrono::seconds kHealthyDelay{5};
+    // Bounds every hold, so a case that fails before `recover` still disconnects.
+    static constexpr std::chrono::seconds kHoldBound{30};
+    std::atomic<int> phase{kIdle};
+
+    void hold_frame() {
+        for (const auto entered = Clock::now(); Clock::now() - entered < kHoldBound;) {
+            int p = phase.load();
+            if (p == kIdle || p == kReleased || (p == kFaulted && !fake.stalled.load())) return;
+            if (p == kHolding && Clock::now() - entered >= kHealthyDelay && phase.compare_exchange_strong(p, kReleased))
+                return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+};
+
+// iGuider: the stream stops during the exposure (frames held as above), and the task clock moves 11 s, past the
+// exposure deadline (10.7 s for 0.02 s) and kStallTimeout (10 s), under util::kLinkStalenessBound. The deadline ends
+// the exposure as failed, not only the link. Falsified by: the exposure worker waiting on read_frame() with no
+// deadline, so ImageReady stays false and never raises.
+Tier3Recipe tier3_recipe_iguider_camera() {
+    const auto make = [](IGuiderT3Hold& s) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::ioptron::create_iguider_camera(0, "", s.v4l2, s.clock);
+    };
+    return {[](Hosted& hosted) {
+                t3_fake<IGuiderT3Hold>(hosted).phase.store(IGuiderT3Hold::kHolding);
+                t3_start_exposure(hosted, 0.02);
+            },
+            [](Hosted& hosted) {
+                auto& s = t3_fake<IGuiderT3Hold>(hosted);
+                s.fake.stalled.store(true);
+                int holding = IGuiderT3Hold::kHolding;
+                s.phase.compare_exchange_strong(holding, IGuiderT3Hold::kFaulted);
+                s.clock.advance(std::chrono::seconds(11));
+            },
+            [](Hosted& hosted) { t3_fake<IGuiderT3Hold>(hosted).fake.stalled.store(false); },
+            "FakeIGuiderV4L2::stalled = true mid-exposure",
+            [make](bool) {
+                auto s = std::make_shared<IGuiderT3Hold>();
+                // Set before the stream worker starts: the hook is not locked.
+                s->fake.before_frame_return = [hold = s.get()](std::int32_t) { hold->hold_frame(); };
+                return host_over(s, make);
+            }};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+// A SynScan V4 handset tracking, the replies those of test_synscan_async_slew_failure.cpp. Falsified by: the slew
+// task clearing slewing when the "L" poll times out.
+Tier3Recipe tier3_recipe_synscan_telescope() {
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto responder = [started](const std::string& chunk) -> std::string {
+        if (chunk.empty()) return "0#";
+        switch (chunk[0]) {
+            case 'K':
+                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return "12AB0500,20000500#";
+            case 'r':
+            case 'R':
+            case 'b':
+            case 'B':
+                started->store(true);
+                return "#";
+            case 'L':
+                return started->load() ? "1#" : "0#";
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 't':
+                return std::string("\x01#");
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'T':
+            case 'W':
+            case 'M':
+            case 'P':
+                return "#";
+            default:
+                return "0#";
+        }
+    };
+    return tier3_mount_server_recipe("synscan_telescope", "synscan", started, responder, synscan_telescope_over);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ONSTEP
+// OnStep tracking and idle, then a goto running once :MS# is accepted; the replies are those of
+// test_onstep_link_loss.cpp. Falsified by: get_slewing() reporting the cached :GU# state when the status read times
+// out.
+Tier3Recipe tier3_recipe_onstep_telescope() {
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto responder = [started](const std::string& cmd) -> std::string {
+        if (cmd.rfind(":GVP", 0) == 0) return "On-Step#";
+        if (cmd.rfind(":GVN", 0) == 0) return "10.23a#";
+        if (cmd.rfind(":GU", 0) == 0) return started->load() ? "pEo190#" : "NpEo190#";
+        if (cmd.rfind(":GR", 0) == 0) return "01:00:00.0000#";
+        if (cmd.rfind(":GD", 0) == 0) return "+10*00:00.000#";
+        if (cmd.rfind(":GA", 0) == 0) return "+40*00:00#";
+        if (cmd.rfind(":GZ", 0) == 0) return "000*00:00#";
+        if (cmd.rfind(":MS", 0) == 0) {
+            started->store(true);
+            return "0";
+        }
+        if (cmd.rfind(":Q", 0) == 0) return "";
+        if (cmd.rfind(":S", 0) == 0 || cmd.rfind(":GXEE", 0) == 0) return "1";
+        return "0#";
+    };
+    return tier3_mount_server_recipe("onstep_telescope", "onstep", started, responder, onstep_telescope_over);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+// Oasis: the device keeps reporting "moving", then the state poll goes unanswered. Falsified by: the status poll
+// clearing IsMoving when the 0x32 read times out.
+Tier3Recipe tier3_recipe_astroasis_focuser() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock({[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
+                        [](Hosted& hosted) {
+                            auto& st = t3_fake<alpacacore::test::FakeHidState>(hosted);
+                            std::lock_guard<std::mutex> lock(st.mutex);
+                            st.dead = true;
+                        },
+                        [](Hosted& hosted) {
+                            auto& st = t3_fake<alpacacore::test::FakeHidState>(hosted);
+                            std::lock_guard<std::mutex> lock(st.mutex);
+                            st.dead = false;
+                        },
+                        "FakeHidState::dead = true mid-move",
+                        [clock](bool) {
+                            auto state = std::make_shared<alpacacore::test::FakeHidState>();
+                            Hosted hosted;
+                            hosted.driver = alpacacore::vendor::astroasis::create_astroasis_focuser(
+                                0, "/dev/hidraw-fake",
+                                std::make_unique<alpacacore::test::LockedAstroasisHidTransport>(
+                                    std::make_unique<alpacacore::test::FakeHidTransport>(state)),
+                                *clock);
+                            hosted.fake = state;
+                            return hosted;
+                        }},
+                       DeviceType::Focuser, clock);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_GEMINI
+// MyFocuserPro2: the firmware reports moving, then answers the state queries with frames the driver cannot parse,
+// as a wedged firmware does. Falsified by: the IsMoving read answering false when the ":01#" reply is invalid.
+Tier3Recipe tier3_recipe_gemini_focuser() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) {
+             t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_moving(true);
+             t3_start_focuser_move(hosted, 500);
+         },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(false); },
+         "FakeGeminiFocuser::set_garbage_state_replies(true) mid-move",
+         [clock](bool) {
+             return host_over(std::make_shared<alpacacore::test::FakeGeminiFocuser>(),
+                              [&](const alpacacore::test::FakeGeminiFocuser& f) -> std::unique_ptr<AlpacaDriver> {
+                                  return alpacacore::vendor::gemini::create_gemini_focuser(0, f.slave_path(), 9600,
+                                                                                           *clock);
+                              });
+         }},
+        DeviceType::Focuser, clock);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+// The tier-2 streamer with the task clock the wrapper's silence check reads (decision 0005 rule 2). Members are
+// destroyed after the driver, the clock last.
+struct WandererT3Hold {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSerialStreamer streamer{kWandererSfwFrame, std::chrono::milliseconds(50)};
+};
+
+// SFW: the streamed frame keeps reporting the old slot, so the move cannot land; the stream then stops with the port
+// open (a hung MCU), and the task clock moves past kFilterWheelLinkSilenceMs (10 s). Falsified by: Position reporting
+// the requested slot when the stream dies.
+Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
+    return {[](Hosted& hosted) {
+                auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*hosted.driver);
+                f.set_position(f.get_position() == 1 ? 2 : 1);
+            },
+            [](Hosted& hosted) {
+                auto& s = t3_fake<WandererT3Hold>(hosted);
+                s.streamer.set_muted(true);
+                // Twice, each step waiting for the reader's next clock read: a frame already in the pty when the mute
+                // lands restarts the silence window once. 20 s stays under util::kLinkStalenessBound.
+                for (int i = 0; i < 2; ++i) {
+                    s.clock.advance(std::chrono::milliseconds(10001));
+                    (void)s.clock.wait_for_now_calls(s.clock.now_calls() + 1, std::chrono::milliseconds(2000));
+                }
+            },
+            [](Hosted& hosted) { t3_fake<WandererT3Hold>(hosted).streamer.set_muted(false); },
+            "FakeSerialStreamer::set_muted(true) mid-move, task clock +20 s",
+            [](bool) {
+                return host_over(std::make_shared<WandererT3Hold>(),
+                                 [](WandererT3Hold& s) -> std::unique_ptr<AlpacaDriver> {
+                                     return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(
+                                         0, s.streamer.slave_path(), 19200, s.clock);
+                                 });
+            }};
+}
+#endif
+
+[[maybe_unused]] void t3_start_filterwheel_move(Hosted& hosted) {
+    auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*hosted.driver);
+    f.set_position(f.get_position() == 1 ? 2 : 1);
+}
+
+// The SDK cameras expose for a minute, long enough that no driver deadline ends the exposure inside the budget.
+constexpr double kTier3SdkExposureSeconds = 60.0;
+// The Player One fake caps an exposure at 10 s. Its driver is on the task clock: the watchdog (9 s + 15 s grace)
+// lands after the 18 s t3_on_clock steps at most before recover.
+constexpr double kTier3CappedExposureSeconds = 9.0;
+
+#ifdef ALPACACORE_ENABLE_ZWO
+// An AM mount: ":MS#" is accepted and the mount then reports itself slewing (no 'N' in ":GU#") for good; the setters
+// the goto sends first (site, time, target) are accepted. Falsified by: the slew status clearing Slewing when the
+// ":GU#" poll goes unanswered.
+Tier3Recipe tier3_recipe_zwo_telescope() {
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto responder = [started](const std::string& chunk) -> std::string {
+        const auto has = [&chunk](const char* command) { return chunk.find(command) != std::string::npos; };
+        if (has(":GVP#")) return "AM5#";
+        if (has(":GMA#")) return "012345ABCDEF#";
+        if (has(":GU#")) return started->load() ? "G#" : "NG#";
+        if (has(":GR#")) return "12:00:00#";
+        if (has(":GD#")) return "+45*00:00#";
+        if (has(":GMGE#")) return "-33*51:24&-151*12:55#";
+        if (has(":GMTI#")) return "01/02/2026&03:04:05&+00:00#";
+        if (has(":MS#")) {
+            started->store(true);
+            return "0#";
+        }
+        if (has(":Q#")) return "";
+        return (has(":GAT") || has(":Sr") || has(":Sd") || has(":SMGE") || has(":SMTI")) ? "1#" : "0#";
+    };
+    return tier3_mount_server_recipe("zwo_telescope", "zwo", started, responder, zwo_telescope_over);
+}
+
+// The exposure never completes (auto_complete_exposure off) until the status reads Failed. The driver retries a failed
+// exposure twice, 250 ms apart on the task clock, before it latches the failure. Falsified by: the exposure poll
+// treating a Failed status as done, so ImageReady goes true on a failed exposure.
+Tier3Recipe tier3_recipe_zwo_camera() {
+    using Fake = alpacacore::test::FakeZWOSDK;
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) {
+             t3_fake<Fake>(hosted).auto_complete_exposure = false;
+             t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+         },
+         [](Hosted& hosted) {
+             auto& fake = t3_fake<Fake>(hosted);
+             fake.fail_every_exposure = true;
+             fake.set_exposure_status(Fake::ExposureStatus::Failed);
+         },
+         [](Hosted& hosted) {
+             auto& fake = t3_fake<Fake>(hosted);
+             fake.fail_every_exposure = false;
+             fake.set_exposure_status(Fake::ExposureStatus::Working);
+         },
+         "FakeZWOSDK::fail_every_exposure = true mid-exposure",
+         [clock](bool) {
+             return host_over(std::make_shared<Fake>(), [&](Fake& fake) -> std::unique_ptr<AlpacaDriver> {
+                 return alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, fake, *clock);
+             });
+         }},
+        DeviceType::Camera, clock);
+}
+
+// The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
+// requested slot when the read fails.
+Tier3Recipe tier3_recipe_zwo_filterwheel() {
+    using Fake = alpacacore::test::FakeZWOEFWSDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).moving_reads = 1 << 30;
+                t3_start_filterwheel_move(hosted);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = true; },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = false; },
+            "FakeZWOEFWSDK::fail_reads = true mid-move"};
+}
+
+// The unit keeps reporting "moving"; then every status read throws. Falsified by: IsMoving answering false when the
+// read fails.
+Tier3Recipe tier3_recipe_zwo_focuser() {
+    using Fake = alpacacore::test::FakeZWOEAFSDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).moving = true;
+                t3_start_focuser_move(hosted, 500);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = true; },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = false; },
+            "FakeZWOEAFSDK::fail_reads = true mid-move"};
+}
+
+// The rotator keeps reporting "moving"; then every status read throws. Falsified by: IsMoving answering false when
+// the read fails.
+Tier3Recipe tier3_recipe_zwo_rotator() {
+    using Fake = alpacacore::test::FakeZWOCAASDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).moving = true;
+                dynamic_cast<alpacacore::RotatorDriver&>(*hosted.driver).move_absolute(90.0);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = true; },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = false; },
+            "FakeZWOCAASDK::fail_reads = true mid-move"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_QHY
+// The frame call is held (before_call on get_mem_length, the worker's first call after the trigger) until `fail`, which
+// makes that call throw: the worker reports no frame buffer and the exposure fails. The hold is bounded, so a case that
+// never reaches `fail` still lets the worker end. The fake answers read_directly, so the worker skips its 1 s settle
+// sleep on the task clock and the raise waits on no driver timer. Falsified by: the exposure worker treating the failed
+// buffer query as a finished frame.
+Tier3Recipe tier3_recipe_qhy_camera() {
+    auto gate = std::make_shared<std::atomic<bool>>(false);
+    return {[](Hosted& hosted) { t3_start_exposure(hosted, kTier3SdkExposureSeconds); },
+            [gate](Hosted& hosted) {
+                t3_fake<QhySdkHold>(hosted).fake.fail_from("get_mem_length");
+                gate->store(true);
+            },
+            [](Hosted& hosted) { t3_fake<QhySdkHold>(hosted).fake.clear_fail_from(); },
+            "FakeQHYSDK::fail_from(get_mem_length) mid-exposure",
+            [gate](bool) {
+                auto sdk_hold = std::make_shared<QhySdkHold>();
+                sdk_hold->fake.read_directly = true;
+                sdk_hold->fake.before_call = [gate](const std::string& name) {
+                    if (name != "get_mem_length") return;
+                    const auto bound = Clock::now() + std::chrono::seconds(30);
+                    while (!gate->load() && Clock::now() < bound)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                };
+                return host_over(sdk_hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+                    return alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", s.sdk);
+                });
+            }};
+}
+
+// The CFW3 takes 8 s for the move (its reply would land then) and the driver waits 12 s for it; `fail` mutes the wheel
+// at 1 s, so the reply never comes. Unmuted the move completes at 8 s, so a fault that does nothing ends the case with
+// the move done. Falsified by: the wheel's move wait reporting the requested slot when the reply never arrives.
+Tier3Recipe tier3_recipe_qhy_filterwheel() {
+    using Fake = alpacacore::test::FakeQhyCfw3;
+    return {[](Hosted& hosted) { t3_start_filterwheel_move(hosted); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(false); }, "FakeQhyCfw3::set_muted(true) mid-move",
+            [](bool) {
+                auto wheel = std::make_shared<Fake>();
+                wheel->set_travel_ms(8000);
+                return host_over(wheel, [](const Fake& f) -> std::unique_ptr<AlpacaDriver> {
+                    alpacacore::vendor::qhy::Cfw3Settings settings;
+                    settings.boot_timeout_ms = 150;
+                    settings.reply_timeout_ms = 300;
+                    settings.move_timeout_ms = 12000;
+                    return alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, f.slave_path(), settings);
+                });
+            }};
+}
+
+// The Q-Focuser advances one step per position poll, so a 500-step move never ends; then the firmware goes silent.
+// Falsified by: IsMoving answering false when the position poll times out.
+Tier3Recipe tier3_recipe_qhy_focuser() {
+    using Fake = alpacacore::test::FakeQhyQFocuser;
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) {
+             t3_fake<Fake>(hosted).set_steps_per_poll(1);
+             t3_start_focuser_move(hosted, 500);
+         },
+         [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(true); },
+         [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(false); }, "FakeQhyQFocuser::set_muted(true) mid-move",
+         [clock](bool) {
+             return host_over(std::make_shared<Fake>(), [&](const Fake& f) -> std::unique_ptr<AlpacaDriver> {
+                 return alpacacore::vendor::qhy::create_qhy_focuser(0, f.slave_path(), {}, *clock);
+             });
+         }},
+        DeviceType::Focuser, clock);
+}
+#endif
+
+#if defined(ALPACACORE_ENABLE_TOUPTEK) || defined(ALPACACORE_ENABLE_ALTAIR)
+// The frame wait is armed to block (hold_next_wait_image, which the stream restart inside StartExposure does not
+// spend); `fail` releases it with no frame delivered, so the camera reports no frame. The failed exposure keeps its
+// error, so there is nothing to undo. Falsified by: the exposure thread treating a wait that returns no frame as a
+// finished exposure.
+Tier3Recipe tier3_recipe_toup_family_camera() {
+    return {[](Hosted& hosted) {
+                t3_fake<ToupTekSdkHold>(hosted).fake.hold_next_wait_image();
+                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+            },
+            [](Hosted& hosted) { t3_fake<ToupTekSdkHold>(hosted).fake.release_wait_image(); }, [](Hosted&) {},
+            "FakeToupTekSDK::release_wait_image() with no frame mid-exposure"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+Tier3Recipe tier3_recipe_touptek_camera() { return tier3_recipe_toup_family_camera(); }
+#endif
+
+#ifdef ALPACACORE_ENABLE_ALTAIR
+Tier3Recipe tier3_recipe_altair_camera() { return tier3_recipe_toup_family_camera(); }
+#endif
+
+#ifdef ALPACACORE_ENABLE_SVBONY
+// Every video-data read is held for up to 20 s (the exposure is running); `fail` makes the held read throw. The
+// failed exposure keeps its error, so there is nothing to undo. The fake allows a 60 s exposure, so with no fault
+// the driver gives up at its own deadline (exposure + 10 s), well after the recover leg ends. Falsified by: the
+// exposure worker swallowing a failed video-data read and ending the exposure as a frame.
+Tier3Recipe tier3_recipe_svbony_camera() {
+    using Fake = alpacacore::test::FakeSVBSDK;
+    return {[](Hosted& hosted) {
+                auto& fake = t3_fake<Fake>(hosted);
+                fake.set_max_read_wait(std::chrono::seconds(20));
+                fake.block_video_data();
+                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+            },
+            [](Hosted& hosted) {
+                auto& fake = t3_fake<Fake>(hosted);
+                fake.fail_next_held_read();
+                fake.release_video_data();
+            },
+            [](Hosted&) {}, "FakeSVBSDK::fail_next_held_read() mid-exposure",
+            [](bool) {
+                auto sdk = std::make_shared<Fake>();
+                sdk->set_exposure_max(std::chrono::seconds(static_cast<int>(kTier3SdkExposureSeconds)));
+                return host_over(sdk, [](Fake& fake) -> std::unique_ptr<AlpacaDriver> {
+                    return alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+                });
+            }};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+// The readiness poll reports not ready (set_image_ready(false)); then it throws. The poll waits 50 ms on the task
+// clock between checks. Falsified by: the exposure worker ending the exposure when the readiness check throws.
+Tier3Recipe tier3_recipe_playerone_camera() {
+    using Fake = alpacacore::test::FakePlayerOneSDK;
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock({[](Hosted& hosted) {
+                            t3_fake<Fake>(hosted).set_image_ready(false);
+                            t3_start_exposure(hosted, kTier3CappedExposureSeconds);
+                        },
+                        [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(true); },
+                        [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(false); },
+                        "FakePlayerOneSDK::set_readiness_error(true) mid-exposure",
+                        [clock](bool) {
+                            return host_over(std::make_shared<Fake>(),
+                                             [&](Fake& fake) -> std::unique_ptr<AlpacaDriver> {
+                                                 return alpacacore::vendor::playerone::create_playerone_camera(
+                                                     0, 0, fake, std::chrono::seconds(15), *clock);
+                                             });
+                        }},
+                       DeviceType::Camera, clock);
+}
+
+// The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
+// requested slot when the read fails.
+Tier3Recipe tier3_recipe_playerone_filterwheel() {
+    using Fake = alpacacore::test::FakePlayerOnePWSDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).set_moving_reads(1 << 30);
+                t3_start_filterwheel_move(hosted);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_fail_reads(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_fail_reads(false); },
+            "FakePlayerOnePWSDK::set_fail_reads(true) mid-move"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_GPHOTO
+// A bulb exposure (60 s, past the longest native speed) pumps events in 100 ms slices; `fail` makes the event pump
+// throw, which closes the shutter and fails the exposure. Falsified by: the exposure worker publishing a frame after
+// the hold throws.
+Tier3Recipe tier3_recipe_gphoto_camera() {
+    return {[](Hosted& hosted) { t3_start_exposure(hosted, kTier3SdkExposureSeconds); },
+            [](Hosted& hosted) { t3_fake<GPhotoSdkHold>(hosted).fake.fail_from("drain_events"); },
+            [](Hosted& hosted) { t3_fake<GPhotoSdkHold>(hosted).fake.clear_fail_from(); },
+            "FakeGPhotoSDK::fail_from(drain_events) mid-exposure"};
+}
+#endif
+
+// One X(id, status) per tier-3 recipe, under the vendor's guard. status OK: the case must pass. status DEFECT: the
+// driver violates the contract today; the case carries [!shouldfail] and its Fix removes the tag.
+// clang-format off
+#ifdef ALPACACORE_ENABLE_CELESTRON
+#define CT3_CELESTRON(X) X(celestron_telescope, OK) X(celestron_cgx_telescope, OK) X(celestron_focuser, OK)
+#else
+#define CT3_CELESTRON(X)
+#endif
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+#define CT3_SKYWATCHER(X) X(skywatcher_telescope, OK) X(skywatcher_telescope_serial, OK)
+#else
+#define CT3_SKYWATCHER(X)
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+#define CT3_IOPTRON(X) X(ioptron_telescope, OK) X(ioptron_focuser, OK) X(iguider_camera, OK)
+#else
+#define CT3_IOPTRON(X)
+#endif
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+#define CT3_SYNSCAN(X) X(synscan_telescope, OK)
+#else
+#define CT3_SYNSCAN(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+#define CT3_ONSTEP(X) X(onstep_telescope, OK)
+#else
+#define CT3_ONSTEP(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+#define CT3_ASTROASIS(X) X(astroasis_focuser, OK)
+#else
+#define CT3_ASTROASIS(X)
+#endif
+#ifdef ALPACACORE_ENABLE_GEMINI
+#define CT3_GEMINI(X) X(gemini_focuser, OK)
+#else
+#define CT3_GEMINI(X)
+#endif
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+#define CT3_WANDERERASTRO(X) X(wandererastro_filterwheel, OK)
+#else
+#define CT3_WANDERERASTRO(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+#define CT3_ZWO(X) X(zwo_telescope, OK) X(zwo_camera, OK) X(zwo_filterwheel, OK) X(zwo_focuser, OK) X(zwo_rotator, OK)
+#else
+#define CT3_ZWO(X)
+#endif
+#ifdef ALPACACORE_ENABLE_QHY
+#define CT3_QHY(X) X(qhy_camera, OK) X(qhy_filterwheel, OK) X(qhy_focuser, OK)
+#else
+#define CT3_QHY(X)
+#endif
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+#define CT3_TOUPTEK(X) X(touptek_camera, OK)
+#else
+#define CT3_TOUPTEK(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CT3_ALTAIR(X) X(altair_camera, OK)
+#else
+#define CT3_ALTAIR(X)
+#endif
+#ifdef ALPACACORE_ENABLE_SVBONY
+#define CT3_SVBONY(X) X(svbony_camera, OK)
+#else
+#define CT3_SVBONY(X)
+#endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+#define CT3_PLAYERONE(X) X(playerone_camera, OK) X(playerone_filterwheel, OK)
+#else
+#define CT3_PLAYERONE(X)
+#endif
+#ifdef ALPACACORE_ENABLE_GPHOTO
+#define CT3_GPHOTO(X) X(gphoto_camera, OK)
+#else
+#define CT3_GPHOTO(X)
+#endif
+#define CONTRACT_SWEEP_TIER3_HOSTS(X) \
+    CT3_CELESTRON(X) \
+    CT3_SYNSCAN(X) \
+    CT3_ONSTEP(X) \
+    CT3_SKYWATCHER(X) \
+    CT3_IOPTRON(X) \
+    CT3_ASTROASIS(X) \
+    CT3_GEMINI(X) \
+    CT3_WANDERERASTRO(X) \
+    CT3_ZWO(X) \
+    CT3_QHY(X) \
+    CT3_TOUPTEK(X) \
+    CT3_ALTAIR(X) \
+    CT3_SVBONY(X) \
+    CT3_PLAYERONE(X) \
+    CT3_GPHOTO(X)
+// clang-format on
+
 #endif  // !_WIN32
 
 }  // namespace
@@ -2382,11 +3444,53 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_INITIATORS)
 #endif
 
 #ifndef _WIN32
+#define CT3_CASE_TAGS_OK "[contract][tier3]"
+#define CT3_CASE_TAGS_DEFECT "[contract][tier3][!shouldfail]"
+// Generated from CONTRACT_SWEEP_TIER3_HOSTS rows, like the tier-1 and tier-2 cases; each recipe names its mutation.
+#define CT3_NAME(id) "Contract sweep tier 3 - " #id " - failure after start is never a clean completion"
+#define CT3_CASE(id, status)                                                 \
+    TEST_CASE(CT3_NAME(id), CT3_CASE_TAGS_##status "[" #id "]") {            \
+        case_t3_failure_after_start(tier2_host_##id(), tier3_recipe_##id()); \
+    }
+CONTRACT_SWEEP_TIER3_HOSTS(CT3_CASE)
+
+// Non-vacuity guard for tier 3: every tier-2 host of a type with an asynchronous completion property (camera,
+// telescope, focuser, rotator, filter wheel) has a tier-3 recipe with a start, a fault, its undo and a description, and
+// no other host has one. A host of those types with no recipe is a fake no case ever fails mid-operation. Run from the
+// tier-2 roster guard below, as check_tier1_cases_have_a_subject() is from the tier-1 one.
+void check_tier3_hosts_have_a_recipe() {
+    std::map<std::string, Tier3Recipe> recipes;
+#define CT3_PUSH(id, status) CHECK(recipes.emplace(#id, tier3_recipe_##id()).second);
+    CONTRACT_SWEEP_TIER3_HOSTS(CT3_PUSH)
+#undef CT3_PUSH
+    std::set<std::string> hosted_ids;
+#define CT3_HOST(id, kind)                                         \
+    {                                                              \
+        const Tier2Host h = tier2_host_##id();                     \
+        hosted_ids.insert(#id);                                    \
+        INFO("tier-2 host " #id);                                  \
+        CHECK((recipes.count(#id) == 1) == is_tier3_type(h.type)); \
+    }
+    CONTRACT_SWEEP_TIER2_HOSTS(CT3_HOST)
+#undef CT3_HOST
+    for (const auto& [id, r] : recipes) {
+        INFO("tier-3 recipe " << id);
+        CHECK(hosted_ids.count(id) == 1);
+        CHECK(static_cast<bool>(r.start));
+        CHECK(static_cast<bool>(r.fail));
+        CHECK(static_cast<bool>(r.recover));
+        CHECK((r.fault != nullptr && std::string(r.fault).size() > 0));
+    }
+}
+#endif
+
+#ifndef _WIN32
 // Non-vacuity guard for tier 2. The roster stays a literal three-field array (docs-drift check 13 parses
 // it), so the connect recipes live in CONTRACT_SWEEP_TIER2_HOSTS; this pins the two to each other in both
 // directions. A roster row without a host would be a fake no case ever connects to, and a host without a
 // row would be a fake that check 13 never sees.
 TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contract][tier2][contract-sweep-guard]") {
+    check_tier3_hosts_have_a_recipe();
     using alpacacore::test::contract::kFakeConnectableRoster;
     std::vector<Tier2Host> hosts;
     std::vector<std::string> kinds;

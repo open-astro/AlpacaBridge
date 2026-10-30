@@ -18,9 +18,11 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <numbers>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_skywatcher_mount.h"
 
 using alpacacore::AlignmentMode;
 using alpacacore::DeviceType;
@@ -29,6 +31,7 @@ namespace sw = alpacacore::vendor::skywatcher;
 
 namespace {
 
+using alpacacore::test::FakeSkyWatcherMount;
 using alpacacore::test::require_alpaca_error;
 
 std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int device_number = 0) {
@@ -36,6 +39,15 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int device_number = 0) 
     conn.type = sw::ConnectionType::Serial;
     conn.port_path = "/dev/null";
     return sw::create_skywatcher_telescope(device_number, conn);
+}
+
+sw::ConnectionInfo endpoint(const FakeSkyWatcherMount& mount) {
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.udp_port = mount.port();
+    info.response_timeout_ms = 250;
+    return info;
 }
 
 }  // namespace
@@ -317,4 +329,38 @@ TEST_CASE("SkyWatcher Telescope Driver spec audit - DoesRefraction is not implem
     require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}
+
+TEST_CASE("SkyWatcher Telescope Driver - CanMoveAxis connected (#1869)", "[skywatcher][telescope][unit]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    // Falsified by: get_can_move_axis returning false for axis 0 or 1.
+    CHECK(driver->get_can_move_axis(0));
+    CHECK(driver->get_can_move_axis(1));
+    // Falsified by: get_can_move_axis returning true for axis 2 (no tertiary axis).
+    CHECK_FALSE(driver->get_can_move_axis(2));
+    // Falsified by: dropping the axis range check, so -1 or 3 answers a bool.
+    require_alpaca_error([&] { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_can_move_axis(3); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher Telescope Driver - ApertureArea connected (#1869)", "[skywatcher][telescope][unit]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    // Falsified by: the area not being recomputed from the diameter (a constant 0.0 or a stale value).
+    driver->set_aperture_diameter(0.2);
+    CHECK(driver->get_aperture_area() == Catch::Approx(std::numbers::pi * 0.1 * 0.1).margin(1e-9));
+    driver->set_aperture_diameter(0.4);
+    CHECK(driver->get_aperture_area() == Catch::Approx(std::numbers::pi * 0.2 * 0.2).margin(1e-9));
+    // Falsified by: a zero diameter leaving the previous area in place.
+    driver->set_aperture_diameter(0.0);
+    CHECK(driver->get_aperture_area() == 0.0);
+    driver->set_connected(false);
 }

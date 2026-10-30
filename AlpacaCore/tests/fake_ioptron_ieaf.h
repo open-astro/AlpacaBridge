@@ -26,7 +26,9 @@
 //   :FQ# / :FZ#    -> "1"               abort / zero
 //
 // Motion completes on the poll after the move, which is enough for the
-// lifecycle tests this fake exists for (issue #528).
+// lifecycle tests this fake exists for (issue #528); set_focuser_moving(true)
+// keeps :FI# reporting the motor running and set_silent(true) stops every
+// reply, for a failure in mid-move.
 //
 // The same fake answers the iEFW filter wheel (model 99 or 98) with its own commands, so the wheel
 // driver can run over it: :FW1# -> "<12 chars>#" firmware, :WP# -> "n#" slot or "-1#" while moving,
@@ -96,6 +98,11 @@ public:
     /// :WP# polls that answer -1 after a :WM move to a different slot (default 0: the move settles at once).
     void set_wheel_moving_polls(int polls) { wheel_moving_polls_.store(polls); }
     void fail_wheel_position(bool fail) { fail_wp_.store(fail); }
+    /// While true, :FI# reports the focuser moving whatever its position: a motor still running after the move
+    /// (the default reports it stopped on the first poll).
+    void set_focuser_moving(bool moving) { focuser_moving_.store(moving); }
+    /// While true, every command is recorded and left unanswered, as a firmware that hangs with the port open does.
+    void set_silent(bool silent) { silent_.store(silent); }
     /// A USB unplug: every driver write fails with EIO from here on, so a move throws. Not reversible.
     void unplug() {
         stop_.store(true);
@@ -132,6 +139,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             commands_.push_back(cmd);
         }
+        if (silent_.load()) return;
         char reply[40] = {};
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
@@ -141,7 +149,8 @@ private:
             // Temperature 20.00 C = 29315 (Kelvin x 100); dir 1 = not reversed.
             // Sign plus zero-padded digits, as the real unit sends ("+013211..."): the
             // fixed-width sscanf in the wrapper over-reads space padding.
-            std::snprintf(reply, sizeof(reply), "%+07d%1d%05d%1d#", position_.load(), 0, 29315, 1);
+            std::snprintf(reply, sizeof(reply), "%+07d%1d%05d%1d#", position_.load(), focuser_moving_.load() ? 1 : 0,
+                          29315, 1);
         } else if (cmd.rfind(":FM", 0) == 0) {
             position_.store(std::atoi(cmd.c_str() + 3));
             std::snprintf(reply, sizeof(reply), "1");
@@ -193,6 +202,8 @@ private:
     std::atomic<int> wheel_moving_polls_{0};
     std::atomic<int> moving_left_{0};
     std::atomic<bool> fail_wp_{false};
+    std::atomic<bool> focuser_moving_{false};
+    std::atomic<bool> silent_{false};
 };
 
 }  // namespace alpacacore::test
