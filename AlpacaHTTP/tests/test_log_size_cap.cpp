@@ -78,7 +78,8 @@ void write_lines(int count) {
 }  // namespace
 
 int main() {
-    {  // case: the file stays within the cap and ends with the marker
+    {
+        // case: the file stays within the cap and ends with the marker
         const fs::path dir = make_dir();
         const std::uintmax_t cap = 4096;
         const fs::path file = start(dir, cap);
@@ -90,7 +91,8 @@ int main() {
         fs::remove_all(dir);
     }
 
-    {  // case: cap 0 means no limit
+    {
+        // case: cap 0 means no limit
         const fs::path dir = make_dir();
         const fs::path file = start(dir, 0);
         write_lines(500);
@@ -99,7 +101,8 @@ int main() {
         fs::remove_all(dir);
     }
 
-    {  // case: deleting today's file resets the cap
+    {
+        // case: deleting today's file resets the cap
         const fs::path dir = make_dir();
         const fs::path file = start(dir, 4096);
         write_lines(500);
@@ -110,7 +113,8 @@ int main() {
         fs::remove_all(dir);
     }
 
-    {  // case: reopening an over-cap file appends nothing, not even a marker
+    {
+        // case: reopening an over-cap file appends nothing, not even a marker
         const fs::path dir = make_dir();
         const fs::path file = dir / util::current_log_filename();
         {
@@ -124,7 +128,8 @@ int main() {
         fs::remove_all(dir);
     }
 
-    {  // case: a restart with a file already holding the marker adds no second marker
+    {
+        // case: a restart with a file already holding the marker adds no second marker
         const fs::path dir = make_dir();
         const fs::path file = start(dir, 4096);
         write_lines(500);
@@ -135,13 +140,15 @@ int main() {
         fs::remove_all(dir);
     }
 
-    {  // case: the default cap fits what the viewer and archive will read
+    {
+        // case: the default cap fits what the viewer and archive will read
         alpacahttp::Config config;
         EXPECT(config.log_max_file_size_mb() == 10);
         EXPECT(static_cast<std::uintmax_t>(config.log_max_file_size_mb()) * kMiB <= util::kMaxLogFileReadBytes);
     }
 
-    {  // case: read_log_file succeeds on a capped file
+    {
+        // case: read_log_file succeeds on a capped file
         const fs::path dir = make_dir();
         const fs::path file = start(dir, 4096);
         write_lines(500);
@@ -151,7 +158,8 @@ int main() {
         fs::remove_all(dir);
     }
 
-    {  // case: age pruning still removes old dated files and keeps today's
+    {
+        // case: age pruning still removes old dated files and keeps today's
         const fs::path dir = make_dir();
         const fs::path old_file = dir / "alpacabridge-2000-01-01.log";
         { std::ofstream(old_file) << "old\n"; }
@@ -164,7 +172,8 @@ int main() {
         fs::remove_all(dir);
     }
 
-    {  // case: logging.max_file_size_mb from yaml, env, 0 = off, bad values keep the default
+    {
+        // case: logging.max_file_size_mb from yaml, env, 0 = off, bad values keep the default
         char path_template[] = "/tmp/alpacahttp_log_cap_cfg_XXXXXX";
         const int fd = ::mkstemp(path_template);
         EXPECT(fd >= 0);
