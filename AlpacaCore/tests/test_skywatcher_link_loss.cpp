@@ -569,3 +569,30 @@ TEST_CASE("SkyWatcher link loss - a pulse sent with Tracking off and ended after
     CHECK(r.frames_since(from, "K") >= 1);  // the pulse ended after the restart; its stop is ungated
     CHECK(r.frames_since(from, "IJG") == 0);
 }
+
+TEST_CASE("SkyWatcher link loss - a MoveAxis stop checks for a board restart itself before it restores tracking",
+          "[skywatcher][linkloss][serial]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    r.board.hold_running(1, true);
+    r.driver->move_axis(0, 0.0);
+    sw::set_status_poll_paused_for_testing(*r.driver, true);  // only the stop task can notice the restart
+    r.board.set_muted(true);
+    for (int i = 0; i < 3; ++i) CHECK_THROWS(r.protocol->inquire_position(sw::kAxisRa));
+    r.board.set_init_done(false);
+    r.board.set_muted(false);
+    for (int i = 0; i < 20 && r.protocol->link_faulted(); ++i) {
+        try {
+            r.protocol->inquire_status(sw::kAxisRa);  // the link recovers; the paused poll has not probed the board
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        }
+        r.step();
+    }
+    REQUIRE_FALSE(r.protocol->link_faulted());
+    r.board.hold_running(1, false);
+    const std::size_t from = r.board.frames().size();
+    r.step(10);  // the stop task reaches its restore
+
+    CHECK(r.frames_since(from, "GIJ") == 0);
+    sw::set_status_poll_paused_for_testing(*r.driver, false);
+}
