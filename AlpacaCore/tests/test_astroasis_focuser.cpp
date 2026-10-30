@@ -39,7 +39,9 @@
 
 namespace {
 
+using alpacacore::test::connect_and_park;
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::tick;
 
 using alpacacore::test::FakeHidState;
 using alpacacore::test::FakeHidTransport;
@@ -54,20 +56,12 @@ std::unique_ptr<alpacacore::FocuserDriver> make_fake_focuser(const std::shared_p
 constexpr auto kTick = std::chrono::milliseconds(150);
 constexpr auto kBound = std::chrono::milliseconds(5000);
 
-// Advances one tick and waits for the poll body to be waiting again.
-void tick(alpacacore::test::FakeTaskClock& clock) {
-    clock.advance(kTick);
-    REQUIRE(clock.wait_for_woken_settled(kBound));
-    REQUIRE(clock.wait_for_waiters(1, kBound));
-}
-
 // A connected driver on a virtual clock. The poll body parks on the clock after
 // Connect returns; not a REQUIRE, so a case fails on the behaviour it pins.
 std::unique_ptr<alpacacore::FocuserDriver> connected_focuser(const std::shared_ptr<FakeHidState>& state,
                                                              alpacacore::test::FakeTaskClock& clock) {
     auto driver = make_fake_focuser(state, clock);
-    driver->set_connected(true);
-    (void)clock.wait_for_waiters(1, std::chrono::milliseconds(2000));
+    (void)connect_and_park(*driver, clock, std::chrono::milliseconds(2000));
     return driver;
 }
 
@@ -99,7 +93,7 @@ TEST_CASE("Astroasis Focuser Driver - getters between poll ticks cause no device
         state->position = 4321;
     }
     CHECK(driver->get_position() == 1234);  // unchanged until the tick
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 4321);
     CHECK(state->transactions() == after_connect + 1);
 
@@ -160,7 +154,7 @@ TEST_CASE("Astroasis Focuser Driver - Move and Halt write through to the frame",
     CHECK(state->status_reads == reads_before);
 
     // The poll that follows measures the device again.
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(state->status_reads == reads_before + 1);
 
     driver->set_connected(false);
@@ -214,7 +208,7 @@ TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a 
     act_during_poll(state, clock, 0x36, [&] { CHECK_THROWS_AS(driver->move(2000), alpacacore::AlpacaException); });
     const int overlapped = driver->get_position();
     CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 5555);  // the next poll measured the device
     CHECK(driver->get_is_moving());
     driver->set_connected(false);
@@ -239,7 +233,7 @@ TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a 
     act_during_poll(state, clock, 0x37, [&] { CHECK_THROWS_AS(driver->halt(), alpacacore::AlpacaException); });
     const int overlapped = driver->get_position();
     CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 5555);
     CHECK_FALSE(driver->get_is_moving());  // the next poll measured the stop
     driver->set_connected(false);
@@ -261,7 +255,7 @@ TEST_CASE("Astroasis Focuser Driver - a poll that overlaps a write drops its fra
 
     // The poll's frame (moving=false) was dropped; the write-through stands.
     CHECK(driver->get_is_moving());
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK_FALSE(driver->get_is_moving());  // the next poll publishes normally
 
     driver->set_connected(false);
@@ -303,12 +297,12 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
     // Below the threshold the last good frame is still served (decision 0010:
     // stale is never a refusal); a failed poll publishes nothing.
     for (int i = 0; i < 2; ++i) {
-        tick(clock);
+        tick(clock, kTick, kBound);
         CHECK(driver->get_position() == 1234);
     }
     CHECK(driver->get_link_fault().empty());
     // The third failed poll latches: DriverException naming the link, Connected untouched.
-    tick(clock);
+    tick(clock, kTick, kBound);
     try {
         (void)driver->get_position();
         FAIL("expected a throw");
@@ -342,7 +336,7 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
         CHECK(state->moves == moves_before);
         CHECK(state->halts == halts_before + 1);
     }
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 9999);  // recovers with no reconnect
     CHECK(driver->get_link_fault().empty());
 
@@ -364,21 +358,21 @@ TEST_CASE("Astroasis Focuser Driver - a removed transport drops Connected at onc
         state->removed = true;
     }
     // One failed poll, far short of the 3-failure fault latch and the 30 s bound.
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault() == "HID transport error");
     require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
 
     // The next poll releases the transport instead of writing to the removed node again.
-    tick(clock);
+    tick(clock, kTick, kBound);
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         CHECK(state->closes >= 1);
     }
     // Further failed polls latch the poll fault, which must not replace the transport text (decision 0009, point 5).
-    tick(clock);
-    tick(clock);
-    tick(clock);
+    tick(clock, kTick, kBound);
+    tick(clock, kTick, kBound);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_link_fault() == "HID transport error");
 
     // Connected=true over the dead link reconnects instead of taking the idempotency return.
@@ -405,7 +399,7 @@ TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound dro
         std::lock_guard<std::mutex> lock(state->mutex);
         state->dead = true;
     }
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 1234);  // stale, still served
     CHECK(driver->get_connected());
 
@@ -736,7 +730,7 @@ TEST_CASE("Astroasis Focuser Driver - a failed HID read drops Connected at once 
         std::lock_guard<std::mutex> lock(state->mutex);
         state->read_fails = true;
     }
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK_FALSE(driver->get_connected());
     require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
 

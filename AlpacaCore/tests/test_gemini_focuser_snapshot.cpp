@@ -36,8 +36,10 @@
 #include "fake_gemini_focuser.h"
 #include "fake_task_clock.h"
 
+using alpacacore::test::connect_and_park;
 using alpacacore::test::FakeGeminiFocuser;
 using alpacacore::test::FakeTaskClock;
+using alpacacore::test::tick;
 using namespace std::chrono_literals;
 
 namespace {
@@ -73,13 +75,6 @@ bool wait_asleep(const std::atomic<pid_t>& tid) {
     return false;
 }
 
-// Advances one tick and waits for the poll body to be waiting again.
-void tick(FakeTaskClock& clock) {
-    clock.advance(kTick);
-    REQUIRE(clock.wait_for_woken_settled(kBound));
-    REQUIRE(clock.wait_for_waiters(1, kBound));
-}
-
 }  // namespace
 
 TEST_CASE("Gemini Focuser Snapshot - getters between poll ticks cause no wire reads",
@@ -87,8 +82,7 @@ TEST_CASE("Gemini Focuser Snapshot - getters between poll ticks cause no wire re
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
 
     CHECK(driver->get_position() == 1000);
     CHECK(driver->get_is_moving() == false);
@@ -107,7 +101,7 @@ TEST_CASE("Gemini Focuser Snapshot - getters between poll ticks cause no wire re
     fake.set_moving(true);
     fake.set_temperature(-3.5);
     CHECK(driver->get_position() == 1000);  // unchanged until the tick
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 2500);
     CHECK(driver->get_is_moving() == true);
     CHECK(driver->get_temperature() == Catch::Approx(-3.5));
@@ -121,15 +115,14 @@ TEST_CASE("Gemini Focuser Snapshot - IsMoving is true right after a successful M
     FakeGeminiFocuser fake;  // reports "not moving" always
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
 
     driver->move(4000);
     CHECK(wire_saw(fake, ":054000#"));  // Move still reaches the device
     CHECK(driver->get_is_moving() == true);
 
     // The poll that follows measures the device, which says it is not moving.
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_is_moving() == false);
 
     driver->set_connected(false);
@@ -141,8 +134,7 @@ TEST_CASE("Gemini Focuser Snapshot - Halt reaches the device and IsMoving reads 
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
     fake.set_moving(true);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
     CHECK(driver->get_is_moving() == true);
 
     driver->halt();
@@ -157,8 +149,7 @@ TEST_CASE("Gemini Focuser Snapshot - disconnect stops the poll and getters throw
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
 
     driver->set_connected(false);
     CHECK(clock.waiter_count() == 0);  // the poll body ended and was joined
@@ -183,15 +174,14 @@ TEST_CASE("Gemini Focuser Snapshot - failed polls latch a link fault and a good 
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
     CHECK(driver->get_position() == 1000);
 
     fake.set_garbage_state_replies(true);
-    tick(clock);
-    tick(clock);
+    tick(clock, kTick, kBound);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 1000);  // two failures: still below the threshold
-    tick(clock);
+    tick(clock, kTick, kBound);
 
     // Latched: the getters and Move refuse, Connected stays true.
     CHECK(driver->get_connected());
@@ -216,7 +206,7 @@ TEST_CASE("Gemini Focuser Snapshot - failed polls latch a link fault and a good 
 
     // The poll keeps asking while faulted; the first good reply restores service.
     fake.set_garbage_state_replies(false);
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 1000);
     CHECK(driver->get_temperature() == Catch::Approx(12.5));
 
@@ -229,8 +219,7 @@ TEST_CASE("Gemini Focuser Snapshot - a temperature probe that fails keeps Positi
     FakeTaskClock clock;
     fake.set_garbage_temperature(true);
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
 
     CHECK(driver->get_position() == 1000);
     CHECK(driver->get_is_moving() == false);
@@ -242,15 +231,13 @@ TEST_CASE("Gemini Focuser Snapshot - a temperature probe that fails keeps Positi
     }
     CHECK(fake.count(":06#") == 1);  // the connect-time frame asked once
 
-    tick(clock);
-    tick(clock);
+    tick(clock, kTick, kBound);
+    tick(clock, kTick, kBound);
     CHECK(fake.count(":06#") == 1);  // backed off: Position keeps polling, the probe is not asked
 
     // After the retry delay the probe is asked again, and a recovered probe is served.
     fake.set_garbage_temperature(false);
-    clock.advance(31s);
-    REQUIRE(clock.wait_for_woken_settled(kBound));
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    tick(clock, 31s, kBound);
     CHECK(fake.count(":06#") == 2);
     CHECK(driver->get_temperature() == Catch::Approx(12.5));
 
@@ -264,13 +251,12 @@ TEST_CASE("Gemini Focuser Snapshot - a temperature probe that fails after a good
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
     CHECK(driver->get_temperature() == Catch::Approx(12.5));
 
     fake.set_garbage_temperature(true);
-    tick(clock);  // the failed read
-    tick(clock);  // a backoff poll
+    tick(clock, kTick, kBound);  // the failed read
+    tick(clock, kTick, kBound);  // a backoff poll
     CHECK(fake.count(":06#") == 2);
     try {
         (void)driver->get_temperature();
@@ -311,15 +297,14 @@ TEST_CASE("Gemini Focuser Snapshot - a fault that stands past the link-loss boun
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
     REQUIRE(driver->get_position() == 1000);
     CHECK(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
 
     // Three failed polls latch the fault; Connected is still true (decision 0009).
     fake.set_garbage_state_replies(true);
     for (int i = 0; i < 3; ++i) {
-        tick(clock);
+        tick(clock, kTick, kBound);
     }
     CHECK(driver->get_connected() == true);
 
@@ -354,12 +339,11 @@ TEST_CASE(
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
     CHECK(driver->get_link_fault().empty());
 
     fake.set_garbage_state_replies(true);
-    for (int i = 0; i < 3; ++i) tick(clock);
+    for (int i = 0; i < 3; ++i) tick(clock, kTick, kBound);
     CHECK_FALSE(driver->get_link_fault().empty());  // latched, Connected still true
 
     clock.advance(31s);
@@ -378,8 +362,7 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
 
     // The next poll's first exchange (":00#") is held by the fake.
     fake.gate_next_reply();
@@ -413,8 +396,7 @@ TEST_CASE(
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
 
     fake.gate_next_reply();
     const int moving_reads = fake.count(":01#");
@@ -445,8 +427,7 @@ TEST_CASE("Gemini Focuser Snapshot - DeviceState TimeStamp is when the frame was
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(connect_and_park(*driver, clock, kBound));
     clock.advance(std::chrono::milliseconds(90));  // under the poll period: no poll, the frame ages
     std::string stamp;
     for (const auto& entry : driver->get_device_state()) {
