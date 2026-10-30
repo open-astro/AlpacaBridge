@@ -1396,3 +1396,23 @@ TEST_CASE("ToupTek camera - Name does not wait for a second ToupTek camera held 
     // Name keeps the identity after a disconnect, without asking the SDK again.
     CHECK(other->get_name() == "FakeCam Two");
 }
+
+TEST_CASE("ToupTek camera - identity getters keep the start-up values after a connect and disconnect (#1844)",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.cameras[0].supports_cg = true;  // two readout modes: HCG and LCG
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    const auto modes = driver->get_readout_modes();
+    const int width = driver->get_camera_x_size();
+    const std::string sensor = driver->get_sensor_name();
+    REQUIRE(modes.size() == 2);
+    REQUIRE(width == 1920);
+
+    driver->set_connected(true);
+    driver->set_connected(false);
+
+    CHECK(driver->get_readout_modes() == modes);
+    CHECK(driver->get_camera_x_size() == width);
+    CHECK(driver->get_sensor_name() == sensor);
+    require_alpaca_error([&] { driver->set_readout_mode(1); }, alpacacore::AlpacaError::NotConnected);
+}

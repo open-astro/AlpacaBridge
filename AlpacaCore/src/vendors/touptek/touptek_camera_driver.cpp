@@ -161,7 +161,8 @@ public:
         // transition_mutex_ spans the whole connect/disconnect and is taken by
         // no getter, so mutex_ stays free during the SDK open (decision 0016
         // item 4). connected_, the handle and the identity change only inside
-        // this lock; mutex_ is taken just to publish or clear them.
+        // this lock; mutex_ is taken just to publish them, or to clear connected_
+        // and the handle (the identity stays for the getters).
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         // exposure_lifecycle_mutex_ also serialises the thermal poller's
         // spawn (connect path, below) against its join (disconnect path), so
@@ -368,12 +369,8 @@ public:
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         exposure_active_.store(false);
         HToupcam handle = std::exchange(handle_, nullptr);
-        // Keep the name: get_name never asks the SDK, which a second ToupTek
-        // device's open can hold (decision 0016 rule 1).
-        std::string name = std::move(camera_info_.name);
-        camera_info_ = {};
-        camera_info_.name = std::move(name);
-        camera_info_valid_ = false;
+        // camera_info_ stays: no getter asks the SDK for it again, which a second
+        // ToupTek device's open can hold (decision 0016 rule 1); connect overwrites it.
         serial_number_.clear();
         firmware_version_.clear();
         reset_exposure_state_locked();
