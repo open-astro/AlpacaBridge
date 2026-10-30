@@ -1313,21 +1313,20 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
         }
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    auto& backend = profile_backend_locked();
     // An empty passphrase keeps the stored secret only on a secured profile;
     // otherwise it would create or keep an open, NAT-sharing hotspot (#1715).
     if (passphrase.empty()) {
-        const auto secured = pick_ap_profile(backend.wifi_connections()).second;
+        const auto secured = pick_ap_profile(profile_backend_locked().wifi_connections()).second;
         if (!secured.contains("802-11-wireless-security")) {
             throw WifiError("Passphrase must be 8-63 characters for a hotspot without a stored passphrase");
         }
     }
     ensure_bus_locked();  // the rest needs the real bus; refuses an injected test backend
-    auto roles = backend.device_roles();
+    auto roles = bus_->device_roles();
     if (roles.count == 0) throw WifiError("no wifi device");
     const std::string& dev = roles.ap_path;
 
-    auto [existing_path, existing] = pick_ap_profile(backend.wifi_connections());
+    auto [existing_path, existing] = bus_->ap_profile();
 
     Section conn{{"id", SVal::str(kApProfileId)},
                  {"type", SVal::str("802-11-wireless")},
@@ -1354,9 +1353,9 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
     }
 
     if (existing_path.empty()) {
-        backend.add_connection(spec, /*pin_shared_ip4=*/true);
+        bus_->add_connection(spec, /*pin_shared_ip4=*/true);
     } else {
-        backend.update_connection(existing_path, spec, /*pin_shared_ip4=*/true);
+        bus_->update_connection(existing_path, spec, /*pin_shared_ip4=*/true);
     }
 
     // Re-resolve (AddConnection does not return the path through our helper)
