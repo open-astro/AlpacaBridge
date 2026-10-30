@@ -161,6 +161,11 @@ where that is too aggressive:
 CTEST_PARALLEL=4 ./run_all_tests.sh
 ```
 
+With `CTEST_RERUN_FAILED=1` a failed run reruns only the failed cases, alone and serially, and
+that rerun is the verdict. The nightly jobs set it: the all-vendors suite under sanitizers lost a
+scheduler race in a different case most nights, while a real finding fails again alone. PR CI
+does not set it, so an assertion that depends on the scheduler still surfaces there.
+
 `run_all_tests.sh` also guards against a shrunken suite. `ctest --no-tests=error` fails only a
 run that finds zero tests, so a vendor target that silently stops configuring would still pass
 with most of its cases gone. After the build the script counts the tests with `ctest -N`
