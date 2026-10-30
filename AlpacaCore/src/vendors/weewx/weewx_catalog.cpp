@@ -12,7 +12,7 @@
 
 // The WeeWX ObservingConditions factory (open-astro#731). It refuses what the
 // router arm it replaces refused, with the same text, in the same order, and
-// then a value above the int range (below). Each
+// then a value out of range (below). Each
 // refusal is an InvalidValue AlpacaException rather than a schema rule so that
 // both config sources keep the arm's outcome: an API configuredevice call gets
 // the text as its error message, and a persisted entry that breaks one is not
@@ -21,9 +21,10 @@
 // so the vendor header here is fine.
 //
 // The deleted arm read both numbers as int; the schema's Int is 64-bit, so the
-// factory refuses a value above INT_MAX to keep that domain. Without it 1e10 s
-// overflows the nanoseconds the poll thread's wait_for() converts to, and the
-// wait returns at once, so the driver fetches back to back.
+// factory refuses a pollIntervalSeconds above INT_MAX to keep that domain.
+// Without it 1e10 s overflows the nanoseconds the poll thread's wait_for()
+// converts to, and the wait returns at once, so the driver fetches back to
+// back. timeoutMs has the tighter cap of 60000 (open-astro#1718).
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
