@@ -598,7 +598,8 @@ bool has_can_subject(const ContractEntry& e) {
     const auto probes = can_getter_probes(*d, e);
     REQUIRE_FALSE(probes.empty());
     // A switch states per entry whether CanWrite/CanAsync answer statically or throw NotConnected.
-    const int expected = e.type == DeviceType::Switch && e.switch_caps_disconnected == alpacacore::test::contract::DisconnectedRead::NotConnected
+    const int expected = e.type == DeviceType::Switch && e.switch_caps_disconnected ==
+                                                             alpacacore::test::contract::DisconnectedRead::NotConnected
                              ? err::NotConnected
                              : -1;
     for (const auto& [name, fn] : probes) {
@@ -2265,14 +2266,13 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS_T1_ERRVOCAB(id) CS_CASE(id, "error code vocabulary", case_error_vocabulary)
 // A case with a subject test is registered only for an entry that passes it, so no case runs with nothing to
 // assert; the guard case below pins each subject test to the probe lists.
-#define CS_CASE_IF(id, casename, body, subject)                                                                \
-    void cs_t1_##body##_##id() { body(alpacacore::test::contract::contract_entry_##id()); }                    \
-    const auto cs_t1_reg_##body##_##id =                                                                       \
-        subject(alpacacore::test::contract::contract_entry_##id())                                              \
-            ? std::make_unique<Catch::AutoReg>(Catch::makeTestInvoker(&cs_t1_##body##_##id),                   \
-                                               CATCH_INTERNAL_LINEINFO, Catch::StringRef(),                    \
-                                               Catch::NameAndTags{"Contract sweep - " #id " - " casename,       \
-                                                                  "[contract][tier1][" #id "]"})               \
+#define CS_CASE_IF(id, casename, body, subject)                                                              \
+    void cs_t1_##body##_##id() { body(alpacacore::test::contract::contract_entry_##id()); }                  \
+    const auto cs_t1_reg_##body##_##id =                                                                     \
+        subject(alpacacore::test::contract::contract_entry_##id())                                           \
+            ? std::make_unique<Catch::AutoReg>(                                                              \
+                  Catch::makeTestInvoker(&cs_t1_##body##_##id), CATCH_INTERNAL_LINEINFO, Catch::StringRef(), \
+                  Catch::NameAndTags{"Contract sweep - " #id " - " casename, "[contract][tier1][" #id "]"})  \
             : nullptr;
 #define CS_T1_INVALID(id) \
     CS_CASE_IF(id, "InvalidValue precedes NotConnected", case_invalid_before_not_connected, has_invalid_subject)
