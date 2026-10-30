@@ -9878,8 +9878,9 @@ int main() {
     // the API path, and a persisted entry that breaks one is still not
     // registered (listed as failed to load, so it stays editable). The first
     // three rows were green before the arm moved into the catalog and pin the
-    // texts and outcome across it; the last two pin the factory's INT_MAX bound,
-    // which keeps the int domain the arm read both numbers in.
+    // texts and outcome across it; the fourth pins the factory's INT_MAX bound
+    // on pollIntervalSeconds, which keeps the int domain the arm read it in,
+    // and the last two pin the 60000 ms cap on timeoutMs (open-astro#1718).
     {
         const char* const kBadConfigs[][2] = {
             {R"({"pollIntervalSeconds":300,"timeoutMs":2500})", "WeeWX observing conditions requires weewxUrl"},
@@ -9889,7 +9890,9 @@ int main() {
             {R"({"weewxUrl":"http://weewx.test:8998/current.json","pollIntervalSeconds":10000000000})",
              "pollIntervalSeconds must be at most 2147483647"},
             {R"({"weewxUrl":"http://weewx.test:8998/current.json","timeoutMs":10000000000})",
-             "timeoutMs must be at most 2147483647"},
+             "timeoutMs must be at most 60000"},
+            {R"({"weewxUrl":"http://weewx.test:8998/current.json","timeoutMs":60001})",
+             "timeoutMs must be at most 60000"},
         };
         int number = 9265;
         for (const auto& bad : kBadConfigs) {

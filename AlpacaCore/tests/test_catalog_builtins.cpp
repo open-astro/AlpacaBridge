@@ -229,8 +229,9 @@ TEST_CASE("Builtin catalog - the Astroasis factory scans by index when hidPath i
 // Astroasis. The schema declares no required/min/max rule: the three refusals
 // of the router arm it replaces ("... requires weewxUrl", "... must be greater
 // than 0") come from the factory, so a persisted entry that breaks one is still
-// not registered, as before the move. The factory also refuses a value above
-// the int range the arm read both numbers in ("... must be at most 2147483647").
+// not registered, as before the move. The factory also refuses an interval above
+// the int range the arm read it in ("... must be at most 2147483647") and a
+// timeout above 60000 ms (issue #1718).
 
 namespace {
 
@@ -662,10 +663,13 @@ namespace {
 // A loopback HTTP endpoint the WeeWX driver can be pointed at. Answering, it
 // serves a minimal current-conditions payload to every request; silent, it
 // accepts each connection and never answers, so the client's own timeout ends
-// the request. `requests()` counts connections accepted.
+// the request. `requests()` counts connections accepted. `padding` spaces go
+// inside the JSON body (still valid JSON); without `declare_length` the reply
+// carries no Content-Length and the body ends when the connection closes.
 class LoopbackWeeWx {
 public:
-    explicit LoopbackWeeWx(bool answer) : answer_(answer) {
+    explicit LoopbackWeeWx(bool answer, std::size_t padding = 0, bool declare_length = true)
+        : answer_(answer), padding_(padding), declare_length_(declare_length) {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         REQUIRE(listen_fd_ >= 0);
         // Non-blocking, so a connection reset between poll() and accept()
@@ -716,16 +720,19 @@ private:
                 if (n <= 0) break;
                 request.append(buf, static_cast<std::size_t>(n));
             }
-            const std::string body = R"({"lcd_datasheet":{"current":{"outTemp":{"value":50.0}}}})";
-            const std::string reply =
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) +
-                "\r\nConnection: close\r\n\r\n" + body;
+            const std::string body =
+                "{" + std::string(padding_, ' ') + R"("lcd_datasheet":{"current":{"outTemp":{"value":50.0}}}})";
+            std::string reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n";
+            if (declare_length_) reply += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+            reply += "Connection: close\r\n\r\n" + body;
             (void)::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL);
             ::close(fd);
         }
     }
 
     bool answer_;
+    std::size_t padding_;
+    bool declare_length_;
     int listen_fd_ = -1;
     int port_ = 0;
     std::atomic<bool> stop_{false};
@@ -781,7 +788,48 @@ TEST_CASE("Builtin catalog - the WeeWX factory refuses an interval or timeout ab
     DeviceConfig timeout_huge;
     timeout_huge.set("weewxUrl", std::string{"http://weewx.test:8998/current.json"});
     timeout_huge.set("timeoutMs", std::int64_t{10000000000});
-    CHECK(create_refusal(catalog, timeout_huge) == "timeoutMs must be at most 2147483647");
+    CHECK(create_refusal(catalog, timeout_huge) == "timeoutMs must be at most 60000");
+}
+
+TEST_CASE("Builtin catalog - the WeeWX factory caps timeoutMs at 60000", "[catalog][weewx][unit]") {
+    // One value governs connect and transfer; INT_MAX ms blocked a fetch for weeks.
+    const DeviceCatalog catalog = builtin_catalog();
+    DeviceConfig at_max;
+    at_max.set("weewxUrl", std::string{"http://192.0.2.10:8998/current.json"});
+    at_max.set("timeoutMs", std::int64_t{60000});
+    CHECK(catalog.create(kWeeWxKey, at_max, 0) != nullptr);
+
+    DeviceConfig above_max;
+    above_max.set("weewxUrl", std::string{"http://192.0.2.10:8998/current.json"});
+    above_max.set("timeoutMs", std::int64_t{60001});
+    CHECK(create_refusal(catalog, above_max) == "timeoutMs must be at most 60000");
+}
+
+TEST_CASE("Builtin catalog - the WeeWX fetch parses a body at the 1 MiB cap and refuses one past it",
+          "[catalog][weewx][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    // The minimal payload is 56 bytes; this padding brings it to exactly 1 MiB.
+    constexpr std::size_t kCap = 1024 * 1024;
+    constexpr std::size_t kPayload = 56;
+    for (const bool declare_length : {true, false}) {
+        CAPTURE(declare_length);
+        const LoopbackWeeWx at_cap(true, kCap - kPayload, declare_length);
+        DeviceConfig ok;
+        ok.set("weewxUrl", at_cap.url());
+        auto accepted = catalog.create(kWeeWxKey, ok, 7);
+        REQUIRE(accepted != nullptr);
+        accepted->set_connected(true);
+        CHECK(accepted->get_connected());
+        accepted->set_connected(false);
+
+        const LoopbackWeeWx over_cap(true, kCap - kPayload + 1, declare_length);
+        DeviceConfig big;
+        big.set("weewxUrl", over_cap.url());
+        auto refused = catalog.create(kWeeWxKey, big, 8);
+        REQUIRE(refused != nullptr);
+        CHECK_THROWS_AS(refused->set_connected(true), AlpacaException);
+        CHECK_FALSE(refused->get_connected());
+    }
 }
 
 TEST_CASE("Builtin catalog - the WeeWX factory passes weewxUrl and timeoutMs through", "[catalog][weewx][unit]") {
