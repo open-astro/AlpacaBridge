@@ -303,7 +303,7 @@ datagrams before each send so replies cannot get off-by-one.
   one waiter that is always parked (`kPollerWaiter`), or pauses it with
   `set_status_poll_paused_for_testing()`.
 - **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
-  #1530). Order: `transition_mutex_` (`set_connected()` against `set_connected()`; no getter takes it) -> `io_mutex_`
+  #1530). Order: `transition_mutex_` (`set_connected()` against `set_connected()`; no getter takes it) -> `duty_transition_mutex_` (`start_duty_worker()` against `stop_duty_worker()`, held across the duty join; no slot body takes it) -> `io_mutex_`
   (the operation lock) -> `mutex_` (the state lock, a leaf) -> the protocol wrapper's own lock. Every member that
   reaches the board holds `io_mutex_` for the whole command through a `StateLock` (Mode::Io, the default), which
   also holds `mutex_`; its `unlock()` releases both, so the places that let other commands in (a sleep, a join)

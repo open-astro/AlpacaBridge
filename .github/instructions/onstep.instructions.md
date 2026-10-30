@@ -431,8 +431,9 @@ it is never reachable through `router.cpp` or the web UI.
 - **Getters and `DeviceState` are served from a polled snapshot, never from the mount** (#1783,
   [decision 0010](../../docs/decisions/0010-snapshot-served-state.md), the SynScan and Celestron shape).
   One status poll per connection runs in an `AsyncOperation` slot (`status_poll_`), started at the end
-  of a connect (its first tick 1 s later: the connect seeds the frame) and joined before a disconnect or
-  a relink closes the port, with no driver lock held. Every `kStatusPollPeriod` (1 s, start to start on
+  of a connect (its first tick 1 s later: the connect seeds the frame) and joined, with the pulse-end
+  tick's slot, before a disconnect or a relink closes the port and at the start of every connect, with
+  no driver lock held. Every `kStatusPollPeriod` (1 s, start to start on
   the task clock, missed ticks skipped) it reads `:GU#` then `:GRa#`/`:GDe#`, and every
   `kSlowPollEvery`-th (2nd) tick `:GA#`/`:GZ#` and, while the site is not known, `:Gt#`/`:Gg#` (every
   `kSiteInfoRetryDelay` at most), into `util::StateSnapshot<PolledFrame>`. A `PulseGuide` adds one

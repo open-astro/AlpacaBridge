@@ -279,6 +279,11 @@ class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::
     // The gate itself (which locks this thread holds, StateLock's two modes, dropping mutex_ around an exchange)
     // is util::LockGate (lock_gate.h, #1729). A full lock table refuses the StateLock with DriverException
     // before it takes any lock (decision 0016 Rule 6, #1730).
+    //
+    // duty_transition_mutex_ is not a leaf (it is held across a join): start_duty_worker() and stop_duty_worker() hold
+    // it for their whole body, join included, so two callers cannot overlap on the duty_ slot. They are called with no
+    // other driver lock held (except set_connected()'s transition_mutex_, which comes first), and no slot body takes
+    // it: duty_loop() never calls either, so a join under it cannot wait on a body that waits on it (decision 0006).
 
 public:
     // The driver's state lock, with the operation lock above it in Mode::Io (util::StateLock). Mode::State is
@@ -1028,17 +1033,24 @@ public:
     // long-lived periodic body on the duty_ slot: it ticks every 50 ms until
     // both duty rates return to zero. Call with no mutexes held (AsyncOperation
     // rule 10). The old body is cancelled and joined first, so its safety stop
-    // runs before the new body bursts; two setters racing past that point
-    // supersede one another instead, and a superseded body stops only a burst
-    // it still owns (see duty_loop()).
+    // runs before the new body bursts. duty_transition_mutex_ serialises this
+    // with stop_duty_worker() and with other callers: a second caller waits for
+    // the first one's join (and start), then cancels and joins the body that
+    // one started and starts its own, so no start() meets another thread's
+    // cancel_all_and_join() (which would refuse it, async_operation.h).
     void start_duty_worker() {
+        std::lock_guard<std::mutex> transition(duty_transition_mutex_);
         duty_.cancel_all_and_join();
         duty_.start([this](util::OperationContext& ctx) { duty_loop(ctx); });
     }
 
     // Stop the duty worker and wait for it (the setters call this before they
-    // re-derive the duty rates). Call with no mutexes held.
-    void stop_duty_worker() { duty_.cancel_all_and_join(); }
+    // re-derive the duty rates). Call with no mutexes held; it waits its turn on
+    // duty_transition_mutex_ behind a start or stop already joining.
+    void stop_duty_worker() {
+        std::lock_guard<std::mutex> transition(duty_transition_mutex_);
+        duty_.cancel_all_and_join();
+    }
 
     // For a setter that throws after stop_duty_worker() (a refusal on a link
     // that faulted while the mutex was released, or a rate-mode change): put
@@ -3889,6 +3901,18 @@ private:
         }
     }
 
+    // Test seam: runs in duty_loop() before its safety stop, with no driver lock held.
+    void run_duty_before_exit_stop_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = duty_before_exit_stop_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     // Test seam: runs in a clean disconnect's close window, with mutex_ released, before the close.
     void run_disconnect_before_close_hook() {
         std::function<void()> hook;
@@ -4618,19 +4642,13 @@ private:
         }
         // Never leave an axis creeping on exit. A zeroed duty rate means
         // whoever cleared it already stopped the axis; only a cancel with the
-        // rate still set (disconnect mid-burst) needs the safety stop. A
-        // superseded body (a concurrent restart) stops only a burst it still
-        // owns: the replacement's own bursts carry a newer motion generation.
-        const bool superseded = ctx.stop_reason() == util::StopReason::Superseded;
+        // rate still set (disconnect mid-burst) needs the safety stop. No
+        // body is ever superseded: start_duty_worker() joins the old body
+        // before it starts a new one, under duty_transition_mutex_.
+        run_duty_before_exit_stop_hook();
         try {
             StateLock lock(lock_gate_);
             for (int channel = 1; channel <= 2; ++channel) {
-                if (superseded) {
-                    if (ax[channel - 1].bursting && motion_generation_ == ax[channel - 1].gen && connected_) {
-                        static_cast<void>(stop_axis_and_wait_locked(lock, channel, ax[channel - 1].gen));
-                    }
-                    continue;
-                }
                 if (duty_rate_locked(channel) != 0.0 && connected_) {
                     const uint64_t gen = ++motion_generation_;
                     static_cast<void>(stop_axis_and_wait_locked(lock, channel, gen));
@@ -6274,6 +6292,11 @@ public:
         disconnect_before_close_hook_ = std::move(hook);
     }
 
+    void set_duty_before_exit_stop_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        duty_before_exit_stop_hook_ = std::move(hook);
+    }
+
 private:
     // Per-axis (open-astro#620): a pulse on one axis must never cancel or
     // join the other axis's pulse body -- ASCOM allows RA and Dec PulseGuide
@@ -6565,6 +6588,7 @@ private:
     std::function<void()> status_poll_after_sample_hook_;
     std::function<void()> rate_verify_before_start_hook_;
     std::function<void()> disconnect_before_close_hook_;
+    std::function<void()> duty_before_exit_stop_hook_;
     util::OperationGeneration status_poll_generation_;
     util::AsyncOperation status_poll_{"SkyWatcher status poll", status_poll_generation_, clock_};
 
@@ -6593,6 +6617,9 @@ private:
     // its own: starting or replacing it must not supersede a slew, pulse or
     // stop body, and their preemption of the axes is judged per axis inside
     // the body, as before. Declared last, so it is destroyed (and joins) first.
+    // Held for the whole of start_duty_worker() and stop_duty_worker() (see the lock-order comment at the top
+    // of the class). Guards no data; no slot body takes it.
+    std::mutex duty_transition_mutex_;
     util::OperationGeneration duty_generation_;
     util::AsyncOperation duty_{"SkyWatcher duty cycle", duty_generation_, clock_};
 };
@@ -6749,6 +6776,12 @@ void set_rate_verify_before_start_hook_for_testing(TelescopeDriver& driver, std:
 void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_disconnect_before_close_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_duty_before_exit_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_duty_before_exit_stop_hook_for_testing(std::move(hook));
     }
 }
 

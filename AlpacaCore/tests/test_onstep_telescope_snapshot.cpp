@@ -943,4 +943,27 @@ TEST_CASE("OnStep snapshot - a newer sample is not dropped by an older tick's pu
     CHECK(std::abs(rig.driver->get_right_ascension() - (12.0 + 20.0 / 3600.0)) < 1e-6);
 }
 
+// A Disconnect that lands between a PulseGuide's unlock and its start() has already joined the pulse-end slot, so
+// the body that start() then installs belongs to the old session. The next Connect joins it before the new
+// session starts, so it neither waits on into the new session nor samples or publishes there.
+TEST_CASE("OnStep snapshot - a reconnect joins a pulse-end body started after the disconnect's join",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));  // the status poll
+    onstep::set_pulse_guide_gap_hook_for_testing(*rig.driver, [&] { rig.driver->set_connected(false); });
+    rig.driver->pulse_guide(2, 500);  // unlocks, the Disconnect runs, then the pulse-end body starts
+    onstep::set_pulse_guide_gap_hook_for_testing(*rig.driver, nullptr);
+    REQUIRE_FALSE(rig.driver->get_connected());
+    REQUIRE(onstep::pulse_measurement_running_for_testing(*rig.driver));  // waiting its 550 ms
+    REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));
+    CHECK(rig.clock.waiter_count() == 1);  // only that body: the poll was joined
+
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    CHECK_FALSE(onstep::pulse_measurement_running_for_testing(*rig.driver));  // joined by the connect
+    REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));                       // the new session's poll
+    CHECK(rig.clock.waiter_count() == 1);                                     // and nothing else
+}
+
 #endif  // !_WIN32
