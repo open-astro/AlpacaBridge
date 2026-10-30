@@ -120,10 +120,14 @@ void run_bulb_on_fake_clock(FakeGPhotoSDK& fake, alpacacore::test::FakeTaskClock
 }
 
 // A hold that only an abort ends (ADR 0005 rule 2): the clock stays still, so a hold loop that misses the abort
-// would call drain_events without bound and grow the fake's call log. Past kCap slices the hook sets `past_cap` and
-// jumps the clock 2 h so the hold ends on virtual time, and the case fails on CHECK_FALSE(hold.past_cap).
+// would call drain_events without bound and grow the fake's call log. A correct hold also spins until the test thread
+// requests the abort, and how many slices that takes depends on how long the OS leaves the test thread off the CPU,
+// not on the driver. So the first kFree slices are free, each of the next kThrottled slices backs off 1 ms of real
+// time (at least 2 s in all, the stop cases' 2 s budget), and only past both does the hook set `past_cap` and jump
+// the clock 2 h so the hold ends on virtual time; the case then fails on CHECK_FALSE(hold.past_cap).
 struct AbortOnlyHold {
-    static constexpr int kCap = 20000;
+    static constexpr int kFree = 1000;
+    static constexpr int kThrottled = 2000;
     std::atomic<bool> holding{false};
     std::atomic<bool> past_cap{false};
     std::atomic<int> slices{0};
@@ -135,9 +139,14 @@ struct AbortOnlyHold {
     void on_call(const std::string& name, alpacacore::test::FakeTaskClock& clock) {
         if (name != "drain_events") return;
         holding.store(true);
-        if (++slices > kCap) {
+        const int slice = ++slices;
+        if (slice > kFree + kThrottled) {
             past_cap.store(true);
             clock.advance(std::chrono::hours(2));
+        } else if (slice > kFree) {
+            // A back-off on a fake hook, not a wait on a driver timer (ADR 0005 rule 2): it leaves real time for
+            // the test thread's abort request while the clock stays still.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
 };
