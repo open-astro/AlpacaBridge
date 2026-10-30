@@ -52,7 +52,9 @@ namespace alpacacore::test {
  *   a time (last value repeats), so homing/bounce sequences are testable.
  *
  * Not thread-hardened beyond a coarse recursive story: driver code already
- * serializes SDK access; tests drive one connect path at a time.
+ * serializes SDK access; tests drive one connect path at a time. Like the
+ * wrapper, enumerate_cameras and open_camera_by_id share one lock, so an
+ * enumeration waits for a held camera open.
  *
  * LIFETIME: drivers hold a plain ToupTekSDK& — the fake MUST outlive every
  * driver constructed on it. Declare the fake before the driver (locals
@@ -160,12 +162,14 @@ public:
     std::string get_sdk_version() override { return hit("get_sdk_version"), "fake-1.0"; }
 
     std::vector<ToupCameraInfo> enumerate_cameras() override {
+        std::lock_guard<std::mutex> lock(sync_->sdk_mutex);
         hit("enumerate_cameras");
         auto copy = cameras;
         for (std::size_t i = 0; i < copy.size(); ++i) copy[i].index = static_cast<int>(i);
         return copy;
     }
     HToupcam open_camera_by_id(const std::string& id) override {
+        std::lock_guard<std::mutex> lock(sync_->sdk_mutex);
         hit("open_camera_by_id");
         return open_shared(id);
     }
@@ -572,6 +576,9 @@ private:
     // (tests build it in a helper and return it by value).
     struct Sync {
         std::mutex calls_mutex;
+        // The wrapper's SDK mutex (toupcam_family_sdk.h), modelled for enumerate_cameras and
+        // open_camera_by_id only: an open held on before_call holds it, as Api::Open does.
+        std::mutex sdk_mutex;
         std::mutex wait_mutex;
         std::condition_variable wait_cv;
         bool wait_hold = false;
