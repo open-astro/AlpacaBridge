@@ -431,7 +431,8 @@ it is never reachable through `router.cpp` or the web UI.
 - **Getters and `DeviceState` are served from a polled snapshot, never from the mount** (#1783,
   [decision 0010](../../docs/decisions/0010-snapshot-served-state.md), the SynScan and Celestron shape).
   One status poll per connection runs in an `AsyncOperation` slot (`status_poll_`), started at the end
-  of a connect (its first tick 1 s later: the connect seeds the frame) and joined, with the pulse-end
+  of a connect (its first tick 1 s later: the connect seeds the frame; a poll that does not start, or a link
+  lost during the connect's reads, fails the connect, which is undone as a Disconnect is, #1895) and joined, with the pulse-end
   tick's slot, before a disconnect or a relink closes the port and at the start of every connect, with
   no driver lock held. Every `kStatusPollPeriod` (1 s, start to start on
   the task clock, missed ticks skipped) it reads `:GU#` then `:GRa#`/`:GDe#`, and every
@@ -450,7 +451,12 @@ it is never reachable through `router.cpp` or the web UI.
   `Slewing` (with the driver's own MoveAxis flags, slew grace and pending Park/FindHome), `SideOfPier`
   (from the frame's RA) and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
   (`device_state_age()`). A field the mount has not answered yet throws `DriverException` "not
-  available"; a latched fault and a lost link refuse as above. Client commands write through
+  available"; a latched fault and a lost link refuse as above. While the frame has no status (every `:GU#`
+  since the connect failed), a command that checks for a park or writes the status through (`PulseGuide`, a
+  moving `MoveAxis`, `FindHome`, `Tracking`, `Unpark`, the slews and syncs) reads `:GU#` first and throws
+  `InvalidOperation` ("the mount's status has not been read yet") when that read fails too, rather than take
+  the unread status for "not parked"; `AbortSlew` and `MoveAxis(axis, 0)` refuse only a status that reads
+  parked, so a stop is never held up (#1895). Client commands write through
   (`snapshot_.write()`): a sync's position, `Tracking`, `Unpark`, a slew start (`Slewing` true), a park
   or home the mount took, and a pulse, a MoveAxis start and AbortSlew drop the tick in flight, so a tick
   that sampled before the command cannot publish over it. Control paths keep their direct reads and
@@ -626,8 +632,12 @@ it is never reachable through `router.cpp` or the web UI.
   command, so it is client-side only. `SiteLatitude` and `SiteLongitude` throw `InvalidOperation`
   (with the reason the last `:Gt#`/`:Gg#` read failed) until the coordinate is known: written from
   the device config at connect, by a client, or read from the mount at connect or by the status poll
-  (#1783; they answered a default 0.0 before, decision 0019). `SiderealTime`, `SideOfPier`,
-  `DestinationSideOfPier` and `SlewToAltAz` still use longitude 0 until it is known.
+  (#1783; they answered a default 0.0 before, decision 0019). `SideOfPier`, `DestinationSideOfPier`,
+  `SiderealTime` and both `SlewToAltAz` forms throw `InvalidOperation` too ("<member> needs the site", with the
+  same reason) until both coordinates are known (#1893; they used latitude and longitude 0 before): decision 0019
+  rule 2, followed for consistency, since its rule 3 covers controllers that store no site. An Alt/Az slew retries
+  the site read first (at most every `kSiteInfoRetryDelay`) and sends nothing when it still fails. With a known
+  site, the normal case and ConformU's, nothing changes.
 - **No `gps_status` action: OnStep cannot report a GPS fix** (#1653). iOptron and Celestron answer
   `gps_status` (#1574) so a client lets the mount's site win only on a fix; OnStep has no reply that
   says the site or time came from GPS. OnStepX (`097cc579`, `Site.cpp` `gpsCheck()`) puts a GPS
