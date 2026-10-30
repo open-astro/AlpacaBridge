@@ -215,7 +215,7 @@ namespace {
     // never through log_*, which would re-take g_file_mutex.
     std::string size_cap_marker(std::uintmax_t cap) {
         return format_log_line(alpacacore::logging::LogLevel::Warn, "AlpacaHTTP",
-                               "Log file size cap reached (" + std::to_string(cap / (1024 * 1024)) +
+                               "Log file size cap reached (" + std::to_string(cap / (1024ull * 1024)) +
                                    " MiB, logging.max_file_size_mb); file logging paused until the next day");
     }
 
