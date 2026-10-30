@@ -2041,7 +2041,8 @@ public:
                 // Same contract as the MoveAxis(0) restore (#535/#630): the
                 // restore never restarts an axis the client switched off.
                 // A pulse that ends on a faulted link or a restarted board only stops the axis: the stop stays
-                // ungated, the tracking-drive restore and the Dec offset re-apply are starts.
+                // ungated, the tracking-drive restore is a start. The Dec offset re-apply needs no gate here: its
+                // position read (refresh_position_cache_locked) already refuses a fault or a restarted board.
                 bool restore = restore_tracking;
                 bool faulted = false;
                 {
@@ -2136,8 +2137,7 @@ public:
                     // A Dec pulse pre-empted any DeclinationRate offset
                     // motion: re-apply it so guiding corrections don't
                     // silently cancel comet/satellite tracking.
-                    if (axis == kAxisDec && !link_faulted_locked() && tracking_effectively_on_locked() &&
-                        dec_rate_arcsec_per_sec_ != 0.0) {
+                    if (axis == kAxisDec && tracking_effectively_on_locked() && dec_rate_arcsec_per_sec_ != 0.0) {
                         try {
                             apply_dec_rate_offset_locked(lock);
                         } catch (const std::exception& e) {
@@ -2663,6 +2663,10 @@ public:
                     }
                 }
                 StateLock lock(lock_gate_);
+                // The restore below is a start. A good ':f' reply may have just cleared a latched fault, so the
+                // board-reset check runs first; the stop wait above stays ungated. It drops the lock for its
+                // probe, so it precedes every read the restore decision uses (decision 0016).
+                check_board_survived_recovery_locked();
                 if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                     return;
                 }
@@ -2707,19 +2711,15 @@ public:
                 const bool same_axis_owner =
                     goto_in_progress_ || parking_ || homing_ || slewing_cached_ || pulse_axis_active_[channel - 1];
                 const bool generation_ok = motion_generation_ == stop_task_generation || !same_axis_owner;
-                // The restore is a start. A good ':f' reply may have just cleared a latched fault, so the
-                // board-reset check runs first; the stop wait above stays ungated.
-                check_board_survived_recovery_locked();
-                const bool link_ok = !link_faulted_locked();
-                if (link_ok && channel == kAxisRa && tracking_effectively_on_locked() && generation_ok) {
+                if (!link_faulted_locked() && channel == kAxisRa && tracking_effectively_on_locked() && generation_ok) {
                     try {
                         set_tracking_locked(lock, true);
                     } catch (const std::exception& e) {
                         ALPACA_LOG_WARN("SkyWatcher",
                                         std::string("MoveAxis stop: failed to restore tracking: ") + e.what());
                     }
-                } else if (link_ok && channel == kAxisDec && tracking_effectively_on_locked() &&
-                           dec_rate_arcsec_per_sec_ != 0.0 && generation_ok) {
+                } else if (channel == kAxisDec && tracking_effectively_on_locked() && dec_rate_arcsec_per_sec_ != 0.0 &&
+                           generation_ok) {
                     // Same restore contract for Dec: a manual nudge must not
                     // silently cancel an active DeclinationRate offset. Not while
                     // a Tracking=false is in flight (the limit guard stops Dec

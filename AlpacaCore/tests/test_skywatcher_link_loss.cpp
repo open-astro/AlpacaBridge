@@ -27,7 +27,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -525,6 +524,8 @@ TEST_CASE("SkyWatcher link loss - a park started before the board restarted send
     release.set_value();
     REQUIRE(finished.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready);
 
+    sw::set_slew_spawn_for_testing(*r.driver, nullptr);
+
     CHECK(r.frames_since(from, "KSGIJ") == 0);
 }
 
@@ -552,4 +553,19 @@ TEST_CASE("SkyWatcher link loss - a MoveAxis stop that completes after the board
     r.step(10);  // the stop task sees the axis stopped and reaches its restore
 
     CHECK(r.frames_since(from, "KGIJ") == 0);
+}
+
+TEST_CASE("SkyWatcher link loss - a pulse sent with Tracking off and ended after the board restarted leaves RA alone",
+          "[skywatcher][linkloss][serial]") {
+    RestartedBoardRig r;
+    r.driver->set_tracking(false);
+    r.driver->pulse_guide(2, 12000);
+    r.step(20);
+    r.driver->set_tracking(true);  // lands mid-pulse: the end would normally put RA back on the drive
+    r.restart_board();
+    const std::size_t from = r.board.frames().size();
+    r.step(200);  // past the end of the hold
+
+    CHECK(r.frames_since(from, "K") >= 1);  // the pulse ended after the restart; its stop is ungated
+    CHECK(r.frames_since(from, "IJG") == 0);
 }
