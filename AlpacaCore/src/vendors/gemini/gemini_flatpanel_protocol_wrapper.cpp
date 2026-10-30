@@ -735,11 +735,10 @@ private:
         close_serial();
     }
 
-    // The port is gone (a hangup, or EIO/ENXIO/ENODEV/EBADF on the fd): decision
-    // 0009 rule 2 loses the link at once. Release the port so a replugged panel
-    // can be reopened, latch link_lost_ for the driver's Connected getter and
-    // fail with NotConnected. During connect() nothing is latched: the
-    // handshake retries and connect() closes the port itself.
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
+    // closed): decision 0009 rule 2 loses the link at once. Release the port so a replugged panel can be reopened,
+    // latch link_lost_ for the driver's Connected getter and fail with NotConnected. During connect() nothing is
+    // latched: the handshake retries and connect() closes the port itself.
     [[noreturn]] void fail_link_locked(const std::string& reason) {
         if (connected_) {
             ALPACA_LOG_ERROR("Gemini",
@@ -776,7 +775,7 @@ private:
 #else
         if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
             const int err = errno;
-            if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) {
+            if (err == EIO || err == ENXIO || err == ENODEV) {
                 fail_link_locked("Serial link lost (errno " + std::to_string(err) + ")");
             }
             throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
