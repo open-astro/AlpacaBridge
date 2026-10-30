@@ -303,13 +303,19 @@ private:
     // Releases mutex_ for a wire exchange and takes it back on scope exit, also when the exchange throws.
     class MutexRelease final {
     public:
-        explicit MutexRelease(std::unique_lock<std::mutex>& lock) : lock_(lock) { lock_.unlock(); }
-        ~MutexRelease() { lock_.lock(); }
+        explicit MutexRelease(std::unique_lock<std::mutex>& lock) : MutexRelease(&lock) {}
+        // A null lock releases nothing (the caller holds no mutex_ to drop).
+        explicit MutexRelease(std::unique_lock<std::mutex>* lock) : lock_(lock) {
+            if (lock_ != nullptr) lock_->unlock();
+        }
+        ~MutexRelease() {
+            if (lock_ != nullptr) lock_->lock();
+        }
         MutexRelease(const MutexRelease&) = delete;
         MutexRelease& operator=(const MutexRelease&) = delete;
 
     private:
-        std::unique_lock<std::mutex>& lock_;
+        std::unique_lock<std::mutex>* lock_;
     };
     void reset_telemetry_locked() const {
         stationary_raw_pair_.reset();
@@ -1196,23 +1202,26 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
 
     // A caller that passed its lock has the I/O lock taken first (decision 0016 rule 2).
     const bool previous_state_valid = tracking_state_valid_;
-    std::optional<MutexRelease> unlocked;
-    if (release != nullptr) unlocked.emplace(*release);
-    const auto failure = write(tracking, rate, "tracking command");
-    if (failure) {
-        bool rollback_succeeded = false;
-        bool rolled_back = false;
-        try {
-            // Lost matching invalidates the reference. Recover on the owned fd
-            // and leave tracking off rather than resume an uncertain frame.
-            // Under mutex_: never wait out another device's probe (#1457).
-            protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
-            rollback_succeeded = !write(false, previous_rate, "tracking rollback");
-            rolled_back = rollback_succeeded;
-        } catch (...) {
-            rollback_succeeded = false;
+    std::exception_ptr failure;
+    bool rollback_succeeded = false;
+    bool rolled_back = false;
+    {
+        const MutexRelease unlocked(release);
+        failure = write(tracking, rate, "tracking command");
+        if (failure) {
+            try {
+                // Lost matching invalidates the reference. Recover on the owned fd
+                // and leave tracking off rather than resume an uncertain frame.
+                // Under mutex_: never wait out another device's probe (#1457).
+                protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
+                rollback_succeeded = !write(false, previous_rate, "tracking rollback");
+                rolled_back = rollback_succeeded;
+            } catch (...) {
+                rollback_succeeded = false;
+            }
         }
-        unlocked.reset();
+    }
+    if (failure) {
         if (rolled_back) tracking_ = false;
         tracking_state_valid_ = previous_state_valid && rollback_succeeded;
         if (!rollback_succeeded) {
@@ -1220,7 +1229,6 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         }
         std::rethrow_exception(failure);
     }
-    unlocked.reset();
     if (release != nullptr) require_connected();  // Disconnect may have run while mutex_ was dropped.
     tracking_state_valid_ = true;
 }
