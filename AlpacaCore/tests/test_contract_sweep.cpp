@@ -2296,7 +2296,7 @@ void check_tier1_cases_have_a_subject() {
         registered.insert(t.getTestCaseInfo().name);
     }
     // Case names use the macro id, which differs from ContractEntry::id for some entries (celestron_cgx_telescope).
-    const auto check = [&](const char* macro_id, const ContractEntry& e) {
+    [[maybe_unused]] const auto check = [&](const char* macro_id, const ContractEntry& e) {
         auto d = e.make(0);
         REQUIRE(d != nullptr);
         const std::string stem = std::string("Contract sweep - ") + macro_id + " - ";
