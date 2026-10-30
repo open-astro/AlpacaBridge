@@ -6288,6 +6288,52 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9702);
     }
 
+    // Issue #1738: a ClientID that is not a uint32 counts as absent, so one
+    // client cannot grow the registry with a distinct key per request. Each
+    // bad value registers in the anonymous slot, which a ClientID-less
+    // disconnect from the same peer then releases.
+    {
+        // case: a ClientID that is not a uint32 registers in the anonymous slot (#1738)
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9703);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9703";
+        const std::string huge(60 * 1024, 'x');
+        const std::string bad_ids[] = {huge, "4294967296", "12345678901", "-1", "1x", "00000000001a"};
+        for (const auto& bad : bad_ids) {
+            const int disconnects = stub->disconnect_count;
+            put_connected(router, base, bad, true);
+            EXPECT(stub->get_connected());
+            put_connected(router, base, "", false);
+            EXPECT(stub->disconnect_count == disconnects + 1);
+            EXPECT(!stub->get_connected());
+        }
+        // JSON body: over-range integer and non-numeric string.
+        for (const char* body :
+             {R"({"Connected": true, "ClientID": 4294967296})", R"({"Connected": true, "ClientID": "abc"})",
+              R"({"Connected": true, "ClientID": -5})"}) {
+            const int disconnects = stub->disconnect_count;
+            EXPECT(nlohmann::json::parse(route_request(router, "PUT", base + "/connected", body).body())
+                       .value("ErrorNumber", -1) == 0);
+            put_connected(router, base, "", false);
+            EXPECT(stub->disconnect_count == disconnects + 1);
+        }
+        // GET with a bad ClientID reads raw device state, like no ClientID.
+        put_connected(router, base, "", true);
+        EXPECT(get_connected_value(router, base, huge));
+        put_connected(router, base, "", false);
+        // Valid ids, including the uint32 bounds, keep their own slots.
+        for (const char* good : {"0", "4294967295", "0000000007"}) {
+            put_connected(router, base, good, true);
+            EXPECT(get_connected_value(router, base, good));
+            put_connected(router, base, "", false);
+            EXPECT(stub->get_connected());
+            put_connected(router, base, good, false);
+            EXPECT(!stub->get_connected());
+        }
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9703);
+    }
+
     // Security: path traversal via the static-file handler must be rejected
     // (404) without leaking file contents (audit finding C1).
     {
