@@ -2451,7 +2451,7 @@ Fake& t3_fake(Hosted& hosted) {
 }
 
 // A recipe whose raise or recover waits on a driver timer on the task clock (decision 0005 rule 2) builds the driver
-// on one of these and steps it in its own legs, so the case's real-time loops wait on no driver timer, only on wire
+// on one of these and steps it in its own legs, so its case's real-time loops wait on no driver timer, only on wire
 // reads (0005 rule 6). The recipe's lambdas hold it, so it outlives the Hosted driver.
 using T3Clock = std::shared_ptr<alpacacore::test::FakeTaskClock>;
 
