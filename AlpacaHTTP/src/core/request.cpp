@@ -146,6 +146,10 @@ bool Request::header_line_ok(std::string_view line) {
     if (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
         return false;
     }
+    // A bare CR or LF splits lines differently in the server and the parser.
+    if (line.find_first_of("\r\n") != std::string_view::npos) {
+        return false;
+    }
     auto colon_pos = line.find(':');
     return colon_pos == std::string_view::npos || colon_pos == 0 ||
            (line[colon_pos - 1] != ' ' && line[colon_pos - 1] != '\t');

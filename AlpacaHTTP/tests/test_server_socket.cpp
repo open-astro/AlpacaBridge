@@ -756,8 +756,7 @@ int main() {
             "PUT /api/v1/telescope/0/connected HTTP/1.1\r\nHost: localhost\n"
             "Transfer-Encoding: chunked\r\n\r\n",
         };
-        const std::string trailers[] = {body, "5\r\nhello\r\n0\r\n\r\n",
-                                        "5\r\nhello\r\n0\r\n\r\n"};
+        const std::string trailers[] = {body, "5\r\nhello\r\n0\r\n\r\n", "5\r\nhello\r\n0\r\n\r\n"};
         for (int i = 0; i < 3; ++i) {
             int fd = connect_local(port);
             EXPECT(fd >= 0);
