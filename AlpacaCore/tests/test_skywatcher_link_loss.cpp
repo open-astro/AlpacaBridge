@@ -584,7 +584,7 @@ TEST_CASE("SkyWatcher link loss - a MoveAxis stop checks for a board restart its
     for (int i = 0; i < 20 && r.protocol->link_faulted(); ++i) {
         try {
             r.protocol->inquire_status(sw::kAxisRa);  // the link recovers; the paused poll has not probed the board
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {             // NOLINT(bugprone-empty-catch)
         }
         r.step();
     }
