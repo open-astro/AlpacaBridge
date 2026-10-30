@@ -2335,9 +2335,10 @@ const char* t3_outcome(const T3Read& r) {
     return r.code != -1 ? "raised" : (r.done ? "reported done" : "still running");
 }
 
-// Twice the longest silence a driver here waits out before it calls the link faulted (10 s: kStallTimeout in
-// ioptron_iguider_camera_driver.cpp and kFilterWheelLinkSilenceMs in the WandererAstro wheel), so a slow runner
-// does not turn a late raise into "still running".
+// The longest real wait after the fault is the QHY CFW3 move wait (12 s from the start, 11 s after the fault): a
+// protocol-wrapper wire deadline on steady_clock (decision 0005 rule 6), in a driver not on the task clock. A recipe
+// over a driver on the clock moves its fake clock past the driver's timer instead (0005 rule 2). The rest is margin
+// so a slow runner does not turn a late raise into "still running".
 constexpr std::chrono::seconds kTier3Budget{20};
 // How long the healthy fake must keep the operation running before the fault.
 constexpr std::chrono::seconds kTier3Control{1};
@@ -2595,8 +2596,10 @@ Tier3Recipe tier3_recipe_ioptron_focuser() {
 // (then until `recover`) or, with no fault, for kHealthyDelay. `fail` sets `stalled` before it moves kHolding to
 // kFaulted, and the hook moves kHolding to kReleased, so exactly one of them wins: a frame already past read_frame()'s
 // stalled check never reaches the driver after the fault (the old 300 ms sleep let one through under load).
+// The driver runs on `clock` (decision 0005 rule 2): `fail` moves it past the exposure deadline.
 struct IGuiderT3Hold : IGuiderV4L2Hold {
     enum Phase : int { kIdle, kHolding, kReleased, kFaulted };
+    alpacacore::test::FakeTaskClock clock;
     // Only a run without the fault (the no-op mutant) gets here: inside the 10.7 s deadline, so the exposure ends.
     static constexpr std::chrono::seconds kHealthyDelay{5};
     // Bounds every hold, so a case that fails before `recover` still disconnects.
@@ -2614,12 +2617,13 @@ struct IGuiderT3Hold : IGuiderV4L2Hold {
     }
 };
 
-// iGuider: the stream stops during the exposure (frames held as above). Its deadline (10.7 s for 0.02 s) ends the
-// exposure as failed, not only the link. Falsified by: the exposure worker waiting on read_frame() with no deadline,
-// so ImageReady stays false and never raises.
+// iGuider: the stream stops during the exposure (frames held as above), and the task clock moves 11 s, past the
+// exposure deadline (10.7 s for 0.02 s) and kStallTimeout (10 s), under util::kLinkStalenessBound. The deadline ends
+// the exposure as failed, not only the link. Falsified by: the exposure worker waiting on read_frame() with no
+// deadline, so ImageReady stays false and never raises.
 Tier3Recipe tier3_recipe_iguider_camera() {
-    const auto make = [](IGuiderV4L2Hold& s) -> std::unique_ptr<AlpacaDriver> {
-        return alpacacore::vendor::ioptron::create_iguider_camera(0, "", s.v4l2);
+    const auto make = [](IGuiderT3Hold& s) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::ioptron::create_iguider_camera(0, "", s.v4l2, s.clock);
     };
     return {[](Hosted& hosted) {
                 t3_fake<IGuiderT3Hold>(hosted).phase.store(IGuiderT3Hold::kHolding);
@@ -2630,6 +2634,7 @@ Tier3Recipe tier3_recipe_iguider_camera() {
                 s.fake.stalled.store(true);
                 int holding = IGuiderT3Hold::kHolding;
                 s.phase.compare_exchange_strong(holding, IGuiderT3Hold::kFaulted);
+                s.clock.advance(std::chrono::seconds(11));
             },
             [](Hosted& hosted) { t3_fake<IGuiderT3Hold>(hosted).fake.stalled.store(false); },
             "FakeIGuiderV4L2::stalled = true mid-exposure",
@@ -2745,16 +2750,40 @@ Tier3Recipe tier3_recipe_gemini_focuser() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
+// The tier-2 streamer with the task clock the wrapper's silence check reads (decision 0005 rule 2). Members are
+// destroyed after the driver, the clock last.
+struct WandererT3Hold {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSerialStreamer streamer{kWandererSfwFrame, std::chrono::milliseconds(50)};
+};
+
 // SFW: the streamed frame keeps reporting the old slot, so the move cannot land; the stream then stops with the port
-// open (a hung MCU). Falsified by: Position reporting the requested slot when the stream dies.
+// open (a hung MCU), and the task clock moves past kFilterWheelLinkSilenceMs (10 s). Falsified by: Position reporting
+// the requested slot when the stream dies.
 Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
     return {[](Hosted& hosted) {
                 auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*hosted.driver);
                 f.set_position(f.get_position() == 1 ? 2 : 1);
             },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSerialStreamer>(hosted).set_muted(true); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSerialStreamer>(hosted).set_muted(false); },
-            "FakeSerialStreamer::set_muted(true) mid-move"};
+            [](Hosted& hosted) {
+                auto& s = t3_fake<WandererT3Hold>(hosted);
+                s.streamer.set_muted(true);
+                // Twice, each step waiting for the reader's next clock read: a frame already in the pty when the mute
+                // lands restarts the silence window once. 20 s stays under util::kLinkStalenessBound.
+                for (int i = 0; i < 2; ++i) {
+                    s.clock.advance(std::chrono::milliseconds(10001));
+                    (void)s.clock.wait_for_now_calls(s.clock.now_calls() + 1, std::chrono::milliseconds(2000));
+                }
+            },
+            [](Hosted& hosted) { t3_fake<WandererT3Hold>(hosted).streamer.set_muted(false); },
+            "FakeSerialStreamer::set_muted(true) mid-move, task clock +20 s",
+            [](bool) {
+                return host_over(std::make_shared<WandererT3Hold>(),
+                                 [](WandererT3Hold& s) -> std::unique_ptr<AlpacaDriver> {
+                                     return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(
+                                         0, s.streamer.slave_path(), 19200, s.clock);
+                                 });
+            }};
 }
 #endif
 
