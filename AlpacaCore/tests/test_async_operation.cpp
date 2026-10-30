@@ -646,14 +646,15 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
         REQUIRE(eventually([&] { return taken->entered.load(); }));
         auto joined = h.on_helper([&h] { h.op->cancel_all_and_join(); });
         // cancel_all_and_join() has taken the body once nothing is running;
-        // it is now blocked joining it.
+        // it is now blocked joining it. A start() now is refused (#1713), so
+        // the next start() can only come after the taken body has thrown.
         REQUIRE(eventually([&] { return !h.op->running(); }));
-        auto next = probe();
-        REQUIRE(h.start_within(waiting_body(next, 1h)));
-        CHECK_FALSE(h.op->last_failure().has_value());
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
         CHECK(taken->exited);
+        CHECK(h.op->last_failure() == std::optional<std::string>("taken"));
+        auto next = probe();
+        REQUIRE(h.start_within(waiting_body(next, 1h)));
         CHECK_FALSE(h.op->last_failure().has_value());  // the next start()'s outcome, not the taken body's throw
     }
 
@@ -757,6 +758,114 @@ TEST_CASE("AsyncOperation - destructor joins every body", "[util][async_operatio
         REQUIRE(eventually([&] { return again->exited.load(); }));
         CHECK(again->wait_result == 1);
     }
+}
+
+// Issue #1713: cancel_all_and_join() takes the bodies out under the slot mutex
+// and joins them outside it. A start() in that gap is refused, so no body is
+// installed behind the join, and the slot is empty when the call returns.
+TEST_CASE("AsyncOperation - a start() while cancel_all_and_join() joins is refused", "[util][async_operation][unit]") {
+    Harness h;
+    auto first = probe();
+    auto first_cancelled = std::make_shared<std::atomic<bool>>(false);
+    auto gate = h.gate();
+    // Sees the cancel at once (the drain sets it under the same lock as it
+    // takes the body), then stays blocked in a fake transaction.
+    REQUIRE(h.start_within([first, first_cancelled, gate](OperationContext& ctx) {
+        first->entered = true;
+        first->wait_result = ctx.wait_for(1h) ? 1 : 0;
+        first_cancelled->store(true);
+        gate->wait();
+        finish(first, ctx);
+    }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+
+    auto drain = h.on_helper([&h] { h.op->cancel_all_and_join(); });
+    REQUIRE(eventually([&] { return first_cancelled->load(); }));  // taken out, now being joined
+    CHECK(drain.wait_for(0s) == std::future_status::timeout);
+
+    const auto generation_before = h.generation.current();
+    auto late = probe();
+    int code = 0;
+    std::string message;
+    try {
+        h.op->start(waiting_body(late, 1h));
+    } catch (const AlpacaException& e) {
+        code = e.error_code();
+        message = e.what();
+    }
+    CHECK(code == AlpacaError::InvalidOperation);
+    CHECK(message == "test-slot: the operations are being stopped; try again");
+    CHECK(h.generation.current() == generation_before);
+    CHECK_FALSE(h.op->running());
+
+    gate->open();
+    REQUIRE(drain.wait_for(kBound) == std::future_status::ready);
+    CHECK(first->wait_result == 0);
+    CHECK(first->reason.load() == StopReason::Cancelled);
+    // The slot is empty once the call returns: nothing outlives the join.
+    CHECK_FALSE(h.op->running());
+    CHECK(h.op->stale_count() == 0);
+    CHECK_FALSE(late->entered);
+
+    // A later start() works (a driver reconnects).
+    auto again = probe();
+    REQUIRE(h.start_within(waiting_body(again, 10ms)));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+    h.clock.advance(10ms);
+    REQUIRE(eventually([&] { return again->exited.load(); }));
+    CHECK(again->wait_result == 1);
+}
+
+// Issue #1713: a start() already waiting at the stale bound (rule 3) is woken
+// by cancel_all_and_join() emptying the lists. It is refused too, not handed
+// the room the drain made.
+TEST_CASE("AsyncOperation - a start() waiting at the stale bound is refused by cancel_all_and_join()",
+          "[util][async_operation][unit]") {
+    Harness h;
+    std::vector<ProbePtr> p;
+    std::vector<GatePtr> g;
+    for (int i = 0; i < 5; ++i) {
+        p.push_back(probe());
+        g.push_back(h.gate());
+    }
+    for (int i = 0; i < 4; ++i) {
+        REQUIRE(h.start_within(gated_body(p[i], g[i])));
+        REQUIRE(eventually([&] { return p[i]->entered.load(); }));
+    }
+    REQUIRE(h.op->stale_count() == 3);
+
+    // Caught on the helper thread and returned by value (see "stale bound").
+    struct Outcome {
+        std::uint64_t token = 0;
+        int error_code = 0;
+    };
+    auto fifth = h.on_helper([&h, body = gated_body(p[4], g[4])]() mutable {
+        Outcome out;
+        try {
+            out.token = h.op->start(std::move(body));
+        } catch (const AlpacaException& e) {
+            out.error_code = e.error_code();
+        }
+        return out;
+    });
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));  // the fifth start() waits on the clock
+
+    // The drain takes all four bodies and joins them; their gates stay closed.
+    auto drain = h.on_helper([&h] { h.op->cancel_all_and_join(); });
+    REQUIRE(fifth.wait_for(kBound) == std::future_status::ready);
+    const auto out = fifth.get();
+    CHECK(out.error_code == AlpacaError::InvalidOperation);
+    CHECK(out.token == 0);
+    CHECK_FALSE(h.op->running());
+    CHECK(drain.wait_for(0s) == std::future_status::timeout);  // still joining
+
+    for (int i = 0; i < 4; ++i) {
+        g[i]->open();
+    }
+    REQUIRE(drain.wait_for(kBound) == std::future_status::ready);
+    CHECK_FALSE(h.op->running());
+    CHECK(h.op->stale_count() == 0);
+    CHECK_FALSE(p[4]->entered);
 }
 
 // Case 8: check, spawn and assign under one mutex (rule 1), with every public
