@@ -1238,7 +1238,8 @@ TEST_CASE("SkyWatcher serial - a rate-applied check in flight does not re-kick a
     const std::size_t from = board.frames().size();
     release.set_value();
     setter.join();
-    std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // settle + the longest sample window
+    // Wall clock: the check samples the pty board over its own settle and window, ~3.2 s at most.
+    std::this_thread::sleep_for(std::chrono::milliseconds(4500));
     sw::set_rate_verify_before_start_hook_for_testing(*driver, nullptr);
 
     CHECK(count_frames_since(board, from, "IJ") == 0);
@@ -1268,6 +1269,7 @@ TEST_CASE("SkyWatcher serial - a park started before the board restarted sends n
     restart_board_under_recovered_link(board, *driver);
     const std::size_t from = board.frames().size();
     release.set_value();
+    // Wall clock: the pty board replies in real time, so a stray frame needs real time to arrive.
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
 
     CHECK(count_frames_since(board, from, "KSGIJ") == 0);
@@ -1285,11 +1287,12 @@ TEST_CASE("SkyWatcher serial - a pulse that ends after the board restarted does 
     driver->set_tracking(true);
 
     driver->pulse_guide(2, 8000);  // East: a live in-place rate change, restored at the end
-    // Dispatch and its rate check are done by now, so the hold is what is in flight.
+    // Wall clock (the pty board and the status poll run in real time): dispatch and its rate check are done
+    // by now, so the hold is what is in flight.
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     restart_board_under_recovered_link(board, *driver);
     const std::size_t from = board.frames().size();
-    std::this_thread::sleep_for(std::chrono::milliseconds(8000));  // past the end of the hold
+    std::this_thread::sleep_for(std::chrono::milliseconds(8000));  // wall clock: past the end of the hold
 
     CHECK(count_frames_since(board, from, "IJG") == 0);
     driver->set_connected(false);
