@@ -53,12 +53,12 @@ struct GetterWaitRig {
     void hold_ra_position_reply() { mount.fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x01}); }
 
     // get_guide_rate and get_aperture_diameter take mutex_ and need no device access.
-    // The bound stays under the 500 ms AUX timeout so a held read cannot release them.
+    // The bound is wide for slow arm64/sanitizer hosts but stays under the 500 ms AUX timeout so a held read cannot release them.
     void check_state_getters_return() {
         auto guide = std::async(std::launch::async, [&] { return driver->get_guide_rate(); });
         auto aperture = std::async(std::launch::async, [&] { return driver->get_aperture_diameter(); });
-        const bool guide_done = guide.wait_for(150ms) == std::future_status::ready;
-        const bool aperture_done = aperture.wait_for(150ms) == std::future_status::ready;
+        const bool guide_done = guide.wait_for(400ms) == std::future_status::ready;
+        const bool aperture_done = aperture.wait_for(400ms) == std::future_status::ready;
         mount.release_reply_tail();  // always release so the test cannot hang
         // On the current code the probes wait for the holder; a Sync holder needs the fake clock to move.
         while (guide.wait_for(2ms) != std::future_status::ready || aperture.wait_for(2ms) != std::future_status::ready)

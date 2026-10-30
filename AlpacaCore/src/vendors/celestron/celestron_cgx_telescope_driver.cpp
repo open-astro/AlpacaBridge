@@ -1203,6 +1203,8 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
     };
 
     // A caller that passed its lock has the I/O lock taken first (decision 0016 rule 2).
+    // Read before the release; safe because the Sync caller holds transition_mutex_ and motion_start_mutex_,
+    // so no other writer changes tracking_state_valid_ while mutex_ is dropped.
     const bool previous_state_valid = tracking_state_valid_;
     std::exception_ptr failure;
     bool rollback_succeeded = false;
