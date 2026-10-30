@@ -2591,24 +2591,52 @@ Tier3Recipe tier3_recipe_ioptron_focuser() {
             "FakeIoptronIeaf::set_silent(true) mid-move"};
 }
 
-// iGuider: a frame every half second (at the fake's default 5 ms the settle frames end the exposure inside the
-// control window), then the stream stops during the exposure. Its deadline (10.7 s for 0.02 s) passes before the
-// 10 s stall does, so the exposure has failed, not only the link. Falsified by: the exposure worker waiting on
-// read_frame() with no deadline, so ImageReady stays false and never raises.
+// The iGuider fake for tier 3. From `start` on, before_frame_return holds each finished frame until `fail` claims it
+// (then until `recover`) or, with no fault, for kHealthyDelay. `fail` sets `stalled` before it moves kHolding to
+// kFaulted, and the hook moves kHolding to kReleased, so exactly one of them wins: a frame already past read_frame()'s
+// stalled check never reaches the driver after the fault (the old 300 ms sleep let one through under load).
+struct IGuiderT3Hold : IGuiderV4L2Hold {
+    enum Phase : int { kIdle, kHolding, kReleased, kFaulted };
+    // Only a run without the fault (the no-op mutant) gets here: inside the 10.7 s deadline, so the exposure ends.
+    static constexpr std::chrono::seconds kHealthyDelay{5};
+    // Bounds every hold, so a case that fails before `recover` still disconnects.
+    static constexpr std::chrono::seconds kHoldBound{30};
+    std::atomic<int> phase{kIdle};
+
+    void hold_frame() {
+        for (const auto entered = Clock::now(); Clock::now() - entered < kHoldBound;) {
+            int p = phase.load();
+            if (p == kIdle || p == kReleased || (p == kFaulted && !fake.stalled.load())) return;
+            if (p == kHolding && Clock::now() - entered >= kHealthyDelay && phase.compare_exchange_strong(p, kReleased))
+                return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+};
+
+// iGuider: the stream stops during the exposure (frames held as above). Its deadline (10.7 s for 0.02 s) ends the
+// exposure as failed, not only the link. Falsified by: the exposure worker waiting on read_frame() with no deadline,
+// so ImageReady stays false and never raises.
 Tier3Recipe tier3_recipe_iguider_camera() {
     const auto make = [](IGuiderV4L2Hold& s) -> std::unique_ptr<AlpacaDriver> {
         return alpacacore::vendor::ioptron::create_iguider_camera(0, "", s.v4l2);
     };
-    return {[](Hosted& hosted) { t3_start_exposure(hosted, 0.02); },
-            [](Hosted& hosted) { t3_fake<IGuiderV4L2Hold>(hosted).fake.stalled.store(true); },
-            [](Hosted& hosted) { t3_fake<IGuiderV4L2Hold>(hosted).fake.stalled.store(false); },
+    return {[](Hosted& hosted) {
+                t3_fake<IGuiderT3Hold>(hosted).phase.store(IGuiderT3Hold::kHolding);
+                t3_start_exposure(hosted, 0.02);
+            },
+            [](Hosted& hosted) {
+                auto& s = t3_fake<IGuiderT3Hold>(hosted);
+                s.fake.stalled.store(true);
+                int holding = IGuiderT3Hold::kHolding;
+                s.phase.compare_exchange_strong(holding, IGuiderT3Hold::kFaulted);
+            },
+            [](Hosted& hosted) { t3_fake<IGuiderT3Hold>(hosted).fake.stalled.store(false); },
             "FakeIGuiderV4L2::stalled = true mid-exposure",
             [make](bool) {
-                auto s = std::make_shared<IGuiderV4L2Hold>();
+                auto s = std::make_shared<IGuiderT3Hold>();
                 // Set before the stream worker starts: the hook is not locked.
-                s->fake.before_frame_return = [](std::int32_t) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-                };
+                s->fake.before_frame_return = [hold = s.get()](std::int32_t) { hold->hold_frame(); };
                 return host_over(s, make);
             }};
 }
@@ -2737,7 +2765,7 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
 
 // The SDK cameras expose for a minute, long enough that no driver deadline ends the exposure inside the budget.
 constexpr double kTier3SdkExposureSeconds = 60.0;
-// The SVBONY and Player One fakes cap an exposure at 10 s; 9 s outlasts the control leg and the fault.
+// The Player One fake caps an exposure at 10 s; 9 s outlasts the control leg and the fault.
 constexpr double kTier3CappedExposureSeconds = 9.0;
 
 #ifdef ALPACACORE_ENABLE_ZWO
@@ -2913,23 +2941,31 @@ Tier3Recipe tier3_recipe_altair_camera() { return tier3_recipe_toup_family_camer
 #endif
 
 #ifdef ALPACACORE_ENABLE_SVBONY
-// One video-data read is held for up to 20 s (the exposure is running); `fail` makes that read throw. The failed
-// exposure keeps its error, so there is nothing to undo. Falsified by: the exposure worker swallowing a failed
-// video-data read and ending the exposure as a frame.
+// Every video-data read is held for up to 20 s (the exposure is running); `fail` makes the held read throw. The
+// failed exposure keeps its error, so there is nothing to undo. The fake allows a 60 s exposure, so with no fault
+// the driver gives up at its own deadline (exposure + 10 s), well after the recover leg ends. Falsified by: the
+// exposure worker swallowing a failed video-data read and ending the exposure as a frame.
 Tier3Recipe tier3_recipe_svbony_camera() {
     using Fake = alpacacore::test::FakeSVBSDK;
     return {[](Hosted& hosted) {
                 auto& fake = t3_fake<Fake>(hosted);
                 fake.set_max_read_wait(std::chrono::seconds(20));
                 fake.block_video_data();
-                t3_start_exposure(hosted, kTier3CappedExposureSeconds);
+                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
             },
             [](Hosted& hosted) {
                 auto& fake = t3_fake<Fake>(hosted);
                 fake.fail_next_held_read();
                 fake.release_video_data();
             },
-            [](Hosted&) {}, "FakeSVBSDK::fail_next_held_read() mid-exposure"};
+            [](Hosted&) {}, "FakeSVBSDK::fail_next_held_read() mid-exposure",
+            [](bool) {
+                auto sdk = std::make_shared<Fake>();
+                sdk->set_exposure_max(std::chrono::seconds(static_cast<int>(kTier3SdkExposureSeconds)));
+                return host_over(sdk, [](Fake& fake) -> std::unique_ptr<AlpacaDriver> {
+                    return alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+                });
+            }};
 }
 #endif
 
