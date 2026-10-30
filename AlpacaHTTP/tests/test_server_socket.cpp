@@ -752,9 +752,13 @@ int main() {
             "Content-Type: application/x-www-form-urlencoded\r\nContent-Length : 31\r\n\r\n",
             "PUT /api/v1/telescope/0/connected HTTP/1.1\r\nHost: localhost\r\n"
             "Transfer-Encoding : chunked\r\n\r\n",
+            // A bare LF hides the header from the server's CRLF split.
+            "PUT /api/v1/telescope/0/connected HTTP/1.1\r\nHost: localhost\n"
+            "Transfer-Encoding: chunked\r\n\r\n",
         };
-        const std::string trailers[] = {body, "5\r\nhello\r\n0\r\n\r\n"};
-        for (int i = 0; i < 2; ++i) {
+        const std::string trailers[] = {body, "5\r\nhello\r\n0\r\n\r\n",
+                                        "5\r\nhello\r\n0\r\n\r\n"};
+        for (int i = 0; i < 3; ++i) {
             int fd = connect_local(port);
             EXPECT(fd >= 0);
             std::string carry;
