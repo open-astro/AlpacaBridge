@@ -593,6 +593,6 @@ TEST_CASE("SkyWatcher link loss - a MoveAxis stop checks for a board restart its
     const std::size_t from = r.board.frames().size();
     r.step(10);  // the stop task reaches its restore
 
-    CHECK(r.frames_since(from, "GIJ") == 0);
+    CHECK(r.frames_since(from, "KGIJ") == 0);
     sw::set_status_poll_paused_for_testing(*r.driver, false);
 }
