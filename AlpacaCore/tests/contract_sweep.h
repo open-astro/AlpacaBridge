@@ -132,15 +132,14 @@ namespace alpacacore::test::contract {
 
 using DriverFactory = std::function<std::unique_ptr<AlpacaDriver>(int device_number)>;
 
-// Can* getters. The Can getters case reads every no-argument Can* getter on the device interface while
-// disconnected (they must not throw): telescope (all but CanMoveAxis, which is checked per axis and against
-// can_move_axis), camera, rotator. Excluded, with the reason:
-//  - focuser, filter wheel, cover calibrator, observing conditions: the interface (AlpacaCore/include/
-//    alpacacore/*_driver.h) declares no Can* getter. The focuser's Absolute is read as one.
-//  - switch: CanWrite(id), CanAsync(id) and MaxSwitch while disconnected may answer from static configuration
-//    or throw NotConnected; any other code is a defect (decided in #655). Each switch entry states which of the
-//    two its driver does, with its source, and names a writable id that the set_switch probe uses. The
-//    sweep pins exactly the stated mode, so a driver that changes flips the case and the entry is updated.
+// Can* getters. The Can getters case is registered for the types that have something to read while disconnected
+// (they must not throw): telescope (all but CanMoveAxis, which is checked per axis and against can_move_axis),
+// camera, rotator, focuser (Absolute) and switch (CanWrite and CanAsync on switch_writable_id). Not registered,
+// because the interface (AlpacaCore/include/alpacacore/*_driver.h) declares no Can* getter: filter wheel, cover
+// calibrator, observing conditions. A switch entry states which of the two its driver does for CanWrite(id) and
+// CanAsync(id) (answered from static configuration, or NotConnected; any other code is a defect, decided in
+// #655), with its source. The sweep pins exactly the stated mode, so a driver that changes flips the case and
+// the entry is updated. MaxSwitch is checked by "operations throw NotConnected".
 // How a per-id capability read behaves while disconnected: answered from static configuration, or NotConnected.
 enum class DisconnectedRead { Static, NotConnected };
 
@@ -173,6 +172,9 @@ struct ContractEntry {
     DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
     int switch_writable_id = -1;
     const char* switch_caps_source = "";
+    // Focuser only: the driver checks a static position range, so move(-1) is an InvalidValue probe
+    // (with_static_focuser_range clears no_invalid_probe_reason).
+    bool focuser_static_range = false;
 };
 
 // Platform 7 interface versions per device type.
@@ -197,7 +199,7 @@ inline int platform7_interface_version(DeviceType t) {
 inline const char* invalid_probe_reason_for(DeviceType t) {
     switch (t) {
         case DeviceType::Camera:
-        case DeviceType::Focuser:
+        case DeviceType::Focuser:  // with_static_focuser_range clears it for a driver that validates a range
             return "no argument with a static out-of-range value that is validated before the connection check "
                    "(assumption)";
         default:
@@ -224,6 +226,18 @@ inline ContractEntry with_command_passthrough(ContractEntry e) {
     // Command* forward to the mount protocol when connected (driver source; assumption for the
     // disconnected NotConnected code, checked by the sweep itself). Source string is kept.
     e.command_passthrough = true;
+    return e;
+}
+
+inline ContractEntry with_static_focuser_range(ContractEntry e) {
+    e.focuser_static_range = true;
+    e.no_invalid_probe_reason = "";
+    return e;
+}
+
+// A focuser that clamps an out-of-range move() instead of throwing has no InvalidValue probe; `why` cites it.
+inline ContractEntry with_clamping_focuser(ContractEntry e, const char* why) {
+    e.no_invalid_probe_reason = why;
     return e;
 }
 
@@ -376,10 +390,11 @@ inline ContractEntry contract_entry_ioptron_telescope() {
         kSrcAgentsAxis));
 }
 inline ContractEntry contract_entry_ioptron_focuser() {
-    return make_entry(
+    // iEAF move() validates 0..IEAF_MAX_STEP before the connection check.
+    return with_static_focuser_range(make_entry(
         "ioptron_focuser", "ioptron", "focuser", DeviceType::Focuser,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_ieaf_focuser(n, "/dev/ttyUSB0"); },
-        kSrcAgents);
+        kSrcAgents));
 }
 inline ContractEntry contract_entry_ioptron_filterwheel() {
     return make_entry(
@@ -589,10 +604,14 @@ inline ContractEntry contract_entry_gemini_covercalibrator_pro() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_gemini_focuser() {
-    return make_entry(
-        "gemini_focuser", "gemini", "focuser", DeviceType::Focuser,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::gemini::create_gemini_focuser(n, "/dev/ttyUSB0"); },
-        kSrcAgents);
+    return with_clamping_focuser(
+        make_entry(
+            "gemini_focuser", "gemini", "focuser", DeviceType::Focuser,
+            [](int n) -> std::unique_ptr<AlpacaDriver> {
+                return vendor::gemini::create_gemini_focuser(n, "/dev/ttyUSB0");
+            },
+            kSrcAgents),
+        "GeminiFocuserDriver::move() clamps a position outside 0..max to the range (ConformU requires clamping)");
 }
 inline ContractEntry contract_entry_gemini_switch() {
     return with_switch_caps(make_entry(
@@ -725,12 +744,15 @@ inline ContractEntry contract_entry_wandererastro_switch() {
 
 #ifdef ALPACACORE_ENABLE_ASTROASIS
 inline ContractEntry contract_entry_astroasis_focuser() {
-    return make_entry(
-        "astroasis_focuser", "astroasis", "focuser", DeviceType::Focuser,
-        [](int n) -> std::unique_ptr<AlpacaDriver> {
-            return vendor::astroasis::create_astroasis_focuser(n, "/dev/hidraw0");
-        },
-        kSrcAgents);
+    return with_clamping_focuser(
+        make_entry(
+            "astroasis_focuser", "astroasis", "focuser", DeviceType::Focuser,
+            [](int n) -> std::unique_ptr<AlpacaDriver> {
+                return vendor::astroasis::create_astroasis_focuser(n, "/dev/hidraw0");
+            },
+            kSrcAgents),
+        "AstroasisFocuserDriver::move() clamps a position outside 0..max to the range (ConformU requires "
+        "clamping)");
 }
 #endif
 

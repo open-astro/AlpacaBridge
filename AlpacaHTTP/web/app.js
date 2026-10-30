@@ -2587,6 +2587,12 @@ async function downloadAllLogs() {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
+        // The server answers a refused or failed build with a JSON error body.
+        if ((response.headers.get('Content-Type') || '').includes('application/json')) {
+            const body = await response.json();
+            throw new Error(body.ErrorMessage || 'unknown error');
+        }
+
         const blob = await response.blob();
         const date = new Date().toISOString().slice(0, 10);
         const filename = `alpacabridge-logs-${date}.txt.gz`;
@@ -2779,6 +2785,11 @@ async function downloadLogFile(filename) {
             `${API_BASE}${LOG_FILES_ENDPOINT}/${encodeURIComponent(filename)}?download=1`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
+        }
+        // A failed read is answered with HTTP 200 and a JSON error body.
+        if ((response.headers.get('Content-Type') || '').includes('application/json')) {
+            const body = await response.json();
+            throw new Error(body.ErrorMessage || 'unknown error');
         }
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);

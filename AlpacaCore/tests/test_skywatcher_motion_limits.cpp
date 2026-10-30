@@ -52,6 +52,7 @@
 #include "skywatcher_fake_clock.h"
 
 namespace sw = alpacacore::vendor::skywatcher;
+using alpacacore::test::connect_and_park;
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
 using alpacacore::test::FakeTaskClock;
@@ -752,8 +753,7 @@ TEST_CASE("SkyWatcher limits - a floor crossed before the guard's first sample i
     mount.jump_axis_degrees(2, kGuardDecAxisDeg);
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {},
                                                   floor_deg(kGuardAltitudeDeg - 1.5), clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(2000)));  // the status poll, parked
+    REQUIRE(connect_and_park(*driver, clock, std::chrono::milliseconds(2000)));  // the status poll, parked
     REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
     // Age the polled frame past its freshness bound (still inside the cache's
     // TTL), so the guard's first sample reads the board, not the inside frame.
@@ -781,8 +781,7 @@ TEST_CASE("SkyWatcher limits - a meridian limit crossed before tracking's first 
     mount.jump_axis_degrees(1, 92.0);  // 8 min past the meridian: inside the limit
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {},
                                                   meridian_minutes(10.0), clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(2000)));  // the status poll, parked
+    REQUIRE(connect_and_park(*driver, clock, std::chrono::milliseconds(2000)));  // the status poll, parked
 
     mount.jump_axis_degrees(1, 94.0);  // 16 min past the meridian, before the dispatch
     driver->set_tracking(true);
@@ -1265,6 +1264,90 @@ TEST_CASE("SkyWatcher tracking guard - all four equatorial slews are refused whi
     driver->slew_to_coordinates_async(ra, kNearPoleDec);
     CHECK(driver->get_slewing());
     REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(30)));
+    driver->set_connected(false);
+}
+
+// The duty worker's stop and restart are serialised: Tracking=true that lands while another setter is
+// joining the duty body must wait for that join, not have its start() refused (#1713). A refusal threw out
+// of set_tracking() before start_limit_guard(), so the mount tracked with no limit guard.
+TEST_CASE("SkyWatcher limits - Tracking on during a duty worker join still starts the guard",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = clocked_driver(mount, clock, floor_deg(-80.0));
+    pumped(clock, mount, [&] { driver->set_tracking(true); });
+    pumped(clock, mount, [&] { driver->set_declination_rate(0.1); });  // below the slow-mode floor: duty worker
+    REQUIRE(follow_until(
+        clock, [&] { return sw::detail::limit_guard_bodies_running() == 1; }, std::chrono::milliseconds(2000)));
+
+    std::atomic<bool> in_hook{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> a_done{false};
+    std::atomic<bool> b_done{false};
+    std::atomic<bool> b_threw{false};
+    std::thread a_thread;
+    std::thread b_thread;
+    struct Cleanup {
+        std::atomic<bool>& release;
+        std::thread& a;
+        std::thread& b;
+        ~Cleanup() {
+            release = true;
+            if (a.joinable()) {
+                a.join();
+            }
+            if (b.joinable()) {
+                b.join();
+            }
+        }
+    } cleanup{release, a_thread, b_thread};
+
+    // Holds the duty body just before its safety stop, bounded in real time so a lost release cannot hang.
+    sw::set_duty_before_exit_stop_hook_for_testing(*driver, [&] {
+        in_hook = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!release.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+    // A: a rate write stops the worker and joins it; the join waits on the held body.
+    a_thread = std::thread([&] {
+        try {
+            driver->set_declination_rate(0.12);
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        }
+        a_done = true;
+    });
+    REQUIRE(follow_until(clock, [&] { return in_hook.load(); }, std::chrono::milliseconds(3000)));
+
+    // Tracking off, then on again: the on is what starts the worker and the guard.
+    pumped(clock, mount, [&] { driver->set_tracking(false); });
+    REQUIRE(follow_until(
+        clock, [&] { return sw::detail::limit_guard_bodies_running() == 0; }, std::chrono::milliseconds(8000)));
+    b_thread = std::thread([&] {
+        try {
+            driver->set_tracking(true);
+        } catch (...) {
+            b_threw = true;
+        }
+        b_done = true;
+    });
+    follow_wall_clock(clock, std::chrono::milliseconds(300));  // B reaches the worker restart while A joins
+
+    release = true;
+    CHECK(pump_until(clock, mount, [&] { return a_done.load() && b_done.load(); }, std::chrono::seconds(20)));
+    if (a_thread.joinable() && a_done.load()) {
+        a_thread.join();
+    }
+    if (b_thread.joinable() && b_done.load()) {
+        b_thread.join();
+    }
+    CHECK_FALSE(b_threw.load());
+    CHECK(driver->get_tracking());
+    CHECK(follow_until(
+        clock, [&] { return sw::detail::limit_guard_bodies_running() == 1; }, std::chrono::milliseconds(2000)));
+    sw::set_duty_before_exit_stop_hook_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }
 

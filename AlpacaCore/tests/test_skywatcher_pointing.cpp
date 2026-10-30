@@ -55,6 +55,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <numbers>
 #include <string>
@@ -261,6 +262,33 @@ LandedFrame land_on_fake_clock(alpacacore::test::FakeTaskClock& clock, alpacacor
     return f;
 }
 
+// What the driver itself reports for the sky when the fake's axes are stamped
+// at (a1, a2) degrees from count home, tracking off so nothing drifts. The
+// pure-oracle cases judge a transcription of the model; this puts the
+// driver's own counts-to-sky path under the same rows (open-astro#1860).
+class StampedDriver {
+public:
+    StampedDriver(const alpacacore::test::FakeMountProfile& profile, double latitude)
+        : mount_(profile), driver_(sw::create_skywatcher_telescope(0, endpoint(mount_), latitude, 151.215297, 42.0)) {
+        REQUIRE(mount_.ok());
+        driver_->set_connected(true);
+    }
+    ~StampedDriver() { driver_->set_connected(false); }
+
+    SkyPoint report_at(double a1, double a2) {
+        mount_.jump_axis_degrees(1, a1);
+        mount_.jump_axis_degrees(2, a2);
+        // Four status reads after the jump: the first may predate it.
+        const int reads = mount_.frames_seen('j');
+        REQUIRE(mount_.wait_for_frames('j', reads + 4, std::chrono::seconds(10)));
+        return {wrap_ha(driver_->get_sidereal_time() - driver_->get_right_ascension()), driver_->get_declination()};
+    }
+
+private:
+    FakeSkyWatcherMount mount_;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver_;
+};
+
 }  // namespace
 
 TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on hardware (#432)",
@@ -324,7 +352,14 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         {"EQ-AL55i Pro, the #579 reading", 40.0, 0.0, 89.37, +1, 6.00, 0.63, 0.41, 270.5,
          "dovetail west, level, after a dec-only move of +89.37 deg from home"},
     };
-    for (const Row& r : rows) {
+    // The board each row was read on, by index (kept out of the row literals).
+    using alpacacore::test::FakeMountProfile;
+    const FakeMountProfile row_profiles[] = {FakeMountProfile::eqm35_pro(), FakeMountProfile::eqm35_pro(),
+                                             FakeMountProfile::eqm35_pro(), FakeMountProfile::wave_100i(),
+                                             FakeMountProfile::eqm35_pro(), FakeMountProfile::eq_al55i()};
+    static_assert(std::size(row_profiles) == std::size(rows));
+    for (std::size_t i = 0; i < std::size(rows); ++i) {
+        const Row& r = rows[i];
         const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2, r.board_sense);
         const AltAz horizon = horizon_from_sky(sky, r.latitude);
         INFO(r.what << ": observed " << r.observed);
@@ -336,6 +371,12 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
             // read off the mount as well as the altitude.
             CHECK(std::abs(horizon.azimuth_degrees - r.expect_az) < 1.0);
         }
+        // The driver, stamped at the row's axes, reports the row's sky: the
+        // oracle above is a transcription, this is the code that ships.
+        StampedDriver driver(row_profiles[i], r.latitude);
+        const SkyPoint reported = driver.report_at(r.a1, r.a2);
+        CHECK(std::abs(wrap_ha(reported.ha_hours - r.expect_ha)) < 0.02);
+        CHECK(std::abs(reported.dec_degrees - r.expect_dec) < 0.1);
     }
 
     // The first row is the one that needs no instrument, and it is what
@@ -1034,6 +1075,20 @@ TEST_CASE("SkyWatcher pointing - the hemisphere-symmetric model agrees with indi
     // #432 model agrees with indi-eqmod in the north only, and is 12 h out in
     // the south: that difference IS #458.
     for (const double latitude : {45.0, -37.2}) {
+        // The driver's own report at a few of the same axes, on a board whose
+        // measured eps is +1 (the EQ-AL55i Pro; the indi-eqmod sense).
+        StampedDriver driver(alpacacore::test::FakeMountProfile::eq_al55i(), latitude);
+        for (const double a1 : {-60.0, 0.0, 45.0}) {
+            for (const double a2 : {-130.0, -40.0, 70.0, 150.0}) {
+                const SkyPoint indi = sky_from_indi_eqmod(latitude, a1, a2);
+                const SkyPoint reported = driver.report_at(a1, a2);
+                INFO("driver at lat " << latitude << " a1 " << a1 << " a2 " << a2 << ": HA " << reported.ha_hours
+                                      << " dec " << reported.dec_degrees << ", indi HA " << indi.ha_hours << " dec "
+                                      << indi.dec_degrees);
+                CHECK(std::abs(wrap_ha(reported.ha_hours - indi.ha_hours)) < kHaToleranceHours);
+                CHECK(std::abs(reported.dec_degrees - indi.dec_degrees) < kDecToleranceDegrees);
+            }
+        }
         for (double a1 = -90.0; a1 <= 90.0; a1 += 15.0) {
             for (double a2 = -170.0; a2 <= 170.0; a2 += 17.0) {
                 if (std::abs(a2) < 1e-9) {
@@ -1499,6 +1554,7 @@ TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky a
     constexpr double kRowDecToleranceDegrees = 5.0;  // a wrong hemisphere sign is 53 deg or more here
     constexpr double kSameSideSpreadHours = 0.05;    // 3 min; measured spread is under 2 min
 
+    StampedDriver driver(alpacacore::test::FakeMountProfile::eqm35_pro(), latitude);
     // First HA offset (model - sky) seen per power-on and side, for the spread check.
     double first_offset[3][2] = {};
     bool seen[3][2] = {};
@@ -1510,6 +1566,10 @@ TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky a
                     << "; solved HA " << r.solved_ha << " h dec " << r.solved_dec);
         CHECK(std::abs(ha_offset) < kRowHaToleranceHours);
         CHECK(std::abs(sky.dec_degrees - r.solved_dec) < kRowDecToleranceDegrees);
+        // The driver's own report at the row's axes against the solved sky.
+        const SkyPoint reported = driver.report_at(r.a1, r.a2);
+        CHECK(std::abs(wrap_ha(reported.ha_hours - r.solved_ha)) < kRowHaToleranceHours);
+        CHECK(std::abs(reported.dec_degrees - r.solved_dec) < kRowDecToleranceDegrees);
         // Data check on the recorded rows: each landing's dec branch is the side of
         // the meridian the sky put the tube on. A wrong branch in the model is caught
         // by the HA check above, not by this line. This assumes this board's

@@ -1,0 +1,2 @@
+### Changed (docs)
+- **A device that did not answer is a `DriverException`, not an `InvalidOperation`** (docs, decision 0010 rule 8, raised in the #1898 review): the ASCOM exception vocabulary in `ascom-contract.instructions.md` now says that `DriverException` covers a timeout and a device value not answered since the connect (ASCOM: "Includes communication errors"), and that `InvalidOperation` covers a value the client can set and has not (the site, `UTCDate`). Decision 0010 gains rule 8, which holds the snapshot drivers' getters and control paths to it. No code changes.

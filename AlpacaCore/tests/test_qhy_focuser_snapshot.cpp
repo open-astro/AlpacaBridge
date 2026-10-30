@@ -44,21 +44,15 @@ constexpr auto kBound = 15000ms;
 
 int wire_reads(const FakeQhyQFocuser& fake) { return fake.count("\"cmd_id\":5}") + fake.count("\"cmd_id\":4}"); }
 
-// Advances one tick and waits for the poll body to be waiting again.
-void tick(FakeTaskClock& clock) {
-    clock.advance(kTick);
-    REQUIRE(clock.wait_for_woken_settled(kBound));
-    REQUIRE(clock.wait_for_waiters(1, kBound));
-}
-
+using alpacacore::test::connect_and_park;
 using alpacacore::test::require_alpaca_error;
+using alpacacore::test::tick;
 
 std::unique_ptr<alpacacore::FocuserDriver> connected_driver(FakeQhyQFocuser& fake, FakeTaskClock& clock) {
     auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), {}, clock);
-    driver->set_connected(true);
     // The poll body parks on the clock after Connect returns. Not a REQUIRE:
     // a case then fails on the behaviour it pins, not on this rendezvous.
-    (void)clock.wait_for_waiters(1, 2000ms);
+    (void)connect_and_park(*driver, clock, 2000ms);
     return driver;
 }
 
@@ -88,7 +82,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - getters between poll ticks cause no wire exc
     // The next tick measures the device again and the getters follow.
     fake.set_position(2500);
     CHECK(driver->get_position() == 1000);  // unchanged until the tick
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 2500);
     CHECK(wire_reads(fake) == reads_before + 2);
 
@@ -110,7 +104,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - IsMoving is true right after a Move and fals
     CHECK(driver->get_position() == 1000);   // the measured position until the next poll
     CHECK(wire_reads(fake) == reads_before);
 
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_is_moving() == true);
     CHECK(driver->get_position() == 1001);
 
@@ -132,9 +126,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - a stale frame is served until the link-loss 
     // wire) and the frame is now older than the 500 ms freshness bound: it is
     // still served, and Connected is still true.
     fake.set_muted(true);
-    clock.advance(1s);
-    REQUIRE(clock.wait_for_woken_settled(kBound));
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    tick(clock, 1s, kBound);
     CHECK(driver->get_position() == 1000);
     CHECK(driver->get_connected() == true);
 
@@ -176,7 +168,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - three failed polls latch a fault that the ne
 
     fake.set_muted(true);
     for (int i = 0; i < 3; ++i) {
-        tick(clock);
+        tick(clock, kTick, kBound);
     }
     // Faulted, not lost: Connected stays true, the cache is refused, static
     // metadata answers.
@@ -197,7 +189,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - three failed polls latch a fault that the ne
     CHECK(fake.count("\"cmd_id\":3}") == 1);
 
     fake.set_position(1800);
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_position() == 1800);
 
     driver->set_connected(false);
@@ -262,7 +254,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - a frame a Move overtook does not clear the t
 
     // The motor is knocked off that target: the next poll must still see the Move's target.
     fake.set_position(1500);
-    tick(clock);
+    tick(clock, kTick, kBound);
     CHECK(driver->get_is_moving() == true);
 
     driver->set_connected(false);

@@ -773,29 +773,53 @@ struct ClientKey {
     bool has_client_id = false;
 };
 
+// Alpaca defines ClientID as a uint32. Anything else counts as absent (issue
+// #1738): the key is stored verbatim, so an arbitrary string would let one
+// client hold a registry entry of any size for the whole stale window.
+bool is_uint32_client_id(std::string_view id) {
+    if (id.empty() || id.size() > 10) {
+        return false;
+    }
+    std::uint64_t value = 0;
+    for (const char c : id) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        value = value * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+    return value <= std::numeric_limits<std::uint32_t>::max();
+}
+
 ClientKey extract_client_key(const alpacahttp::Request& request) {
     ClientKey result;
-    if (request.method() == alpacahttp::HttpMethod::GET) {
-        if (request.has_query_param("ClientID")) {
-            result.key = request.get_query_param("ClientID");
+    const auto accept = [&result](std::string id) {
+        if (is_uint32_client_id(id)) {
+            result.key = std::move(id);
             result.has_client_id = true;
         }
+    };
+    if (request.method() == alpacahttp::HttpMethod::GET) {
+        if (request.has_query_param("ClientID")) {
+            accept(request.get_query_param("ClientID"));
+        }
     } else if (!request.body().empty()) {
+        bool json_has_client_id = false;
         if (auto json_opt = alpacahttp::parse_json(request.body())) {
             if (const auto* val = find_json_value(*json_opt, "ClientID")) {
                 if (val->is_string()) {
-                    result.key = val->get<std::string>();
-                    result.has_client_id = true;
+                    json_has_client_id = true;
+                    accept(val->get<std::string>());
                 } else if (val->is_number_integer()) {
-                    result.key = std::to_string(val->get<std::int64_t>());
-                    result.has_client_id = true;
+                    json_has_client_id = true;
+                    if (val->is_number_unsigned()) {
+                        accept(std::to_string(val->get<std::uint64_t>()));
+                    }
                 }
             }
         }
-        if (!result.has_client_id) {
+        if (!json_has_client_id) {
             if (auto value = get_form_value(request.body(), "ClientID")) {
-                result.key = *value;
-                result.has_client_id = true;
+                accept(*value);
             }
         }
     }
@@ -5219,13 +5243,22 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
     }
 
     if (request.has_query_param("download")) {
+        // One archive build at a time: each holds the combined text plus its
+        // gzip buffer. A concurrent request is refused, never queued.
+        std::unique_lock<std::mutex> archive_lock(log_archive_mutex_, std::try_to_lock);
+        if (!archive_lock.owns_lock()) {
+            response.set_content_type("application/json");
+            response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                                  "Log archive build already in progress; retry shortly"));
+            return response;
+        }
         try {
             auto files = util::list_log_files();
             // Cap the combined archive so a long retention window cannot
             // build an OOM-sized string on a small SBC. Keep the newest
             // files (the relevant ones for debugging) and drop the oldest;
             // the newest file is always included.
-            constexpr std::uint64_t kMaxArchiveBytes = 200ull * 1024 * 1024;
+            constexpr std::uint64_t kMaxArchiveBytes = 32ull * 1024 * 1024;
             // Must stay within gzip_compress's input-size guard (uInt-based);
             // raising the cap past it would make the download always fail.
             static_assert(kMaxArchiveBytes < std::numeric_limits<uInt>::max() / 2,
@@ -5249,7 +5282,8 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             std::string combined;
             if (included < files.size()) {
                 combined += "===== " + std::to_string(files.size() - included) +
-                            " older log file(s) omitted: archive capped at 200 MiB =====\n\n";
+                            " older log file(s) omitted: archive capped at " + std::to_string(kMaxArchiveBytes >> 20) +
+                            " MiB =====\n\n";
             }
             for (std::size_t i = included; i-- > 0;) {
                 const auto& info = files[i];

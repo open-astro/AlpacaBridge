@@ -73,6 +73,13 @@ void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
 /// anything else is ignored.
 void set_park_home_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam: replaces the thread factory of the driver's status poll slot, so
+/// a case can make the poll's start at the end of a connect fail (#1895). Call
+/// only while no connect is in flight. `driver` must come from the factories
+/// above; anything else is ignored.
+void set_status_poll_spawn_for_testing(TelescopeDriver& driver,
+                                       std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test seam: `hook` runs on the thread of a clean set_connected(false), with
 /// the driver's state lock released and the close not yet sent, so a case can
 /// read a getter while the close is in flight (decision 0016, #1449). Pass an

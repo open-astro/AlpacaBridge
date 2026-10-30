@@ -235,6 +235,7 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
                          [&] { (void)o.get_time_since_last_update("NoSuchSensor"); }});
             p.push_back(
                 {"get_sensor_description(NoSuchSensor)", [&] { (void)o.get_sensor_description("NoSuchSensor"); }});
+            p.push_back({"set_average_period(-1)", [&] { o.set_average_period(-1.0); }});
             break;
         }
         case DeviceType::Rotator: {
@@ -251,6 +252,16 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
         }
         default:
             break;
+    }
+    return p;
+}
+
+// The tier-1 probe list: the type's probes plus the focuser move(-1) of a driver that checks a static range.
+std::vector<Probe> invalid_value_probes(AlpacaDriver& d, const ContractEntry& e) {
+    auto p = invalid_value_probes(d, e.type);
+    if (e.type == DeviceType::Focuser && e.focuser_static_range) {
+        auto& f = dynamic_cast<alpacacore::FocuserDriver&>(d);
+        p.push_back({"move(-1)", [&] { f.move(-1); }});
     }
     return p;
 }
@@ -353,9 +364,9 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
 }
 
 // Static capability getters: readable while disconnected (they must not throw).
-std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
+std::vector<Probe> can_getter_probes(AlpacaDriver& d, const ContractEntry& entry) {
     std::vector<Probe> p;
-    switch (type) {
+    switch (entry.type) {
         case DeviceType::Telescope: {
             auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(d);
             p.push_back({"get_can_slew", [&] { (void)t.get_can_slew(); }});
@@ -397,10 +408,34 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"get_absolute", [&] { (void)f.get_absolute(); }});
             break;
         }
+        case DeviceType::Switch: {
+            // Per-id reads: answered statically or NotConnected as the entry states (case_can_getters).
+            auto& s = dynamic_cast<alpacacore::SwitchDriver&>(d);
+            const int id = entry.switch_writable_id;
+            p.push_back({"get_can_write(writable id)", [&s, id] { (void)s.get_can_write(id); }});
+            p.push_back({"get_can_async(writable id)", [&s, id] { (void)s.get_can_async(id); }});
+            break;
+        }
         default:
             break;
     }
     return p;
+}
+
+// Which entries have a tier-1 subject. InvalidValue: the entry states no reason for lacking a probe. Can getters:
+// the types whose Can* reads can_getter_probes lists (the interface of the others has none).
+bool has_invalid_subject(const ContractEntry& e) { return std::string(e.no_invalid_probe_reason).empty(); }
+bool has_can_subject(const ContractEntry& e) {
+    switch (e.type) {
+        case DeviceType::Telescope:
+        case DeviceType::Camera:
+        case DeviceType::Rotator:
+        case DeviceType::Focuser:
+        case DeviceType::Switch:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // ---- case bodies ----------------------------------------------------------
@@ -411,12 +446,9 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     auto d = e.make(0);
     REQUIRE(d != nullptr);
     REQUIRE_FALSE(d->get_connected());
-    const auto probes = invalid_value_probes(*d, e.type);
-    if (probes.empty()) {
-        INFO("no static out-of-range probe: " << e.no_invalid_probe_reason);
-        REQUIRE(std::string(e.no_invalid_probe_reason).size() > 0);
-        return;
-    }
+    // Registered only for an entry with probes (has_invalid_subject); the guard case pins that.
+    const auto probes = invalid_value_probes(*d, e);
+    REQUIRE_FALSE(probes.empty());
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::InvalidValue);
@@ -563,9 +595,16 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
 [[maybe_unused]] void case_can_getters(const ContractEntry& e) {
     auto d = e.make(0);
     REQUIRE(d != nullptr);
-    for (const auto& [name, fn] : can_getter_probes(*d, e.type)) {
+    const auto probes = can_getter_probes(*d, e);
+    REQUIRE_FALSE(probes.empty());
+    // A switch states per entry whether CanWrite/CanAsync answer statically or throw NotConnected.
+    const int expected = e.type == DeviceType::Switch && e.switch_caps_disconnected ==
+                                                             alpacacore::test::contract::DisconnectedRead::NotConnected
+                             ? err::NotConnected
+                             : -1;
+    for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
-        CHECK(thrown_code(fn) == -1);
+        CHECK(thrown_code(fn) == expected);
     }
     if (e.type == DeviceType::Telescope) {
         auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*d);
@@ -2218,7 +2257,6 @@ Tier2Host tier2_host_wandererastro_switch() {
         body(alpacacore::test::contract::contract_entry_##id());                      \
     }
 
-#define CS_T1_INVALID(id) CS_CASE(id, "InvalidValue precedes NotConnected", case_invalid_before_not_connected)
 #define CS_T1_NOTCONN(id) CS_CASE(id, "operations throw NotConnected", case_operations_throw_not_connected)
 #define CS_T1_STATE(id) CS_CASE(id, "disconnected DeviceState is empty", case_device_state_empty)
 #define CS_T1_IFACE(id) CS_CASE(id, "InterfaceVersion is Platform 7", case_interface_version)
@@ -2226,7 +2264,19 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS_T1_UID(id) CS_CASE(id, "UniqueID distinct per device number", case_unique_id)
 #define CS_T1_ACTION(id) CS_CASE(id, "unsupported action contract", case_unsupported_action)
 #define CS_T1_ERRVOCAB(id) CS_CASE(id, "error code vocabulary", case_error_vocabulary)
-#define CS_T1_CAN(id) CS_CASE(id, "Can getters", case_can_getters)
+// A case with a subject test is registered only for an entry that passes it, so no case runs with nothing to
+// assert; the guard case below pins each subject test to the probe lists.
+#define CS_CASE_IF(id, casename, body, subject)                                                              \
+    void cs_t1_##body##_##id() { body(alpacacore::test::contract::contract_entry_##id()); }                  \
+    const auto cs_t1_reg_##body##_##id =                                                                     \
+        subject(alpacacore::test::contract::contract_entry_##id())                                           \
+            ? std::make_unique<Catch::AutoReg>(                                                              \
+                  Catch::makeTestInvoker(&cs_t1_##body##_##id), CATCH_INTERNAL_LINEINFO, Catch::StringRef(), \
+                  Catch::NameAndTags{"Contract sweep - " #id " - " casename, "[contract][tier1][" #id "]"})  \
+            : nullptr;
+#define CS_T1_INVALID(id) \
+    CS_CASE_IF(id, "InvalidValue precedes NotConnected", case_invalid_before_not_connected, has_invalid_subject)
+#define CS_T1_CAN(id) CS_CASE_IF(id, "Can getters", case_can_getters, has_can_subject)
 
 CONTRACT_SWEEP_ENTRIES(CS_T1_INVALID)
 CONTRACT_SWEEP_ENTRIES(CS_T1_NOTCONN)
@@ -2237,6 +2287,29 @@ CONTRACT_SWEEP_ENTRIES(CS_T1_UID)
 CONTRACT_SWEEP_ENTRIES(CS_T1_ACTION)
 CONTRACT_SWEEP_ENTRIES(CS_T1_ERRVOCAB)
 CONTRACT_SWEEP_ENTRIES(CS_T1_CAN)
+
+// Non-vacuity: a tier-1 case is registered exactly for the entries that pass its subject test, and each such
+// entry has a non-empty probe list (an unregistered entry states why in no_invalid_probe_reason).
+void check_tier1_cases_have_a_subject() {
+    std::set<std::string> registered;
+    for (const auto& t : Catch::getRegistryHub().getTestCaseRegistry().getAllTests()) {
+        registered.insert(t.getTestCaseInfo().name);
+    }
+    // Case names use the macro id, which differs from ContractEntry::id for some entries (celestron_cgx_telescope).
+    [[maybe_unused]] const auto check = [&](const char* macro_id, const ContractEntry& e) {
+        auto d = e.make(0);
+        REQUIRE(d != nullptr);
+        const std::string stem = std::string("Contract sweep - ") + macro_id + " - ";
+        INFO(macro_id);
+        CHECK(!invalid_value_probes(*d, e).empty() == has_invalid_subject(e));
+        CHECK((registered.count(stem + "InvalidValue precedes NotConnected") == 1) == has_invalid_subject(e));
+        CHECK(!can_getter_probes(*d, e).empty() == has_can_subject(e));
+        CHECK((registered.count(stem + "Can getters") == 1) == has_can_subject(e));
+    };
+#define CS_T1_GUARD(id) check(#id, alpacacore::test::contract::contract_entry_##id());
+    CONTRACT_SWEEP_ENTRIES(CS_T1_GUARD)
+#undef CS_T1_GUARD
+}
 
 TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected", "[contract][tier1][filterwheel]") {
     int seen = 0;
@@ -2513,6 +2586,7 @@ TEST_CASE("Contract sweep - every registry entry of a catalog vendor has a descr
 // alpacacore_tests, or the registry compiles to nothing and every case above
 // silently disappears. Each macro that IS defined must contribute an entry.
 TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep-guard]") {
+    check_tier1_cases_have_a_subject();
     const auto entries = alpacacore::test::contract::contract_entries();
     std::set<std::string> vendors;
     std::set<std::string> ids;

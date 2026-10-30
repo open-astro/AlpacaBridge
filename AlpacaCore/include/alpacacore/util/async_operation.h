@@ -159,8 +159,9 @@ public:
      * Rule 10: call without the driver mutex held. Rule 2: never waits for
      * the body it replaces; rule 3 is its only wait, at most
      * kStaleReapTimeout. Throws AlpacaException(InvalidOperation) when the
-     * stale bound does not clear in time, and AlpacaException(DriverException)
-     * when the OS refuses a thread (EAGAIN); both change nothing.
+     * stale bound does not clear in time or a cancel_all_and_join() is still
+     * joining (issue #1713), and AlpacaException(DriverException) when the OS
+     * refuses a thread (EAGAIN); each changes nothing.
      */
     std::uint64_t start(std::function<void(OperationContext&)> body) {
         // Rule 1: the capacity check, the move into the stale list, the bump,
@@ -190,6 +191,15 @@ public:
                                       AlpacaError::InvalidOperation);
             }
             reap_returned_locked();
+        }
+
+        // Issue #1713: a cancel_all_and_join() still joining has emptied the
+        // slot and promised its caller it stays empty, so no body may be
+        // installed until that join ends. Checked after the rule 3 wait,
+        // which a drain ends by emptying the lists.
+        if (draining_ > 0) {
+            throw AlpacaException(name_ + ": the operations are being stopped; try again",
+                                  AlpacaError::InvalidOperation);
         }
 
         // The thread is created before anything else changes, so a refused
@@ -253,9 +263,12 @@ public:
      * bound. The slot never calls detach(). A body blocked in a call with no
      * timeout of its own is the caller's to bound. Afterwards the slot is
      * empty and a later start() works. Rule 10: call without the driver mutex.
-     * The owning driver must serialize this entire call with other reapers and
-     * teardown: a concurrent caller sees an empty slot while this caller still
-     * owns threads being joined (docs/failures/0011-cgx-handoff-disconnect-race.md).
+     * A start() that runs while this call is joining is refused with
+     * InvalidOperation, so no body is installed behind the join (issue #1713).
+     * The owning driver must still serialize this entire call with other
+     * reapers and teardown: a concurrent cancel_all_and_join() sees an empty
+     * slot while this caller still owns threads being joined
+     * (docs/failures/0011-cgx-handoff-disconnect-race.md).
      */
     void cancel_all_and_join() {
         std::vector<std::unique_ptr<OperationContext::Body>> bodies;
@@ -270,6 +283,9 @@ public:
                 bodies.push_back(std::move(stale));
             }
             stale_.clear();
+            // Under the same lock as the extraction: a start() from here
+            // until the joins end is refused (issue #1713).
+            ++draining_;
             cv_.notify_all();
         }
         // Joined outside the lock: a body needs the slot mutex to wait,
@@ -279,6 +295,8 @@ public:
                 b->thread.join();
             }
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        --draining_;
     }
 
     /// True while the current body has not returned. May be called with the
@@ -377,9 +395,10 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             if (failure) {
                 // Kept only from the body the slot started last. A body
-                // replaced by start(), or taken by cancel_all_and_join()
-                // before a later start(), is stale: its throw must not
-                // overwrite what that later start() cleared.
+                // replaced by start() is stale: its throw must not
+                // overwrite what that later start() cleared. A body taken
+                // by cancel_all_and_join() has returned before any later
+                // start() can run (issue #1713), so its throw is kept.
                 if (b.token != latest_token_) {
                     stale_failure = true;
                 } else {
@@ -415,6 +434,7 @@ private:
     std::vector<std::unique_ptr<OperationContext::Body>> stale_;  // oldest first
     std::optional<std::string> last_failure_;
     std::uint64_t latest_token_ = 0;  // token of the body the last successful start() spawned
+    std::size_t draining_ = 0;        // cancel_all_and_join() calls still joining; start() refuses while > 0
 };
 
 // Rule 6: waits through the slot's TaskClock on the slot mutex and condition

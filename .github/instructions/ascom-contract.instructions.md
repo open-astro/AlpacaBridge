@@ -96,8 +96,8 @@ and assert only that the slew threw. An Alt/Az slew test in a driver that refuse
 | `MethodNotImplemented` | A method the hardware lacks (e.g. `PulseGuide` when `CanPulseGuide` is false). |
 | `ActionNotImplemented` | `Action()` called with a name the driver does not list in `SupportedActions` (0x40C, ASCOM's `ActionNotImplementedException`). An unsupported `CommandBlind`/`CommandBool`/`CommandString` is `MethodNotImplemented`, not this. |
 | `NotImplemented` | A generic unsupported action (e.g. `set_temp_comp(true)` with no temp-comp support) — never `DriverException` for "not supported". |
-| `InvalidOperation` | Valid call, wrong state (e.g. changing readout mode/geometry mid-exposure). |
-| `DriverException` | A genuine internal/driver failure only — not a stand-in for any of the above. |
+| `InvalidOperation` | Valid call, wrong state (e.g. changing readout mode/geometry mid-exposure), including a value the client can set and has not yet (the site, [decision 0019](../../docs/decisions/0019-connect-without-site.md); `UTCDate`). |
+| `DriverException` | A genuine internal/driver failure, including a device that did not answer: a timeout, or a value only the device supplies (status, position, telemetry) that it has not answered since the connect (ASCOM: "Includes communication errors"; [decision 0010](../../docs/decisions/0010-snapshot-served-state.md) rule 8). Never `InvalidOperation` for a device that did not answer, and not a stand-in for any of the above. |
 
 All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not the status.
 

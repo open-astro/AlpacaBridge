@@ -12,11 +12,15 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
 
+#include <atomic>
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -77,4 +81,107 @@ TEST_CASE("driver_rig - time_stamp_of picks the TimeStamp entry", "[driver_rig]"
     state.push_back({"Other", std::string("no")});
     state.push_back({"TimeStamp", std::string("2026-10-10T21:46:30.626Z")});
     CHECK(time_stamp_of(state) == "2026-10-10T21:46:30.626Z");
+}
+
+namespace {
+
+// A poll body on the fake clock: it wakes every period and counts the laps.
+class ToyPoller {
+public:
+    ToyPoller(FakeTaskClock& clock, std::chrono::nanoseconds period)
+        : clock_(clock), period_(period), thread_([this] {
+              while (!stop_.load()) {
+                  clock_.sleep_for(period_);
+                  ++laps_;
+              }
+          }) {}
+    // The poll body is parked on the clock: one last advance() lets it see stop_ and exit.
+    ~ToyPoller() {
+        stop_.store(true);
+        clock_.wait_for_waiters(1, std::chrono::seconds(5));
+        clock_.advance(period_);
+        thread_.join();
+    }
+    int laps() const { return laps_.load(); }
+
+private:
+    FakeTaskClock& clock_;
+    std::chrono::nanoseconds period_;
+    std::atomic<bool> stop_{false};
+    std::atomic<int> laps_{0};
+    std::thread thread_;
+};
+
+// The smallest AlpacaDriver whose Connect starts a poll body that parks on the clock, as a real driver's does.
+class PollingStub : public alpacacore::AlpacaDriver {
+public:
+    PollingStub(FakeTaskClock& clock, bool polls) : clock_(clock), polls_(polls) {}
+    void set_connected(bool connected) override {
+        if (connected && polls_ && !poller_) {
+            poller_ = std::make_unique<ToyPoller>(clock_, std::chrono::seconds(1));
+        }
+        connected_ = connected;
+    }
+    bool get_connected() const override { return connected_; }
+    int get_device_number() const override { return 0; }
+    std::string get_name() const override { return "stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Focuser; }
+    std::string get_description() const override { return "stub"; }
+    std::string get_driver_info() const override { return "stub"; }
+    std::string get_driver_version() const override { return "0"; }
+    int get_interface_version() const override { return 1; }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return {}; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return {}; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return {}; }
+
+protected:
+    std::string fallback_unique_id() const override { return "stub"; }
+
+private:
+    FakeTaskClock& clock_;
+    bool polls_;
+    bool connected_ = false;
+    std::unique_ptr<ToyPoller> poller_;
+};
+
+}  // namespace
+
+// Falsified by: tick() dropping the wait_for_woken_settled() (laps() is read before the poller finished its lap) or
+// not advancing the clock (laps() stays 0).
+TEST_CASE("driver_rig - tick returns once the poller completed its lap and parked again", "[driver_rig]") {
+    FakeTaskClock clock;
+    ToyPoller poller(clock, std::chrono::seconds(1));
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    for (int lap = 1; lap <= 3; ++lap) {
+        tick(clock, std::chrono::seconds(1), std::chrono::seconds(5));
+        CHECK(poller.laps() == lap);
+        CHECK(clock.waiter_count() == 1);
+    }
+}
+
+// A failed helper aborts its test case, so the failure is a [!shouldfail] case.
+// Falsified by: tick() dropping the REQUIRE on wait_for_waiters() (nothing waits, the call returns).
+TEST_CASE("driver_rig - tick fails at the bound when nothing waits", "[driver_rig][!shouldfail]") {
+    FakeTaskClock clock;
+    tick(clock, std::chrono::seconds(1), std::chrono::milliseconds(50));
+}
+
+// Falsified by: connect_and_park() not calling set_connected(true) (the poll never starts, it returns false).
+TEST_CASE("driver_rig - connect_and_park connects and reports the poll parked", "[driver_rig]") {
+    FakeTaskClock clock;
+    PollingStub driver(clock, true);
+    CHECK(connect_and_park(driver, clock, std::chrono::seconds(5)));
+    CHECK(driver.get_connected());
+    CHECK(clock.waiter_count() == 1);
+}
+
+// Falsified by: connect_and_park() returning true without waiting for the waiter.
+TEST_CASE("driver_rig - connect_and_park returns false when the poll never parks", "[driver_rig]") {
+    FakeTaskClock clock;
+    PollingStub driver(clock, false);
+    CHECK_FALSE(connect_and_park(driver, clock, std::chrono::milliseconds(50)));
+    CHECK(driver.get_connected());
 }
