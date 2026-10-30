@@ -27,8 +27,10 @@
 #include <alpacahttp/software_update.h>
 #include <alpacahttp/util/error_mapping.h>
 #include <alpacahttp/util/host_timezone.h>
+#include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/version.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include <algorithm>
 #include <atomic>
@@ -43,6 +45,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
@@ -83,6 +86,25 @@ alpacahttp::Response route_request(alpacahttp::Router& router, const std::string
 
     EXPECT(request.parse(raw.str()));
     return router.route(request, 1);
+}
+
+// Inflate a gzip body (zlib windowBits 15 + 16) for the log-archive tests.
+std::string gunzip_for_test(const std::string& gz) {
+    z_stream stream{};
+    if (inflateInit2(&stream, 15 + 16) != Z_OK) return {};
+    std::string out;
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(gz.data()));
+    stream.avail_in = static_cast<uInt>(gz.size());
+    char buf[1 << 16];
+    int rc = Z_OK;
+    while (rc == Z_OK) {
+        stream.next_out = reinterpret_cast<Bytef*>(buf);
+        stream.avail_out = sizeof(buf);
+        rc = inflate(&stream, Z_NO_FLUSH);
+        out.append(buf, sizeof(buf) - stream.avail_out);
+    }
+    inflateEnd(&stream);
+    return rc == Z_STREAM_END ? out : std::string();
 }
 
 // open-astro#392: route_request() with a chosen Host header, or none at all
@@ -10519,6 +10541,46 @@ int main() {
         EXPECT(description.get_header("Content-Type").find("application/json") == 0);
         EXPECT(nlohmann::json::parse(description.body(), nullptr, false).is_object());
         // The update/channel 400 envelope is pinned in "update channel route", whose router has a manager.
+    }
+
+    {
+        // case: the log archive download stays within its 32 MiB cap (#1737)
+        const ScopedCwd scratch;
+        const auto log_dir = std::filesystem::current_path() / "logs";
+        std::filesystem::create_directories(log_dir);
+        // 5 x 9 MiB: each file is under util::kMaxLogFileReadBytes, together well over the cap.
+        const std::string line(1023, 'x');
+        for (int day = 1; day <= 5; ++day) {
+            std::ofstream out(log_dir / ("alpacabridge-2026-01-0" + std::to_string(day) + ".log"), std::ios::binary);
+            for (int i = 0; i < 9 * 1024; ++i) out << line << '\n';
+        }
+        alpacahttp::util::configure_log_directory(log_dir.string(), true);
+        alpacahttp::Router router;
+        const auto response = route_request(router, "GET", "/management/v1/logfiles?download=1");
+        alpacahttp::util::configure_log_directory("", false);
+        EXPECT(response.get_header("Content-Type").find("application/gzip") == 0);
+        const std::string archive = gunzip_for_test(response.body());
+        EXPECT(!archive.empty());
+        constexpr std::size_t kCap = 32ull * 1024 * 1024;
+        constexpr std::size_t kSeparators = 4096;  // "=====" headers and the omitted note
+        EXPECT(archive.size() <= kCap + kSeparators);
+        EXPECT(archive.find("older log file(s) omitted: archive capped at 32 MiB") != std::string::npos);
+    }
+
+    {
+        // case: a second log archive download is refused while one is building (#1737)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        const auto held = router.hold_log_archive_lock_for_test();
+        // Route from a second thread: try_lock on a mutex this thread owns is undefined behaviour.
+        const auto busy = std::async(std::launch::async, [&] {
+                              return route_request(router, "GET", "/management/v1/logfiles?download=1");
+                          }).get();
+        EXPECT(busy.get_header("Content-Type").find("application/json") == 0);
+        const auto json = nlohmann::json::parse(busy.body(), nullptr, false);
+        EXPECT(json.is_object());
+        EXPECT(json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(json.value("ErrorMessage", "") == "Log archive build already in progress; retry shortly");
     }
 
     std::cout << "All routing tests passed!\n";
