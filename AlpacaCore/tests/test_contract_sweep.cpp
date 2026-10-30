@@ -14,7 +14,9 @@
 // construct, disconnected, no fake. The registry is contract_sweep.h; each
 // (driver, case) pair below is its own TEST_CASE so `ctest -N` lists it by name
 // and a failure names the driver. Tier 2 (connected over a roster fake) is further
-// down, one host per kFakeConnectableRoster row.
+// down, one host per kFakeConnectableRoster row. Tier 3 (issue #1861, failure after
+// start) runs over the tier-2 hosts of the camera, telescope, focuser, rotator and
+// filter wheel types, one recipe per host.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/camera_driver.h>
@@ -33,6 +35,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <map>
@@ -1111,6 +1114,13 @@ constexpr const char* kAbsentPort = "/dev/alpacacore-contract-sweep-absent";
     defined(ALPACACORE_ENABLE_ONSTEP)
 // FakeMountServer rows share one shape: a loopback endpoint on the fake for the connect, and a held,
 // never-listening loopback port for the failed connect.
+// The fake behind a FakeMountServer row's Hosted: while `silent` is set the responder answers nothing, as a mount
+// that hangs with the socket open (tier 3).
+struct MountServerHold {
+    std::shared_ptr<std::atomic<bool>> silent = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<alpacacore::test::FakeMountServer> server;
+};
+
 template <class MakeDriver>
 Tier2Host mount_server_host(const char* id, const char* vendor, const char* registry_id,
                             alpacacore::test::FakeMountServer::Responder responder, MakeDriver make) {
@@ -1121,15 +1131,17 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
     // hold case (make(port, hold)) so the held reply is late, not lost.
     h.connectable = [responder, make](bool hold) {
         auto first = std::make_shared<std::atomic<bool>>(hold);
-        auto held = [responder, first](const std::string& chunk) {
+        auto fake = std::make_shared<MountServerHold>();
+        auto held = [responder, first, silent = fake->silent](const std::string& chunk) {
+            if (silent->load()) return std::string();
             if (first->exchange(false)) std::this_thread::sleep_for(kHold);
             return responder(chunk);
         };
-        auto server = std::make_shared<alpacacore::test::FakeMountServer>(held);
-        REQUIRE(server->ok());
+        fake->server = std::make_shared<alpacacore::test::FakeMountServer>(held);
+        REQUIRE(fake->server->ok());
         Hosted hosted;
-        hosted.driver = make(server->port(), hold);
-        hosted.fake = server;
+        hosted.driver = make(fake->server->port(), hold);
+        hosted.fake = fake;
         return hosted;
     };
     h.failing = [make]() { return host_over_held_port(SOCK_STREAM, [make](int port) { return make(port, false); }); };
@@ -1261,20 +1273,21 @@ Tier2Host tier2_host_zwo_rotator() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
+std::unique_ptr<AlpacaDriver> celestron_telescope_over(int port, bool hold) {
+    namespace cel = alpacacore::vendor::celestron;
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
+    return cel::create_celestron_telescope(0, info);
+}
+
 // Recipe of test_celestron_concurrency_stress.cpp: a position-pair sized reply ends every read at once.
 Tier2Host tier2_host_celestron_telescope() {
-    namespace cel = alpacacore::vendor::celestron;
     Tier2Host h = mount_server_host(
         "celestron_telescope", "celestron", "celestron_telescope",
-        [](const std::string&) { return std::string("00000000,00000000#"); },
-        [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-            cel::ConnectionInfo info;
-            info.type = cel::ConnectionType::Network;
-            info.host = "127.0.0.1";
-            info.tcp_port = port;
-            info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-            return cel::create_celestron_telescope(0, info);
-        });
+        [](const std::string&) { return std::string("00000000,00000000#"); }, celestron_telescope_over);
     h.move_axis_unavailable =
         "the fixed-reply responder does not answer the variable-rate axis frame, so move_axis() times out and "
         "throws (fake_mount_server.h, celestron_protocol_wrapper move_axis_variable_rate)";
@@ -1343,19 +1356,20 @@ Tier2Host tier2_host_celestron_focuser() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
+std::unique_ptr<AlpacaDriver> synscan_telescope_over(int port, bool hold) {
+    namespace syn = alpacacore::vendor::synscan;
+    syn::ConnectionInfo info;
+    info.type = syn::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
+    return syn::create_synscan_telescope(0, info, syn::SynScanVersion::V4);
+}
+
 // Recipe of test_synscan_concurrency_stress.cpp: V4 and the default responder's 'K' echo, which the connect gates on.
 Tier2Host tier2_host_synscan_telescope() {
-    namespace syn = alpacacore::vendor::synscan;
     Tier2Host h = mount_server_host("synscan_telescope", "synscan", "synscan_telescope",
-                                    alpacacore::test::FakeMountServer::default_responder(),
-                                    [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-                                        syn::ConnectionInfo info;
-                                        info.type = syn::ConnectionType::Network;
-                                        info.host = "127.0.0.1";
-                                        info.tcp_port = port;
-                                        info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-                                        return syn::create_synscan_telescope(0, info, syn::SynScanVersion::V4);
-                                    });
+                                    alpacacore::test::FakeMountServer::default_responder(), synscan_telescope_over);
     h.park_unavailable =
         "FakeMountServer::default_responder() does not answer the SynScan position read (the driver logs 'Invalid "
         "SynScan RA/Dec response'), so park() throws DriverException before it can start the slew "
@@ -1365,11 +1379,20 @@ Tier2Host tier2_host_synscan_telescope() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
+std::unique_ptr<AlpacaDriver> onstep_telescope_over(int port, bool hold) {
+    namespace ons = alpacacore::vendor::onstep;
+    ons::ConnectionInfo info;
+    info.type = ons::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
+    return ons::create_onstep_telescope(0, info);
+}
+
 // Recipe of test_onstep_concurrency_stress.cpp, with an idle OnStepX for
 // :GU# and :hP#. The default "0#" has no 'N', so :GU# would report a GOTO that
 // never ends, and Park stops running motion and waits for it first (#1430).
 Tier2Host tier2_host_onstep_telescope() {
-    namespace ons = alpacacore::vendor::onstep;
     auto idle_onstep = [fallback = alpacacore::test::FakeMountServer::default_responder()](const std::string& chunk) {
         if (chunk.rfind(":GU", 0) == 0) {
             return std::string("nNp#");  // not tracking, no GOTO, not parked
@@ -1379,15 +1402,7 @@ Tier2Host tier2_host_onstep_telescope() {
         }
         return fallback(chunk);
     };
-    return mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
-                             [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-                                 ons::ConnectionInfo info;
-                                 info.type = ons::ConnectionType::Network;
-                                 info.host = "127.0.0.1";
-                                 info.tcp_port = port;
-                                 info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-                                 return ons::create_onstep_telescope(0, info);
-                             });
+    return mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep, onstep_telescope_over);
 }
 #endif
 
@@ -2246,6 +2261,458 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_WANDERERASTRO(X)
 // clang-format on
 
+// ---------------------------------------------------------------------------
+// Tier 3 (issue #1861): failure after start. On a connected host the type's asynchronous operation starts (an
+// exposure, a slew, a move), the fake then fails while it runs, and the completion property (ImageReady, Slewing,
+// IsMoving, FilterWheel Position) must raise the failure: never a clean completion, and never "still running"
+// past the budget (the ASCOM async FAQ, https://ascom-standards.org/AlpacaDeveloper/Async.htm; the shared rule
+// "A failed async operation body keeps its error", ascom-contract.instructions.md). One recipe per tier-2 host of
+// those five types, listed in CONTRACT_SWEEP_TIER3_HOSTS; the guard case pins the list to the tier-2 hosts.
+// ---------------------------------------------------------------------------
+
+struct Tier3Recipe {
+    // The type's asynchronous initiator, on a healthy fake. It must return normally.
+    std::function<void(Hosted&)> start;
+    // Makes the fake fail while the operation runs.
+    std::function<void(Hosted&)> fail;
+    // What `fail` does to the fake, quoted in the failure message.
+    const char* fault;
+    // The driver over a fake that can run the operation, when the tier-2 host's fake cannot (its responder does not
+    // model it); empty to use the tier-2 host's connectable. Same contract as Tier2Host::connectable.
+    std::function<Hosted(bool hold)> connectable = {};
+};
+
+bool is_tier3_type(DeviceType t) {
+    return t == DeviceType::Camera || t == DeviceType::Telescope || t == DeviceType::Focuser ||
+           t == DeviceType::Rotator || t == DeviceType::FilterWheel;
+}
+
+// One read of the completion property: true when it reports the operation finished, false while it runs. Whatever
+// the driver throws passes through.
+bool completion_reports_done(AlpacaDriver& d, DeviceType type) {
+    switch (type) {
+        case DeviceType::Camera:
+            return dynamic_cast<alpacacore::CameraDriver&>(d).get_image_ready();
+        case DeviceType::Telescope:
+            return !dynamic_cast<alpacacore::TelescopeDriver&>(d).get_slewing();
+        case DeviceType::Focuser:
+            return !dynamic_cast<alpacacore::FocuserDriver&>(d).get_is_moving();
+        case DeviceType::Rotator:
+            return !dynamic_cast<alpacacore::RotatorDriver&>(d).get_is_moving();
+        case DeviceType::FilterWheel:
+            // -1 is the moving sentinel (IFilterWheelV3 Position); any slot is a finished move.
+            return dynamic_cast<alpacacore::FilterWheelDriver&>(d).get_position() != -1;
+        default:
+            FAIL("no tier-3 completion property for this device type");
+    }
+    return false;
+}
+
+// Twice the longest silence a driver here waits out before it calls the link faulted (10 s: kStallTimeout in
+// ioptron_iguider_camera_driver.cpp and kFilterWheelLinkSilenceMs in the WandererAstro wheel), so a slow runner
+// does not turn a late raise into "still running".
+constexpr std::chrono::seconds kTier3Budget{20};
+
+[[maybe_unused]] void case_t3_failure_after_start(const Tier2Host& h, const Tier3Recipe& r) {
+    REQUIRE(is_tier3_type(h.type));
+    INFO(h.id << " over " << h.fake_header << "; fault: " << r.fault);
+    Hosted hosted = r.connectable ? r.connectable(false) : h.connectable(false);
+    REQUIRE(hosted.driver != nullptr);
+    REQUIRE(connect_and_observe(*hosted.driver).settled);
+    REQUIRE(hosted.driver->get_connected());
+    {
+        int start_code = -1;
+        std::string start_message;
+        try {
+            r.start(hosted);
+        } catch (const AlpacaException& e) {
+            start_code = e.error_code();
+            start_message = e.what();
+        }
+        INFO("the initiator threw " << start_code << ": '" << start_message << "'");
+        REQUIRE(start_code == -1);
+    }
+    // The operation must still be running when the fault lands; a fake that finished it already would make the
+    // case pass on a driver that ignores every failure.
+    REQUIRE_FALSE(completion_reports_done(*hosted.driver, h.type));
+    r.fail(hosted);
+    bool done = false;
+    int code = -1;
+    std::string message;
+    const auto deadline = Clock::now() + kTier3Budget;
+    while (Clock::now() < deadline) {
+        try {
+            if (completion_reports_done(*hosted.driver, h.type)) {
+                done = true;
+                break;
+            }
+        } catch (const AlpacaException& e) {
+            code = e.error_code();
+            message = e.what();
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const char* outcome = code != -1 ? "raised" : (done ? "reported done" : "still running");
+    INFO("completion property after the fault: " << outcome << " (code " << code << ", '" << message << "')");
+    CHECK_FALSE(done);
+    REQUIRE(code != -1);
+    // Every fault keeps the transport open, and the case ends well inside util::kLinkStalenessBound (30 s), so the
+    // link is faulted, not lost: the read raises the operation's failure, not NotConnected (CONTEXT.md "Connected
+    // vs link health", decision 0009).
+    CHECK(code != err::NotConnected);
+    // The failure stays raised until the next command or a reconnect clears it.
+    CHECK(thrown_code([&] { (void)completion_reports_done(*hosted.driver, h.type); }) != -1);
+}
+
+// Initiators shared by the recipes.
+void t3_start_slew(Hosted& hosted, double ra_offset_hours, double dec) {
+    auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+    if (t.get_can_set_tracking() && !t.get_tracking()) t.set_tracking(true);
+    t.slew_to_coordinates_async(std::fmod(t.get_right_ascension() + ra_offset_hours + 24.0, 24.0), dec);
+}
+
+// A slew to `ha_hours` west of the meridian, which no mount here takes as a meridian flip.
+void t3_start_slew_at_hour_angle(Hosted& hosted, double ha_hours, double dec) {
+    auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+    if (t.get_can_set_tracking() && !t.get_tracking()) t.set_tracking(true);
+    t.slew_to_coordinates_async(std::fmod(t.get_sidereal_time() - ha_hours + 24.0, 24.0), dec);
+}
+
+void t3_start_focuser_move(Hosted& hosted, int steps_away) {
+    auto& f = dynamic_cast<alpacacore::FocuserDriver&>(*hosted.driver);
+    f.move(f.get_absolute() ? f.get_position() + steps_away : steps_away);
+}
+
+void t3_start_exposure(Hosted& hosted, double seconds) {
+    dynamic_cast<alpacacore::CameraDriver&>(*hosted.driver).start_exposure(seconds, true);
+}
+
+template <class Fake>
+Fake& t3_fake(Hosted& hosted) {
+    return *static_cast<Fake*>(hosted.fake.get());
+}
+
+#if defined(ALPACACORE_ENABLE_ZWO) || defined(ALPACACORE_ENABLE_CELESTRON) || defined(ALPACACORE_ENABLE_SYNSCAN) || \
+    defined(ALPACACORE_ENABLE_ONSTEP)
+// FakeMountServer rows: the tier-2 responders answer a fixed reply and model no goto, so each row's recipe brings a
+// responder whose goto, once started, never ends (the slew status keeps reporting it running). The goto starts, then
+// the mount stops answering with the socket open.
+// `started` is set by the responder when the GOTO reaches it, so the fault lands on a goto the mount is running, not on
+// its dispatch.
+template <class MakeDriver>
+Tier3Recipe tier3_mount_server_recipe(const char* id, const char* vendor, std::shared_ptr<std::atomic<bool>> started,
+                                      alpacacore::test::FakeMountServer::Responder r, MakeDriver make) {
+    return {[](Hosted& hosted) { t3_start_slew_at_hour_angle(hosted, 1.0, 30.0); },
+            [started](Hosted& hosted) {
+                const auto deadline = Clock::now() + std::chrono::seconds(5);
+                while (!started->load() && Clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                REQUIRE(started->load());
+                t3_fake<MountServerHold>(hosted).silent->store(true);
+            },
+            "FakeMountServer responder silent mid-goto",
+            mount_server_host(id, vendor, id, std::move(r), make).connectable};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_CELESTRON
+// A NexStar hand controller on a CGX-L (model 24, firmware 5.35), aligned, tracking EQ north; the replies are those
+// of test_celestron_async_slew_failure.cpp. Falsified by: get_slewing() answering from the cached slew flag when the
+// "L" status poll fails.
+Tier3Recipe tier3_recipe_celestron_telescope() {
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto responder = [started](const std::string& chunk) -> std::string {
+        if (chunk.empty()) return "0#";
+        switch (chunk[0]) {
+            case 'm':
+                return std::string(1, static_cast<char>(24)) + "#";
+            case 'V':
+                return std::string("\x05\x23#");
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return "12AB0500,20000500#";
+            case 'r':
+            case 'R':
+            case 'b':
+            case 'B':
+                started->store(true);
+                return "#";
+            case 'L':
+                return started->load() ? "1#" : "0#";
+            case 'J':
+                return "1#";
+            case 'p':
+                return "W#";
+            case 't':
+                return std::string("\x02#");
+            case 'T':
+            case 'W':
+            case 'M':
+                return "#";
+            case 'P': {  // AUX passthrough: P len dev op ...
+                const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
+                if (op == 0xFE) return std::string("\x00\x00#", 3);  // bus device firmware probe
+                if (op == 0x02 || op == 0x17) {                      // MC_GOTO_FAST / MC_GOTO_SLOW
+                    started->store(true);
+                    return "#";
+                }
+                if (op == 0x13)
+                    return started->load() ? std::string("\x00#", 2) : std::string("\xFF#");  // MC_SLEW_DONE
+                return std::string("\xFF#");
+            }
+            default:
+                return "0#";
+        }
+    };
+    return tier3_mount_server_recipe("celestron_telescope", "celestron", started, responder, celestron_telescope_over);
+}
+
+// CGX: homed and tracking (the driver refuses tracking before FindHome), a goto then stays running because the fake
+// stops completing motions, and the mount then stops answering. Falsified by: the slew body swallowing the failed
+// motor-controller read and clearing slewing.
+Tier3Recipe tier3_recipe_celestron_cgx_telescope() {
+    return {[](Hosted& hosted) {
+                auto& fake = t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted);
+                auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+                fake.set_auto_complete_motions(true);
+                t.find_home();
+                const auto deadline = Clock::now() + std::chrono::seconds(10);
+                while (t.get_slewing() && Clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                t.set_tracking(true);
+                fake.set_auto_complete_motions(false);
+                t.slew_to_coordinates_async(std::fmod(t.get_sidereal_time() + 23.0, 24.0), 85.0);
+            },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted).set_muted(true); },
+            "FakeCelestronCgxMount::set_muted(true) mid-goto"};
+}
+
+// Focus motor: a GOTO stays running until complete_move(); the motor then stops answering. Falsified by: the
+// move-poll treating an unanswered position read as arrival.
+Tier3Recipe tier3_recipe_celestron_focuser() {
+    return {[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(true); },
+            "FakeCelestronFocuser::set_muted(true) mid-move"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+// UDP motor controller: a two-hour goto ramps on the board's axis model, so it is still running when the board stops
+// answering. Falsified by: the slew task ending on a timed-out status read as if the axes had stopped.
+Tier3Recipe tier3_recipe_skywatcher_telescope() {
+    return {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, 30.0); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(true); },
+            "FakeSkyWatcherMount::set_silent(true) mid-goto"};
+}
+
+// Serial motor board (a southern site): same recipe, the board stops answering with the port open.
+Tier3Recipe tier3_recipe_skywatcher_telescope_serial() {
+    return {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, -30.0); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(true); },
+            "FakeSkyWatcherSerialBoard::set_muted(true) mid-goto"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+// The firmware reports "slewing" (system status 2) so the goto stays running, then every position and status read
+// fails. Falsified by: the settle loop treating failed status reads as a landed goto.
+Tier3Recipe tier3_recipe_ioptron_telescope() {
+    return {[](Hosted& hosted) {
+                t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_system_status(2);
+                t3_start_slew(hosted, 2.0, 30.0);
+            },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(true); },
+            "FakeIoptronMount::set_fail_reads(true) mid-goto"};
+}
+
+// iEAF: the motor keeps reporting it is running, then the firmware stops answering. Falsified by: the move poll
+// reporting IsMoving false on a failed :FI# read.
+Tier3Recipe tier3_recipe_ioptron_focuser() {
+    return {[](Hosted& hosted) {
+                t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_focuser_moving(true);
+                t3_start_focuser_move(hosted, 500);
+            },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(true); },
+            "FakeIoptronIeaf::set_silent(true) mid-move"};
+}
+
+// iGuider: the stream stops delivering frames during the exposure. Falsified by: the exposure worker waiting on
+// read_frame() with no deadline, so ImageReady stays false and never raises.
+Tier3Recipe tier3_recipe_iguider_camera() {
+    return {[](Hosted& hosted) { t3_start_exposure(hosted, 1.0); },
+            [](Hosted& hosted) { t3_fake<IGuiderV4L2Hold>(hosted).fake.stalled.store(true); },
+            "FakeIGuiderV4L2::stalled = true mid-exposure"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+// A SynScan V4 handset tracking, the replies those of test_synscan_async_slew_failure.cpp. Falsified by: the slew
+// task clearing slewing when the "L" poll times out.
+Tier3Recipe tier3_recipe_synscan_telescope() {
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto responder = [started](const std::string& chunk) -> std::string {
+        if (chunk.empty()) return "0#";
+        switch (chunk[0]) {
+            case 'K':
+                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return "12AB0500,20000500#";
+            case 'r':
+            case 'R':
+            case 'b':
+            case 'B':
+                started->store(true);
+                return "#";
+            case 'L':
+                return started->load() ? "1#" : "0#";
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 't':
+                return std::string("\x01#");
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'T':
+            case 'W':
+            case 'M':
+            case 'P':
+                return "#";
+            default:
+                return "0#";
+        }
+    };
+    return tier3_mount_server_recipe("synscan_telescope", "synscan", started, responder, synscan_telescope_over);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ONSTEP
+// OnStep tracking and idle, then a goto running once :MS# is accepted; the replies are those of
+// test_onstep_link_loss.cpp. Falsified by: get_slewing() reporting the cached :GU# state when the status read times
+// out.
+Tier3Recipe tier3_recipe_onstep_telescope() {
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto responder = [started](const std::string& cmd) -> std::string {
+        if (cmd.rfind(":GVP", 0) == 0) return "On-Step#";
+        if (cmd.rfind(":GVN", 0) == 0) return "10.23a#";
+        if (cmd.rfind(":GU", 0) == 0) return started->load() ? "pEo190#" : "NpEo190#";
+        if (cmd.rfind(":GR", 0) == 0) return "01:00:00.0000#";
+        if (cmd.rfind(":GD", 0) == 0) return "+10*00:00.000#";
+        if (cmd.rfind(":GA", 0) == 0) return "+40*00:00#";
+        if (cmd.rfind(":GZ", 0) == 0) return "000*00:00#";
+        if (cmd.rfind(":MS", 0) == 0) {
+            started->store(true);
+            return "0";
+        }
+        if (cmd.rfind(":Q", 0) == 0) return "";
+        if (cmd.rfind(":S", 0) == 0 || cmd.rfind(":GXEE", 0) == 0) return "1";
+        return "0#";
+    };
+    return tier3_mount_server_recipe("onstep_telescope", "onstep", started, responder, onstep_telescope_over);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+// Oasis: the device keeps reporting "moving", then the state poll goes unanswered. Falsified by: the status poll
+// clearing IsMoving when the 0x32 read times out.
+Tier3Recipe tier3_recipe_astroasis_focuser() {
+    return {[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
+            [](Hosted& hosted) {
+                auto& st = t3_fake<alpacacore::test::FakeHidState>(hosted);
+                std::lock_guard<std::mutex> lock(st.mutex);
+                st.dead = true;
+            },
+            "FakeHidState::dead = true mid-move"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_GEMINI
+// MyFocuserPro2: the firmware reports moving, then answers the state queries with frames the driver cannot parse,
+// as a wedged firmware does. Falsified by: the IsMoving read answering false when the ":01#" reply is invalid.
+Tier3Recipe tier3_recipe_gemini_focuser() {
+    return {
+        [](Hosted& hosted) {
+            t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_moving(true);
+            t3_start_focuser_move(hosted, 500);
+        },
+        [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(true); },
+        "FakeGeminiFocuser::set_garbage_state_replies(true) mid-move"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+// SFW: the streamed frame keeps reporting the old slot, so the move cannot land; the stream then stops with the port
+// open (a hung MCU). Falsified by: Position reporting the requested slot when the stream dies.
+Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
+    return {[](Hosted& hosted) {
+                auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*hosted.driver);
+                f.set_position(f.get_position() == 1 ? 2 : 1);
+            },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSerialStreamer>(hosted).set_muted(true); },
+            "FakeSerialStreamer::set_muted(true) mid-move"};
+}
+#endif
+
+// One X(id, status) per tier-3 recipe, under the vendor's guard. status OK: the case must pass. status DEFECT: the
+// driver violates the contract today; the case carries [!shouldfail] and its Fix removes the tag.
+// clang-format off
+#ifdef ALPACACORE_ENABLE_CELESTRON
+#define CT3_CELESTRON(X) X(celestron_telescope, OK) X(celestron_cgx_telescope, OK) X(celestron_focuser, OK)
+#else
+#define CT3_CELESTRON(X)
+#endif
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+#define CT3_SKYWATCHER(X) X(skywatcher_telescope, OK) X(skywatcher_telescope_serial, OK)
+#else
+#define CT3_SKYWATCHER(X)
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+#define CT3_IOPTRON(X) X(ioptron_telescope, OK) X(ioptron_focuser, OK) X(iguider_camera, OK)
+#else
+#define CT3_IOPTRON(X)
+#endif
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+#define CT3_SYNSCAN(X) X(synscan_telescope, OK)
+#else
+#define CT3_SYNSCAN(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+#define CT3_ONSTEP(X) X(onstep_telescope, OK)
+#else
+#define CT3_ONSTEP(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+#define CT3_ASTROASIS(X) X(astroasis_focuser, OK)
+#else
+#define CT3_ASTROASIS(X)
+#endif
+#ifdef ALPACACORE_ENABLE_GEMINI
+#define CT3_GEMINI(X) X(gemini_focuser, OK)
+#else
+#define CT3_GEMINI(X)
+#endif
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+#define CT3_WANDERERASTRO(X) X(wandererastro_filterwheel, OK)
+#else
+#define CT3_WANDERERASTRO(X)
+#endif
+#define CONTRACT_SWEEP_TIER3_HOSTS(X) \
+    CT3_CELESTRON(X) \
+    CT3_SYNSCAN(X) \
+    CT3_ONSTEP(X) \
+    CT3_SKYWATCHER(X) \
+    CT3_IOPTRON(X) \
+    CT3_ASTROASIS(X) \
+    CT3_GEMINI(X) \
+    CT3_WANDERERASTRO(X)
+// clang-format on
+
 #endif  // !_WIN32
 
 }  // namespace
@@ -2379,6 +2846,45 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_IMAGE)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_LASTEXP)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_HOOKS)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_INITIATORS)
+#endif
+
+#ifndef _WIN32
+#define CT3_CASE_TAGS_OK "[contract][tier3]"
+#define CT3_CASE_TAGS_DEFECT "[contract][tier3][!shouldfail]"
+#define CT3_CASE(id, status)                                                                       \
+    TEST_CASE("Contract sweep tier 3 - " #id " - failure after start is never a clean completion", \
+              CT3_CASE_TAGS_##status "[" #id "]") {                                                \
+        case_t3_failure_after_start(tier2_host_##id(), tier3_recipe_##id());                       \
+    }
+CONTRACT_SWEEP_TIER3_HOSTS(CT3_CASE)
+
+// Non-vacuity guard for tier 3: every tier-2 host of a type with an asynchronous completion property (camera,
+// telescope, focuser, rotator, filter wheel) has a tier-3 recipe with a start, a fault and a description, and no
+// other host has one. A host of those types with no recipe is a fake no case ever fails mid-operation.
+TEST_CASE("Contract sweep tier 3 - every host of an async type has a failure recipe",
+          "[contract][tier3][contract-sweep-guard]") {
+    std::map<std::string, Tier3Recipe> recipes;
+#define CT3_PUSH(id, status) CHECK(recipes.emplace(#id, tier3_recipe_##id()).second);
+    CONTRACT_SWEEP_TIER3_HOSTS(CT3_PUSH)
+#undef CT3_PUSH
+    std::set<std::string> hosted_ids;
+#define CT3_HOST(id, kind)                                         \
+    {                                                              \
+        const Tier2Host h = tier2_host_##id();                     \
+        hosted_ids.insert(#id);                                    \
+        INFO("tier-2 host " #id);                                  \
+        CHECK((recipes.count(#id) == 1) == is_tier3_type(h.type)); \
+    }
+    CONTRACT_SWEEP_TIER2_HOSTS(CT3_HOST)
+#undef CT3_HOST
+    for (const auto& [id, r] : recipes) {
+        INFO("tier-3 recipe " << id);
+        CHECK(hosted_ids.count(id) == 1);
+        CHECK(static_cast<bool>(r.start));
+        CHECK(static_cast<bool>(r.fail));
+        CHECK((r.fault != nullptr && std::string(r.fault).size() > 0));
+    }
+}
 #endif
 
 #ifndef _WIN32
