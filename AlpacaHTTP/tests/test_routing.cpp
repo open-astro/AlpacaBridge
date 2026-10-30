@@ -6293,6 +6293,7 @@ int main() {
     // bad value registers in the anonymous slot, which a ClientID-less
     // disconnect from the same peer then releases.
     {
+        // case: a ClientID that is not a uint32 registers in the anonymous slot (#1738)
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto stub = std::make_shared<ConnectStubDriver>(9703);
         EXPECT(registry.register_device(stub));
