@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -164,6 +165,16 @@ public:
 
     std::vector<FakeCamera> cameras;
     std::set<std::string> throw_from;
+    // Makes every later call of `name` throw, until clear_fail_from(). Unlike throw_from it is locked, so a case may
+    // set and clear it while the driver runs (contract sweep tier 3).
+    void fail_from(const std::string& name) {
+        std::lock_guard<std::mutex> lock(fail_from_mutex_);
+        failing_name_ = name;
+    }
+    void clear_fail_from() {
+        std::lock_guard<std::mutex> lock(fail_from_mutex_);
+        failing_name_.clear();
+    }
     // Persistent, not a one-shot: runs before every call until it is cleared (after the call is counted, before
     // throw_from), so a case can make one named call block or move a FakeTaskClock. Null in every ordinary
     // test; the contract sweep sets it on the connect call to hold a connect open, and the [taskclock] cases
@@ -372,10 +383,18 @@ private:
     void log_and_maybe_throw(const std::string& name) {
         call_log.push_back(name);
         if (before_call) before_call(name);
-        if (throw_from.count(name) != 0) {
+        bool failing = false;
+        {
+            std::lock_guard<std::mutex> lock(fail_from_mutex_);
+            failing = failing_name_ == name;
+        }
+        if (failing || throw_from.count(name) != 0) {
             throw AlpacaException("FakeGPhotoSDK: injected failure in " + name, AlpacaError::DriverException);
         }
     }
+
+    std::mutex fail_from_mutex_;
+    std::string failing_name_;
 };
 
 }  // namespace alpacacore::test

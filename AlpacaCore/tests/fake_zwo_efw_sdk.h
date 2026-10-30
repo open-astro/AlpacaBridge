@@ -40,7 +40,6 @@ namespace alpacacore::test {
 // - The moving window ends after a number of reads, not after a time, and calibrate()
 //   opens none, though the real wheel turns while it calibrates.
 // - Serial number, firmware and SDK version are fixed strings.
-// - fail_reads throws std::runtime_error; the real wrapper throws only AlpacaException.
 
 class FakeZWOEFWSDK final : public vendor::zwo::ZWOEFWSDK {
 public:
@@ -51,7 +50,8 @@ public:
     int slot_count{7};
     int position{0};
     bool unidirectional{false};
-    bool fail_reads{false};
+    // Atomic: the contract sweep sets and clears it while the driver polls (tier 3).
+    std::atomic<bool> fail_reads{false};
     // No wheel attached: enumeration is empty and the id lookups fail.
     bool no_wheels{false};
     // The next open_wheel() throws (a connect that must fail).
@@ -122,7 +122,7 @@ public:
         check_id(wheel_id);
         ++position_calls;
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         if (moving_left_ > 0) {
             --moving_left_;

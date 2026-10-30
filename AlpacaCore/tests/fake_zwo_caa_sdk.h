@@ -59,8 +59,9 @@ public:
     int motion_calls{0};
     int degree_calls{0};
     int reverse_calls{0};
-    bool fail_reads{false};
-    bool moving{false};
+    // Atomic: the contract sweep sets and clears them while the driver polls (tier 3).
+    std::atomic<bool> fail_reads{false};
+    std::atomic<bool> moving{false};
     // The next open_rotator() throws (a connect that must fail).
     bool fail_open{false};
     // open_rotator() sleeps this long before returning (a connect held open).
@@ -109,7 +110,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++motion_calls;
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         return {moving, false};
     }
@@ -117,7 +118,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++degree_calls;
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         return degree;
     }
