@@ -1055,6 +1055,23 @@ TEST_CASE("OnStep snapshot - a Tracking write after a connect that read no statu
     CHECK_FALSE(rig.driver->get_tracking());
 }
 
+// #1895: Unpark on a connect whose :GU# read failed reads :GU# first, so its write-through lands in a status the
+// getter serves; while :GU# stays silent it refuses instead of unparking blind.
+TEST_CASE("OnStep snapshot - an Unpark after a connect that read no status is served at once",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.mount->silent_status = true;  // the connect's :GU# times out
+    rig.connect();
+    rig.pause();
+    rig.mount->set_status("nNPEW180#");  // parked, but nothing has read it
+    CHECK(error_of([&] { rig.driver->unpark(); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.mount->count(":hR") == 0);  // nothing was sent while the status was unknown
+
+    rig.mount->silent_status = false;
+    rig.driver->unpark();
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
 // #1895: an unread status is not taken for "not parked": the commands that check for a park read :GU# first and
 // refuse while it does not answer. The stops still go out.
 TEST_CASE("OnStep snapshot - a status the connect could not read refuses the commands that check for a park",

@@ -1451,6 +1451,12 @@ public:
     void move_axis(int axis, double rate) override {
         StateLock lock(lock_gate_);
         check_connected();
+        // The parked check stays ahead of the argument checks, as on main: a parked mount answers
+        // InvalidWhileParked to a bad axis or rate too. Only a finite rate at or under the epsilon is a stop,
+        // which an unread status does not hold up (#1895); NaN is not one.
+        constexpr double kStopEpsilon = 1e-6;
+        const bool moving = !(std::abs(rate) <= kStopEpsilon);
+        check_not_parked_locked("MoveAxis", /*stop=*/!moving);
         if (axis != 0 && axis != 1) {
             throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
         }
@@ -1461,9 +1467,6 @@ public:
             throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
 
-        constexpr double kStopEpsilon = 1e-6;
-        const bool moving = std::abs(rate) > kStopEpsilon;
-        check_not_parked_locked("MoveAxis", /*stop=*/!moving);  // an unread status does not hold up a stop (#1895)
         if (moving) {
             refuse_while_faulted_locked("MoveAxis");  // before it ends a waiting Park or FindHome
         }
