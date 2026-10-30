@@ -245,7 +245,7 @@ SensorSnapshot parse_snapshot(std::string_view payload) {
 
 // A current-conditions payload is a few KiB; a larger body is refused unparsed
 // so a misbehaving endpoint cannot grow the buffer without bound.
-constexpr std::size_t kMaxResponseBytes = 1024 * 1024;
+constexpr std::size_t kMaxResponseBytes = std::size_t{1024} * 1024;
 
 size_t curl_write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     if (!userdata) {
