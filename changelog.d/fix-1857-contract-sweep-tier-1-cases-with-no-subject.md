@@ -1,0 +1,3 @@
+### Changed
+
+- **Contract sweep tier 1 cases with no subject**, test-only, issue #1857. The "InvalidValue precedes NotConnected" and "Can getters" cases are now registered only for entries that have a probe, so no case passes on a bare `REQUIRE(d != nullptr)`. New probes: switch `CanWrite`/`CanAsync` on the writable id (pinned to the entry's `DisconnectedRead`), ObservingConditions `set_average_period(-1)`, and iEAF `move(-1)`; the Gemini and Astroasis focuser entries state that `move()` clamps. The `Contract sweep - registry is not vacuous` guard in `AlpacaCore/tests/test_contract_sweep.cpp` now fails when a registered case has an empty probe list or an entry's registration disagrees with its probes.

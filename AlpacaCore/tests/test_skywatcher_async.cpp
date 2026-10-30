@@ -2358,13 +2358,23 @@ TEST_CASE("SkyWatcher EQM-35 - FindHome uses the count-frame fallback", "[skywat
 
 TEST_CASE("SkyWatcher Wave - home indexer still enables FindHome", "[skywatcher][telescope][eqm35]") {
     // Guard against the EQM-35 work regressing the Wave: same code path, the
-    // 0x100C feature word, and FindHome must stay available.
+    // 0x100C feature word, and FindHome must stay available and must take the
+    // index-sensor path (CanFindHome is true on every board, so the property
+    // alone proves nothing about the indexer).
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
     REQUIRE(mount.ok());
+    mount.set_home_index_degrees(1, 2.0);
+    mount.set_home_index_degrees(2, 2.0);
     auto driver = connected_driver(mount);
 
     CHECK(driver->get_name() == "Sky-Watcher Wave 100i (EQMOD, eps: unmeasured default)");
     CHECK(driver->get_can_find_home() == true);
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return !driver->get_slewing() && driver->get_at_home(); }, 60000));
+    // AutoHome parks the axis on the sensor 2 degrees from count home; the
+    // count-frame fallback of a board without the indexer lands at 0.
+    CHECK(std::abs(mount.physical_degrees(1) - 2.0) < 0.2);
 
     driver->set_connected(false);
 }
@@ -2388,12 +2398,12 @@ TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period", "
     const double after = mount.physical_degrees(1);
 
     // Sidereal is ~0.004178 deg/s; over 0.6 s that is ~2.5e-3 deg. Assert the
-    // axis moved in the tracking direction at roughly the sidereal rate rather
-    // than pinning an exact figure (the loopback clock is not real-time).
+    // axis moved in the tracking direction within 20-25% of the sidereal rate
+    // rather than pinning an exact figure; a doubled rate is 2x and fails.
     const double moved = std::fabs(after - before);
     const double expected = FakeSkyWatcherSerialBoard::kSiderealDegPerSec * 0.6;
-    CHECK(moved > expected * 0.3);
-    CHECK(moved < expected * 3.0);
+    CHECK(moved > expected * 0.8);
+    CHECK(moved < expected * 1.25);
 
     driver->set_tracking(false);
     driver->set_connected(false);
@@ -3059,7 +3069,19 @@ TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not res
     // (the board stores a live preset without applying it; a follow-up commit
     // handles that). The fake acks and drops one write: the rate change must
     // return normally, the dropped write must not be resent, and the axis
-    // must not be stopped.
+    // must not be stopped, and the mismatch must reach the log as one WARN.
+    std::atomic<int> readback_warns{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("step period readback") != std::string_view::npos) {
+                ++readback_warns;
+            }
+        });
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
@@ -3073,6 +3095,7 @@ TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not res
 
     REQUIRE(mount.step_period(1) == sidereal_preset);  // logged, not resent
     REQUIRE(mount.stop_count(1) == stops_before);      // and the axis was left running
+    CHECK(readback_warns.load() == 1);                 // ...but the mismatch is logged, once
     driver->set_right_ascension_rate(0.0);
     driver->set_tracking(false);
     driver->set_connected(false);
@@ -3657,8 +3680,12 @@ TEST_CASE("SkyWatcher async - a pending RightAscensionRate check is reaped by Tr
     driver->set_connected(false);
     const double disconnect_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    REQUIRE(disconnect_ms < 2000.0);
+    // Cancelled, not waited out: a check left running holds the disconnect for
+    // its settle + window (450 ms measured), a cancelled one for microseconds.
+    REQUIRE(disconnect_ms < 200.0);
     REQUIRE_FALSE(driver->get_connected());
+    // The disconnect reaped the check: nothing is still parked on the clock.
+    CHECK(clock.waiter_count() == 0);
 }
 
 TEST_CASE("SkyWatcher async - a rate check past its last wait does not resend after Tracking off",
@@ -3754,8 +3781,13 @@ TEST_CASE("SkyWatcher async - a sub-resolution TrackingRate change is not spurio
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     const int starts_before = mount.start_count(1);
 
-    driver->set_tracking_rate(2);                                  // Solar
-    elapse(clock, std::chrono::milliseconds(1200));                // well past settle + min window
+    driver->set_tracking_rate(2);  // Solar
+    // A skipped check ends at once; one that went on to sample parks in its
+    // settle wait on the clock (the same rendezvous the reap cases use), and
+    // the exact fake would still say "took" afterwards, so the park is the
+    // only trace of the missing skip.
+    CHECK_FALSE(clock.wait_for_waiters(kPollerWaiter + 1, std::chrono::milliseconds(300)));
+    elapse(clock, std::chrono::milliseconds(1200));  // well past settle + min window
     REQUIRE(mount.start_count(1) == starts_before + 1);
 
     driver->set_tracking_rate(0);
