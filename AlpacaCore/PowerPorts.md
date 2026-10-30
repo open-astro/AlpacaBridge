@@ -302,7 +302,7 @@ sudo usermod -aG gpio "$USER"
 
 > **Runtime libs** (`libusb-1.0-0`, `libudev1`, `libcurl4`) are what AlpacaBridge links against at runtime — required even if you install only the `.deb`. **Dev libs** (`libusb-1.0-0-dev`, `libudev-dev`, `libcurl4-openssl-dev`, `nlohmann-json3-dev`, `catch2`) and **build tools** (`git`, `build-essential`, `cmake`) are needed when building from source on the device via `build_and_run.sh`. They are harmless on a `.deb`-only target. The Plus driver does **not** use libgpiod (unlike the Pro), so no `libgpiod*` packages are required.
 
-The udev rule shipped with AlpacaBridge (`/usr/lib/udev/rules.d/99-zwo-asiair-plus.rules`) grants the `gpio` group `0660` access to `/dev/pwm-gpio-misc`. Without it, only root can open the device — and AlpacaBridge intentionally runs unprivileged. The rule is installed automatically by `build_and_run.sh` (or by the `.deb` postinst), which also handles the `groupadd` / `usermod` steps shown above — the manual commands here just make the dependency explicit for first-time deployments.
+The udev rule shipped with AlpacaBridge (`/usr/lib/udev/rules.d/99-zwo-asiair-plus.rules` from the `.deb`, `/etc/udev/rules.d/99-zwo-asiair-plus.rules` from `build_and_run.sh`) grants the `gpio` group `0660` access to `/dev/pwm-gpio-misc`. Without it, only root can open the device — and AlpacaBridge intentionally runs unprivileged. The rule is installed automatically by `build_and_run.sh` (or by the `.deb` postinst), which also handles the `groupadd` / `usermod` steps shown above — the manual commands here just make the dependency explicit for first-time deployments.
 
 After adding yourself to the `gpio` group, log out and back in (or `newgrp gpio`) so membership applies to your current shell.
 
