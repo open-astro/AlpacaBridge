@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
 
 namespace alpacacore::test {
 
@@ -57,6 +58,21 @@ std::chrono::microseconds timed(Fn&& fn) {
     const auto start = std::chrono::steady_clock::now();
     fn();
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+}
+
+// Advances the fake clock one poll period, then waits (up to `bound` of real time) until the woken poll
+// body is parked on the clock again. Fails the test case when it does not settle or park.
+inline void tick(FakeTaskClock& clock, std::chrono::nanoseconds period, std::chrono::milliseconds bound) {
+    clock.advance(period);
+    REQUIRE(clock.wait_for_woken_settled(bound));
+    REQUIRE(clock.wait_for_waiters(1, bound));
+}
+
+// Connects the driver, then waits (up to `bound` of real time) for its poll body to park on the clock.
+// Returns whether it parked; a caller that must fail on a missed rendezvous wraps the call in REQUIRE.
+inline bool connect_and_park(alpacacore::AlpacaDriver& driver, FakeTaskClock& clock, std::chrono::milliseconds bound) {
+    driver.set_connected(true);
+    return clock.wait_for_waiters(1, bound);
 }
 
 // "2026-10-10T21:46:30.626Z" -> system_clock time point. Fails the test case on any other shape.

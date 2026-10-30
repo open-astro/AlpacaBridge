@@ -27,11 +27,13 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
 using alpacacore::test::FakeTaskClock;
+using alpacacore::test::tick;
 using alpacacore::util::OperationGeneration;
 using alpacacore::util::PolledState;
 using namespace std::chrono_literals;
@@ -78,13 +80,6 @@ struct Rig {
                 ++lost_calls;
             });
     }
-
-    // One tick of the poll thread: it parked, the clock moves, it probed and parked again.
-    void tick() {
-        clock.advance(kPeriod);
-        REQUIRE(clock.wait_for_woken_settled(kBound));
-        REQUIRE(clock.wait_for_waiters(1, kBound));
-    }
 };
 
 }  // namespace
@@ -115,21 +110,19 @@ TEST_CASE("PolledState - polls start to start and skips the ticks a slow probe r
     REQUIRE(rig.clock.wait_for_waiters(1, kBound));
     CHECK(rig.probes.load() == 1);
 
-    rig.tick();
+    tick(rig.clock, kPeriod, kBound);
     CHECK(rig.probes.load() == 2);  // one probe per period
 
     // A probe that takes 250 ms covers two further ticks; the next one is due
     // 50 ms later (3 periods from the start), with no catch-up burst.
     rig.during = [&rig] { rig.clock.advance(250ms); };
-    rig.tick();
+    tick(rig.clock, kPeriod, kBound);
     CHECK(rig.probes.load() == 3);
     rig.during = nullptr;
     rig.clock.advance(49ms);
     REQUIRE(rig.clock.wait_for_woken_settled(kBound));
     CHECK(rig.probes.load() == 3);
-    rig.clock.advance(1ms);
-    REQUIRE(rig.clock.wait_for_woken_settled(kBound));
-    REQUIRE(rig.clock.wait_for_waiters(1, kBound));
+    tick(rig.clock, 1ms, kBound);
     CHECK(rig.probes.load() == 4);
     rig.state->stop_and_join();
 }
@@ -303,9 +296,7 @@ TEST_CASE("PolledState - pause_for_testing holds the poll thread, poll_now_for_t
     REQUIRE(rig.state->start());
     REQUIRE(rig.clock.wait_for_waiters(1, kBound));
     rig.state->pause_for_testing(true);
-    rig.clock.advance(kPeriod);
-    REQUIRE(rig.clock.wait_for_woken_settled(kBound));
-    REQUIRE(rig.clock.wait_for_waiters(1, kBound));
+    tick(rig.clock, kPeriod, kBound);
     CHECK(rig.probes.load() == 1);  // the tick passed, nothing was probed
 
     rig.next = 4;
@@ -314,7 +305,7 @@ TEST_CASE("PolledState - pause_for_testing holds the poll thread, poll_now_for_t
     CHECK(rig.state->served().value.value == 4);
 
     rig.state->pause_for_testing(false);
-    rig.tick();
+    tick(rig.clock, kPeriod, kBound);
     CHECK(rig.probes.load() == 3);
     rig.state->stop_and_join();
 }
@@ -338,7 +329,7 @@ TEST_CASE("PolledState - on_lost runs on the poll thread and the poll ends with 
     REQUIRE(rig.state->start());
     REQUIRE(rig.clock.wait_for_waiters(1, kBound));
     rig.fail = true;
-    rig.tick();
+    tick(rig.clock, kPeriod, kBound);
     rig.clock.advance(alpacacore::util::kLinkStalenessBound);
     REQUIRE(rig.clock.wait_for_woken_settled(kBound));
     const auto deadline = std::chrono::steady_clock::now() + kBound;
