@@ -1121,6 +1121,12 @@ struct MountServerHold {
     std::shared_ptr<alpacacore::test::FakeMountServer> server;
 };
 
+// A FakeMountServer row's driver factory, `Over(port, hold, clock)`, on the default task clock (tier 2).
+template <auto Over>
+std::unique_ptr<AlpacaDriver> on_default_clock(int port, bool hold) {
+    return Over(port, hold, alpacacore::util::default_task_clock());
+}
+
 template <class MakeDriver>
 Tier2Host mount_server_host(const char* id, const char* vendor, const char* registry_id,
                             alpacacore::test::FakeMountServer::Responder responder, MakeDriver make) {
@@ -1150,14 +1156,14 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
 #endif
 
 #ifdef ALPACACORE_ENABLE_ZWO
-std::unique_ptr<AlpacaDriver> zwo_telescope_over(int port, bool hold) {
+std::unique_ptr<AlpacaDriver> zwo_telescope_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
     namespace zwo = alpacacore::vendor::zwo;
     zwo::ConnectionInfo info;
     info.type = zwo::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = port;
     info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 250;
-    return zwo::create_zwo_telescope(0, info);
+    return zwo::create_zwo_telescope(0, info, clock);
 }
 
 // Recipe of test_zwo_concurrency_stress.cpp: LX200 replies, tracking reported on.
@@ -1178,7 +1184,7 @@ Tier2Host tier2_host_zwo_telescope() {
                        ? "1#"
                        : "0#";
         },
-        zwo_telescope_over);
+        on_default_clock<zwo_telescope_over>);
 }
 
 Tier2Host tier2_host_zwo_camera() {
@@ -1275,21 +1281,23 @@ Tier2Host tier2_host_zwo_rotator() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
-std::unique_ptr<AlpacaDriver> celestron_telescope_over(int port, bool hold) {
+std::unique_ptr<AlpacaDriver> celestron_telescope_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
     namespace cel = alpacacore::vendor::celestron;
     cel::ConnectionInfo info;
     info.type = cel::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = port;
     info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-    return cel::create_celestron_telescope(0, info);
+    return cel::create_celestron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                                                     cel::CelestronAlignmentSetting::Auto, clock);
 }
 
 // Recipe of test_celestron_concurrency_stress.cpp: a position-pair sized reply ends every read at once.
 Tier2Host tier2_host_celestron_telescope() {
     Tier2Host h = mount_server_host(
         "celestron_telescope", "celestron", "celestron_telescope",
-        [](const std::string&) { return std::string("00000000,00000000#"); }, celestron_telescope_over);
+        [](const std::string&) { return std::string("00000000,00000000#"); },
+        on_default_clock<celestron_telescope_over>);
     h.move_axis_unavailable =
         "the fixed-reply responder does not answer the variable-rate axis frame, so move_axis() times out and "
         "throws (fake_mount_server.h, celestron_protocol_wrapper move_axis_variable_rate)";
@@ -1358,20 +1366,23 @@ Tier2Host tier2_host_celestron_focuser() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-std::unique_ptr<AlpacaDriver> synscan_telescope_over(int port, bool hold) {
+std::unique_ptr<AlpacaDriver> synscan_telescope_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
     namespace syn = alpacacore::vendor::synscan;
     syn::ConnectionInfo info;
     info.type = syn::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = port;
     info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-    return syn::create_synscan_telescope(0, info, syn::SynScanVersion::V4);
+    return syn::create_synscan_telescope_with_site(0, info, syn::SynScanVersion::V4, std::nullopt, std::nullopt,
+                                                   std::nullopt, std::nullopt, syn::SynScanAlignmentSetting::Auto,
+                                                   clock);
 }
 
 // Recipe of test_synscan_concurrency_stress.cpp: V4 and the default responder's 'K' echo, which the connect gates on.
 Tier2Host tier2_host_synscan_telescope() {
     Tier2Host h = mount_server_host("synscan_telescope", "synscan", "synscan_telescope",
-                                    alpacacore::test::FakeMountServer::default_responder(), synscan_telescope_over);
+                                    alpacacore::test::FakeMountServer::default_responder(),
+                                    on_default_clock<synscan_telescope_over>);
     h.park_unavailable =
         "FakeMountServer::default_responder() does not answer the SynScan position read (the driver logs 'Invalid "
         "SynScan RA/Dec response'), so park() throws DriverException before it can start the slew "
@@ -1381,14 +1392,14 @@ Tier2Host tier2_host_synscan_telescope() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
-std::unique_ptr<AlpacaDriver> onstep_telescope_over(int port, bool hold) {
+std::unique_ptr<AlpacaDriver> onstep_telescope_over(int port, bool hold, alpacacore::util::TaskClock& clock) {
     namespace ons = alpacacore::vendor::onstep;
     ons::ConnectionInfo info;
     info.type = ons::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = port;
     info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-    return ons::create_onstep_telescope(0, info);
+    return ons::create_onstep_telescope(0, info, clock);
 }
 
 // Recipe of test_onstep_concurrency_stress.cpp, with an idle OnStepX for
@@ -1404,7 +1415,8 @@ Tier2Host tier2_host_onstep_telescope() {
         }
         return fallback(chunk);
     };
-    return mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep, onstep_telescope_over);
+    return mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
+                             on_default_clock<onstep_telescope_over>);
 }
 #endif
 
@@ -2342,8 +2354,9 @@ const char* t3_outcome(const T3Read& r) {
 constexpr std::chrono::seconds kTier3Budget{20};
 // How long the healthy fake must keep the operation running before the fault.
 constexpr std::chrono::seconds kTier3Control{1};
-// Three periods of the slowest status poll here (1 s: kStatusPollPeriod in the Celestron, SynScan and OnStep
-// telescope drivers), so the drivers see the recovered link before the case ends.
+// How long the case watches the property after recover. A recipe on the task clock has already stepped its polls
+// in `recover` (t3_on_clock); a driver not on the clock gets three seconds of its real-time status poll to see the
+// answering fake.
 constexpr std::chrono::seconds kTier3RecoverWindow{3};
 
 [[maybe_unused]] void case_t3_failure_after_start(const Tier2Host& h, const Tier3Recipe& r) {
@@ -2437,27 +2450,74 @@ Fake& t3_fake(Hosted& hosted) {
     return *static_cast<Fake*>(hosted.fake.get());
 }
 
+// A recipe over a driver on the task clock (decision 0005 rule 2) builds the driver on one of these and steps it in
+// its own legs, so the case's real-time loops wait on no driver timer, only on wire reads (0005 rule 6). The recipe's
+// lambdas hold it, so it outlives the Hosted driver.
+using T3Clock = std::shared_ptr<alpacacore::test::FakeTaskClock>;
+
+// One poll tick of every driver stepped here (100 ms to 1 s periods); each step waits for the woken threads to
+// settle, as advance_until() in test_celestron_async_slew_failure.cpp does.
+constexpr std::chrono::milliseconds kT3Step{250};
+
+// Steps `clock` until `done` holds, at most `virtual_limit` of virtual time; returns whether `done` held.
+[[maybe_unused]] bool t3_step(alpacacore::test::FakeTaskClock& clock, std::chrono::milliseconds virtual_limit,
+                              const std::function<bool()>& done = {}) {
+    for (std::chrono::milliseconds stepped{0}; stepped < virtual_limit; stepped += kT3Step) {
+        if (done && done()) return true;
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(kT3Step);
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    return done && done();
+}
+
+// `r` on `clock`: `start` steps 3 s so the control leg reads state the healthy polls refreshed; `fail` steps until
+// the property raises or reports done, at most 15 s, so a 3-failure latch on a 1 s poll trips and the link stays
+// inside util::kLinkStalenessBound (30 s); `recover` steps 3 s, three periods of the slowest poll (1 s:
+// kStatusPollPeriod in the Celestron, SynScan and OnStep telescope drivers), so the driver sees the answering fake.
+[[maybe_unused]] Tier3Recipe t3_on_clock(Tier3Recipe r, DeviceType type, T3Clock clock) {
+    r.start = [start = std::move(r.start), clock](Hosted& hosted) {
+        start(hosted);
+        t3_step(*clock, std::chrono::seconds(3));
+    };
+    r.fail = [fail = std::move(r.fail), type, clock](Hosted& hosted) {
+        fail(hosted);
+        t3_step(*clock, std::chrono::seconds(15), [&] {
+            const T3Read rd = t3_read(*hosted.driver, type);
+            return rd.done || rd.code != -1;
+        });
+    };
+    r.recover = [recover = std::move(r.recover), clock](Hosted& hosted) {
+        recover(hosted);
+        t3_step(*clock, std::chrono::seconds(3));
+    };
+    return r;
+}
+
 #if defined(ALPACACORE_ENABLE_ZWO) || defined(ALPACACORE_ENABLE_CELESTRON) || defined(ALPACACORE_ENABLE_SYNSCAN) || \
     defined(ALPACACORE_ENABLE_ONSTEP)
 // FakeMountServer rows: the tier-2 responders answer a fixed reply and model no goto, so each row's recipe brings a
 // responder whose goto, once started, never ends (the slew status keeps reporting it running). The goto starts, then
 // the mount stops answering with the socket open.
 // `started` is set by the responder when the GOTO reaches it, so the fault lands on a goto the mount is running, not on
-// its dispatch.
+// its dispatch. All four drivers are on the task clock: `make(port, hold, clock)` builds one on the recipe's clock.
 template <class MakeDriver>
 Tier3Recipe tier3_mount_server_recipe(const char* id, const char* vendor, std::shared_ptr<std::atomic<bool>> started,
                                       alpacacore::test::FakeMountServer::Responder r, MakeDriver make) {
-    return {[](Hosted& hosted) { t3_start_slew_at_hour_angle(hosted, 1.0, 30.0); },
-            [started](Hosted& hosted) {
-                const auto deadline = Clock::now() + std::chrono::seconds(5);
-                while (!started->load() && Clock::now() < deadline)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                REQUIRE(started->load());
-                t3_fake<MountServerHold>(hosted).silent->store(true);
-            },
-            [](Hosted& hosted) { t3_fake<MountServerHold>(hosted).silent->store(false); },
-            "FakeMountServer responder silent mid-goto",
-            mount_server_host(id, vendor, id, std::move(r), make).connectable};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    auto on_clock = [make, clock](int port, bool hold) { return make(port, hold, *clock); };
+    return t3_on_clock({[](Hosted& hosted) { t3_start_slew_at_hour_angle(hosted, 1.0, 30.0); },
+                        [started](Hosted& hosted) {
+                            const auto deadline = Clock::now() + std::chrono::seconds(5);
+                            while (!started->load() && Clock::now() < deadline)
+                                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                            REQUIRE(started->load());
+                            t3_fake<MountServerHold>(hosted).silent->store(true);
+                        },
+                        [](Hosted& hosted) { t3_fake<MountServerHold>(hosted).silent->store(false); },
+                        "FakeMountServer responder silent mid-goto",
+                        mount_server_host(id, vendor, id, std::move(r), on_clock).connectable},
+                       DeviceType::Telescope, clock);
 }
 #endif
 
@@ -2541,10 +2601,20 @@ Tier3Recipe tier3_recipe_celestron_cgx_telescope() {
 // Focus motor: a GOTO stays running until complete_move(); the motor then stops answering. Falsified by: the
 // move-poll treating an unanswered position read as arrival.
 Tier3Recipe tier3_recipe_celestron_focuser() {
-    return {[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(true); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(false); },
-            "FakeCelestronFocuser::set_muted(true) mid-move"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(false); },
+         "FakeCelestronFocuser::set_muted(true) mid-move",
+         [clock](bool) {
+             return host_over(std::make_shared<alpacacore::test::FakeCelestronFocuser>(),
+                              [&](const alpacacore::test::FakeCelestronFocuser& f) -> std::unique_ptr<AlpacaDriver> {
+                                  return alpacacore::vendor::celestron::create_celestron_focuser(0, f.slave_path(),
+                                                                                                 *clock);
+                              });
+         }},
+        DeviceType::Focuser, clock);
 }
 #endif
 
@@ -2552,18 +2622,48 @@ Tier3Recipe tier3_recipe_celestron_focuser() {
 // UDP motor controller: a two-hour goto ramps on the board's axis model, so it is still running when the board stops
 // answering. Falsified by: the slew task ending on a timed-out status read as if the axes had stopped.
 Tier3Recipe tier3_recipe_skywatcher_telescope() {
-    return {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, 30.0); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(true); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(false); },
-            "FakeSkyWatcherMount::set_silent(true) mid-goto"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, 30.0); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(false); },
+         "FakeSkyWatcherMount::set_silent(true) mid-goto",
+         [clock](bool) {
+             return host_over(std::make_shared<alpacacore::test::FakeSkyWatcherMount>(),
+                              [&](const alpacacore::test::FakeSkyWatcherMount& m) -> std::unique_ptr<AlpacaDriver> {
+                                  sw::ConnectionInfo info;
+                                  info.type = sw::ConnectionType::Network;
+                                  info.host = "127.0.0.1";
+                                  info.udp_port = m.port();
+                                  info.response_timeout_ms = 250;
+                                  return sw::create_skywatcher_telescope(0, info, 51.477833, -0.0015, 46.0, {}, {},
+                                                                         *clock);
+                              });
+         }},
+        DeviceType::Telescope, clock);
 }
 
 // Serial motor board (a southern site): same recipe, the board stops answering with the port open.
 Tier3Recipe tier3_recipe_skywatcher_telescope_serial() {
-    return {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, -30.0); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(true); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(false); },
-            "FakeSkyWatcherSerialBoard::set_muted(true) mid-goto"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, -30.0); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(false); },
+         "FakeSkyWatcherSerialBoard::set_muted(true) mid-goto",
+         [clock](bool) {
+             return host_over(
+                 std::make_shared<alpacacore::test::FakeSkyWatcherSerialBoard>(),
+                 [&](const alpacacore::test::FakeSkyWatcherSerialBoard& b) -> std::unique_ptr<AlpacaDriver> {
+                     sw::ConnectionInfo info;
+                     info.type = sw::ConnectionType::Serial;
+                     info.port_path = b.slave_path();
+                     info.baud_rate = 9600;
+                     info.response_timeout_ms = 300;
+                     return sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0, {}, {}, *clock);
+                 });
+         }},
+        DeviceType::Telescope, clock);
 }
 #endif
 
@@ -2571,25 +2671,49 @@ Tier3Recipe tier3_recipe_skywatcher_telescope_serial() {
 // The firmware reports "slewing" (system status 2) so the goto stays running, then every position and status read
 // fails. Falsified by: the settle loop treating failed status reads as a landed goto.
 Tier3Recipe tier3_recipe_ioptron_telescope() {
-    return {[](Hosted& hosted) {
-                t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_system_status(2);
-                t3_start_slew(hosted, 2.0, 30.0);
-            },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(true); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(false); },
-            "FakeIoptronMount::set_fail_reads(true) mid-goto"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) {
+             t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_system_status(2);
+             t3_start_slew(hosted, 2.0, 30.0);
+         },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(false); },
+         "FakeIoptronMount::set_fail_reads(true) mid-goto",
+         [clock](bool) {
+             auto mount = std::make_shared<alpacacore::test::FakeIoptronMount>("0012", 12.0);
+             REQUIRE(mount->ok());
+             return host_over(mount, [&](const alpacacore::test::FakeIoptronMount& m) -> std::unique_ptr<AlpacaDriver> {
+                 alpacacore::vendor::ioptron::ConnectionInfo info;
+                 info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+                 info.host = "127.0.0.1";
+                 info.tcp_port = m.port();
+                 return alpacacore::vendor::ioptron::create_ioptron_telescope(0, info, *clock);
+             });
+         }},
+        DeviceType::Telescope, clock);
 }
 
 // iEAF: the motor keeps reporting it is running, then the firmware stops answering. Falsified by: the move poll
 // reporting IsMoving false on a failed :FI# read.
 Tier3Recipe tier3_recipe_ioptron_focuser() {
-    return {[](Hosted& hosted) {
-                t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_focuser_moving(true);
-                t3_start_focuser_move(hosted, 500);
-            },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(true); },
-            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(false); },
-            "FakeIoptronIeaf::set_silent(true) mid-move"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock({[](Hosted& hosted) {
+                            t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_focuser_moving(true);
+                            t3_start_focuser_move(hosted, 500);
+                        },
+                        [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(true); },
+                        [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(false); },
+                        "FakeIoptronIeaf::set_silent(true) mid-move",
+                        [clock](bool) {
+                            return host_over(
+                                std::make_shared<alpacacore::test::FakeIoptronIeaf>(),
+                                [&](const alpacacore::test::FakeIoptronIeaf& f) -> std::unique_ptr<AlpacaDriver> {
+                                    return alpacacore::vendor::ioptron::create_ieaf_focuser(0, f.slave_path(), "ieaf",
+                                                                                            *clock);
+                                });
+                        }},
+                       DeviceType::Focuser, clock);
 }
 
 // The iGuider fake for tier 3. From `start` on, before_frame_return holds each finished frame until `fail` claims it
@@ -2719,18 +2843,31 @@ Tier3Recipe tier3_recipe_onstep_telescope() {
 // Oasis: the device keeps reporting "moving", then the state poll goes unanswered. Falsified by: the status poll
 // clearing IsMoving when the 0x32 read times out.
 Tier3Recipe tier3_recipe_astroasis_focuser() {
-    return {[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
-            [](Hosted& hosted) {
-                auto& st = t3_fake<alpacacore::test::FakeHidState>(hosted);
-                std::lock_guard<std::mutex> lock(st.mutex);
-                st.dead = true;
-            },
-            [](Hosted& hosted) {
-                auto& st = t3_fake<alpacacore::test::FakeHidState>(hosted);
-                std::lock_guard<std::mutex> lock(st.mutex);
-                st.dead = false;
-            },
-            "FakeHidState::dead = true mid-move"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock({[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
+                        [](Hosted& hosted) {
+                            auto& st = t3_fake<alpacacore::test::FakeHidState>(hosted);
+                            std::lock_guard<std::mutex> lock(st.mutex);
+                            st.dead = true;
+                        },
+                        [](Hosted& hosted) {
+                            auto& st = t3_fake<alpacacore::test::FakeHidState>(hosted);
+                            std::lock_guard<std::mutex> lock(st.mutex);
+                            st.dead = false;
+                        },
+                        "FakeHidState::dead = true mid-move",
+                        [clock](bool) {
+                            auto state = std::make_shared<alpacacore::test::FakeHidState>();
+                            Hosted hosted;
+                            hosted.driver = alpacacore::vendor::astroasis::create_astroasis_focuser(
+                                0, "/dev/hidraw-fake",
+                                std::make_unique<alpacacore::test::LockedAstroasisHidTransport>(
+                                    std::make_unique<alpacacore::test::FakeHidTransport>(state)),
+                                *clock);
+                            hosted.fake = state;
+                            return hosted;
+                        }},
+                       DeviceType::Focuser, clock);
 }
 #endif
 
@@ -2738,14 +2875,23 @@ Tier3Recipe tier3_recipe_astroasis_focuser() {
 // MyFocuserPro2: the firmware reports moving, then answers the state queries with frames the driver cannot parse,
 // as a wedged firmware does. Falsified by: the IsMoving read answering false when the ":01#" reply is invalid.
 Tier3Recipe tier3_recipe_gemini_focuser() {
-    return {
-        [](Hosted& hosted) {
-            t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_moving(true);
-            t3_start_focuser_move(hosted, 500);
-        },
-        [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(true); },
-        [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(false); },
-        "FakeGeminiFocuser::set_garbage_state_replies(true) mid-move"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) {
+             t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_moving(true);
+             t3_start_focuser_move(hosted, 500);
+         },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(true); },
+         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(false); },
+         "FakeGeminiFocuser::set_garbage_state_replies(true) mid-move",
+         [clock](bool) {
+             return host_over(std::make_shared<alpacacore::test::FakeGeminiFocuser>(),
+                              [&](const alpacacore::test::FakeGeminiFocuser& f) -> std::unique_ptr<AlpacaDriver> {
+                                  return alpacacore::vendor::gemini::create_gemini_focuser(0, f.slave_path(), 9600,
+                                                                                           *clock);
+                              });
+         }},
+        DeviceType::Focuser, clock);
 }
 #endif
 
@@ -2936,13 +3082,20 @@ Tier3Recipe tier3_recipe_qhy_filterwheel() {
 // Falsified by: IsMoving answering false when the position poll times out.
 Tier3Recipe tier3_recipe_qhy_focuser() {
     using Fake = alpacacore::test::FakeQhyQFocuser;
-    return {[](Hosted& hosted) {
-                t3_fake<Fake>(hosted).set_steps_per_poll(1);
-                t3_start_focuser_move(hosted, 500);
-            },
-            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(true); },
-            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(false); },
-            "FakeQhyQFocuser::set_muted(true) mid-move"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) {
+             t3_fake<Fake>(hosted).set_steps_per_poll(1);
+             t3_start_focuser_move(hosted, 500);
+         },
+         [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(true); },
+         [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(false); }, "FakeQhyQFocuser::set_muted(true) mid-move",
+         [clock](bool) {
+             return host_over(std::make_shared<Fake>(), [&](const Fake& f) -> std::unique_ptr<AlpacaDriver> {
+                 return alpacacore::vendor::qhy::create_qhy_focuser(0, f.slave_path(), {}, *clock);
+             });
+         }},
+        DeviceType::Focuser, clock);
 }
 #endif
 
