@@ -318,6 +318,7 @@ public:
             target_ra_set_ = false;
             target_dec_set_ = false;
             parked_ = false;
+            parking_ = false;
             at_home_ = false;
             homing_ = false;
             slewing_cached_ = false;
@@ -698,9 +699,33 @@ public:
     }
 
     void park() override {
-        check_connected_now();
         auto& protocol = BisqueProtocolWrapper::instance();
-        protocol.park();
+        // Cleared on every exit; the poll below runs without initiator_mutex_, so AbortSlew never waits for it.
+        struct ParkingGuard {
+            BisqueTelescopeDriver& self;
+            bool armed = false;
+            uint64_t epoch = 0;
+            ~ParkingGuard() {
+                if (!armed) return;
+                std::lock_guard<std::mutex> lock(self.mutex_);
+                // A newer Park owns the flag now (park_epoch_).
+                if (self.park_epoch_ == epoch) self.parking_ = false;
+            }
+        };
+        ParkingGuard guard{*this};
+        {
+            // Initiator lock for the gate and the Park send only: a slew either went to the wire before the park
+            // or sees parking_ after it (#1838).
+            std::lock_guard<std::mutex> ilock(initiator_mutex_);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                check_connected();
+                parking_ = true;
+                guard.epoch = ++park_epoch_;
+                guard.armed = true;
+            }
+            protocol.park();
+        }
         // Poll until parked.
         auto start = clock_.now();
         while (true) {
@@ -719,6 +744,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             parked_ = true;
+            if (park_epoch_ == guard.epoch) parking_ = false;
         }
         publish_measurement();
     }
@@ -868,6 +894,9 @@ public:
         check_connected();
         check_not_parked("SlewToCoordinates");
         check_tracking_for_slew(lock, "SlewToCoordinates");
+        // mutex_ was released for the tracking read: a disconnect or a park may have landed meanwhile (#1838).
+        check_connected();
+        check_not_parked("SlewToCoordinates");
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -895,6 +924,9 @@ public:
         check_connected();
         check_not_parked("SlewToCoordinatesAsync");
         check_tracking_for_slew(lock, "SlewToCoordinatesAsync");
+        // See slew_to_coordinates().
+        check_connected();
+        check_not_parked("SlewToCoordinatesAsync");
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -978,6 +1010,7 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         parked_ = false;
+        parking_ = false;  // a park poll still running no longer blocks slews
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1049,6 +1082,7 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         ++slew_epoch_;
+        parking_ = false;  // a park poll still running no longer blocks slews
         // Bumping the request id retires a running guide body: under mutex_ it
         // sends and records nothing. It is not cancelled or joined here, because a PulseGuide
         // started while the abort waits on the wrapper owns the slot by then.
@@ -1128,7 +1162,7 @@ private:
     }
 
     void check_not_parked(const char* operation) const {
-        if (parked_) {
+        if (parked_ || parking_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
         }
@@ -1680,6 +1714,8 @@ private:
     bool site_info_valid_ = false;
 
     mutable bool parked_ = false;
+    uint64_t park_epoch_ = 0;  // under mutex_; bumped by each Park so a stale Park's exit leaves a newer one's parking_
+    bool parking_ = false;     // under mutex_; a Park is sent and its IsParked poll runs; refuses slews like parked_
     mutable bool at_home_ = false;
     mutable bool homing_ = false;
     mutable bool slewing_cached_ = false;
