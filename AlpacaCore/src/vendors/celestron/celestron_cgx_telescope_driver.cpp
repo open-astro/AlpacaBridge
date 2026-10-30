@@ -296,8 +296,29 @@ private:
     [[noreturn]] static void not_implemented(const char* member, bool property = false);
     void require_connected() const;
     void require_healthy_transport() const;
-    CgxSkyPosition read_sky_position_locked(std::uint32_t* ra_encoder = nullptr, std::uint32_t* dec_encoder = nullptr,
-                                            bool reuse_stationary_telemetry = false) const;
+    // Drops mutex_ for the axis exchanges and re-validates after them (decision 0016 rules 1 and 6).
+    // Every caller holds motion_start_mutex_, so no other reader or motion start runs while mutex_ is dropped:
+    // the stationary check and the telemetry key taken before the read still describe the mount afterwards.
+    CgxSkyPosition read_sky_position(std::unique_lock<std::mutex>& lock, std::uint32_t* ra_encoder = nullptr,
+                                     std::uint32_t* dec_encoder = nullptr,
+                                     bool reuse_stationary_telemetry = false) const;
+    // Releases mutex_ for a wire exchange and takes it back on scope exit, also when the exchange throws.
+    class MutexRelease final {
+    public:
+        explicit MutexRelease(std::unique_lock<std::mutex>& lock) : MutexRelease(&lock) {}
+        // A null lock releases nothing (the caller holds no mutex_ to drop).
+        explicit MutexRelease(std::unique_lock<std::mutex>* lock) : lock_(lock) {
+            if (lock_ != nullptr) lock_->unlock();
+        }
+        ~MutexRelease() {
+            if (lock_ != nullptr) lock_->lock();
+        }
+        MutexRelease(const MutexRelease&) = delete;
+        MutexRelease& operator=(const MutexRelease&) = delete;
+
+    private:
+        std::unique_lock<std::mutex>* lock_;
+    };
     void reset_telemetry_locked() const {
         stationary_raw_pair_.reset();
         ++telemetry_reference_epoch_;
@@ -320,8 +341,9 @@ private:
     void stop_motion_worker_checked();
     void start_stop_operation(bool unpark);
     void run_stop_operation(util::OperationContext& context);
-    void set_tracking_locked(bool tracking);
-    void write_tracking_state_locked(bool tracking, int rate);
+    // A non-null `release` is the caller's held mutex_ lock: the tracking exchanges run with it dropped.
+    void set_tracking_locked(bool tracking, std::unique_lock<std::mutex>* release = nullptr);
+    void write_tracking_state_locked(bool tracking, int rate, std::unique_lock<std::mutex>* release = nullptr);
     bool finish_slew_operation(util::OperationContext& context, util::TaskClock::clock::time_point deadline,
                                double right_ascension_hours, double declination_degrees, CgxPointingSide pointing_side,
                                const char* timeout_message);
@@ -520,23 +542,27 @@ void CelestronCgxTelescopeDriver::validate_site_and_coordinates(double ra, doubl
     util::validate_ra_dec(ra, dec, operation);
 }
 
-CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position_locked(std::uint32_t* ra_encoder,
-                                                                     std::uint32_t* dec_encoder,
-                                                                     bool reuse_stationary_telemetry) const {
+CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position(std::unique_lock<std::mutex>& lock,
+                                                              std::uint32_t* ra_encoder, std::uint32_t* dec_encoder,
+                                                              bool reuse_stationary_telemetry) const {
     try {
-        require_connected();
-        require_site_locked();
-        require_healthy_transport();  // A known fault must refuse even a warm frame.
-        if (stop_pending_)
-            throw AlpacaException("Celestron CGX stop is still pending verification", AlpacaError::DriverException);
-        if (motion_state_unverified_)
-            throw AlpacaException("Celestron CGX motion may still be active; confirm a stop before reading coordinates",
-                                  AlpacaError::DriverException);
-        if (!reference_valid_locked()) {
-            throw AlpacaException(needs_sync_ ? "Celestron CGX pointing reference needs SyncToCoordinates"
-                                              : "Celestron CGX encoder reference is unknown; run FindHome",
-                                  AlpacaError::DriverException);
-        }
+        const auto require_readable = [this] {
+            require_connected();
+            require_site_locked();
+            require_healthy_transport();  // A known fault must refuse even a warm frame.
+            if (stop_pending_)
+                throw AlpacaException("Celestron CGX stop is still pending verification", AlpacaError::DriverException);
+            if (motion_state_unverified_)
+                throw AlpacaException(
+                    "Celestron CGX motion may still be active; confirm a stop before reading coordinates",
+                    AlpacaError::DriverException);
+            if (!reference_valid_locked()) {
+                throw AlpacaException(needs_sync_ ? "Celestron CGX pointing reference needs SyncToCoordinates"
+                                                  : "Celestron CGX encoder reference is unknown; run FindHome",
+                                      AlpacaError::DriverException);
+            }
+        };
+        require_readable();
         // Control callers remain fresh by default. Only the five public coordinate
         // getters opt in, holding motion_start_mutex_ before mutex_ so ownership
         // cannot change between this gate and the pair read/cache hit.
@@ -546,17 +572,27 @@ CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position_locked(std::uint32
                                 !pulse_slot_.running() && !stop_slot_.running() && !motion_slot_.last_failure() &&
                                 !pulse_slot_.last_failure() && !stop_slot_.last_failure();
         if (!stationary) reset_telemetry_locked();  // Includes Sync's fresh read before its label writes.
-        const std::array key{reference_generation_, telemetry_reference_epoch_, motion_generation_.current(),
-                             pulse_generation_.current(), stop_generation_.current()};
+        const auto make_key = [this] {
+            return std::array{reference_generation_, telemetry_reference_epoch_, motion_generation_.current(),
+                              pulse_generation_.current(), stop_generation_.current()};
+        };
+        const auto key = make_key();
         if (telemetry_key_ != key) stationary_raw_pair_.reset();
         std::pair<std::uint32_t, std::uint32_t> raw;
         // Unobserved link loss is bounded to 30 ms from refill; hits never extend it.
         if (!stationary_raw_pair_ || clock_.now() - telemetry_filled_at_ >= std::chrono::milliseconds(30)) {
             stationary_raw_pair_.reset();  // Never fall back after a failed/partial refill.
-            const auto ra = protocol_.get_axis_position(CgxAxis::RightAscension);
-            const auto dec = protocol_.get_axis_position(CgxAxis::Declination);
-            require_healthy_transport();
-            if (!reference_valid_locked())
+            const auto session = protocol_.session_generation();
+            std::uint32_t ra;
+            std::uint32_t dec;
+            {
+                const MutexRelease unlocked(lock);  // The I/O lock is never taken under mutex_.
+                ra = protocol_.get_axis_position(CgxAxis::RightAscension);
+                dec = protocol_.get_axis_position(CgxAxis::Declination);
+            }
+            // The pair may be from a session or motion state that no longer exists: re-validate.
+            require_readable();
+            if (session != protocol_.session_generation() || make_key() != key)
                 throw AlpacaException("Celestron CGX session changed while reading coordinates",
                                       AlpacaError::DriverException);
             raw = {ra, dec};
@@ -827,8 +863,8 @@ AlignmentMode CelestronCgxTelescopeDriver::get_alignment_mode() const {
 }
 double CelestronCgxTelescopeDriver::get_altitude() const {
     std::lock_guard<std::mutex> motion_lock(motion_start_mutex_);
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto sky = read_sky_position_locked(nullptr, nullptr, true);
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto sky = read_sky_position(lock, nullptr, nullptr, true);
     const double latitude = configured_site_coordinate(info_.site_latitude_degrees, "SiteLatitude");
     const auto utc =
         std::chrono::system_clock::time_point{std::chrono::duration_cast<std::chrono::system_clock::duration>(
@@ -876,8 +912,8 @@ bool CelestronCgxTelescopeDriver::get_at_park() const {
 }
 double CelestronCgxTelescopeDriver::get_azimuth() const {
     std::lock_guard<std::mutex> motion_lock(motion_start_mutex_);
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto sky = read_sky_position_locked(nullptr, nullptr, true);
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto sky = read_sky_position(lock, nullptr, nullptr, true);
     const double latitude =
         configured_site_coordinate(info_.site_latitude_degrees, "SiteLatitude") * std::numbers::pi / 180.0;
     const auto utc =
@@ -895,8 +931,8 @@ double CelestronCgxTelescopeDriver::get_azimuth() const {
 }
 double CelestronCgxTelescopeDriver::get_declination() const {
     std::lock_guard<std::mutex> motion_lock(motion_start_mutex_);
-    std::lock_guard<std::mutex> lock(mutex_);
-    return read_sky_position_locked(nullptr, nullptr, true).declination_degrees;
+    std::unique_lock<std::mutex> lock(mutex_);
+    return read_sky_position(lock, nullptr, nullptr, true).declination_degrees;
 }
 bool CelestronCgxTelescopeDriver::get_tracking() const {
     require_connected();
@@ -917,7 +953,7 @@ void CelestronCgxTelescopeDriver::set_tracking(bool tracking) {
     set_tracking_locked(tracking);
 }
 
-void CelestronCgxTelescopeDriver::set_tracking_locked(bool tracking) {
+void CelestronCgxTelescopeDriver::set_tracking_locked(bool tracking, std::unique_lock<std::mutex>* release) {
     if (tracking && parked_) {
         throw AlpacaException("Cannot enable tracking while parked", AlpacaError::InvalidWhileParked);
     }
@@ -925,7 +961,7 @@ void CelestronCgxTelescopeDriver::set_tracking_locked(bool tracking) {
     if (tracking && !reference_valid_locked()) {
         throw AlpacaException("Run FindHome before enabling Celestron CGX tracking", AlpacaError::InvalidOperation);
     }
-    write_tracking_state_locked(tracking, tracking_rate_);
+    write_tracking_state_locked(tracking, tracking_rate_, release);
     tracking_ = tracking;
     if (tracking) at_home_ = false;
 }
@@ -964,8 +1000,8 @@ bool CelestronCgxTelescopeDriver::get_is_pulse_guiding() const {
 }
 double CelestronCgxTelescopeDriver::get_right_ascension() const {
     std::lock_guard<std::mutex> motion_lock(motion_start_mutex_);
-    std::lock_guard<std::mutex> lock(mutex_);
-    return read_sky_position_locked(nullptr, nullptr, true).right_ascension_hours;
+    std::unique_lock<std::mutex> lock(mutex_);
+    return read_sky_position(lock, nullptr, nullptr, true).right_ascension_hours;
 }
 void CelestronCgxTelescopeDriver::set_declination_rate(double) {
     require_connected();
@@ -977,8 +1013,8 @@ void CelestronCgxTelescopeDriver::set_right_ascension_rate(double) {
 }
 int CelestronCgxTelescopeDriver::get_side_of_pier() const {
     std::lock_guard<std::mutex> motion_lock(motion_start_mutex_);
-    std::lock_guard<std::mutex> lock(mutex_);
-    return read_sky_position_locked(nullptr, nullptr, true).pointing_side == CgxPointingSide::Normal ? 0 : 1;
+    std::unique_lock<std::mutex> lock(mutex_);
+    return read_sky_position(lock, nullptr, nullptr, true).pointing_side == CgxPointingSide::Normal ? 0 : 1;
 }
 void CelestronCgxTelescopeDriver::set_side_of_pier(int side) {
     if (side != 0 && side != 1) throw AlpacaException("SideOfPier must be 0 or 1", AlpacaError::InvalidValue);
@@ -1051,8 +1087,8 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
             return false;
         bool arrived = false;
         if (!run_motion_stage(context, [&] {
-                std::lock_guard<std::mutex> lock(mutex_);
-                const CgxSkyPosition actual = read_sky_position_locked();
+                std::unique_lock<std::mutex> lock(mutex_);
+                const CgxSkyPosition actual = read_sky_position(lock);
                 const double ra_error_degrees =
                     std::abs(std::remainder(actual.right_ascension_hours - right_ascension_hours, 24.0)) * 15.0;
                 const double dec_error_degrees = std::abs(actual.declination_degrees - declination_degrees);
@@ -1134,12 +1170,15 @@ void CelestronCgxTelescopeDriver::set_tracking_rate_locked(int rate) {
     tracking_rate_ = rate;
 }
 
-void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int rate) {
+void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int rate,
+                                                              std::unique_lock<std::mutex>* release) {
     // Every nonzero rate path, including TrackingRate, needs the same reference.
     // Zero-rate cleanup remains available after a session fault.
     if (tracking && !reference_valid_locked())
         throw AlpacaException("Run FindHome before enabling Celestron CGX tracking", AlpacaError::InvalidOperation);
-    const auto write = [this](bool enabled, int selected_rate, const char* operation) {
+    const auto hemisphere = hemisphere_locked();  // Read before the exchanges may drop mutex_.
+    const auto previous_rate = tracking_rate_;
+    const auto write = [this, hemisphere](bool enabled, int selected_rate, const char* operation) {
         std::exception_ptr failure;
         const auto send = [&](CgxAxis axis, std::uint8_t command, std::vector<std::uint8_t> payload) {
             try {
@@ -1151,7 +1190,7 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         };
         if (enabled) {
             send(CgxAxis::Declination, 0x06, {0, 0, 0});
-            const auto command = hemisphere_locked() == CgxHemisphere::South ? 0x07 : 0x06;
+            const auto command = hemisphere == CgxHemisphere::South ? 0x07 : 0x06;
             const auto payload = selected_rate == 0   ? std::vector<std::uint8_t>{0xff, 0xff}
                                  : selected_rate == 1 ? std::vector<std::uint8_t>{0xff, 0xfd}
                                                       : std::vector<std::uint8_t>{0xff, 0xfe};
@@ -1163,25 +1202,38 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         return failure;
     };
 
-    if (const auto failure = write(tracking, rate, "tracking command")) {
-        const bool previous_state_valid = tracking_state_valid_;
-        bool rollback_succeeded = false;
-        try {
-            // Lost matching invalidates the reference. Recover on the owned fd
-            // and leave tracking off rather than resume an uncertain frame.
-            // Under mutex_: never wait out another device's probe (#1457).
-            protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
-            rollback_succeeded = !write(false, tracking_rate_, "tracking rollback");
-            if (rollback_succeeded) tracking_ = false;
-        } catch (...) {
-            rollback_succeeded = false;
+    // A caller that passed its lock has the I/O lock taken first (decision 0016 rule 2).
+    // Read before the release; safe because the Sync caller holds transition_mutex_ and motion_start_mutex_,
+    // so no other writer changes tracking_state_valid_ while mutex_ is dropped.
+    const bool previous_state_valid = tracking_state_valid_;
+    std::exception_ptr failure;
+    bool rollback_succeeded = false;
+    bool rolled_back = false;
+    {
+        const MutexRelease unlocked(release);
+        failure = write(tracking, rate, "tracking command");
+        if (failure) {
+            try {
+                // Lost matching invalidates the reference. Recover on the owned fd
+                // and leave tracking off rather than resume an uncertain frame.
+                // Never wait out another device's probe (#1457); mutex_ is held here unless the caller passed its lock.
+                protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
+                rollback_succeeded = !write(false, previous_rate, "tracking rollback");
+                rolled_back = rollback_succeeded;
+            } catch (...) {
+                rollback_succeeded = false;
+            }
         }
+    }
+    if (failure) {
+        if (rolled_back) tracking_ = false;
         tracking_state_valid_ = previous_state_valid && rollback_succeeded;
         if (!rollback_succeeded) {
             ALPACA_LOG_ERROR("Celestron CGX", "Tracking update and rollback both failed; tracking readback is unknown");
         }
         std::rethrow_exception(failure);
     }
+    if (release != nullptr) require_connected();  // Re-check after the exchanges (decision 0016 rule 6).
     tracking_state_valid_ = true;
 }
 void CelestronCgxTelescopeDriver::set_site_elevation(double elevation) {
@@ -1335,7 +1387,7 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
     CgxAxis axis;
     int velocity;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         require_site_locked();
         if (parked_) throw AlpacaException("Cannot PulseGuide while parked", AlpacaError::InvalidWhileParked);
         if (!tracking_state_valid_)
@@ -1346,7 +1398,7 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
         if (!reference_valid_locked())
             throw AlpacaException("Run FindHome before PulseGuide", AlpacaError::InvalidOperation);
         if (duration_ms == 0) return;
-        const auto sky = read_sky_position_locked();
+        const auto sky = read_sky_position(lock);
         const bool dec_axis = direction == 0 || direction == 1;
         axis = dec_axis ? CgxAxis::Declination : CgxAxis::RightAscension;
         const double guide_rate = dec_axis ? guide_rate_.dec : guide_rate_.ra;
@@ -1411,36 +1463,44 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         if (parked_) throw AlpacaException("Cannot sync while parked", AlpacaError::InvalidWhileParked);
     }
     MotionTransition transition(*this);
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     if (parked_) throw AlpacaException("Cannot sync while parked", AlpacaError::InvalidWhileParked);
     if (!reference_valid_locked())
         throw AlpacaException("Run FindHome before SyncToCoordinates", AlpacaError::InvalidOperation);
     const bool restore_tracking = tracking_;
     bool reference_write_started = false;
     try {
-        if (restore_tracking) set_tracking_locked(false);
+        if (restore_tracking) set_tracking_locked(false, &lock);
         // A rate-off ACK can precede encoder standstill. Never re-label a
         // drifting axis, including when the client just switched tracking off.
         util::ConsecutiveSettle settle(3, 15);
         const auto settle_deadline = clock_.now() + std::chrono::milliseconds(500);
         std::optional<std::pair<std::uint32_t, std::uint32_t>> previous;
-        while (true) {
-            const auto ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
-            const auto dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
-            const bool stable = previous && std::abs(signed_cgx_encoder_delta(ra_encoder, previous->first)) <= 2 &&
-                                std::abs(signed_cgx_encoder_delta(dec_encoder, previous->second)) <= 2;
-            previous = std::pair{ra_encoder, dec_encoder};
-            const auto state = settle.feed(stable);
-            if (state == util::ConsecutiveSettle::State::Settled) break;
-            if (state == util::ConsecutiveSettle::State::TimedOut || clock_.now() >= settle_deadline) {
-                throw AlpacaException("Celestron CGX encoders did not settle before Sync",
-                                      AlpacaError::DriverException);
+        // The settle and label-readback loops run on the wire with mutex_ dropped (decision 0016 rules 1 and 2).
+        {
+            const MutexRelease unlocked(lock);
+            while (true) {
+                const auto ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
+                const auto dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
+                const bool stable = previous && std::abs(signed_cgx_encoder_delta(ra_encoder, previous->first)) <= 2 &&
+                                    std::abs(signed_cgx_encoder_delta(dec_encoder, previous->second)) <= 2;
+                previous = std::pair{ra_encoder, dec_encoder};
+                const auto state = settle.feed(stable);
+                if (state == util::ConsecutiveSettle::State::Settled) break;
+                if (state == util::ConsecutiveSettle::State::TimedOut || clock_.now() >= settle_deadline) {
+                    throw AlpacaException("Celestron CGX encoders did not settle before Sync",
+                                          AlpacaError::DriverException);
+                }
+                clock_.sleep_for(std::chrono::milliseconds(20));
             }
-            clock_.sleep_for(std::chrono::milliseconds(20));
         }
+        require_connected();  // Rule 6: re-check after the exchanges.
+        if (parked_) throw AlpacaException("Cannot sync while parked", AlpacaError::InvalidWhileParked);
+        if (!reference_valid_locked())
+            throw AlpacaException("Run FindHome before SyncToCoordinates", AlpacaError::InvalidOperation);
         std::uint32_t current_ra_encoder;
         std::uint32_t current_dec_encoder;
-        const CgxSkyPosition current = read_sky_position_locked(&current_ra_encoder, &current_dec_encoder);
+        const CgxSkyPosition current = read_sky_position(lock, &current_ra_encoder, &current_dec_encoder);
         const auto utc =
             std::chrono::system_clock::time_point{std::chrono::duration_cast<std::chrono::system_clock::duration>(
                 std::chrono::duration<double>(current_utc_locked()))};
@@ -1452,27 +1512,31 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         const std::uint32_t next_dec_rehome_label =
             offset_encoder_label(dec_rehome_label_, signed_cgx_encoder_delta(positions.second, current_dec_encoder));
         reference_write_started = true;  // Even a failed ACK may have changed the controller labels.
-        protocol_.set_axis_position(CgxAxis::RightAscension, positions.first);
-        protocol_.set_axis_position(CgxAxis::Declination, positions.second);
-        // MC_SET_POSITION itself produces a brief readback transient even on
-        // stationary hardware. Verify retained labels, not its first sample.
-        util::ConsecutiveSettle reference_settle(3, 15);
-        const auto reference_deadline = clock_.now() + std::chrono::milliseconds(500);
-        while (true) {
-            const auto ra_delta =
-                signed_cgx_encoder_delta(protocol_.get_axis_position(CgxAxis::RightAscension), positions.first);
-            const auto dec_delta =
-                signed_cgx_encoder_delta(protocol_.get_axis_position(CgxAxis::Declination), positions.second);
-            const auto state = reference_settle.feed(std::abs(ra_delta) <= 2 && std::abs(dec_delta) <= 2);
-            if (state == util::ConsecutiveSettle::State::Settled) break;
-            if (state == util::ConsecutiveSettle::State::TimedOut || clock_.now() >= reference_deadline) {
-                throw AlpacaException("Celestron CGX did not retain the synchronized encoder reference: RA delta=" +
-                                          std::to_string(ra_delta) + " Dec delta=" + std::to_string(dec_delta) +
-                                          " counts",
-                                      AlpacaError::DriverException);
+        {
+            const MutexRelease unlocked(lock);
+            protocol_.set_axis_position(CgxAxis::RightAscension, positions.first);
+            protocol_.set_axis_position(CgxAxis::Declination, positions.second);
+            // MC_SET_POSITION itself produces a brief readback transient even on
+            // stationary hardware. Verify retained labels, not its first sample.
+            util::ConsecutiveSettle reference_settle(3, 15);
+            const auto reference_deadline = clock_.now() + std::chrono::milliseconds(500);
+            while (true) {
+                const auto ra_delta =
+                    signed_cgx_encoder_delta(protocol_.get_axis_position(CgxAxis::RightAscension), positions.first);
+                const auto dec_delta =
+                    signed_cgx_encoder_delta(protocol_.get_axis_position(CgxAxis::Declination), positions.second);
+                const auto state = reference_settle.feed(std::abs(ra_delta) <= 2 && std::abs(dec_delta) <= 2);
+                if (state == util::ConsecutiveSettle::State::Settled) break;
+                if (state == util::ConsecutiveSettle::State::TimedOut || clock_.now() >= reference_deadline) {
+                    throw AlpacaException("Celestron CGX did not retain the synchronized encoder reference: RA delta=" +
+                                              std::to_string(ra_delta) + " Dec delta=" + std::to_string(dec_delta) +
+                                              " counts",
+                                          AlpacaError::DriverException);
+                }
+                clock_.sleep_for(std::chrono::milliseconds(20));
             }
-            clock_.sleep_for(std::chrono::milliseconds(20));
         }
+        require_connected();  // Rule 6: re-check after the exchanges; the catch marks the labels unknown.
         // Sync re-labels the current mechanical position. Keep the homed
         // reference fixed, and remember the equivalent home labels in this
         // shifted frame for any later meridian-route re-home.
@@ -1492,7 +1556,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         }
         throw;
     }
-    if (restore_tracking) set_tracking_locked(true);
+    if (restore_tracking) set_tracking_locked(true, &lock);
 }
 void CelestronCgxTelescopeDriver::sync_to_target() {
     require_connected();
@@ -1825,7 +1889,7 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     CgxHemisphere hemisphere;
     bool needs_home_route;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         if (parked_) throw AlpacaException("Cannot slew while parked", AlpacaError::InvalidWhileParked);
         if (!reference_valid_locked())
             throw AlpacaException("Run FindHome before slewing the Celestron CGX", AlpacaError::InvalidOperation);
@@ -1834,7 +1898,7 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
         if (!tracking_state_valid_)
             throw AlpacaException("Celestron CGX tracking state is unknown after a partial controller update",
                                   AlpacaError::DriverException);
-        const CgxSkyPosition current = read_sky_position_locked();
+        const CgxSkyPosition current = read_sky_position(lock);
         sync_correction_active = sync_correction_active_;
         const auto utc =
             std::chrono::system_clock::time_point{std::chrono::duration_cast<std::chrono::system_clock::duration>(

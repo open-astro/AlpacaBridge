@@ -40,7 +40,7 @@ Symbol: `transition_mutex_`
 | Altair camera | `create_toupcam_family_camera` | `AlpacaCore/src/vendors/altair/altair_camera_driver.cpp` | adopted |  |  |
 | Astroasis focuser |  | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted |  | served from `PolledState` |
 | Bisque telescope |  | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | partial | #1838 | rule 6: slew gate re-locks after a live `is_tracking()` without re-checking park |
-| Celestron CGX telescope |  | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | partial | #1837 | coordinate getters and Sync hold `mutex_` across AUX reads |
+| Celestron CGX telescope |  | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | partial | #1837 | coordinate getters, the slew-arrival and PulseGuide position reads and SyncToCoordinates (settle, label write, tracking off/restore) drop `mutex_` for AUX exchanges; still on the old order (I/O under `mutex_`): `set_tracking` and `set_tracking_rate` (`set_tracking_locked` without a lock argument), the slew start tracking-off write and its failure restore, the slew-arrival `set_tracking_locked(true)` and `goto_axis_slow`, stop, home and the flip slew |
 | Celestron focuser |  | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted |  |  |
 | Celestron telescope |  | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted |  |  |
 | Gemini flat panel |  | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted |  |  |
