@@ -124,8 +124,7 @@ TEST_CASE("CGX state-only getters return while Sync waits on the label write ACK
     check_getters_while_sync_holds(rig, {0x10, 0x04}, false);  // MC_SET_POSITION
 }
 
-TEST_CASE("CGX state-only getters return while Sync waits on a tracking ACK (#1837)",
-          "[celestron][cgx][getter-wait]") {
+TEST_CASE("CGX state-only getters return while Sync waits on a tracking ACK (#1837)", "[celestron][cgx][getter-wait]") {
     GetterWaitRig rig;
     check_getters_while_sync_holds(rig, {0x10, 0x06}, true);  // tracking off before the labels
 }
