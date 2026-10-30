@@ -75,7 +75,7 @@ TEST_CASE("Astroasis Focuser Driver - getters between poll ticks cause no device
     const int after_connect = state->transactions();
 
     // A client that polls slower than the old 100 ms cache lifetime: real time
-    // passes, the virtual rig.clock() does not, so no tick runs.
+    // passes, the fake rig.clock() does not, so no tick runs.
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     for (int i = 0; i < 50; ++i) {
         (void)rig.driver().get_position();

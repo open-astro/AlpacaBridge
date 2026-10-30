@@ -12,8 +12,8 @@
 
 #pragma once
 
-// Helpers every driver test file shares. Free functions, no state; a file
-// includes this header instead of keeping its own copy.
+// Helpers and a polled-driver rig every driver test file shares: free functions, plus PolledRig;
+// a file includes this header instead of keeping its own copy.
 
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/telescope_driver.h>
@@ -83,7 +83,7 @@ struct RigTiming {
     std::chrono::milliseconds bound;
 };
 
-// A fake, a fake clock and the driver under test, built in that order and destroyed in reverse (the driver goes
+// A fake clock, a fake and the driver under test, built in that order and destroyed in reverse (the driver goes
 // first). A thin wrapper over connect_and_park(), tick() and require_alpaca_error(): it adds no rendezvous logic.
 // The factory builds the driver without connecting it, so a case can set up the fake before connect().
 template <typename Fake, typename Driver>
@@ -91,9 +91,7 @@ class PolledRig {
 public:
     using Factory = std::function<std::unique_ptr<Driver>(Fake&, FakeTaskClock&)>;
 
-    template <typename... FakeArgs>
-    PolledRig(RigTiming timing, Factory make, FakeArgs&&... args)
-        : timing_(timing), fake_(std::forward<FakeArgs>(args)...), driver_(make(fake_, clock_)) {}
+    PolledRig(RigTiming timing, Factory make) : timing_(timing), driver_(make(fake_, clock_)) {}
 
     PolledRig(const PolledRig&) = delete;
     PolledRig& operator=(const PolledRig&) = delete;
