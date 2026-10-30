@@ -3684,6 +3684,8 @@ TEST_CASE("SkyWatcher async - a pending RightAscensionRate check is reaped by Tr
     // its settle + window (450 ms measured), a cancelled one for microseconds.
     REQUIRE(disconnect_ms < 200.0);
     REQUIRE_FALSE(driver->get_connected());
+    // The disconnect reaped the check: nothing is still parked on the clock.
+    CHECK(clock.waiter_count() == 0);
 }
 
 TEST_CASE("SkyWatcher async - a rate check past its last wait does not resend after Tracking off",
