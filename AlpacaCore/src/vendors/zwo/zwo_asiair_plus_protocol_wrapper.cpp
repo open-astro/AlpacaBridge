@@ -213,7 +213,7 @@ public:
             // duty 0 OFF) before the fd goes. Boolean ports already hold
             // their commanded level. Raw polarity is inverted: 0 = ON.
             for (std::size_t i = 0; i < ports_.size(); ++i) {
-                // A port no client armed was never written; settling it would drive the cached 100 (decision 0021 rule 1).
+                // A port no client armed was never written; settling it would drive the cached 100 (decision 0021).
                 if (!ports_[i].pwm_enabled || !port_states_[i]->armed.exchange(false)) {
                     continue;
                 }
