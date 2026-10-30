@@ -773,29 +773,53 @@ struct ClientKey {
     bool has_client_id = false;
 };
 
+// Alpaca defines ClientID as a uint32. Anything else counts as absent (issue
+// #1738): the key is stored verbatim, so an arbitrary string would let one
+// client hold a registry entry of any size for the whole stale window.
+bool is_uint32_client_id(std::string_view id) {
+    if (id.empty() || id.size() > 10) {
+        return false;
+    }
+    std::uint64_t value = 0;
+    for (const char c : id) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        value = value * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+    return value <= std::numeric_limits<std::uint32_t>::max();
+}
+
 ClientKey extract_client_key(const alpacahttp::Request& request) {
     ClientKey result;
-    if (request.method() == alpacahttp::HttpMethod::GET) {
-        if (request.has_query_param("ClientID")) {
-            result.key = request.get_query_param("ClientID");
+    const auto accept = [&result](std::string id) {
+        if (is_uint32_client_id(id)) {
+            result.key = std::move(id);
             result.has_client_id = true;
         }
+    };
+    if (request.method() == alpacahttp::HttpMethod::GET) {
+        if (request.has_query_param("ClientID")) {
+            accept(request.get_query_param("ClientID"));
+        }
     } else if (!request.body().empty()) {
+        bool json_has_client_id = false;
         if (auto json_opt = alpacahttp::parse_json(request.body())) {
             if (const auto* val = find_json_value(*json_opt, "ClientID")) {
                 if (val->is_string()) {
-                    result.key = val->get<std::string>();
-                    result.has_client_id = true;
+                    json_has_client_id = true;
+                    accept(val->get<std::string>());
                 } else if (val->is_number_integer()) {
-                    result.key = std::to_string(val->get<std::int64_t>());
-                    result.has_client_id = true;
+                    json_has_client_id = true;
+                    if (val->is_number_unsigned()) {
+                        accept(std::to_string(val->get<std::uint64_t>()));
+                    }
                 }
             }
         }
-        if (!result.has_client_id) {
+        if (!json_has_client_id) {
             if (auto value = get_form_value(request.body(), "ClientID")) {
-                result.key = *value;
-                result.has_client_id = true;
+                accept(*value);
             }
         }
     }
