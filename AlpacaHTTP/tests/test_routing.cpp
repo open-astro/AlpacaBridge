@@ -10520,6 +10520,19 @@ int main() {
         EXPECT(archive.find("older log file(s) omitted: archive capped at 32 MiB") != std::string::npos);
     }
 
+    {
+        // case: a second log archive download is refused while one is building (#1737)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        const auto held = router.hold_log_archive_lock_for_test();
+        const auto busy = route_request(router, "GET", "/management/v1/logfiles?download=1");
+        EXPECT(busy.get_header("Content-Type").find("application/json") == 0);
+        const auto json = nlohmann::json::parse(busy.body(), nullptr, false);
+        EXPECT(json.is_object());
+        EXPECT(json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(json.value("ErrorMessage", "") == "Log archive build already in progress; retry shortly");
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }
