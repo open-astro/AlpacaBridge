@@ -2365,26 +2365,26 @@ constexpr std::chrono::seconds kTier3Budget{20};
     CHECK(thrown_code([&] { (void)completion_reports_done(*hosted.driver, h.type); }) != -1);
 }
 
-// Initiators shared by the recipes.
-void t3_start_slew(Hosted& hosted, double ra_offset_hours, double dec) {
+// Initiators shared by the recipes; [[maybe_unused]] because a build with none of their vendors calls none.
+[[maybe_unused]] void t3_start_slew(Hosted& hosted, double ra_offset_hours, double dec) {
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
     if (t.get_can_set_tracking() && !t.get_tracking()) t.set_tracking(true);
     t.slew_to_coordinates_async(std::fmod(t.get_right_ascension() + ra_offset_hours + 24.0, 24.0), dec);
 }
 
 // A slew to `ha_hours` west of the meridian, which no mount here takes as a meridian flip.
-void t3_start_slew_at_hour_angle(Hosted& hosted, double ha_hours, double dec) {
+[[maybe_unused]] void t3_start_slew_at_hour_angle(Hosted& hosted, double ha_hours, double dec) {
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
     if (t.get_can_set_tracking() && !t.get_tracking()) t.set_tracking(true);
     t.slew_to_coordinates_async(std::fmod(t.get_sidereal_time() - ha_hours + 24.0, 24.0), dec);
 }
 
-void t3_start_focuser_move(Hosted& hosted, int steps_away) {
+[[maybe_unused]] void t3_start_focuser_move(Hosted& hosted, int steps_away) {
     auto& f = dynamic_cast<alpacacore::FocuserDriver&>(*hosted.driver);
     f.move(f.get_absolute() ? f.get_position() + steps_away : steps_away);
 }
 
-void t3_start_exposure(Hosted& hosted, double seconds) {
+[[maybe_unused]] void t3_start_exposure(Hosted& hosted, double seconds) {
     dynamic_cast<alpacacore::CameraDriver&>(*hosted.driver).start_exposure(seconds, true);
 }
 
@@ -2851,18 +2851,19 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_INITIATORS)
 #ifndef _WIN32
 #define CT3_CASE_TAGS_OK "[contract][tier3]"
 #define CT3_CASE_TAGS_DEFECT "[contract][tier3][!shouldfail]"
-#define CT3_CASE(id, status)                                                                       \
-    TEST_CASE("Contract sweep tier 3 - " #id " - failure after start is never a clean completion", \
-              CT3_CASE_TAGS_##status "[" #id "]") {                                                \
-        case_t3_failure_after_start(tier2_host_##id(), tier3_recipe_##id());                       \
+// Generated from CONTRACT_SWEEP_TIER3_HOSTS rows, like the tier-1 and tier-2 cases; each recipe names its mutation.
+#define CT3_NAME(id) "Contract sweep tier 3 - " #id " - failure after start is never a clean completion"
+#define CT3_CASE(id, status)                                                 \
+    TEST_CASE(CT3_NAME(id), CT3_CASE_TAGS_##status "[" #id "]") {            \
+        case_t3_failure_after_start(tier2_host_##id(), tier3_recipe_##id()); \
     }
 CONTRACT_SWEEP_TIER3_HOSTS(CT3_CASE)
 
 // Non-vacuity guard for tier 3: every tier-2 host of a type with an asynchronous completion property (camera,
 // telescope, focuser, rotator, filter wheel) has a tier-3 recipe with a start, a fault and a description, and no
-// other host has one. A host of those types with no recipe is a fake no case ever fails mid-operation.
-TEST_CASE("Contract sweep tier 3 - every host of an async type has a failure recipe",
-          "[contract][tier3][contract-sweep-guard]") {
+// other host has one. A host of those types with no recipe is a fake no case ever fails mid-operation. Run from the
+// tier-2 roster guard below, as check_tier1_cases_have_a_subject() is from the tier-1 one.
+void check_tier3_hosts_have_a_recipe() {
     std::map<std::string, Tier3Recipe> recipes;
 #define CT3_PUSH(id, status) CHECK(recipes.emplace(#id, tier3_recipe_##id()).second);
     CONTRACT_SWEEP_TIER3_HOSTS(CT3_PUSH)
@@ -2893,6 +2894,7 @@ TEST_CASE("Contract sweep tier 3 - every host of an async type has a failure rec
 // directions. A roster row without a host would be a fake no case ever connects to, and a host without a
 // row would be a fake that check 13 never sees.
 TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contract][tier2][contract-sweep-guard]") {
+    check_tier3_hosts_have_a_recipe();
     using alpacacore::test::contract::kFakeConnectableRoster;
     std::vector<Tier2Host> hosts;
     std::vector<std::string> kinds;
