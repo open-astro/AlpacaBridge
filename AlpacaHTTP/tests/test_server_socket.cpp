@@ -755,9 +755,13 @@ int main() {
             // A bare LF hides the header from the server's CRLF split.
             "PUT /api/v1/telescope/0/connected HTTP/1.1\r\nHost: localhost\n"
             "Transfer-Encoding: chunked\r\n\r\n",
+            // The same bare LF at the end of the request line.
+            "PUT /api/v1/telescope/0/connected HTTP/1.1\n"
+            "Transfer-Encoding: chunked\r\nHost: localhost\r\n\r\n",
         };
-        const std::string trailers[] = {body, "5\r\nhello\r\n0\r\n\r\n", "5\r\nhello\r\n0\r\n\r\n"};
-        for (int i = 0; i < 3; ++i) {
+        const std::string chunked = "5\r\nhello\r\n0\r\n\r\n";
+        const std::string trailers[] = {body, chunked, chunked, chunked};
+        for (int i = 0; i < 4; ++i) {
             int fd = connect_local(port);
             EXPECT(fd >= 0);
             std::string carry;
