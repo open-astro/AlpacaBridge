@@ -1064,7 +1064,7 @@ TEST_CASE("OnStep snapshot - an Unpark after a connect that read no status is se
     rig.connect();
     rig.pause();
     rig.mount->set_status("nNPEW180#");  // parked, but nothing has read it
-    CHECK(error_of([&] { rig.driver->unpark(); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_of([&] { rig.driver->unpark(); }) == alpacacore::AlpacaError::DriverException);
     CHECK(rig.mount->count(":hR") == 0);  // nothing was sent while the status was unknown
 
     rig.mount->silent_status = false;
@@ -1081,8 +1081,8 @@ TEST_CASE("OnStep snapshot - a status the connect could not read refuses the com
     rig.connect();
     rig.pause();
     rig.mount->set_status("nNPEW180#");  // parked, but nothing has read it
-    CHECK(error_of([&] { rig.driver->pulse_guide(0, 100); }) == alpacacore::AlpacaError::InvalidOperation);
-    CHECK(error_of([&] { rig.driver->move_axis(0, 1.0); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_of([&] { rig.driver->pulse_guide(0, 100); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_of([&] { rig.driver->move_axis(0, 1.0); }) == alpacacore::AlpacaError::DriverException);
     CHECK(rig.mount->count(":M") == 0);  // no :Mg, :RA or :Me went out
     CHECK(rig.mount->count(":RA") == 0);
     CHECK_NOTHROW(rig.driver->move_axis(0, 0.0));  // a stop is not held up by the unread status

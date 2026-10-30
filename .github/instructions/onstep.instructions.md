@@ -459,7 +459,7 @@ it is never reachable through `router.cpp` or the web UI.
   available"; a latched fault and a lost link refuse as above. While the frame has no status (every `:GU#`
   since the connect failed), a command that checks for a park or writes the status through (`PulseGuide`, a
   moving `MoveAxis`, `FindHome`, `Tracking=true`, `Unpark`, the slews and syncs) reads `:GU#` first and throws
-  `InvalidOperation` ("the mount's status has not been read yet") when that read fails too, rather than take
+  `DriverException` ("the mount has not answered :GU# since the connect") when that read fails too, rather than take
   the unread status for "not parked"; `AbortSlew`, `MoveAxis(axis, 0)` and `Tracking=false` are stops and are
   never refused over an unread status (`Tracking=false` tries the read, sends `:ST0#` if it fails, and its
   write-through then does not land; a lost link and a latched fault still throw) (#1895). Client commands write through

@@ -2547,8 +2547,9 @@ private:
     // A frame with no status (every :GU# since the connect failed) reads as idle and not parked to the control paths,
     // and a write-through into it is not served (#1895). A command that checks or writes the status reads :GU# now
     // instead, as the Tracking check of a slew does, and refuses when that read fails too: a latched fault and a
-    // lost link as they are, anything else as InvalidOperation. `refuse` false (Tracking=false, a stop) swallows
-    // that last case and carries on; a lost link and a latched fault still throw.
+    // lost link as they are, anything else as DriverException (a mount that does not answer :GU#).
+    // `refuse` false (Tracking=false, a stop) swallows that last case and carries on; a lost link and a latched fault
+    // still throw.
     void ensure_status_read_locked(const char* operation, bool refuse = true) const {
         const auto reading = snapshot_.read();
         if (reading && reading->value.status_known) {
@@ -2565,8 +2566,8 @@ private:
                 return;
             }
             throw AlpacaException(std::string(operation) +
-                                      " is not allowed: the mount's status has not been read yet (" + ex.what() + ")",
-                                  AlpacaError::InvalidOperation);
+                                      " failed: the mount has not answered :GU# since the connect (" + ex.what() + ")",
+                                  AlpacaError::DriverException);
         }
     }
 
