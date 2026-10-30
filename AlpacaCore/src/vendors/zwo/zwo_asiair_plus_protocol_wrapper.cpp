@@ -223,6 +223,10 @@ public:
                     const int err = errno;
                     ALPACA_LOG_WARN(kLogCategory, "ASIAIR Plus: failed to settle PWM port " + std::to_string(i) +
                                                       " before close: " + util::errno_string(err));
+                } else {
+                    // The line now holds the steady level, not the duty. The next open() writes nothing
+                    // (decision 0021 rule 1), so the cache must report what the line holds.
+                    port_states_[i]->value.store(lvl.level == 0 ? 100 : 0);
                 }
             }
             ::close(fd_);

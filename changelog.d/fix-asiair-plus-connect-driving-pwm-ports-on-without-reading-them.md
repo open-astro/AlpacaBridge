@@ -1,3 +1,4 @@
 ### Fixed
 
 - **ASIAIR Plus connect no longer drives PWM ports on**, ZWO ASIAIR Plus switch driver, issue #1904. Connecting wrote SET_MODE, ENABLE and SET_LEVEL (ON) to every PWM-enabled port because the worker started at the cached value 100. A PWM port's worker now writes nothing until a client write or the server-start power-on pass sets its value. Covered by `AlpacaCore/tests/test_zwo_asiair_plus_switch.cpp` ("connect writes nothing to a PWM port no client set"); [decision 0021](docs/decisions/0021-power-port-power-on-state.md) rule 1.
+- **ASIAIR Plus reconnect reports the level the line holds**, same driver, issue #1904. Disconnect settles a PWM line to its steady level, and the next connect writes nothing, so the cached duty (for example 50) no longer matched the line. Disconnect now stores the settled level (100 or 0) after a successful settle. Covered by "a reconnect reports the level close settled and writes nothing" in the same test file.
