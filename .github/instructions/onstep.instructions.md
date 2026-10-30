@@ -118,13 +118,17 @@ it is never reachable through `router.cpp` or the web UI.
 - **Pulse guiding is hardware-timed**: OnStep supports native duration-bearing guide commands
   (`:Mgn####`/`:Mgs####`/`:Mge####`/`:Mgw####`, 4-digit zero-padded milliseconds) — fire-and-forget,
   the mount stops the pulse itself. `IsPulseGuiding` is tracked from the known requested
-  duration, not polled from the mount, and ends early on a stop that ends the pulse: `AbortSlew`
+  duration, not polled from the mount: each axis has its own `util::HoldWindow` (`pulse_hold_`,
+  [decision 0022](../../docs/decisions/0022-hold-window.md)), armed for the duration on the task clock
+  before the `:Mg` command goes out and cleared if the send fails, and `IsPulseGuiding` is true while
+  either axis's pulse runs (OnStepX times each axis on its own, so a shorter pulse on one axis does not
+  end the other's; before #1835 one deadline served both). It ends early on a stop that ends the pulse: `AbortSlew`
   and the same stops a `Park` or `FindHome` sends before a moving mount parks or homes (`:Q#` ends
   every guide, OnStepX `Guide::stop()`), and a `MoveAxis(axis, 0)` on the pulse's axis
-  (`:Qe#`/`:Qw#` or `:Qn#`/`:Qs#` end that axis's guides). Past its end time a pulse still reads
+  (`:Qe#`/`:Qw#` or `:Qn#`/`:Qs#` end that axis's guides), and on connect and disconnect. Past its end time a pulse still reads
   as running until the status poll publishes a frame sampled `kPulseGuideSettle` (50 ms) or more after
   that end, at most `kPulseMeasureBound` (2 s) longer (#1783): a `PulseGuide` starts one extra tick for
-  then, in a slot of its own (`pulse_measurement_`; the 1 s ticks run on through the pulse), so a position read right after `IsPulseGuiding` goes false is not one
+  then (unless the other axis's pulse ends later, whose tick stays), in a slot of its own (`pulse_measurement_`; the 1 s ticks run on through the pulse), so a position read right after `IsPulseGuiding` goes false is not one
   measured mid-pulse (ConformU's PulseGuide checks compare the RA and Dec around it). Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread. A `Duration` over 9999 ms does not fit the 4-digit field
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
@@ -211,7 +215,7 @@ it is never reachable through `router.cpp` or the web UI.
   - **On the task clock (decision 0005).** The driver takes a `util::TaskClock&` (factories
     `create_onstep_telescope()` / `create_onstep_telescope_with_site()`, default the real clock),
     the re-send slot waits through it, and the other deadlines read it too: the status poll's period
-    and the age of its frame, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
+    and the age of its frame, the slew grace and the pulse-guide end (`util::HoldWindow`s, decision 0022), the synchronous-slew poll and settle
     sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
     connect and on disconnect), and the #521 relink outage:
     the driver hands its clock to the process-wide wrapper at connect
@@ -390,6 +394,14 @@ it is never reachable through `router.cpp` or the web UI.
   the mount refused it as already moving (reply `8`). Outside the slew grace the check reads `:GU#`
   on each slew and sync, never the polled frame alone, so a GOTO or home started from the handset is
   seen at once (before #1783 it read the 2 s status cache); inside the grace it refuses without a read.
+  The grace is `slew_hold_`, a `util::HoldWindow` ([decision 0022](../../docs/decisions/0022-hold-window.md)):
+  armed before the `:MS#` goes out and cleared when the `:MS#` is refused or fails, by AbortSlew and the
+  Park/FindHome pre-stops, on connect and disconnect, and at the GOTO's end. Landing never reads the
+  window: it is a reading that shows no GOTO, from the poll or a control path, and it clears the window,
+  so a short GOTO reports landed when the mount stops, not at 2 s. `:GU#` shows the GOTO 1 ms after `:MS#`
+  answers (HM-17 OnStepX 10.23a, 2026-10-29), so the window only keeps `Slewing` true until the first
+  reading. A stale reading cannot end the slew or send the tracking restore: a reading and the `:MS#` share
+  the operation lock, and the dispatch write-through shows the GOTO until a later reading replaces it (#1835).
   `AbortSlew` ends the grace, so the next slew goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
   GOTO state while it brakes after `:Q#` (HM-17 2026-10-24: about 1.6 s), and a slew in that time
   is refused, as the firmware would refuse it (reply `5`). A `:MS#` the mount refuses reports its reply digit and reason (the digits are
@@ -426,7 +438,11 @@ it is never reachable through `router.cpp` or the web UI.
   `kSiteInfoRetryDelay` at most), into `util::StateSnapshot<PolledFrame>`. A `PulseGuide` adds one
   tick, in a slot of its own, that measures the pulse's end (see the pulse guiding bullet). The tick holds
   the operation lock for its exchanges, so it never lands inside a command's sequence, drops `mutex_`
-  for each, and publishes under `mutex_` alone after `begin_poll()`. A tick ends at its first failed
+  for each, and publishes under `mutex_` alone after `begin_poll()`. Publishes are ordered by sample
+  (`PolledFrame::sample_seq`, numbered under the operation lock): a tick, the pulse-end tick or the
+  synchronous slew's end read whose sample is older than the held frame's is skipped, and a newer one in
+  flight is left to publish (before #1835 a publish dropped every other sample in flight, newer ones
+  included, so `IsPulseGuiding` could stay true about 1 s longer and Alt/Az be 2 s older). A tick ends at its first failed
   exchange of `:GU#` or the position, so a Disconnect waits for one reply timeout. Served from the
   frame, stale or not (`kSnapshotMaxAge` 3 s is the freshness bound; stale never refuses, decision 0010
   rule 6): `RightAscension`, `Declination`, `Altitude`, `Azimuth`, `Tracking`, `AtPark`, `AtHome`,
@@ -443,7 +459,7 @@ it is never reachable through `router.cpp` or the web UI.
   body, the synchronous slew's wait (which publishes a full measurement where the slew ends; a failed one
   keeps the last values and counts toward the fault, as a failed tick), AbortSlew's
   tracking decision and the MoveAxis re-send tick. The tracking restore a coordinate slew owes (#1230)
-  is sent by the tick that first reads the GOTO ended past the slew grace (not during a MoveAxis or
+  is sent by the tick that first reads the GOTO ended in a frame sampled after the `:MS#` answer (not during a MoveAxis or
   while a Park or FindHome is pending), under the same operation lock as its `:GU#`. Test seams:
   `set_status_poll_paused_for_testing()`, `poll_status_now_for_testing()`,
   `set_status_poll_after_sample_hook_for_testing()`, `status_poll_running_for_testing()`,

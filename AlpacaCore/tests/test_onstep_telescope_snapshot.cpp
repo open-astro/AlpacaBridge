@@ -71,7 +71,13 @@ struct SnapshotMount {
     std::mutex mutex;
     std::string status = "NpEW180#";  // tracking, no GOTO, not parked (under `mutex`)
     std::vector<std::string> log;     // under `mutex`
+    // Runs on the server thread for each command before it is answered (under `mutex` to set, called outside it).
+    std::function<void(const std::string&)> on_command;
 
+    void set_on_command(std::function<void(const std::string&)> hook) {
+        std::lock_guard<std::mutex> lock(mutex);
+        on_command = std::move(hook);
+    }
     void set_status(const std::string& s) {
         std::lock_guard<std::mutex> lock(mutex);
         status = s;
@@ -131,10 +137,13 @@ struct SnapshotMount {
 
     std::string reply(const std::string& chunk) {
         exchanges.fetch_add(1);
+        std::function<void(const std::string&)> hook;
         {
             std::lock_guard<std::mutex> lock(mutex);
             log.push_back(chunk);
+            hook = on_command;
         }
+        if (hook) hook(chunk);
         if (mute.load()) return "";
         std::string r = answer(chunk);
         if (!r.empty() && latency_ms.load() > 0) std::this_thread::sleep_for(milliseconds(latency_ms.load()));
@@ -657,8 +666,8 @@ TEST_CASE("OnStep snapshot - a control-path status read drops the poll sample in
     onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
 }
 
-// The regular tick and the pulse-end tick both publish after they release the operation lock. A tick that
-// publishes drops any other sample in flight, so a stalled older tick cannot land its frame on top of it.
+// The regular tick and the pulse-end tick both publish after they release the operation lock. A tick whose sample
+// is older than the held frame's is skipped, so a stalled older tick cannot land its frame on top of a newer one.
 TEST_CASE("OnStep snapshot - a tick's publish drops an older tick that is still between its sample and its publish",
           "[onstep][telescope][snapshot]") {
     Rig rig;
@@ -715,6 +724,223 @@ TEST_CASE("OnStep snapshot - a pulse-end body superseded by a newer PulseGuide s
     CHECK(rig.mount->count(":ST") + rig.mount->count(":Te") == restores);  // no restore from the old body
     CHECK(rig.mount->count(":GU#") == reads);                              // it did not even sample
     CHECK(std::abs(rig.driver->get_right_ascension() - 12.0) < 1e-6);      // its frame is not published
+}
+
+// Decision 0022 rule 2: the slew's hold window is armed before the :MS# goes out, so Slewing reads true while the
+// GOTO is being sent and once the call returns, before any :GU# has been read.
+TEST_CASE("OnStep snapshot - Slewing is true as soon as SlewToCoordinatesAsync returns",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.mount->set_status("NpEW180#");  // no GOTO
+    std::atomic<int> during{-1};        // Slewing read while the :MS# is in flight
+    rig.mount->set_on_command([&](const std::string& chunk) {
+        if (chunk.rfind(":MS", 0) == 0) during = rig.driver->get_slewing() ? 1 : 0;
+    });
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.mount->set_on_command(nullptr);
+    CHECK(during.load() == 1);
+    CHECK(rig.driver->get_slewing());
+    rig.mount->set_status("npEW180#");  // the mount shows the GOTO from its first :GU# (rig, 2026-10-29)
+    REQUIRE(rig.tick());
+    CHECK(rig.driver->get_slewing());
+}
+
+// Decision 0022 rule 3: a :GU# read with no GOTO ends the slew at once, inside the 2 s grace. The mount shows the
+// GOTO on one read and then reports stopped: the synchronous call returns on the next 250 ms poll, not at 2 s.
+TEST_CASE("OnStep snapshot - a synchronous slew that lands inside the grace returns before the grace ends",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.mount->set_status("NpEW180#");
+    std::atomic<int> reads_after_goto{-1};  // -1: the :MS# has not gone out
+    rig.mount->set_on_command([&](const std::string& chunk) {
+        if (chunk.rfind(":MS", 0) == 0) {
+            reads_after_goto = 0;
+        } else if (chunk.rfind(":GU", 0) == 0 && reads_after_goto.load() >= 0) {
+            rig.mount->set_status(reads_after_goto.fetch_add(1) == 0 ? "npEW180#" : "NpEW180#");
+        }
+    });
+    const auto start = rig.clock.now();
+    REQUIRE_NOTHROW(synchronous_slew(rig, 2.0, 20.0));
+    const auto elapsed = rig.clock.now() - start;
+    CHECK(elapsed < seconds(2));
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// Decision 0022 rule 2: AbortSlew clears the window, so Slewing reads false at once, inside the 2 s.
+TEST_CASE("OnStep snapshot - AbortSlew inside the hold clears Slewing at once",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.mount->set_status("NpEW180#");
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    REQUIRE(rig.driver->get_slewing());
+    rig.driver->abort_slew();
+    CHECK_FALSE(rig.driver->get_slewing());
+    rig.clock.advance(milliseconds(500));
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// Decision 0022 rule 2: a reconnect starts without the old session's window.
+TEST_CASE("OnStep snapshot - a reconnect inside the hold leaves Slewing false",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.mount->set_status("NpEW180#");
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    REQUIRE(rig.driver->get_slewing());
+    rig.driver->set_connected(false);
+    rig.connect();
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// Decision 0022 rule 4: the pulse's window is on the task clock; a frame sampled before the pulse's end keeps it.
+TEST_CASE("OnStep snapshot - a pulse keeps its axis while virtual time has not reached its end",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.driver->pulse_guide(0, 1000);  // North, 1 s
+    rig.clock.advance(milliseconds(999));
+    REQUIRE(rig.tick());
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.clock.advance(milliseconds(51));  // the end plus kPulseGuideSettle
+    REQUIRE(rig.tick());
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+}
+
+// Each axis has its own window (OnStepX times each axis on its own): a shorter North pulse sent during a longer
+// East one does not end the East pulse's IsPulseGuiding.
+TEST_CASE("OnStep snapshot - a shorter pulse on one axis leaves the other axis's longer pulse guiding",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.driver->pulse_guide(2, 3000);  // East, 3 s
+    rig.driver->pulse_guide(0, 500);   // North, 0.5 s
+    rig.clock.advance(milliseconds(600));
+    REQUIRE(rig.tick());  // North has ended and is measured
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.clock.advance(milliseconds(2400));
+    REQUIRE(rig.tick());  // East's end, sampled before end + 50 ms
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.clock.advance(milliseconds(50));
+    REQUIRE(rig.tick());
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+}
+
+// Decision 0022 rule 3: a reading taken before the :MS# answer does not end the slew, even once the window has run
+// out. A tick samples "no GOTO" and, between its sample and its publish, a SlewToCoordinatesAsync goes out: the
+// dispatch's write-through drops that tick's publish, and Slewing stays true past the 2 s window with no restore.
+// A tick sampled after the answer that shows no GOTO is the landing.
+TEST_CASE("OnStep snapshot - a reading taken before the :MS# answer does not end the slew",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    std::atomic<int> calls{0};
+    onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [&] {
+        if (calls.fetch_add(1) != 0) return;
+        rig.driver->slew_to_coordinates_async(2.0, 20.0);  // tracking on: a restore is owed at the end
+    });
+    REQUIRE(rig.tick());  // sampled "no GOTO" before the :MS#
+    onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
+    rig.mount->set_status("nNpEW180#");  // no GOTO, tracking off
+    rig.clock.advance(seconds(3));       // past the window
+    CHECK(rig.driver->get_slewing());
+    CHECK(rig.mount->count(":ST60") == 0);
+    REQUIRE(rig.tick());  // sampled after the answer: the landing, with no window to wait for
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.mount->count(":ST60") == 1);
+}
+
+// Decision 0022 rule 3 (the Sky-Watcher check, "a short goto reports landed before the 8 s hold ends"): landing is
+// the mount's answer, never the 2 s window. The mount shows the GOTO (1 ms after :MS# answers on the rig), stops at
+// 0.5 s, and the next poll tick reads Slewing false at 1 s.
+TEST_CASE("OnStep snapshot - a short goto reports landed before the 2 s hold ends",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.mount->set_status("npEW180#");  // the GOTO runs
+    REQUIRE(rig.driver->get_slewing());
+    rig.clock.advance(milliseconds(500));
+    REQUIRE(rig.clock.wait_for_woken_settled(seconds(5)));
+    CHECK(rig.driver->get_slewing());   // still running
+    rig.mount->set_status("NpEW180#");  // the GOTO ends at about 0.5 s
+    rig.clock.advance(milliseconds(500));
+    REQUIRE(rig.clock.wait_for_woken_settled(seconds(5)));  // the 1 s tick
+    CHECK_FALSE(rig.driver->get_slewing());                 // 1 s, inside the 2 s window
+}
+
+// A new pulse keeps the running pulse-end tick when the other axis's pulse ends later. With the poll running: East
+// 3 s, then North 0.5 s. East's IsPulseGuiding stays true through the regular 1 s ticks and the 2 s bound, and ends
+// on the tick 50 ms after 3 s; North adds no tick of its own.
+TEST_CASE("OnStep snapshot - a shorter pulse on the other axis keeps the longer pulse's end tick",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));
+    const auto waits = rig.clock.wait_count();
+    rig.driver->pulse_guide(2, 3000);  // East, 3 s: its end tick waits 3.05 s
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, seconds(2)));
+    rig.driver->pulse_guide(0, 500);  // North, 0.5 s: must not replace it with a tick at 0.55 s
+
+    for (int second = 1; second <= 3; ++second) {
+        CAPTURE(second);
+        const auto polls = rig.mount->count(":GU#");
+        rig.clock.advance(seconds(1));
+        REQUIRE(rig.clock.wait_for_woken_settled(seconds(5)));
+        CHECK(rig.mount->count(":GU#") == polls + 1);  // the regular tick only
+        CHECK(rig.driver->get_is_pulse_guiding());
+    }
+    const auto polls = rig.mount->count(":GU#");
+    rig.clock.advance(milliseconds(50));
+    REQUIRE(rig.clock.wait_for_woken_settled(seconds(5)));
+    CHECK(rig.mount->count(":GU#") == polls + 1);  // East's pulse-end tick
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+}
+
+// Publishes are ordered by sample: a tick that sampled after an older tick, and publishes after it, is published
+// (before, the older tick's publish dropped every sample in flight, the newer one included).
+TEST_CASE("OnStep snapshot - a newer sample is not dropped by an older tick's publish",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.mount->ra_seconds = 10;  // what tick A samples
+    std::atomic<int> calls{0};
+    std::atomic<bool> b_sampled{false};
+    std::atomic<bool> a_published{false};
+    std::atomic<bool> b_result{false};
+    std::thread b;
+    const auto await = [](const std::atomic<bool>& flag) {
+        for (int i = 0; i < 5000 && !flag.load(); ++i) std::this_thread::sleep_for(milliseconds(1));
+    };
+    onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [&] {
+        if (calls.fetch_add(1) == 0) {
+            // Tick A, between its sample and its publish: tick B samples now and publishes after A.
+            rig.mount->ra_seconds = 20;
+            b = std::thread([&] { b_result = rig.tick(); });
+            await(b_sampled);
+            return;
+        }
+        b_sampled = true;  // tick B, between its sample and its publish
+        await(a_published);
+    });
+    REQUIRE(rig.tick());  // A publishes 10
+    a_published = true;
+    if (b.joinable()) b.join();
+    onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
+    REQUIRE(b_sampled.load());
+    REQUIRE(b_result.load());
+    CHECK(std::abs(rig.driver->get_right_ascension() - (12.0 + 20.0 / 3600.0)) < 1e-6);
 }
 
 #endif  // !_WIN32
