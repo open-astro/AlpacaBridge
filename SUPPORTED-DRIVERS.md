@@ -570,7 +570,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **Source**: WeeWX HTTP JSON feed (`lcd_datasheet.current`); missing sensors return NaN.
 - **Connection**: HTTP(S) to WeeWX REST/JSON endpoint.
-- **Configuration**: `weewxUrl` (required), optional `pollIntervalSeconds`, `timeoutMs`.
+- **Configuration**: `weewxUrl` (required), optional `pollIntervalSeconds`, `timeoutMs` (1-60000 ms). A response body over 1 MiB fails the fetch.
 
 </details>
 

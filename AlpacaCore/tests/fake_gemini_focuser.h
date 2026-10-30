@@ -40,6 +40,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -61,6 +62,10 @@ public:
 
     ~FakeGeminiFocuser() {
         stop_.store(true);
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex_);  // wake a reader parked on the gate
+        }
+        gate_cv_.notify_all();
         if (reader_.joinable()) {
             reader_.join();
         }
@@ -137,6 +142,19 @@ public:
 
     /// One shot, then spent: the next reply the fake sends is held for @p delay (blind commands do not use it up).
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+
+    /// One shot, then spent: the next reply is held until release_reply(), with no timer. wait_reply_held() blocks
+    /// until the reader thread is holding it.
+    void gate_next_reply() { gate_armed_.store(true); }
+    bool wait_reply_held(std::chrono::milliseconds bound) {
+        std::unique_lock<std::mutex> lock(gate_mutex_);
+        return gate_cv_.wait_for(lock, bound, [this] { return gate_held_; });
+    }
+    void release_reply() {
+        std::lock_guard<std::mutex> lock(gate_mutex_);
+        gate_open_ = true;
+        gate_cv_.notify_all();
+    }
 
     /// A USB unplug: the reader stops and both pty ends close, so the driver's reads fail with EIO from here on.
     /// Not reversible.
@@ -226,6 +244,12 @@ private:
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
         }
+        if (gate_armed_.exchange(false)) {
+            std::unique_lock<std::mutex> lock(gate_mutex_);
+            gate_held_ = true;
+            gate_cv_.notify_all();
+            gate_cv_.wait(lock, [this] { return gate_open_ || stop_.load(); });
+        }
         pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
@@ -236,6 +260,11 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<long long> handshake_delay_ms_{0};
     std::atomic<int> hold_ms_{0};
+    std::atomic<bool> gate_armed_{false};
+    std::mutex gate_mutex_;
+    std::condition_variable gate_cv_;
+    bool gate_held_ = false;
+    bool gate_open_ = false;
     std::atomic<bool> temp_comp_on_{false};
 
     mutable std::mutex mutex_;

@@ -39,6 +39,11 @@
 # .deb build: a sanitizer finding is a signal filed as its own issue, and
 # testers' nightlies keep shipping. The run still shows red.
 #
+# Both test jobs set CTEST_RERUN_FAILED=1: a case that fails in the
+# oversubscribed pool runs once more alone, and that run is the verdict
+# (run_all_tests.sh). A sanitizer finding fails again; a scheduler race
+# does not, and it cost a different case on most nights before this.
+#
 # Upstream builds main only (the cron, or `gh workflow run nightly-build.yml
 # -f force=true`), so the public nightly-build release always names a main
 # commit. Forks never build on the cron; a manual run there builds the branch
@@ -185,6 +190,7 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
+          CTEST_RERUN_FAILED: "1"
         run: |
           ccache --zero-stats
           ./run_all_tests.sh
@@ -295,6 +301,7 @@ jobs:
           ASAN_OPTIONS: "abort_on_error=1:detect_leaks=1"
           LSAN_OPTIONS: "suppressions=${{ github.workspace }}/scripts/lsan_suppressions.txt"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+          CTEST_RERUN_FAILED: "1"
         run: |
           ccache --zero-stats
           ./run_all_tests.sh

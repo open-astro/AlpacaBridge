@@ -1,0 +1,3 @@
+### Fixed
+
+- **Gemini focuser Disconnect no longer waits for a whole state poll**, Gemini focuser driver, issue #1710. A Disconnect that starts during a poll now waits for the one serial exchange in flight, not for all three (up to about 10 s on a silent link): the poll runs no later exchange once the disconnect has started. Covered by `AlpacaCore/tests/test_gemini_focuser_snapshot.cpp` ("a disconnect during a poll waits for the exchange in flight only"). Removing a connected Gemini focuser from the web UI waits the same way, covered by the case "destroying a connected focuser during a poll waits for the exchange in flight only".
