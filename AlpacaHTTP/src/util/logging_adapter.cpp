@@ -502,6 +502,8 @@ void set_log_retention_days(int days) {
     g_log_retention_days = days;
 }
 
+void set_log_max_file_bytes(std::uintmax_t) {}
+
 std::size_t prune_old_log_files() {
     std::lock_guard<std::mutex> lock(g_file_mutex);
     return prune_old_files_locked();

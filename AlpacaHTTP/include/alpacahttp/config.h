@@ -101,6 +101,8 @@ public:
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
+    // logging.max_file_size_mb: per-day log file cap in MiB; 0 = no cap.
+    int log_max_file_size_mb() const { return log_max_file_size_mb_; }
     const std::string& config_path() const { return config_path_; }
 
     // Device enable/disable
@@ -157,6 +159,7 @@ public:
     void set_log_directory(const std::string& dir) { log_directory_ = dir; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
+    void set_log_max_file_size_mb(int mb) { log_max_file_size_mb_ = mb < 0 ? 0 : mb; }
 
 private:
     std::uint16_t http_port_ = 6800;
@@ -200,6 +203,7 @@ private:
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever
+    int log_max_file_size_mb_ = 10;  // 0 = no cap
     std::string config_path_;
 
     // Device enable/disable map: "devicetype:number" -> enabled
