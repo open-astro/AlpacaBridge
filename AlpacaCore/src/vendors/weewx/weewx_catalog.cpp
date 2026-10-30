@@ -57,8 +57,12 @@ void register_weewx_factory(DeviceCatalog& catalog) {
         if (poll_interval > kIntMax) {
             throw AlpacaException("pollIntervalSeconds must be at most 2147483647", AlpacaError::InvalidValue);
         }
-        if (timeout_ms > kIntMax) {
-            throw AlpacaException("timeoutMs must be at most 2147483647", AlpacaError::InvalidValue);
+        // One value bounds connect and transfer of a fetch; a minute is far past
+        // any LAN station's answer yet keeps a stuck fetch from holding the
+        // poll thread and a Connect for days.
+        constexpr std::int64_t kMaxTimeoutMs = 60000;
+        if (timeout_ms > kMaxTimeoutMs) {
+            throw AlpacaException("timeoutMs must be at most 60000", AlpacaError::InvalidValue);
         }
         weewx_config.poll_interval = std::chrono::seconds(poll_interval);
         weewx_config.timeout = std::chrono::milliseconds(timeout_ms);
