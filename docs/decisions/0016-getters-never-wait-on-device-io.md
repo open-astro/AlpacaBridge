@@ -37,7 +37,7 @@ Symbol: `transition_mutex_`
 
 | Driver | Symbol | Source | State | Issue | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Altair camera | `create_toupcam_family_camera` | `AlpacaCore/src/vendors/altair/altair_camera_driver.cpp` | partial | #1844 | runs the ToupTek camera class |
+| Altair camera | `create_toupcam_family_camera` | `AlpacaCore/src/vendors/altair/altair_camera_driver.cpp` | adopted |  |  |
 | Astroasis focuser |  | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted |  | served from `PolledState` |
 | Bisque telescope |  | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | partial | #1838 | rule 6: slew gate re-locks after a live `is_tracking()` without re-checking park |
 | Celestron CGX telescope |  | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | partial | #1837 | coordinate getters and Sync hold `mutex_` across AUX reads |
@@ -63,7 +63,7 @@ Symbol: `transition_mutex_`
 | Sky-Watcher telescope |  | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted |  | `util::LockGate` drops `mutex_` per exchange |
 | SVBONY camera |  | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | partial | #1842 | `mutex_` held across the SDK connect |
 | SynScan telescope | `mutex_` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | partial | #1828 | `mutex_` held across the connect handshake |
-| ToupTek camera | `exposure_lifecycle_mutex_` | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | partial | #1844 | `mutex_` held across the SDK connect |
+| ToupTek camera |  | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted |  |  |
 | ToupTek filter wheel |  | `AlpacaCore/src/vendors/touptek/touptek_filterwheel_driver.cpp` | adopted |  |  |
 | ToupTek focuser |  | `AlpacaCore/src/vendors/touptek/touptek_focuser_driver.cpp` | adopted |  |  |
 | ToupTek switch |  | `AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp` | adopted |  |  |
