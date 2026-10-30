@@ -1150,10 +1150,19 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
 #endif
 
 #ifdef ALPACACORE_ENABLE_ZWO
+std::unique_ptr<AlpacaDriver> zwo_telescope_over(int port, bool hold) {
+    namespace zwo = alpacacore::vendor::zwo;
+    zwo::ConnectionInfo info;
+    info.type = zwo::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 250;
+    return zwo::create_zwo_telescope(0, info);
+}
+
 // Recipe of test_zwo_concurrency_stress.cpp: LX200 replies, tracking reported on.
 // Knob, no fake change: the responder also accepts :Sr/:Sd so the target setters succeed.
 Tier2Host tier2_host_zwo_telescope() {
-    namespace zwo = alpacacore::vendor::zwo;
     return mount_server_host(
         "zwo_telescope", "zwo", "zwo_telescope",
         [](const std::string& chunk) -> std::string {
@@ -1169,14 +1178,7 @@ Tier2Host tier2_host_zwo_telescope() {
                        ? "1#"
                        : "0#";
         },
-        [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-            zwo::ConnectionInfo info;
-            info.type = zwo::ConnectionType::Network;
-            info.host = "127.0.0.1";
-            info.tcp_port = port;
-            info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 250;
-            return zwo::create_zwo_telescope(0, info);
-        });
+        zwo_telescope_over);
 }
 
 Tier2Host tier2_host_zwo_camera() {
@@ -2728,6 +2730,239 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
 }
 #endif
 
+[[maybe_unused]] void t3_start_filterwheel_move(Hosted& hosted) {
+    auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*hosted.driver);
+    f.set_position(f.get_position() == 1 ? 2 : 1);
+}
+
+// The SDK cameras expose for a minute, long enough that no driver deadline ends the exposure inside the budget.
+constexpr double kTier3SdkExposureSeconds = 60.0;
+
+#ifdef ALPACACORE_ENABLE_ZWO
+// An AM mount: ":MS#" is accepted and the mount then reports itself slewing (no 'N' in ":GU#") for good; the setters
+// the goto sends first (site, time, target) are accepted. Falsified by: the slew status clearing Slewing when the
+// ":GU#" poll goes unanswered.
+Tier3Recipe tier3_recipe_zwo_telescope() {
+    auto started = std::make_shared<std::atomic<bool>>(false);
+    auto responder = [started](const std::string& chunk) -> std::string {
+        const auto has = [&chunk](const char* command) { return chunk.find(command) != std::string::npos; };
+        if (has(":GVP#")) return "AM5#";
+        if (has(":GMA#")) return "012345ABCDEF#";
+        if (has(":GU#")) return started->load() ? "G#" : "NG#";
+        if (has(":GR#")) return "12:00:00#";
+        if (has(":GD#")) return "+45*00:00#";
+        if (has(":GMGE#")) return "-33*51:24&-151*12:55#";
+        if (has(":GMTI#")) return "01/02/2026&03:04:05&+00:00#";
+        if (has(":MS#")) {
+            started->store(true);
+            return "0#";
+        }
+        if (has(":Q#")) return "";
+        return (has(":GAT") || has(":Sr") || has(":Sd") || has(":SMGE") || has(":SMTI")) ? "1#" : "0#";
+    };
+    return tier3_mount_server_recipe("zwo_telescope", "zwo", started, responder, zwo_telescope_over);
+}
+
+// The exposure never completes (auto_complete_exposure off) until the status reads Failed. Falsified by: the exposure
+// poll treating a Failed status as done, so ImageReady goes true on a failed exposure.
+Tier3Recipe tier3_recipe_zwo_camera() {
+    using Fake = alpacacore::test::FakeZWOSDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).auto_complete_exposure = false;
+                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_exposure_status(Fake::ExposureStatus::Failed); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_exposure_status(Fake::ExposureStatus::Working); },
+            "FakeZWOSDK::set_exposure_status(Failed) mid-exposure"};
+}
+
+// The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
+// requested slot when the read fails.
+Tier3Recipe tier3_recipe_zwo_filterwheel() {
+    using Fake = alpacacore::test::FakeZWOEFWSDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).moving_reads = 1 << 30;
+                t3_start_filterwheel_move(hosted);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = true; },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = false; },
+            "FakeZWOEFWSDK::fail_reads = true mid-move"};
+}
+
+// The unit keeps reporting "moving"; then every status read throws. Falsified by: IsMoving answering false when the
+// read fails.
+Tier3Recipe tier3_recipe_zwo_focuser() {
+    using Fake = alpacacore::test::FakeZWOEAFSDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).moving = true;
+                t3_start_focuser_move(hosted, 500);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = true; },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = false; },
+            "FakeZWOEAFSDK::fail_reads = true mid-move"};
+}
+
+// The rotator keeps reporting "moving"; then every status read throws. Falsified by: IsMoving answering false when
+// the read fails.
+Tier3Recipe tier3_recipe_zwo_rotator() {
+    using Fake = alpacacore::test::FakeZWOCAASDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).moving = true;
+                dynamic_cast<alpacacore::RotatorDriver&>(*hosted.driver).move_absolute(90.0);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = true; },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_reads = false; },
+            "FakeZWOCAASDK::fail_reads = true mid-move"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_QHY
+// The frame call is held (before_call on get_mem_length, the worker's first call after the trigger) until `fail`, which
+// makes that call throw: the worker reports no frame buffer and the exposure fails. The hold is bounded, so a case that
+// never reaches `fail` still lets the worker end. Falsified by: the exposure worker treating the failed buffer query as
+// a finished frame.
+Tier3Recipe tier3_recipe_qhy_camera() {
+    auto gate = std::make_shared<std::atomic<bool>>(false);
+    return {[](Hosted& hosted) { t3_start_exposure(hosted, kTier3SdkExposureSeconds); },
+            [gate](Hosted& hosted) {
+                t3_fake<QhySdkHold>(hosted).fake.fail_from("get_mem_length");
+                gate->store(true);
+            },
+            [](Hosted& hosted) { t3_fake<QhySdkHold>(hosted).fake.clear_fail_from(); },
+            "FakeQHYSDK::fail_from(get_mem_length) mid-exposure",
+            [gate](bool) {
+                auto sdk_hold = std::make_shared<QhySdkHold>();
+                sdk_hold->fake.before_call = [gate](const std::string& name) {
+                    if (name != "get_mem_length") return;
+                    const auto bound = Clock::now() + std::chrono::seconds(30);
+                    while (!gate->load() && Clock::now() < bound)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                };
+                return host_over(sdk_hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+                    return alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", s.sdk);
+                });
+            }};
+}
+
+// The CFW3 takes 8 s for the move (its reply would land then) and the driver waits 12 s for it; `fail` mutes the wheel
+// at 1 s, so the reply never comes. Unmuted the move completes at 8 s, so a fault that does nothing ends the case with
+// the move done. Falsified by: the wheel's move wait reporting the requested slot when the reply never arrives.
+Tier3Recipe tier3_recipe_qhy_filterwheel() {
+    using Fake = alpacacore::test::FakeQhyCfw3;
+    return {[](Hosted& hosted) { t3_start_filterwheel_move(hosted); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(false); }, "FakeQhyCfw3::set_muted(true) mid-move",
+            [](bool) {
+                auto wheel = std::make_shared<Fake>();
+                wheel->set_travel_ms(8000);
+                return host_over(wheel, [](const Fake& f) -> std::unique_ptr<AlpacaDriver> {
+                    alpacacore::vendor::qhy::Cfw3Settings settings;
+                    settings.boot_timeout_ms = 150;
+                    settings.reply_timeout_ms = 300;
+                    settings.move_timeout_ms = 12000;
+                    return alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, f.slave_path(), settings);
+                });
+            }};
+}
+
+// The Q-Focuser advances one step per position poll, so a 500-step move never ends; then the firmware goes silent.
+// Falsified by: IsMoving answering false when the position poll times out.
+Tier3Recipe tier3_recipe_qhy_focuser() {
+    using Fake = alpacacore::test::FakeQhyQFocuser;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).set_steps_per_poll(1);
+                t3_start_focuser_move(hosted, 500);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_muted(false); },
+            "FakeQhyQFocuser::set_muted(true) mid-move"};
+}
+#endif
+
+#if defined(ALPACACORE_ENABLE_TOUPTEK) || defined(ALPACACORE_ENABLE_ALTAIR)
+// The frame wait is armed to block (hold_next_wait_image, which the stream restart inside StartExposure does not
+// spend); `fail` releases it with no frame delivered, so the camera reports no frame. The failed exposure keeps its
+// error, so there is nothing to undo. Falsified by: the exposure thread treating a wait that returns no frame as a
+// finished exposure.
+Tier3Recipe tier3_recipe_toup_family_camera() {
+    return {[](Hosted& hosted) {
+                t3_fake<ToupTekSdkHold>(hosted).fake.hold_next_wait_image();
+                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+            },
+            [](Hosted& hosted) { t3_fake<ToupTekSdkHold>(hosted).fake.release_wait_image(); }, [](Hosted&) {},
+            "FakeToupTekSDK::release_wait_image() with no frame mid-exposure"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+Tier3Recipe tier3_recipe_touptek_camera() { return tier3_recipe_toup_family_camera(); }
+#endif
+
+#ifdef ALPACACORE_ENABLE_ALTAIR
+Tier3Recipe tier3_recipe_altair_camera() { return tier3_recipe_toup_family_camera(); }
+#endif
+
+#ifdef ALPACACORE_ENABLE_SVBONY
+// One video-data read is held for up to 20 s (the exposure is running); `fail` makes that read throw. The failed
+// exposure keeps its error, so there is nothing to undo. Falsified by: the exposure worker swallowing a failed
+// video-data read and ending the exposure as a frame.
+Tier3Recipe tier3_recipe_svbony_camera() {
+    using Fake = alpacacore::test::FakeSVBSDK;
+    return {[](Hosted& hosted) {
+                auto& fake = t3_fake<Fake>(hosted);
+                fake.set_max_read_wait(std::chrono::seconds(20));
+                fake.block_video_data();
+                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+            },
+            [](Hosted& hosted) {
+                auto& fake = t3_fake<Fake>(hosted);
+                fake.fail_next_held_read();
+                fake.release_video_data();
+            },
+            [](Hosted&) {}, "FakeSVBSDK::fail_next_held_read() mid-exposure"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+// The readiness poll reports not ready (set_image_ready(false)); then it throws. Falsified by: the exposure worker
+// ending the exposure when the readiness check throws.
+Tier3Recipe tier3_recipe_playerone_camera() {
+    using Fake = alpacacore::test::FakePlayerOneSDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).set_image_ready(false);
+                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(false); },
+            "FakePlayerOneSDK::set_readiness_error(true) mid-exposure"};
+}
+
+// The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
+// requested slot when the read fails.
+Tier3Recipe tier3_recipe_playerone_filterwheel() {
+    using Fake = alpacacore::test::FakePlayerOnePWSDK;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).set_moving_reads(1 << 30);
+                t3_start_filterwheel_move(hosted);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_fail_reads(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_fail_reads(false); },
+            "FakePlayerOnePWSDK::set_fail_reads(true) mid-move"};
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_GPHOTO
+// A bulb exposure (60 s, past the longest native speed) pumps events in 100 ms slices; `fail` makes the event pump
+// throw, which closes the shutter and fails the exposure. Falsified by: the exposure worker publishing a frame after
+// the hold throws.
+Tier3Recipe tier3_recipe_gphoto_camera() {
+    return {[](Hosted& hosted) { t3_start_exposure(hosted, kTier3SdkExposureSeconds); },
+            [](Hosted& hosted) { t3_fake<GPhotoSdkHold>(hosted).fake.fail_from("drain_events"); },
+            [](Hosted& hosted) { t3_fake<GPhotoSdkHold>(hosted).fake.clear_fail_from(); },
+            "FakeGPhotoSDK::fail_from(drain_events) mid-exposure"};
+}
+#endif
+
 // One X(id, status) per tier-3 recipe, under the vendor's guard. status OK: the case must pass. status DEFECT: the
 // driver violates the contract today; the case carries [!shouldfail] and its Fix removes the tag.
 // clang-format off
@@ -2771,6 +3006,41 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
 #else
 #define CT3_WANDERERASTRO(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ZWO
+#define CT3_ZWO(X) X(zwo_telescope, OK) X(zwo_camera, OK) X(zwo_filterwheel, OK) X(zwo_focuser, OK) X(zwo_rotator, OK)
+#else
+#define CT3_ZWO(X)
+#endif
+#ifdef ALPACACORE_ENABLE_QHY
+#define CT3_QHY(X) X(qhy_camera, OK) X(qhy_filterwheel, OK) X(qhy_focuser, OK)
+#else
+#define CT3_QHY(X)
+#endif
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+#define CT3_TOUPTEK(X) X(touptek_camera, OK)
+#else
+#define CT3_TOUPTEK(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CT3_ALTAIR(X) X(altair_camera, OK)
+#else
+#define CT3_ALTAIR(X)
+#endif
+#ifdef ALPACACORE_ENABLE_SVBONY
+#define CT3_SVBONY(X) X(svbony_camera, OK)
+#else
+#define CT3_SVBONY(X)
+#endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+#define CT3_PLAYERONE(X) X(playerone_camera, OK) X(playerone_filterwheel, OK)
+#else
+#define CT3_PLAYERONE(X)
+#endif
+#ifdef ALPACACORE_ENABLE_GPHOTO
+#define CT3_GPHOTO(X) X(gphoto_camera, OK)
+#else
+#define CT3_GPHOTO(X)
+#endif
 #define CONTRACT_SWEEP_TIER3_HOSTS(X) \
     CT3_CELESTRON(X) \
     CT3_SYNSCAN(X) \
@@ -2779,7 +3049,14 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
     CT3_IOPTRON(X) \
     CT3_ASTROASIS(X) \
     CT3_GEMINI(X) \
-    CT3_WANDERERASTRO(X)
+    CT3_WANDERERASTRO(X) \
+    CT3_ZWO(X) \
+    CT3_QHY(X) \
+    CT3_TOUPTEK(X) \
+    CT3_ALTAIR(X) \
+    CT3_SVBONY(X) \
+    CT3_PLAYERONE(X) \
+    CT3_GPHOTO(X)
 // clang-format on
 
 #endif  // !_WIN32

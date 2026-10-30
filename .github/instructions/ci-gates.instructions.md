@@ -77,6 +77,9 @@ author must do. Read the docstring before changing a gate.
   catalog-built pair cannot be allow-listed. A connectable fake goes in `kFakeConnectableRoster`
   (tier 2); a row whose fake cannot hold a connect open says why in `connecting_unobservable`. Tier 2 also checks each connected DeviceState value's
   JSON type against the ASCOM member table in `test_contract_sweep.cpp`; a new member needs a row.
+  Tier 3 faults a fake after a camera, telescope, focuser, rotator or filter wheel operation has started
+  and requires that failure after start is never a clean completion; every such tier-2 host needs a
+  tier-3 recipe with a `recover`, which a guard case checks.
 - **Docs drift** (`scripts/check_docs_drift.py`, the `docs-drift` job): its docstring lists all
   checks. The ones authors trip: bump the `zizmor` version and sha256 in `ci.yml` and
   `ci_preflight.sh` together; keep the cppcheck `--suppress` lists identical; give each new CI job id

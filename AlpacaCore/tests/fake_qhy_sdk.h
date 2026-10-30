@@ -148,6 +148,17 @@ public:
     // --- scripting knobs ---------------------------------------------------
     std::set<std::string> throw_from;
 
+    /// Makes every later call of `fn` throw, until clear_fail_from(). Unlike throw_from it is locked, so a case
+    /// may set and clear it while the driver runs (contract sweep tier 3).
+    void fail_from(const std::string& fn) {
+        std::lock_guard<std::mutex> lock(sync_.calls_mutex);
+        sync_.failing_fn = fn;
+    }
+    void clear_fail_from() {
+        std::lock_guard<std::mutex> lock(sync_.calls_mutex);
+        sync_.failing_fn.clear();
+    }
+
     /// Test-only hook, run at the top of every forward (open-astro#339).
     /// Null in every ordinary case. See hit(). Read by hit() with NO
     /// synchronisation, like every other knob here: assign and clear it only
@@ -762,6 +773,7 @@ private:
     // mutex in place, and the moved-from object stays fully usable.
     struct Sync {
         mutable std::mutex calls_mutex;
+        std::string failing_fn;  // fail_from(), guarded by calls_mutex
 
         Sync() = default;
         Sync(Sync&&) noexcept {}
@@ -786,7 +798,12 @@ private:
         if (before_call) {
             before_call(fn);
         }
-        if (throw_from.count(fn) != 0) {
+        bool failing = false;
+        {
+            std::lock_guard<std::mutex> lock(sync_.calls_mutex);
+            failing = sync_.failing_fn == fn;
+        }
+        if (failing || throw_from.count(fn) != 0) {
             throw AlpacaException(std::string("fake: injected failure in ") + fn, AlpacaError::DriverException);
         }
     }

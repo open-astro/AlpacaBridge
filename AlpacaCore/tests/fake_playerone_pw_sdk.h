@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/playerone/playerone_pw_sdk.h>
 
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <mutex>
@@ -106,6 +107,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_open_locked(handle);
         maybe_fail_locked("get_position");
+        if (fail_reads_.load()) throw AlpacaException("FakePlayerOnePWSDK: link down", AlpacaError::DriverException);
         if (moving_reads_left_ > 0) {
             if (--moving_reads_left_ == 0) position_ = target_;
             return -1;
@@ -225,6 +227,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         moving_reads_ = reads;
     }
+    // get_position() throws on every read while set (a dead link); unlike fail_next it is not spent by the first read.
+    void set_fail_reads(bool fail) { fail_reads_.store(fail); }
     void fail_next(const std::string& call) {
         std::lock_guard<std::mutex> lock(mutex_);
         fail_next_ = call;
@@ -295,6 +299,7 @@ private:
     std::map<std::string, int> calls_;
     std::string fail_next_;
     bool fail_non_alpaca_{false};
+    std::atomic<bool> fail_reads_{false};
     std::chrono::milliseconds open_delay_{0};
     std::chrono::milliseconds position_delay_{0};
     int open_count_{0};
