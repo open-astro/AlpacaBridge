@@ -499,6 +499,11 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - connect writes nothing to a PWM port 
     }
     driver->set_connected(false);
     CHECK(requests == 0);
+    // Disconnect must not drive the unset line either: close() settles only a port a client armed.
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        CHECK(st.requests == 0);
+    }
 }
 
 TEST_CASE("ZWO ASIAIR Plus Switch Driver - a client's PWM write still reaches the fd after connect",
