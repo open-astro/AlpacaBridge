@@ -89,7 +89,8 @@ vendor-agnostic; do them in the driver from the start.
     exposure, timers) before members are destroyed.
 - **Serialize reapers across the whole join.** `AsyncOperation::cancel_all_and_join()`
   takes its body out of the slot before joining; a second caller can see an empty
-  slot while the first still owns a running worker. A driver-level lifecycle/handoff
+  slot while the first still owns a running worker. (A `start()` during that join is
+  refused with `InvalidOperation`, #1713; a second reaper is not.) A driver-level lifecycle/handoff
   lock must cover that entire join and prevent teardown from closing its handle.
   Background bodies must not acquire the lock their joiner holds. Concrete failure:
   [CGX handoff/disconnect race](../../docs/failures/0011-cgx-handoff-disconnect-race.md).

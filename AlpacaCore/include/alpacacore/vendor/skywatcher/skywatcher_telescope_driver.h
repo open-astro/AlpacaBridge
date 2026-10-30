@@ -171,6 +171,12 @@ void set_rate_verify_before_start_hook_for_testing(TelescopeDriver& driver, std:
 /// Pass an empty function to clear it.
 void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// Test seam: `hook` runs on the duty-cycle worker's thread when it is stopping,
+/// before its safety stop, with no driver lock held, so a case can hold the
+/// body there while another thread joins it. Pass an empty function to clear
+/// it, and release anything the hook blocks on before the driver is destroyed.
+void set_duty_before_exit_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(

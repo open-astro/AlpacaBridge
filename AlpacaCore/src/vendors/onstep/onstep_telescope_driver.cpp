@@ -533,9 +533,11 @@ public:
         // below goes through Wire, with mutex_ free; io_mutex_ is held from the first state write to the end.
         // A getter meanwhile reads NotConnected (check_connected()) instead of waiting for the connect.
         std::lock_guard<std::mutex> transition(transition_mutex_);
-        // The status poll ends before a disconnect or a relink closes the port, and is joined with no driver
-        // lock held: its body takes them (decision 0006 rule 4). No poll body runs during a connect.
-        if (!connected || (connected_ && !protocol.link_alive())) {
+        // The status poll and the pulse-end tick end before a disconnect or a relink closes the port, and are
+        // joined with no driver lock held: their bodies take them (decision 0006 rule 4). A fresh connect joins
+        // them too: a pulse-end body a PulseGuide started after a Disconnect's join would otherwise live on into
+        // the new session. No poll body runs during a connect.
+        if (!connected || !connected_ || !protocol.link_alive()) {
             stop_status_poller();
         }
         StateLock lock(lock_gate_);
@@ -1293,7 +1295,8 @@ public:
         lock.unlock();
         run_pulse_guide_gap_hook();
         // A Disconnect can land between the unlock and the start: the slot's body is then harmless, because
-        // poll_status_once() checks the connection under the operation lock and the destructor joins the slot.
+        // poll_status_once() checks the connection under the operation lock, and the next Connect (or the
+        // destructor) joins the slot before a new session starts. A start during the Disconnect's join is refused.
         start_pulse_measurement(wait);
     }
 
@@ -3246,7 +3249,7 @@ private:
     // Decision 0016: see the lock-order comment at the top of the class. Both are mutable: a const helper
     // that reaches the wire (Wire::call) needs the operation lock already held and drops and retakes mutex_.
     // set_connected() against set_connected(); no getter takes it. Under it, set_connected() joins the
-    // status-poll and pulse-end slots (stop_status_poller(), on a disconnect and a relink) and only cancels
+    // status-poll and pulse-end slots (stop_status_poller(), on a connect, a disconnect and a relink) and only cancels
     // the others (cancel() never blocks). No slot body takes it or calls set_connected(), so the join ends.
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
