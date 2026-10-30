@@ -1365,3 +1365,34 @@ TEST_CASE("ToupTek camera - a disconnect sent during a held SDK open leaves the 
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
 }
+
+TEST_CASE("ToupTek camera - Name does not wait for a second ToupTek camera held in the SDK open (#1844)",
+          "[touptek][camera][unit][fakesdk]") {
+    // One fake for both drivers: on hardware every ToupTek driver shares one SDK
+    // wrapper, whose mutex covers enumerate_cameras and every open.
+    auto fake = make_fake_with_camera();
+    fake.cameras.push_back(FakeToupTekSDK::default_camera("fake-cam-1", "FakeCam Two"));
+    OpenLatch latch;
+    latch.install(fake);
+
+    auto idle = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    auto other = alpacacore::vendor::touptek::create_touptek_camera(1, 1, fake);
+    std::thread connector([&] { other->set_connected(true); });
+    const bool entered = latch.wait_entered();
+
+    std::promise<std::string> result;
+    auto future = result.get_future();
+    std::thread reader([&] { result.set_value(idle->get_name()); });
+    const bool returned = entered && future.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+
+    latch.release();  // always release, so a failing run cannot hang the join
+    connector.join();
+    reader.join();
+
+    REQUIRE(entered);
+    CHECK(returned);
+    CHECK(future.get() == "FakeCam One");
+    other->set_connected(false);
+    // Name keeps the identity after a disconnect, without asking the SDK again.
+    CHECK(other->get_name() == "FakeCam Two");
+}

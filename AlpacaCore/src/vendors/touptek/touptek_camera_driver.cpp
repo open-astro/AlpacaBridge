@@ -121,9 +121,8 @@ public:
     int get_device_number() const override { return device_number_; }
 
     std::string get_name() const override {
-        const_cast<ToupTekCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_ && !camera_info_.name.empty()) {
+        if (!camera_info_.name.empty()) {
             return camera_info_.name;
         }
         return branding_.label + " Camera";
@@ -159,8 +158,8 @@ public:
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        // transition_mutex_ spans the whole connect/disconnect and no getter
-        // waits on it, so mutex_ stays free during the SDK open (decision 0016
+        // transition_mutex_ spans the whole connect/disconnect and is taken by
+        // no getter, so mutex_ stays free during the SDK open (decision 0016
         // item 4). connected_, the handle and the identity change only inside
         // this lock; mutex_ is taken just to publish or clear them.
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
@@ -369,7 +368,11 @@ public:
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         exposure_active_.store(false);
         HToupcam handle = std::exchange(handle_, nullptr);
+        // Keep the name: get_name never asks the SDK, which a second ToupTek
+        // device's open can hold (decision 0016 rule 1).
+        std::string name = std::move(camera_info_.name);
         camera_info_ = {};
+        camera_info_.name = std::move(name);
         camera_info_valid_ = false;
         serial_number_.clear();
         firmware_version_.clear();
@@ -1515,8 +1518,7 @@ private:
     std::atomic<uint64_t> abort_generation_{0};
     struct ExposureAborted {};
     // Spans the whole of set_connected() (connect handshake and disconnect close);
-    // no getter waits on it (get_name only try-locks it to skip its SDK refresh),
-    // so mutex_ is free during the SDK open (decision 0016).
+    // no getter takes it, so mutex_ is free during the SDK open (decision 0016).
     // Lock order: transition_mutex_ -> exposure_lifecycle_mutex_ -> mutex_ ->
     // readout_mutex_ -> SDK-wrapper mutex. Connect takes mutex_ only to publish the
     // identity and handle; disconnect clears state under mutex_ + readout_mutex_,
@@ -1808,24 +1810,6 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG(branding_.label, "Preload enumerate failed: " + std::string(e.what()));
         }
-    }
-
-    void refresh_cached_camera_info_if_needed() {
-        if (connected_.load()) return;
-        // Try, never wait: a connect or disconnect holds transition_mutex_ across
-        // the SDK open/close, which hold the wrapper mutex enumerate_cameras needs
-        // (decision 0016 rule 1). Holding it here also keeps connected_ fixed
-        // until the refreshed identity is stored.
-        std::unique_lock<std::mutex> transition_lock(transition_mutex_, std::try_to_lock);
-        if (!transition_lock.owns_lock() || connected_.load()) return;
-        try {
-            auto cameras = sdk_.enumerate_cameras();
-            if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
-                camera_info_valid_ = true;
-            }
-        } catch (const std::exception&) {}
     }
 
     void set_bin_locked(int bin_x, int bin_y) {
