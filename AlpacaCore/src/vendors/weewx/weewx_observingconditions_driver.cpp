@@ -243,11 +243,18 @@ SensorSnapshot parse_snapshot(std::string_view payload) {
     return snapshot;
 }
 
+// A current-conditions payload is a few KiB; a larger body is refused unparsed
+// so a misbehaving endpoint cannot grow the buffer without bound.
+constexpr std::size_t kMaxResponseBytes = std::size_t{1024} * 1024;
+
 size_t curl_write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     if (!userdata) {
         return 0;
     }
     auto* buffer = static_cast<std::string*>(userdata);
+    if (size * nmemb > kMaxResponseBytes - buffer->size()) {
+        return 0;  // short count: curl aborts with CURLE_WRITE_ERROR
+    }
     buffer->append(ptr, size * nmemb);
     return size * nmemb;
 }
@@ -271,6 +278,8 @@ std::string http_get(const std::string& url, std::chrono::milliseconds timeout) 
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout.count()));
+    // Refuses a declared Content-Length over the cap before the body arrives.
+    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(kMaxResponseBytes));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "AlpacaBridge-WeeWX/1.0");
