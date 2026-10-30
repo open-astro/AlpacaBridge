@@ -1457,6 +1457,19 @@ int main() {
     EXPECT(request.get_query_param("declination") == "-20.3");
     EXPECT(!request.has_query_param("nonexistent"));
 
+    // Framing (#1692): a body shorter than Content-Length, or a header name
+    // with whitespace before the colon (RFC 7230 section 3.2.4), is refused
+    // so the parser never disagrees with the server's socket read loop.
+    {
+        alpacahttp::Request framed;
+        EXPECT(!framed.parse("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length: 31\r\n\r\n"));
+        EXPECT(!framed.parse("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length : 2\r\n\r\n{}"));
+        EXPECT(!framed.parse("GET /management/apiversions HTTP/1.1\r\nX-Foo\t: bar\r\n\r\n"));
+        alpacahttp::Request good;
+        EXPECT(good.parse("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}"));
+        EXPECT(good.body() == "{}");
+    }
+
     // Conformance: HTTP 400 "indicates that the device could not interpret the
     // request e.g. an invalid device number or misspelt device type". These
     // must be 400 (Bad Request), not 404, with a text/plain message (#1476).

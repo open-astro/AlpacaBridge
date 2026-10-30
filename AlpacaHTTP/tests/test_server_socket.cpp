@@ -737,6 +737,36 @@ int main() {
         ::close(fd);
     }
 
+    // Whitespace before the colon (#1692, RFC 7230 section 3.2.4). The server
+    // used to miss "Content-Length : 31" and read no body while the parser
+    // honoured it, so a body arriving in a later packet was left on the wire
+    // and read as the next request; "Transfer-Encoding : chunked" slipped past
+    // the 501 the same way. Both must now be a 400 and a close. The pause
+    // puts the body in a later recv than the headers, as a real client can.
+    {
+        const std::string body = "Connected=true&ClientID=1&x=123";
+        EXPECT(body.size() == 31);
+        const std::string cases[] = {
+            "PUT /api/v1/telescope/0/connected HTTP/1.1\r\nHost: localhost\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length : 31\r\n\r\n",
+            "PUT /api/v1/telescope/0/connected HTTP/1.1\r\nHost: localhost\r\n"
+            "Transfer-Encoding : chunked\r\n\r\n",
+        };
+        const std::string trailers[] = {body, "5\r\nhello\r\n0\r\n\r\n"};
+        for (int i = 0; i < 2; ++i) {
+            int fd = connect_local(port);
+            EXPECT(fd >= 0);
+            std::string carry;
+            send_all(fd, cases[i]);
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            send_all(fd, trailers[i]);
+            std::string r = read_one_response(fd, carry);
+            EXPECT(r.rfind("HTTP/1.1 400 ", 0) == 0);
+            EXPECT(peer_closed(fd, 2000));
+            ::close(fd);
+        }
+    }
+
     // A Content-Length over the 64 KiB body cap (issue #741) is refused with
     // 413 from the headers alone: the client sends no body, so a server that
     // waited for one would never answer inside the receive timeout.
