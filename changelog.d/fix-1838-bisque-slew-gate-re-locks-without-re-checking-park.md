@@ -1,0 +1,3 @@
+### Fixed
+
+- **Bisque slew during a park**, Bisque driver, issue #1838. A slew sent while a park is still running (Park sends the command, then waits up to 120 s for TheSkyX to report parked) is now refused with `InvalidWhileParked` and nothing reaches TheSkyX, for both `SlewToCoordinates` and `SlewToCoordinatesAsync`. `AbortSlew` or `Unpark` during the park wait returns at once and lets slews through again, and a stale park that times out no longer re-opens slews while a newer park runs. A disconnect that lands while a slew waits for the Tracking check now makes the slew fail with `NotConnected` instead of being sent. Covered by the `[park-race]` cases in `AlpacaCore/tests/test_bisque_telescope.cpp`.
