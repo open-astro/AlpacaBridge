@@ -11,14 +11,14 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/alpaca_defs.h>
-#include <alpacacore/alpacadriver.h>
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
 
 #include <atomic>
 #include <chrono>
-#include <stdexcept>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -136,6 +136,7 @@ public:
     std::string command_blind(std::string_view, bool) override { return {}; }
     bool command_bool(std::string_view, bool) override { return false; }
     std::string command_string(std::string_view, bool) override { return {}; }
+
 protected:
     std::string fallback_unique_id() const override { return "stub"; }
 

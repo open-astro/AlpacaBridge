@@ -70,8 +70,7 @@ inline void tick(FakeTaskClock& clock, std::chrono::nanoseconds period, std::chr
 
 // Connects the driver, then waits (up to `bound` of real time) for its poll body to park on the clock.
 // Returns whether it parked; a caller that must fail on a missed rendezvous wraps the call in REQUIRE.
-inline bool connect_and_park(alpacacore::AlpacaDriver& driver, FakeTaskClock& clock,
-                             std::chrono::milliseconds bound) {
+inline bool connect_and_park(alpacacore::AlpacaDriver& driver, FakeTaskClock& clock, std::chrono::milliseconds bound) {
     driver.set_connected(true);
     return clock.wait_for_waiters(1, bound);
 }
