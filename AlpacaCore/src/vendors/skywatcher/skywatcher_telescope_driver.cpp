@@ -2040,10 +2040,14 @@ public:
                 bool ra_reverses = false;
                 // Same contract as the MoveAxis(0) restore (#535/#630): the
                 // restore never restarts an axis the client switched off.
+                // A pulse that ends on a faulted link or a restarted board only stops the axis: the stop stays
+                // ungated, the tracking-drive restore and the Dec offset re-apply are starts.
                 bool restore = restore_tracking;
-                if (restore) {
+                bool faulted = false;
+                {
                     StateLock lock(lock_gate_);
-                    restore = tracking_effectively_on_locked();
+                    faulted = link_faulted_locked();
+                    restore = restore && !faulted && tracking_effectively_on_locked();
                     restore_still_wanted = restore;
                 }
                 // open-astro#821: the mirror case. A pulse dispatched with
@@ -2054,7 +2058,7 @@ public:
                 // RA at the pulse rate. Decided and applied under one lock, so
                 // a Tracking=false after the read is the setter's stop to make
                 // (#770), not undone by this restart.
-                if (!restore && axis == kAxisRa) {
+                if (!restore && axis == kAxisRa && !faulted) {
                     StateLock lock(lock_gate_);
                     if (tracking_effectively_on_locked()) {
                         apply_ra_drive_locked(lock);
@@ -2132,7 +2136,8 @@ public:
                     // A Dec pulse pre-empted any DeclinationRate offset
                     // motion: re-apply it so guiding corrections don't
                     // silently cancel comet/satellite tracking.
-                    if (axis == kAxisDec && tracking_effectively_on_locked() && dec_rate_arcsec_per_sec_ != 0.0) {
+                    if (axis == kAxisDec && !link_faulted_locked() && tracking_effectively_on_locked() &&
+                        dec_rate_arcsec_per_sec_ != 0.0) {
                         try {
                             apply_dec_rate_offset_locked(lock);
                         } catch (const std::exception& e) {
@@ -4228,6 +4233,8 @@ private:
             if (!may_resend_locked()) {
                 return;  // a reaper owns the axis now
             }
+            // A re-kick is a start the driver makes by itself: refused on a faulted link or a restarted board.
+            throw_if_link_faulted_locked();
             protocol.set_step_period(channel, step_period_for_locked(channel, expected_rate_deg_per_sec, false));
             protocol.start_motion(channel);
         } catch (const std::exception& e) {
@@ -4874,6 +4881,9 @@ private:
     // derived speed.
     void dispatch_goto_locked(StateLock& lock, double target_ra_axis_deg, double target_dec_axis_deg,
                               bool compensate_backlash = true, const FinalApproach* final_leg = nullptr) {
+        // Park, FindHome and the final-approach legs reach here from a body that may outlive the link: send
+        // nothing, not even the leading stops (the goto forms are stopped earlier by their position read).
+        throw_if_link_faulted_locked();
         const Wire protocol = wire();
         const uint64_t gen = final_leg ? final_leg->generation : ++motion_generation_;
         const bool moves[2] = {!final_leg || final_leg->owed[0], !final_leg || final_leg->owed[1]};

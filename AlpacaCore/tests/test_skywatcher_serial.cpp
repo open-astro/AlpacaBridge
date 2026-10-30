@@ -1185,6 +1185,116 @@ TEST_CASE("SkyWatcher serial - a board that restarted under a recovered link sta
     driver->set_connected(false);
 }
 
+namespace {
+
+// Number of frames sent since @p from whose command letter is in @p letters.
+int count_frames_since(const FakeSkyWatcherSerialBoard& board, std::size_t from, const std::string& letters) {
+    int n = 0;
+    const auto frames = board.frames();
+    for (std::size_t i = from; i < frames.size(); ++i) {
+        if (letters.find(frames[i][0]) != std::string::npos) ++n;
+    }
+    return n;
+}
+
+// The board restarts under a recovered link: it goes quiet until the fault
+// latches, then answers again with its initialization cleared, which the status
+// poll turns into the terminal "restarted" fault. From here an ungated write is
+// visible, because the board answers it.
+void restart_board_under_recovered_link(FakeSkyWatcherSerialBoard& board, alpacacore::TelescopeDriver& driver) {
+    board.set_muted(true);
+    REQUIRE(wait_until_true([&] { return !driver.get_link_fault().empty(); }, 6000));
+    board.set_init_done(false);
+    board.set_muted(false);
+    REQUIRE(wait_until_true([&] { return driver.get_link_fault().find("restarted") != std::string::npos; }, 6000));
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher serial - a rate-applied check in flight does not re-kick a board that restarted",
+          "[skywatcher][serial][linkhealth]") {
+    // The check's resend is a write the driver makes by itself: with the board
+    // answering, an ungated ':I1' ':J1' lands on an axis whose registers were reset.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+
+    // The write's own ':I'+':J' do not take, so the check has a stall to re-kick.
+    board.stall_live_rate_writes(1, 1);
+    board.ignore_start_relatches(1, 1);
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::atomic<bool> parked{false};
+    sw::set_rate_verify_before_start_hook_for_testing(*driver, [&parked, released] {
+        parked = true;
+        released.wait();
+    });
+    std::thread setter([&] { driver->set_right_ascension_rate(0.5); });
+    REQUIRE(wait_until_true([&] { return parked.load(); }, 5000));  // the write is on the wire
+
+    restart_board_under_recovered_link(board, *driver);
+    const std::size_t from = board.frames().size();
+    release.set_value();
+    setter.join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // settle + the longest sample window
+    sw::set_rate_verify_before_start_hook_for_testing(*driver, nullptr);
+
+    CHECK(count_frames_since(board, from, "IJ") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - a park started before the board restarted sends nothing when its body runs",
+          "[skywatcher][serial][linkhealth]") {
+    // A goto's own position read is gated by the board-reset latch, but Park's
+    // dispatch stops the axes first, and that ':K' reaches the board that answers.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    sw::set_slew_spawn_for_testing(*driver, [released](std::function<void()> body) {
+        return std::thread([released, body = std::move(body)] {
+            released.wait();
+            body();
+        });
+    });
+    driver->park();
+
+    restart_board_under_recovered_link(board, *driver);
+    const std::size_t from = board.frames().size();
+    release.set_value();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+    CHECK(count_frames_since(board, from, "KSGIJ") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - a pulse that ends after the board restarted does not restore the tracking drive",
+          "[skywatcher][serial][linkhealth]") {
+    // The end of the pulse STOPS the axis (a stop stays ungated), but writing
+    // the drive's step period and re-latching it is a start.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+
+    driver->pulse_guide(2, 8000);  // East: a live in-place rate change, restored at the end
+    // Dispatch and its rate check are done by now, so the hold is what is in flight.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    restart_board_under_recovered_link(board, *driver);
+    const std::size_t from = board.frames().size();
+    std::this_thread::sleep_for(std::chrono::milliseconds(8000));  // past the end of the hold
+
+    CHECK(count_frames_since(board, from, "IJG") == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher serial - state getters on a faulted link that is then lost report NotConnected",
           "[skywatcher][serial][linkhealth]") {
     // open-astro#882 review: the latch outlives the link (the fault text stays
