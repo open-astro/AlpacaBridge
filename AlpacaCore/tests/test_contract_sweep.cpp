@@ -2349,8 +2349,8 @@ const char* t3_outcome(const T3Read& r) {
 
 // The longest real wait after the fault is the QHY CFW3 move wait (12 s from the start, 11 s after the fault): a
 // protocol-wrapper wire deadline on steady_clock (decision 0005 rule 6), in a driver not on the task clock. A recipe
-// over a driver on the clock moves its fake clock past the driver's timer instead (0005 rule 2). The rest is margin
-// so a slow runner does not turn a late raise into "still running".
+// whose raise waits on a driver timer on the task clock moves its fake clock past that timer instead (0005 rule 2).
+// The rest is margin so a slow runner does not turn a late raise into "still running".
 constexpr std::chrono::seconds kTier3Budget{20};
 // How long the healthy fake must keep the operation running before the fault.
 constexpr std::chrono::seconds kTier3Control{1};
@@ -2450,9 +2450,9 @@ Fake& t3_fake(Hosted& hosted) {
     return *static_cast<Fake*>(hosted.fake.get());
 }
 
-// A recipe over a driver on the task clock (decision 0005 rule 2) builds the driver on one of these and steps it in
-// its own legs, so the case's real-time loops wait on no driver timer, only on wire reads (0005 rule 6). The recipe's
-// lambdas hold it, so it outlives the Hosted driver.
+// A recipe whose raise or recover waits on a driver timer on the task clock (decision 0005 rule 2) builds the driver
+// on one of these and steps it in its own legs, so the case's real-time loops wait on no driver timer, only on wire
+// reads (0005 rule 6). The recipe's lambdas hold it, so it outlives the Hosted driver.
 using T3Clock = std::shared_ptr<alpacacore::test::FakeTaskClock>;
 
 // One poll tick of every driver stepped here (100 ms to 1 s periods); each step waits for the woken threads to
@@ -2940,7 +2940,8 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
 
 // The SDK cameras expose for a minute, long enough that no driver deadline ends the exposure inside the budget.
 constexpr double kTier3SdkExposureSeconds = 60.0;
-// The Player One fake caps an exposure at 10 s; 9 s outlasts the control leg and the fault.
+// The Player One fake caps an exposure at 10 s. Its driver is on the task clock: the watchdog (9 s + 15 s grace)
+// lands after the 18 s t3_on_clock steps at most before recover.
 constexpr double kTier3CappedExposureSeconds = 9.0;
 
 #ifdef ALPACACORE_ENABLE_ZWO
@@ -2968,25 +2969,34 @@ Tier3Recipe tier3_recipe_zwo_telescope() {
     return tier3_mount_server_recipe("zwo_telescope", "zwo", started, responder, zwo_telescope_over);
 }
 
-// The exposure never completes (auto_complete_exposure off) until the status reads Failed. Falsified by: the exposure
-// poll treating a Failed status as done, so ImageReady goes true on a failed exposure.
+// The exposure never completes (auto_complete_exposure off) until the status reads Failed. The driver retries a failed
+// exposure twice, 250 ms apart on the task clock, before it latches the failure. Falsified by: the exposure poll
+// treating a Failed status as done, so ImageReady goes true on a failed exposure.
 Tier3Recipe tier3_recipe_zwo_camera() {
     using Fake = alpacacore::test::FakeZWOSDK;
-    return {[](Hosted& hosted) {
-                t3_fake<Fake>(hosted).auto_complete_exposure = false;
-                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
-            },
-            [](Hosted& hosted) {
-                auto& fake = t3_fake<Fake>(hosted);
-                fake.fail_every_exposure = true;
-                fake.set_exposure_status(Fake::ExposureStatus::Failed);
-            },
-            [](Hosted& hosted) {
-                auto& fake = t3_fake<Fake>(hosted);
-                fake.fail_every_exposure = false;
-                fake.set_exposure_status(Fake::ExposureStatus::Working);
-            },
-            "FakeZWOSDK::fail_every_exposure = true mid-exposure"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) {
+             t3_fake<Fake>(hosted).auto_complete_exposure = false;
+             t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+         },
+         [](Hosted& hosted) {
+             auto& fake = t3_fake<Fake>(hosted);
+             fake.fail_every_exposure = true;
+             fake.set_exposure_status(Fake::ExposureStatus::Failed);
+         },
+         [](Hosted& hosted) {
+             auto& fake = t3_fake<Fake>(hosted);
+             fake.fail_every_exposure = false;
+             fake.set_exposure_status(Fake::ExposureStatus::Working);
+         },
+         "FakeZWOSDK::fail_every_exposure = true mid-exposure",
+         [clock](bool) {
+             return host_over(std::make_shared<Fake>(), [&](Fake& fake) -> std::unique_ptr<AlpacaDriver> {
+                 return alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, fake, *clock);
+             });
+         }},
+        DeviceType::Camera, clock);
 }
 
 // The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
@@ -3032,8 +3042,9 @@ Tier3Recipe tier3_recipe_zwo_rotator() {
 #ifdef ALPACACORE_ENABLE_QHY
 // The frame call is held (before_call on get_mem_length, the worker's first call after the trigger) until `fail`, which
 // makes that call throw: the worker reports no frame buffer and the exposure fails. The hold is bounded, so a case that
-// never reaches `fail` still lets the worker end. Falsified by: the exposure worker treating the failed buffer query as
-// a finished frame.
+// never reaches `fail` still lets the worker end. The fake answers read_directly, so the worker skips its 1 s settle
+// sleep on the task clock and the raise waits on no driver timer. Falsified by: the exposure worker treating the failed
+// buffer query as a finished frame.
 Tier3Recipe tier3_recipe_qhy_camera() {
     auto gate = std::make_shared<std::atomic<bool>>(false);
     return {[](Hosted& hosted) { t3_start_exposure(hosted, kTier3SdkExposureSeconds); },
@@ -3045,6 +3056,7 @@ Tier3Recipe tier3_recipe_qhy_camera() {
             "FakeQHYSDK::fail_from(get_mem_length) mid-exposure",
             [gate](bool) {
                 auto sdk_hold = std::make_shared<QhySdkHold>();
+                sdk_hold->fake.read_directly = true;
                 sdk_hold->fake.before_call = [gate](const std::string& name) {
                     if (name != "get_mem_length") return;
                     const auto bound = Clock::now() + std::chrono::seconds(30);
@@ -3152,17 +3164,26 @@ Tier3Recipe tier3_recipe_svbony_camera() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-// The readiness poll reports not ready (set_image_ready(false)); then it throws. Falsified by: the exposure worker
-// ending the exposure when the readiness check throws.
+// The readiness poll reports not ready (set_image_ready(false)); then it throws. The poll waits 50 ms on the task
+// clock between checks. Falsified by: the exposure worker ending the exposure when the readiness check throws.
 Tier3Recipe tier3_recipe_playerone_camera() {
     using Fake = alpacacore::test::FakePlayerOneSDK;
-    return {[](Hosted& hosted) {
-                t3_fake<Fake>(hosted).set_image_ready(false);
-                t3_start_exposure(hosted, kTier3CappedExposureSeconds);
-            },
-            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(true); },
-            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(false); },
-            "FakePlayerOneSDK::set_readiness_error(true) mid-exposure"};
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock({[](Hosted& hosted) {
+                            t3_fake<Fake>(hosted).set_image_ready(false);
+                            t3_start_exposure(hosted, kTier3CappedExposureSeconds);
+                        },
+                        [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(true); },
+                        [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(false); },
+                        "FakePlayerOneSDK::set_readiness_error(true) mid-exposure",
+                        [clock](bool) {
+                            return host_over(std::make_shared<Fake>(),
+                                             [&](Fake& fake) -> std::unique_ptr<AlpacaDriver> {
+                                                 return alpacacore::vendor::playerone::create_playerone_camera(
+                                                     0, 0, fake, std::chrono::seconds(15), *clock);
+                                             });
+                        }},
+                       DeviceType::Camera, clock);
 }
 
 // The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
