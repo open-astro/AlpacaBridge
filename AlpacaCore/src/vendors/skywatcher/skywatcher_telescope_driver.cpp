@@ -280,10 +280,10 @@ class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::
     // is util::LockGate (lock_gate.h, #1729). A full lock table refuses the StateLock with DriverException
     // before it takes any lock (decision 0016 Rule 6, #1730).
     //
-    // duty_transition_mutex_ is a separate leaf: start_duty_worker() and stop_duty_worker() hold it for their whole
-    // body, join included, so two callers cannot overlap on the duty_ slot. They are called with no other driver
-    // lock held (except set_connected()'s transition_mutex_, which comes first), and no slot body takes it:
-    // duty_loop() never calls either, so a join under it cannot wait on a body that waits on it (decision 0006).
+    // duty_transition_mutex_ is not a leaf (it is held across a join): start_duty_worker() and stop_duty_worker() hold
+    // it for their whole body, join included, so two callers cannot overlap on the duty_ slot. They are called with no
+    // other driver lock held (except set_connected()'s transition_mutex_, which comes first), and no slot body takes
+    // it: duty_loop() never calls either, so a join under it cannot wait on a body that waits on it (decision 0006).
 
 public:
     // The driver's state lock, with the operation lock above it in Mode::Io (util::StateLock). Mode::State is
@@ -4642,20 +4642,13 @@ private:
         }
         // Never leave an axis creeping on exit. A zeroed duty rate means
         // whoever cleared it already stopped the axis; only a cancel with the
-        // rate still set (disconnect mid-burst) needs the safety stop. A
-        // superseded body (a concurrent restart) stops only a burst it still
-        // owns: the replacement's own bursts carry a newer motion generation.
-        const bool superseded = ctx.stop_reason() == util::StopReason::Superseded;
+        // rate still set (disconnect mid-burst) needs the safety stop. No
+        // body is ever superseded: start_duty_worker() joins the old body
+        // before it starts a new one, under duty_transition_mutex_.
         run_duty_before_exit_stop_hook();
         try {
             StateLock lock(lock_gate_);
             for (int channel = 1; channel <= 2; ++channel) {
-                if (superseded) {
-                    if (ax[channel - 1].bursting && motion_generation_ == ax[channel - 1].gen && connected_) {
-                        static_cast<void>(stop_axis_and_wait_locked(lock, channel, ax[channel - 1].gen));
-                    }
-                    continue;
-                }
                 if (duty_rate_locked(channel) != 0.0 && connected_) {
                     const uint64_t gen = ++motion_generation_;
                     static_cast<void>(stop_axis_and_wait_locked(lock, channel, gen));
