@@ -269,7 +269,7 @@ LandedFrame land_on_fake_clock(alpacacore::test::FakeTaskClock& clock, alpacacor
 class StampedDriver {
 public:
     StampedDriver(const alpacacore::test::FakeMountProfile& profile, double latitude)
-        : mount_(profile), driver_(sw::create_skywatcher_telescope(0, endpoint(mount_), latitude, 150.0, 80.0)) {
+        : mount_(profile), driver_(sw::create_skywatcher_telescope(0, endpoint(mount_), latitude, 151.215297, 42.0)) {
         REQUIRE(mount_.ok());
         driver_->set_connected(true);
     }
@@ -340,24 +340,26 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         double expect_alt;
         double expect_az;  // negative = not read off the mount for this row
         const char* observed;
-        alpacacore::test::FakeMountProfile profile;  // the board the row was read on
     };
-    using alpacacore::test::FakeMountProfile;
     const Row rows[] = {
-        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -1, -6.11, 0.0, -1.3, 91.0, "level, pointing east",
-         FakeMountProfile::eqm35_pro()},
-        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -1, -10.00, 0.0, -43.6, -1.0, "down about 45 deg",
-         FakeMountProfile::eqm35_pro()},
+        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -1, -6.11, 0.0, -1.3, 91.0, "level, pointing east"},
+        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -1, -10.00, 0.0, -43.6, -1.0, "down about 45 deg"},
         {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -1, -9.01, -20.0, -18.9, 136.0,
-         "down, azimuth about 136", FakeMountProfile::eqm35_pro()},
-        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, +1, 10.13, 19.05, -20.7, -1.0, "down about 20 deg",
-         FakeMountProfile::wave_100i()},
+         "down, azimuth about 136"},
+        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, +1, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
         {"EQM-35 Pro at a northern latitude", 37.2, 45.0, -60.0, -1, 9.00, 30.0, -10.7, -1.0,
-         "front-left and slightly down on the south-facing rig, i.e. SE, about -8 deg", FakeMountProfile::eqm35_pro()},
+         "front-left and slightly down on the south-facing rig, i.e. SE, about -8 deg"},
         {"EQ-AL55i Pro, the #579 reading", 40.0, 0.0, 89.37, +1, 6.00, 0.63, 0.41, 270.5,
-         "dovetail west, level, after a dec-only move of +89.37 deg from home", FakeMountProfile::eq_al55i()},
+         "dovetail west, level, after a dec-only move of +89.37 deg from home"},
     };
-    for (const Row& r : rows) {
+    // The board each row was read on, by index (kept out of the row literals).
+    using alpacacore::test::FakeMountProfile;
+    const FakeMountProfile row_profiles[] = {FakeMountProfile::eqm35_pro(), FakeMountProfile::eqm35_pro(),
+                                             FakeMountProfile::eqm35_pro(), FakeMountProfile::wave_100i(),
+                                             FakeMountProfile::eqm35_pro(), FakeMountProfile::eq_al55i()};
+    static_assert(std::size(row_profiles) == std::size(rows));
+    for (std::size_t i = 0; i < std::size(rows); ++i) {
+        const Row& r = rows[i];
         const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2, r.board_sense);
         const AltAz horizon = horizon_from_sky(sky, r.latitude);
         INFO(r.what << ": observed " << r.observed);
@@ -371,7 +373,7 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         }
         // The driver, stamped at the row's axes, reports the row's sky: the
         // oracle above is a transcription, this is the code that ships.
-        StampedDriver driver(r.profile, r.latitude);
+        StampedDriver driver(row_profiles[i], r.latitude);
         const SkyPoint reported = driver.report_at(r.a1, r.a2);
         CHECK(std::abs(wrap_ha(reported.ha_hours - r.expect_ha)) < 0.02);
         CHECK(std::abs(reported.dec_degrees - r.expect_dec) < 0.1);
