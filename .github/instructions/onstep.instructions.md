@@ -458,10 +458,11 @@ it is never reachable through `router.cpp` or the web UI.
   (`device_state_age()`). A field the mount has not answered yet throws `DriverException` "not
   available"; a latched fault and a lost link refuse as above. While the frame has no status (every `:GU#`
   since the connect failed), a command that checks for a park or writes the status through (`PulseGuide`, a
-  moving `MoveAxis`, `FindHome`, `Tracking`, `Unpark`, the slews and syncs) reads `:GU#` first and throws
+  moving `MoveAxis`, `FindHome`, `Tracking=true`, `Unpark`, the slews and syncs) reads `:GU#` first and throws
   `InvalidOperation` ("the mount's status has not been read yet") when that read fails too, rather than take
-  the unread status for "not parked"; `AbortSlew` and `MoveAxis(axis, 0)` refuse only a status that reads
-  parked, so a stop is never held up (#1895). Client commands write through
+  the unread status for "not parked"; `AbortSlew`, `MoveAxis(axis, 0)` and `Tracking=false` are stops and are
+  never refused over an unread status (`Tracking=false` tries the read, sends `:ST0#` if it fails, and its
+  write-through then does not land; a lost link and a latched fault still throw) (#1895). Client commands write through
   (`snapshot_.write()`): a sync's position, `Tracking`, `Unpark`, a slew start (`Slewing` true), a park
   or home the mount took, and a pulse, a MoveAxis start and AbortSlew drop the tick in flight, so a tick
   that sampled before the command cannot publish over it. Control paths keep their direct reads and

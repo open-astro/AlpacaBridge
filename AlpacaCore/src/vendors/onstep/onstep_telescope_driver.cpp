@@ -907,7 +907,9 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("Tracking");
-        ensure_status_read_locked("Tracking");  // the write-through below needs a status to land in (#1895)
+        // The write-through below needs a status to land in (#1895). Tracking=false is a stop, so an unread status
+        // never holds it up: :ST0 goes out and, if the read failed, the write-through does not land.
+        ensure_status_read_locked("Tracking", /*refuse=*/tracking);
         if (tracking) {
             check_not_parked_locked("Tracking");
         }
@@ -2545,8 +2547,9 @@ private:
     // A frame with no status (every :GU# since the connect failed) reads as idle and not parked to the control paths,
     // and a write-through into it is not served (#1895). A command that checks or writes the status reads :GU# now
     // instead, as the Tracking check of a slew does, and refuses when that read fails too: a latched fault and a
-    // lost link as they are, anything else as InvalidOperation.
-    void ensure_status_read_locked(const char* operation) const {
+    // lost link as they are, anything else as InvalidOperation. `refuse` false (Tracking=false, a stop) swallows
+    // that last case and carries on; a lost link and a latched fault still throw.
+    void ensure_status_read_locked(const char* operation, bool refuse = true) const {
         const auto reading = snapshot_.read();
         if (reading && reading->value.status_known) {
             return;
@@ -2557,6 +2560,9 @@ private:
         } catch (const std::exception& ex) {
             if (is_link_lost(ex) || link_health_.faulted()) {
                 throw;
+            }
+            if (!refuse) {
+                return;
             }
             throw AlpacaException(std::string(operation) +
                                       " is not allowed: the mount's status has not been read yet (" + ex.what() + ")",

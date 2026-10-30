@@ -1093,6 +1093,17 @@ TEST_CASE("OnStep snapshot - a status the connect could not read refuses the com
     CHECK(error_of([&] { rig.driver->set_tracking(true); }) == alpacacore::AlpacaError::InvalidWhileParked);
 }
 
+// Turning tracking off is a stop: an unread status never holds it up, as for AbortSlew and MoveAxis(axis, 0).
+TEST_CASE("OnStep snapshot - Tracking off after a connect that read no status still stops tracking",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.mount->silent_status = true;  // the connect's :GU# times out
+    rig.connect();
+    rig.pause();
+    CHECK_NOTHROW(rig.driver->set_tracking(false));  // the :GU# read inside it fails too
+    CHECK(rig.mount->count(":ST0") == 1);
+}
+
 // #1887 (decision 0022 rule 2): the slew's hold window is cleared when the :MS# send itself throws, so Slewing
 // reads false right after, with no virtual time advanced (the 2 s hold would otherwise still be open). A silent
 // :MS# does not reach that path: it reads as an empty reply, which the refusal branch clears.
