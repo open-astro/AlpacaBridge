@@ -2266,8 +2266,10 @@ Tier2Host tier2_host_wandererastro_switch() {
 // exposure, a slew, a move), the fake then fails while it runs, and the completion property (ImageReady, Slewing,
 // IsMoving, FilterWheel Position) must raise the failure: never a clean completion, and never "still running"
 // past the budget (the ASCOM async FAQ, https://ascom-standards.org/AlpacaDeveloper/Async.htm; the shared rule
-// "A failed async operation body keeps its error", ascom-contract.instructions.md). One recipe per tier-2 host of
-// those five types, listed in CONTRACT_SWEEP_TIER3_HOSTS; the guard case pins the list to the tier-2 hosts.
+// "A failed async operation body keeps its error", ascom-contract.instructions.md). Before the fault the healthy
+// fake keeps the operation running; after it the recipe undoes the fault and the property must still never report
+// done. One recipe per tier-2 host of those five types, listed in CONTRACT_SWEEP_TIER3_HOSTS; the guard case pins
+// the list to the tier-2 hosts.
 // ---------------------------------------------------------------------------
 
 struct Tier3Recipe {
@@ -2275,6 +2277,8 @@ struct Tier3Recipe {
     std::function<void(Hosted&)> start;
     // Makes the fake fail while the operation runs.
     std::function<void(Hosted&)> fail;
+    // Undoes `fail`: the fake answers again and still models the operation running (it never completes it).
+    std::function<void(Hosted&)> recover;
     // What `fail` does to the fake, quoted in the failure message.
     const char* fault;
     // The driver over a fake that can run the operation, when the tier-2 host's fake cannot (its responder does not
@@ -2287,31 +2291,57 @@ bool is_tier3_type(DeviceType t) {
            t == DeviceType::Rotator || t == DeviceType::FilterWheel;
 }
 
-// One read of the completion property: true when it reports the operation finished, false while it runs. Whatever
-// the driver throws passes through.
-bool completion_reports_done(AlpacaDriver& d, DeviceType type) {
-    switch (type) {
-        case DeviceType::Camera:
-            return dynamic_cast<alpacacore::CameraDriver&>(d).get_image_ready();
-        case DeviceType::Telescope:
-            return !dynamic_cast<alpacacore::TelescopeDriver&>(d).get_slewing();
-        case DeviceType::Focuser:
-            return !dynamic_cast<alpacacore::FocuserDriver&>(d).get_is_moving();
-        case DeviceType::Rotator:
-            return !dynamic_cast<alpacacore::RotatorDriver&>(d).get_is_moving();
-        case DeviceType::FilterWheel:
-            // -1 is the moving sentinel (IFilterWheelV3 Position); any slot is a finished move.
-            return dynamic_cast<alpacacore::FilterWheelDriver&>(d).get_position() != -1;
-        default:
-            FAIL("no tier-3 completion property for this device type");
+// One read of the completion property: `done` when it reports the operation finished; `code` the AlpacaException it
+// raised, -1 when none. Any other exception passes through.
+struct T3Read {
+    bool done = false;
+    int code = -1;
+    std::string message;
+};
+
+T3Read t3_read(AlpacaDriver& d, DeviceType type) {
+    T3Read r;
+    try {
+        switch (type) {
+            case DeviceType::Camera:
+                r.done = dynamic_cast<alpacacore::CameraDriver&>(d).get_image_ready();
+                break;
+            case DeviceType::Telescope:
+                r.done = !dynamic_cast<alpacacore::TelescopeDriver&>(d).get_slewing();
+                break;
+            case DeviceType::Focuser:
+                r.done = !dynamic_cast<alpacacore::FocuserDriver&>(d).get_is_moving();
+                break;
+            case DeviceType::Rotator:
+                r.done = !dynamic_cast<alpacacore::RotatorDriver&>(d).get_is_moving();
+                break;
+            case DeviceType::FilterWheel:
+                // -1 is the moving sentinel (IFilterWheelV3 Position); any slot is a finished move.
+                r.done = dynamic_cast<alpacacore::FilterWheelDriver&>(d).get_position() != -1;
+                break;
+            default:
+                FAIL("no tier-3 completion property for this device type");
+        }
+    } catch (const AlpacaException& e) {
+        r.code = e.error_code();
+        r.message = e.what();
     }
-    return false;
+    return r;
+}
+
+const char* t3_outcome(const T3Read& r) {
+    return r.code != -1 ? "raised" : (r.done ? "reported done" : "still running");
 }
 
 // Twice the longest silence a driver here waits out before it calls the link faulted (10 s: kStallTimeout in
 // ioptron_iguider_camera_driver.cpp and kFilterWheelLinkSilenceMs in the WandererAstro wheel), so a slow runner
 // does not turn a late raise into "still running".
 constexpr std::chrono::seconds kTier3Budget{20};
+// How long the healthy fake must keep the operation running before the fault.
+constexpr std::chrono::seconds kTier3Control{1};
+// Three periods of the slowest status poll here (1 s: kStatusPollPeriod in the Celestron, SynScan and OnStep
+// telescope drivers), so the drivers see the recovered link before the case ends.
+constexpr std::chrono::seconds kTier3RecoverWindow{3};
 
 [[maybe_unused]] void case_t3_failure_after_start(const Tier2Host& h, const Tier3Recipe& r) {
     REQUIRE(is_tier3_type(h.type));
@@ -2332,37 +2362,48 @@ constexpr std::chrono::seconds kTier3Budget{20};
         INFO("the initiator threw " << start_code << ": '" << start_message << "'");
         REQUIRE(start_code == -1);
     }
-    // The operation must still be running when the fault lands; a fake that finished it already would make the
-    // case pass on a driver that ignores every failure.
-    REQUIRE_FALSE(completion_reports_done(*hosted.driver, h.type));
-    r.fail(hosted);
-    bool done = false;
-    int code = -1;
-    std::string message;
-    const auto deadline = Clock::now() + kTier3Budget;
-    while (Clock::now() < deadline) {
-        try {
-            if (completion_reports_done(*hosted.driver, h.type)) {
-                done = true;
-                break;
-            }
-        } catch (const AlpacaException& e) {
-            code = e.error_code();
-            message = e.what();
-            break;
-        }
+    // Control: on the healthy fake the operation keeps running, neither raising nor finishing, so the raise below is
+    // the fault's. A fake that finished (or failed) the operation by itself would let a driver that ignores every
+    // failure pass.
+    for (const auto until = Clock::now() + kTier3Control; Clock::now() < until;) {
+        const T3Read rd = t3_read(*hosted.driver, h.type);
+        INFO("completion property before the fault: " << t3_outcome(rd) << " (code " << rd.code << ", '" << rd.message
+                                                      << "')");
+        REQUIRE(rd.code == -1);
+        REQUIRE_FALSE(rd.done);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    const char* outcome = code != -1 ? "raised" : (done ? "reported done" : "still running");
-    INFO("completion property after the fault: " << outcome << " (code " << code << ", '" << message << "')");
-    CHECK_FALSE(done);
-    REQUIRE(code != -1);
+    r.fail(hosted);
+    T3Read after;
+    for (const auto deadline = Clock::now() + kTier3Budget; Clock::now() < deadline;) {
+        after = t3_read(*hosted.driver, h.type);
+        if (after.done || after.code != -1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    INFO("completion property after the fault: " << t3_outcome(after) << " (code " << after.code << ", '"
+                                                 << after.message << "')");
+    CHECK_FALSE(after.done);
+    REQUIRE(after.code != -1);
     // Every fault keeps the transport open, and the case ends well inside util::kLinkStalenessBound (30 s), so the
     // link is faulted, not lost: the read raises the operation's failure, not NotConnected (CONTEXT.md "Connected
     // vs link health", decision 0009).
-    CHECK(code != err::NotConnected);
-    // The failure stays raised until the next command or a reconnect clears it.
-    CHECK(thrown_code([&] { (void)completion_reports_done(*hosted.driver, h.type); }) != -1);
+    CHECK(after.code != err::NotConnected);
+    // While the fault lasts the link stays faulted, so the next read raises too (decision 0009 rule 1).
+    CHECK(t3_read(*hosted.driver, h.type).code != -1);
+    // The fake answers again: the next good reply may clear the link fault (0009 rule 1), but the operation it
+    // interrupted never finished, so the property raises a failure the body kept or reports the operation running;
+    // done is a body that swallowed the failure behind the live link fault ("A failed async operation body keeps its
+    // error", ascom-contract.instructions.md).
+    r.recover(hosted);
+    T3Read recovered;
+    for (const auto until = Clock::now() + kTier3RecoverWindow; Clock::now() < until;) {
+        recovered = t3_read(*hosted.driver, h.type);
+        if (recovered.done) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    INFO("completion property after recover: " << t3_outcome(recovered) << " (code " << recovered.code << ", '"
+                                               << recovered.message << "')");
+    CHECK_FALSE(recovered.done);
 }
 
 // Initiators shared by the recipes; [[maybe_unused]] because a build with none of their vendors calls none.
@@ -2411,6 +2452,7 @@ Tier3Recipe tier3_mount_server_recipe(const char* id, const char* vendor, std::s
                 REQUIRE(started->load());
                 t3_fake<MountServerHold>(hosted).silent->store(true);
             },
+            [](Hosted& hosted) { t3_fake<MountServerHold>(hosted).silent->store(false); },
             "FakeMountServer responder silent mid-goto",
             mount_server_host(id, vendor, id, std::move(r), make).connectable};
 }
@@ -2489,6 +2531,7 @@ Tier3Recipe tier3_recipe_celestron_cgx_telescope() {
                 t.slew_to_coordinates_async(std::fmod(t.get_sidereal_time() + 23.0, 24.0), 85.0);
             },
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronCgxMount>(hosted).set_muted(false); },
             "FakeCelestronCgxMount::set_muted(true) mid-goto"};
 }
 
@@ -2497,6 +2540,7 @@ Tier3Recipe tier3_recipe_celestron_cgx_telescope() {
 Tier3Recipe tier3_recipe_celestron_focuser() {
     return {[](Hosted& hosted) { t3_start_focuser_move(hosted, 500); },
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeCelestronFocuser>(hosted).set_muted(false); },
             "FakeCelestronFocuser::set_muted(true) mid-move"};
 }
 #endif
@@ -2507,6 +2551,7 @@ Tier3Recipe tier3_recipe_celestron_focuser() {
 Tier3Recipe tier3_recipe_skywatcher_telescope() {
     return {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, 30.0); },
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(true); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherMount>(hosted).set_silent(false); },
             "FakeSkyWatcherMount::set_silent(true) mid-goto"};
 }
 
@@ -2514,6 +2559,7 @@ Tier3Recipe tier3_recipe_skywatcher_telescope() {
 Tier3Recipe tier3_recipe_skywatcher_telescope_serial() {
     return {[](Hosted& hosted) { t3_start_slew(hosted, 2.0, -30.0); },
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSkyWatcherSerialBoard>(hosted).set_muted(false); },
             "FakeSkyWatcherSerialBoard::set_muted(true) mid-goto"};
 }
 #endif
@@ -2527,6 +2573,7 @@ Tier3Recipe tier3_recipe_ioptron_telescope() {
                 t3_start_slew(hosted, 2.0, 30.0);
             },
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(true); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronMount>(hosted).set_fail_reads(false); },
             "FakeIoptronMount::set_fail_reads(true) mid-goto"};
 }
 
@@ -2538,15 +2585,30 @@ Tier3Recipe tier3_recipe_ioptron_focuser() {
                 t3_start_focuser_move(hosted, 500);
             },
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(true); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeIoptronIeaf>(hosted).set_silent(false); },
             "FakeIoptronIeaf::set_silent(true) mid-move"};
 }
 
-// iGuider: the stream stops delivering frames during the exposure. Falsified by: the exposure worker waiting on
+// iGuider: a frame every half second (at the fake's default 5 ms the settle frames end the exposure inside the
+// control window), then the stream stops during the exposure. Its deadline (10.7 s for 0.02 s) passes before the
+// 10 s stall does, so the exposure has failed, not only the link. Falsified by: the exposure worker waiting on
 // read_frame() with no deadline, so ImageReady stays false and never raises.
 Tier3Recipe tier3_recipe_iguider_camera() {
-    return {[](Hosted& hosted) { t3_start_exposure(hosted, 1.0); },
+    const auto make = [](IGuiderV4L2Hold& s) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::ioptron::create_iguider_camera(0, "", s.v4l2);
+    };
+    return {[](Hosted& hosted) { t3_start_exposure(hosted, 0.02); },
             [](Hosted& hosted) { t3_fake<IGuiderV4L2Hold>(hosted).fake.stalled.store(true); },
-            "FakeIGuiderV4L2::stalled = true mid-exposure"};
+            [](Hosted& hosted) { t3_fake<IGuiderV4L2Hold>(hosted).fake.stalled.store(false); },
+            "FakeIGuiderV4L2::stalled = true mid-exposure",
+            [make](bool) {
+                auto s = std::make_shared<IGuiderV4L2Hold>();
+                // Set before the stream worker starts: the hook is not locked.
+                s->fake.before_frame_return = [](std::int32_t) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                };
+                return host_over(s, make);
+            }};
 }
 #endif
 
@@ -2628,6 +2690,11 @@ Tier3Recipe tier3_recipe_astroasis_focuser() {
                 std::lock_guard<std::mutex> lock(st.mutex);
                 st.dead = true;
             },
+            [](Hosted& hosted) {
+                auto& st = t3_fake<alpacacore::test::FakeHidState>(hosted);
+                std::lock_guard<std::mutex> lock(st.mutex);
+                st.dead = false;
+            },
             "FakeHidState::dead = true mid-move"};
 }
 #endif
@@ -2642,6 +2709,7 @@ Tier3Recipe tier3_recipe_gemini_focuser() {
             t3_start_focuser_move(hosted, 500);
         },
         [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(true); },
+        [](Hosted& hosted) { t3_fake<alpacacore::test::FakeGeminiFocuser>(hosted).set_garbage_state_replies(false); },
         "FakeGeminiFocuser::set_garbage_state_replies(true) mid-move"};
 }
 #endif
@@ -2655,6 +2723,7 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
                 f.set_position(f.get_position() == 1 ? 2 : 1);
             },
             [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSerialStreamer>(hosted).set_muted(true); },
+            [](Hosted& hosted) { t3_fake<alpacacore::test::FakeSerialStreamer>(hosted).set_muted(false); },
             "FakeSerialStreamer::set_muted(true) mid-move"};
 }
 #endif
@@ -2860,8 +2929,8 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_INITIATORS)
 CONTRACT_SWEEP_TIER3_HOSTS(CT3_CASE)
 
 // Non-vacuity guard for tier 3: every tier-2 host of a type with an asynchronous completion property (camera,
-// telescope, focuser, rotator, filter wheel) has a tier-3 recipe with a start, a fault and a description, and no
-// other host has one. A host of those types with no recipe is a fake no case ever fails mid-operation. Run from the
+// telescope, focuser, rotator, filter wheel) has a tier-3 recipe with a start, a fault, its undo and a description, and
+// no other host has one. A host of those types with no recipe is a fake no case ever fails mid-operation. Run from the
 // tier-2 roster guard below, as check_tier1_cases_have_a_subject() is from the tier-1 one.
 void check_tier3_hosts_have_a_recipe() {
     std::map<std::string, Tier3Recipe> recipes;
@@ -2883,6 +2952,7 @@ void check_tier3_hosts_have_a_recipe() {
         CHECK(hosted_ids.count(id) == 1);
         CHECK(static_cast<bool>(r.start));
         CHECK(static_cast<bool>(r.fail));
+        CHECK(static_cast<bool>(r.recover));
         CHECK((r.fault != nullptr && std::string(r.fault).size() > 0));
     }
 }
