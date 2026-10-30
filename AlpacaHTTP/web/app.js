@@ -2786,6 +2786,11 @@ async function downloadLogFile(filename) {
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
+        // A failed read is answered with HTTP 200 and a JSON error body.
+        if ((response.headers.get('Content-Type') || '').includes('application/json')) {
+            const body = await response.json();
+            throw new Error(body.ErrorMessage || 'unknown error');
+        }
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');

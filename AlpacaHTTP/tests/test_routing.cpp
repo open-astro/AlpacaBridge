@@ -45,6 +45,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
@@ -10525,7 +10526,10 @@ int main() {
         const ScopedCwd scratch;
         alpacahttp::Router router;
         const auto held = router.hold_log_archive_lock_for_test();
-        const auto busy = route_request(router, "GET", "/management/v1/logfiles?download=1");
+        // Route from a second thread: try_lock on a mutex this thread owns is undefined behaviour.
+        const auto busy = std::async(std::launch::async, [&] {
+                              return route_request(router, "GET", "/management/v1/logfiles?download=1");
+                          }).get();
         EXPECT(busy.get_header("Content-Type").find("application/json") == 0);
         const auto json = nlohmann::json::parse(busy.body(), nullptr, false);
         EXPECT(json.is_object());
