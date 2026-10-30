@@ -175,9 +175,10 @@ public:
     // flight. No-op unless a loss is pending.
     void finish_lost_close();
     // Test seam (open-astro#1707): `hook` runs inside link_alive() at each
-    // point where a loss verdict is taken and not yet acted on, so a test can
-    // relink exactly there.
-    enum class LinkLossPoint { AfterStaleVerdict, AfterStaleLatch, AfterNodeCheck };
+    // point between taking a loss verdict and its last step (the latch, or the
+    // close after it), so a test can relink exactly there. Only tests set it,
+    // before the call, so link_alive() reads it unlocked.
+    enum class LinkLossPoint : std::uint8_t { AfterStaleVerdict, AfterStaleLatch, AfterNodeCheck };
     void set_link_loss_hook_for_test(std::function<void(LinkLossPoint)> hook);
     // Stamps the lost-at time from the driver's own evidence (first stamp wins).
     void note_link_lost_at(std::chrono::steady_clock::time_point at);
