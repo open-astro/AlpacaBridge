@@ -1283,9 +1283,11 @@ TEST_CASE("ToupTek thermal switch - a dead link refuses reads after three failed
 
 namespace {
 
-// Holds open_camera_by_id on the fake's before_call hook until released, so a
-// test can probe the driver while its connect sits inside the SDK open.
+// Holds one SDK call (open_camera_by_id unless `call` is set) on the fake's
+// before_call hook until released, so a test can probe the driver while its
+// connect or disconnect sits inside that call.
 struct OpenLatch {
+    std::string call = "open_camera_by_id";
     std::mutex m;
     std::condition_variable cv;
     bool entered = false;
@@ -1293,7 +1295,7 @@ struct OpenLatch {
 
     void install(FakeToupTekSDK& fake) {
         fake.before_call = [this](const std::string& fn) {
-            if (fn != "open_camera_by_id") return;
+            if (fn != call) return;
             std::unique_lock<std::mutex> lock(m);
             entered = true;
             cv.notify_all();
@@ -1364,6 +1366,35 @@ TEST_CASE("ToupTek camera - a disconnect sent during a held SDK open leaves the 
     CHECK_FALSE(driver->get_connected());
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
+}
+
+TEST_CASE("ToupTek camera - Name and Connected do not wait for a disconnect held in the SDK close (#1844)",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    OpenLatch latch;
+    latch.call = "close_camera";
+    latch.install(fake);
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    std::thread disconnector([&] { driver->set_connected(false); });
+    const bool entered = latch.wait_entered();
+
+    std::promise<std::pair<std::string, bool>> result;
+    auto future = result.get_future();
+    std::thread reader([&] { result.set_value({driver->get_name(), driver->get_connected()}); });
+    const bool returned = entered && future.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+
+    latch.release();  // always release, so a failing run cannot hang the join
+    disconnector.join();
+    reader.join();
+
+    REQUIRE(entered);
+    CHECK(returned);
+    const auto [name, connected] = future.get();
+    CHECK(name == "FakeCam One");
+    CHECK_FALSE(connected);
+    CHECK(fake.ref_count("fake-cam-0") == 0);
 }
 
 TEST_CASE("ToupTek camera - Name does not wait for a second ToupTek camera held in the SDK open (#1844)",
