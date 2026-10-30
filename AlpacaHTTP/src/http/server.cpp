@@ -1058,10 +1058,16 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
     // Parse Content-Length (case-insensitive) out of the header block
     std::size_t content_length = 0;
     {
-        // Refuse header names Request::parse would read differently from the
+        // Refuse lines Request::parse would read differently from the
         // exact-name scan below (whitespace before the colon, a leading
-        // space), so the body framing cannot desync (#1692).
-        for (std::size_t start = raw_request.find("\r\n"); start != std::string::npos && start < header_end;) {
+        // space, a bare CR or LF in the request line or a header line), so
+        // the body framing cannot desync (#1692).
+        const std::size_t request_line_end = raw_request.find("\r\n");
+        if (std::string_view(raw_request).substr(0, request_line_end).find_first_of("\r\n") != std::string_view::npos) {
+            send_error(socket_fd, 400, "Bad Request", "Invalid request line");
+            return false;
+        }
+        for (std::size_t start = request_line_end; start != std::string::npos && start < header_end;) {
             start += 2;
             const std::size_t eol = raw_request.find("\r\n", start);
             if (!Request::header_line_ok(std::string_view(raw_request).substr(start, eol - start))) {
