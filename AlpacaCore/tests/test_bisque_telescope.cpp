@@ -1378,9 +1378,12 @@ TEST_CASE("Bisque slew - a park in progress refuses both slew forms and sends no
 
     require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
                          alpacacore::AlpacaError::InvalidWhileParked);
-    // Stepped on the clock so a sent slew fails the case instead of waiting for its completion forever.
+    // A refused slew throws at once, so wait for it in real time: stepping the clock does not give the slew thread
+    // time to start under load. If a slew was sent, it waits on the clock, so step it to let the case fail, not hang.
     auto sync_slew = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
-    advance_until(rig.clock, [&] { return ready(sync_slew); }, 20);
+    if (sync_slew.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+        advance_until(rig.clock, [&] { return ready(sync_slew); }, 20);
+    }
     REQUIRE(ready(sync_slew));
     require_alpaca_error([&] { sync_slew.get(); }, alpacacore::AlpacaError::InvalidWhileParked);
     CHECK(rig.mount.slew_commands.load() == 0);
