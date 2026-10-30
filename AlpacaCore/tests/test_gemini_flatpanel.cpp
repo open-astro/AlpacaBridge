@@ -716,6 +716,23 @@ TEST_CASE("Gemini Flat Panel Lite - a cable pulled during the connect state seed
     CHECK_FALSE(driver->get_connected());
 }
 
+TEST_CASE("Gemini Flat Panel Slots - a cable pulled during the connect state seed fails the Connect",
+          "[gemini][flatpanel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // before the driver, which waits on it
+    FakeGeminiFlatPanel panel;
+    ReplugPort port(panel);
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, port.path.string(), 9600, clock);
+
+    panel.set_reply_delay(">S#", milliseconds(300));  // the seed's first read sits on the reply while the cable goes
+    std::atomic<int> code{0};
+    std::jthread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    REQUIRE(slot_wait_until([&] { return panel.count(">S#") == 1; }, milliseconds(2000)));
+    panel.unplug();
+    connecting.join();
+    CHECK(code.load() == kNotConnected);
+    CHECK_FALSE(driver->get_connected());
+}
+
 TEST_CASE("Gemini Flat Panel Slots - a Connect over a lost link reopens without a Disconnect first",
           "[gemini][flatpanel][unit][fake][link-lost]") {
     alpacacore::test::FakeTaskClock clock;  // before the driver, which waits on it
