@@ -2707,15 +2707,19 @@ public:
                 const bool same_axis_owner =
                     goto_in_progress_ || parking_ || homing_ || slewing_cached_ || pulse_axis_active_[channel - 1];
                 const bool generation_ok = motion_generation_ == stop_task_generation || !same_axis_owner;
-                if (channel == kAxisRa && tracking_effectively_on_locked() && generation_ok) {
+                // The restore is a start. A good ':f' reply may have just cleared a latched fault, so the
+                // board-reset check runs first; the stop wait above stays ungated.
+                check_board_survived_recovery_locked();
+                const bool link_ok = !link_faulted_locked();
+                if (link_ok && channel == kAxisRa && tracking_effectively_on_locked() && generation_ok) {
                     try {
                         set_tracking_locked(lock, true);
                     } catch (const std::exception& e) {
                         ALPACA_LOG_WARN("SkyWatcher",
                                         std::string("MoveAxis stop: failed to restore tracking: ") + e.what());
                     }
-                } else if (channel == kAxisDec && tracking_effectively_on_locked() && dec_rate_arcsec_per_sec_ != 0.0 &&
-                           generation_ok) {
+                } else if (link_ok && channel == kAxisDec && tracking_effectively_on_locked() &&
+                           dec_rate_arcsec_per_sec_ != 0.0 && generation_ok) {
                     // Same restore contract for Dec: a manual nudge must not
                     // silently cancel an active DeclinationRate offset. Not while
                     // a Tracking=false is in flight (the limit guard stops Dec
