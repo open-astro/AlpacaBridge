@@ -48,6 +48,7 @@ namespace {
     bool g_file_logging_enabled = false;
     int g_log_retention_days = 0;  // 0 = forever
     std::uintmax_t g_log_max_file_bytes = 0;  // 0 = unlimited
+    std::uintmax_t g_log_marker_bytes = 0;    // size of the cap marker line for the current cap
     std::uintmax_t g_log_file_bytes = 0;      // size of the open file: at open plus bytes written
     bool g_log_file_capped = false;           // cap reached; file writes dropped until the next open
 
@@ -240,13 +241,12 @@ namespace {
         std::string text = line + '\n';
         if (cap > 0) {
             // Keep room for the marker so the final size stays within the cap.
-            const std::string marker = size_cap_marker(cap) + '\n';
-            if (g_log_file_bytes + text.size() + marker.size() > cap) {
+            if (g_log_file_bytes + text.size() + g_log_marker_bytes > cap) {
                 g_log_file_capped = true;
-                if (g_log_file_bytes + marker.size() > cap) {
+                if (g_log_file_bytes + g_log_marker_bytes > cap) {
                     return;  // no room (a restart on a full file): append nothing
                 }
-                text = marker;
+                text = size_cap_marker(cap) + '\n';
             }
         }
         g_log_file << text;
@@ -537,6 +537,8 @@ void set_log_retention_days(int days) {
 void set_log_max_file_bytes(std::uintmax_t bytes) {
     std::lock_guard<std::mutex> lock(g_file_mutex);
     g_log_max_file_bytes = bytes;
+    // Fixed width for a given cap, so measure it once here, not on every line.
+    g_log_marker_bytes = bytes > 0 ? size_cap_marker(bytes).size() + 1 : 0;
 }
 
 std::size_t prune_old_log_files() {
