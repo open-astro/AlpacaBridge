@@ -159,7 +159,6 @@ public:
     void set_log_directory(const std::string& dir) { log_directory_ = dir; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
-    void set_log_max_file_size_mb(int mb) { log_max_file_size_mb_ = mb < 0 ? 0 : mb; }
 
 private:
     std::uint16_t http_port_ = 6800;
