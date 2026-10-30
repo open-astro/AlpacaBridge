@@ -880,7 +880,7 @@ public:
         // SVBONY, Player One) returns a static/cached list while disconnected,
         // and imaging clients (NINA/APT/SGPro) read ReadoutModes during device
         // enumeration before connecting to populate dropdowns. Disconnected, the
-        // list derives from the preloaded camera_info_ caps (or just "Normal");
+        // list derives from the start-up or last-connect camera_info_ caps (or just "Normal");
         // the index getter/setter still require a live handle.
         const auto specs = readout_mode_specs();
         std::vector<std::string> names;
