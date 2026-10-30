@@ -741,8 +741,10 @@ int main() {
     // used to miss "Content-Length : 31" and read no body while the parser
     // honoured it, so a body arriving in a later packet was left on the wire
     // and read as the next request; "Transfer-Encoding : chunked" slipped past
-    // the 501 the same way. Both must now be a 400 and a close. The pause
-    // puts the body in a later recv than the headers, as a real client can.
+    // the 501 the same way. Both must now be a 400 and a close, as must a
+    // bare LF or a header line that starts with whitespace (obs-fold), which
+    // hide the header from the server's scan in the same way. The pause puts
+    // the body in a later recv than the headers, as a real client can.
     {
         // case: whitespace before a header colon gets 400 and close
         const std::string body = "Connected=true&ClientID=1&x=123";
@@ -758,10 +760,13 @@ int main() {
             // The same bare LF at the end of the request line.
             "PUT /api/v1/telescope/0/connected HTTP/1.1\n"
             "Transfer-Encoding: chunked\r\nHost: localhost\r\n\r\n",
+            // A leading space: the parser trims it, the server's scan misses it.
+            "PUT /api/v1/telescope/0/connected HTTP/1.1\r\nHost: localhost\r\n"
+            " Transfer-Encoding: chunked\r\n\r\n",
         };
         const std::string chunked = "5\r\nhello\r\n0\r\n\r\n";
-        const std::string trailers[] = {body, chunked, chunked, chunked};
-        for (int i = 0; i < 4; ++i) {
+        const std::string trailers[] = {body, chunked, chunked, chunked, chunked};
+        for (int i = 0; i < 5; ++i) {
             int fd = connect_local(port);
             EXPECT(fd >= 0);
             std::string carry;

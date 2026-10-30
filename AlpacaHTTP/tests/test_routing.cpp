@@ -1479,16 +1479,21 @@ int main() {
     EXPECT(request.get_query_param("declination") == "-20.3");
     EXPECT(!request.has_query_param("nonexistent"));
 
-    // Framing (#1692): a body shorter than Content-Length, or a header name
-    // with whitespace before the colon (RFC 7230 section 3.2.4), is refused
-    // so the parser never disagrees with the server's socket read loop.
+    // Framing (#1692): a body shorter than Content-Length, a header name with
+    // whitespace before the colon (RFC 7230 section 3.2.4) or a header line
+    // that starts with whitespace (obs-fold, section 3.2.6) is refused so the
+    // parser never disagrees with the server's socket read loop.
     {
         // case: parse refuses a short body or whitespace before a colon
-        alpacahttp::Request framed;
-        EXPECT(!framed.parse("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length: 31\r\n\r\n"));
-        EXPECT(!framed.parse("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length : 2\r\n\r\n{}"));
-        EXPECT(!framed.parse("GET /management/apiversions HTTP/1.1\r\nX-Foo\t: bar\r\n\r\n"));
+        // A fresh Request each time: parse keeps headers from an earlier
+        // call, and a stale Content-Length would refuse every later case.
+        const auto parses = [](const char* raw) { return alpacahttp::Request{}.parse(raw); };
+        EXPECT(!parses("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length: 31\r\n\r\n"));
+        EXPECT(!parses("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length : 2\r\n\r\n{}"));
+        EXPECT(!parses("GET /management/apiversions HTTP/1.1\r\nX-Foo\t: bar\r\n\r\n"));
         EXPECT(!alpacahttp::Request::header_line_ok("X: a\nB: c"));
+        EXPECT(!alpacahttp::Request::header_line_ok(" X: a"));
+        EXPECT(!parses("PUT /x HTTP/1.1\n Content-Length: 2\n\n{}"));
         alpacahttp::Request good;
         EXPECT(good.parse("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}"));
         EXPECT(good.body() == "{}");
