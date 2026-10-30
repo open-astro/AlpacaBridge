@@ -47,6 +47,9 @@ namespace {
     std::string g_log_file_date;  // YYYY-MM-DD of currently-open file
     bool g_file_logging_enabled = false;
     int g_log_retention_days = 0;  // 0 = forever
+    std::uintmax_t g_log_max_file_bytes = 0;  // 0 = unlimited
+    std::uintmax_t g_log_file_bytes = 0;      // size of the open file: at open plus bytes written
+    bool g_log_file_capped = false;           // cap reached; file writes dropped until the next open
 
     const std::regex kLogFilenameRegex(R"(^alpacabridge-(\d{4})-(\d{2})-(\d{2})\.log$)");
 
@@ -147,6 +150,10 @@ namespace {
         if (g_log_file.is_open()) {
             g_log_file_name = name;
             g_log_file_date = date;
+            std::error_code size_ec;
+            const auto size = std::filesystem::file_size(path, size_ec);
+            g_log_file_bytes = size_ec ? 0 : size;
+            g_log_file_capped = false;
         } else {
             g_log_file_name.clear();
             g_log_file_date.clear();
@@ -203,6 +210,15 @@ namespace {
         return removed;
     }
 
+    // The one line written when the cap is reached. Fixed width for a given
+    // cap, so its size can be reserved up front. Written straight to the file,
+    // never through log_*, which would re-take g_file_mutex.
+    std::string size_cap_marker(std::uintmax_t cap) {
+        return format_log_line(alpacacore::logging::LogLevel::Warn, "AlpacaHTTP",
+                               "Log file size cap reached (" + std::to_string(cap / (1024 * 1024)) +
+                                   " MiB, logging.max_file_size_mb); file logging paused until the next day");
+    }
+
     void write_to_file(const std::string& line) {
         std::lock_guard<std::mutex> lock(g_file_mutex);
         if (!g_file_logging_enabled || g_log_directory.empty()) {
@@ -217,10 +233,25 @@ namespace {
                 prune_old_files_locked();
             }
         }
-        if (g_log_file.is_open()) {
-            g_log_file << line << '\n';
-            g_log_file.flush();
+        if (!g_log_file.is_open() || g_log_file_capped) {
+            return;
         }
+        const std::uintmax_t cap = g_log_max_file_bytes;
+        std::string text = line + '\n';
+        if (cap > 0) {
+            // Keep room for the marker so the final size stays within the cap.
+            const std::string marker = size_cap_marker(cap) + '\n';
+            if (g_log_file_bytes + text.size() + marker.size() > cap) {
+                g_log_file_capped = true;
+                if (g_log_file_bytes + marker.size() > cap) {
+                    return;  // no room (a restart on a full file): append nothing
+                }
+                text = marker;
+            }
+        }
+        g_log_file << text;
+        g_log_file.flush();
+        g_log_file_bytes += text.size();
     }
 
     void log_sink(alpacacore::logging::LogLevel level,
@@ -441,6 +472,7 @@ void init_logging(const Config& config) {
     alpacacore::logging::set_log_level(convert_log_level(config.log_level()));
     alpacacore::logging::set_log_sink(log_sink);
     set_log_retention_days(config.log_retention_days());
+    set_log_max_file_bytes(static_cast<std::uintmax_t>(config.log_max_file_size_mb()) * 1024 * 1024);
     const std::string selected =
         configure_log_directory(config.log_directory(), config.file_logging_enabled());
     if (config.file_logging_enabled() && !selected.empty()) {
@@ -502,7 +534,10 @@ void set_log_retention_days(int days) {
     g_log_retention_days = days;
 }
 
-void set_log_max_file_bytes(std::uintmax_t) {}
+void set_log_max_file_bytes(std::uintmax_t bytes) {
+    std::lock_guard<std::mutex> lock(g_file_mutex);
+    g_log_max_file_bytes = bytes;
+}
 
 std::size_t prune_old_log_files() {
     std::lock_guard<std::mutex> lock(g_file_mutex);

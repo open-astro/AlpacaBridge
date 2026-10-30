@@ -56,16 +56,16 @@ std::string last_line(const std::string& text) {
     return pos == std::string::npos ? t : t.substr(pos + 1);
 }
 
-// Points the sink at `dir`, silences stderr, and sets the cap.
+// Points the sink at `dir`, silences stderr, and sets the cap before the file
+// is opened (as init_logging does), so a reopened file is judged against it.
 fs::path start(const fs::path& dir, std::uintmax_t cap) {
     alpacahttp::Config config;
-    config.set_log_directory(dir.string());
-    config.set_file_logging_enabled(true);
+    config.set_file_logging_enabled(false);
     config.set_log_level(alpacahttp::LogLevel::INFO);
-    config.set_log_retention_days(90);
     util::init_logging(config);
     util::set_external_log_sink([](alpacacore::logging::LogLevel, std::string_view, std::string_view) {});
     util::set_log_max_file_bytes(cap);
+    EXPECT(util::configure_log_directory(dir.string(), true) == dir.string());
     return dir / util::current_log_filename();
 }
 
@@ -157,6 +157,8 @@ int main() {
         { std::ofstream(old_file) << "old\n"; }
         const fs::path file = start(dir, 4096);
         write_lines(5);
+        util::set_log_retention_days(90);
+        EXPECT(util::prune_old_log_files() == 1);
         EXPECT(!fs::exists(old_file));
         EXPECT(fs::exists(file));
         fs::remove_all(dir);
