@@ -2290,7 +2290,7 @@ CONTRACT_SWEEP_ENTRIES(CS_T1_CAN)
 
 // Non-vacuity: a tier-1 case is registered exactly for the entries that pass its subject test, and each such
 // entry has a non-empty probe list (an unregistered entry states why in no_invalid_probe_reason).
-TEST_CASE("Contract sweep - tier 1 cases have a subject", "[contract][tier1][guard]") {
+void check_tier1_cases_have_a_subject() {
     std::set<std::string> registered;
     for (const auto& t : Catch::getRegistryHub().getTestCaseRegistry().getAllTests()) {
         registered.insert(t.getTestCaseInfo().name);
@@ -2582,6 +2582,7 @@ TEST_CASE("Contract sweep - every registry entry of a catalog vendor has a descr
 // alpacacore_tests, or the registry compiles to nothing and every case above
 // silently disappears. Each macro that IS defined must contribute an entry.
 TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep-guard]") {
+    check_tier1_cases_have_a_subject();
     const auto entries = alpacacore::test::contract::contract_entries();
     std::set<std::string> vendors;
     std::set<std::string> ids;
