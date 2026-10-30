@@ -5259,7 +5259,7 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             if (included < files.size()) {
                 combined += "===== " + std::to_string(files.size() - included) +
                             " older log file(s) omitted: archive capped at " +
-                            std::to_string(kMaxArchiveBytes / (1024 * 1024)) + " MiB =====\n\n";
+                            std::to_string(kMaxArchiveBytes >> 20) + " MiB =====\n\n";
             }
             for (std::size_t i = included; i-- > 0;) {
                 const auto& info = files[i];
