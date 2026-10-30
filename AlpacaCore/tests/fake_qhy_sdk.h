@@ -768,16 +768,22 @@ private:
     // moved-from object's sync_ null, so a stray hit()/call_count() on it
     // (a caller holding a moved-from fake past the move, say) segfaults
     // instead of misbehaving loudly. Sync's own hand-written move
-    // constructor sidesteps both: there is nothing meaningful to transfer
-    // out of a mutex-only struct, so moving one just re-defaults a fresh
-    // mutex in place, and the moved-from object stays fully usable.
+    // constructor sidesteps both: a mutex has nothing to transfer, so moving
+    // one re-defaults a fresh mutex in place and carries only failing_fn
+    // across, and the moved-from object stays fully usable.
     struct Sync {
         mutable std::mutex calls_mutex;
         std::string failing_fn;  // fail_from(), guarded by calls_mutex
 
         Sync() = default;
-        Sync(Sync&&) noexcept {}
-        Sync& operator=(Sync&&) noexcept { return *this; }
+        Sync(Sync&& other) noexcept { *this = std::move(other); }
+        Sync& operator=(Sync&& other) noexcept {
+            if (this != &other) {
+                std::scoped_lock lock(calls_mutex, other.calls_mutex);
+                failing_fn = std::move(other.failing_fn);
+            }
+            return *this;
+        }
         Sync(const Sync&) = delete;
         Sync& operator=(const Sync&) = delete;
     };
