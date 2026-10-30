@@ -29,6 +29,7 @@
 
 #include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -412,4 +413,186 @@ TEST_CASE("SkyWatcher link loss - serial: a node-gone verdict does not stamp or 
     CHECK(protocol.link_alive());
     CHECK_FALSE(protocol.consume_link_lost_at().has_value());
     protocol.disconnect();
+}
+
+// open-astro#1708: background workers a client started before the fault must not
+// write once the board has restarted under a recovered link. The board answers
+// again, so an ungated write is visible on the wire. All waits are virtual.
+namespace {
+
+struct RestartedBoardRig {
+    FakeTaskClock clock;
+    FakeSkyWatcherSerialBoard board{alpacacore::test::FakeMountProfile::wave_100i(), clock};
+    sw::SkyWatcherProtocolWrapper* protocol = nullptr;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    RestartedBoardRig() {
+        sw::ConnectionInfo info;
+        info.type = sw::ConnectionType::Serial;
+        info.port_path = board.slave_path();
+        info.baud_rate = 9600;
+        info.response_timeout_ms = 100;
+        auto owned = std::make_unique<sw::SkyWatcherProtocolWrapper>();
+        protocol = owned.get();
+        driver = sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0, std::move(owned), {}, clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        driver->set_tracking(true);
+    }
+
+    ~RestartedBoardRig() { driver->set_connected(false); }
+
+    // One poll tick of virtual time; returns once a woken task has registered its next wait, so the
+    // exchange it ran (real time on the pty) is done.
+    void step(int ticks = 1) {
+        for (int i = 0; i < ticks; ++i) {
+            const auto waits = clock.wait_count();
+            clock.advance(std::chrono::milliseconds(100));
+            clock.wait_for_wait_count(waits + 1, std::chrono::milliseconds(1000));
+        }
+    }
+
+    // The board goes quiet until the fault latches, then answers with its
+    // initialization cleared; the status poll turns that into the terminal
+    // "restarted" fault.
+    void restart_board() {
+        board.set_muted(true);
+        for (int i = 0; i < 3; ++i) CHECK_THROWS(protocol->inquire_position(sw::kAxisRa));
+        REQUIRE(protocol->link_faulted());
+        board.set_init_done(false);
+        board.set_muted(false);
+        for (int i = 0; i < 50 && driver->get_link_fault().find("restarted") == std::string::npos; ++i) step();
+        REQUIRE(driver->get_link_fault().find("restarted") != std::string::npos);
+    }
+
+    // Frames sent since @p from whose command letter is in @p letters.
+    int frames_since(std::size_t from, const std::string& letters) const {
+        int n = 0;
+        const auto frames = board.frames();
+        for (std::size_t i = from; i < frames.size(); ++i) {
+            if (letters.find(frames[i][0]) != std::string::npos) ++n;
+        }
+        return n;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("SkyWatcher link loss - a rate-applied check in flight does not re-kick a board that restarted",
+          "[skywatcher][linkloss][serial]") {
+    RestartedBoardRig r;
+    // The write's own ':I'+':J' do not take, so the check has a stall to re-kick.
+    r.board.stall_live_rate_writes(1, 1);
+    r.board.ignore_start_relatches(1, 1);
+    std::promise<void> parked;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    sw::set_rate_verify_before_start_hook_for_testing(*r.driver, [&parked, released] {
+        parked.set_value();
+        released.wait();
+    });
+    std::thread setter([&] { r.driver->set_right_ascension_rate(0.5); });
+    REQUIRE(parked.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+
+    r.restart_board();
+    const std::size_t from = r.board.frames().size();
+    release.set_value();
+    setter.join();
+    r.step(60);  // past the settle and the longest window
+    sw::set_rate_verify_before_start_hook_for_testing(*r.driver, nullptr);
+
+    CHECK(r.frames_since(from, "IJ") == 0);
+}
+
+TEST_CASE("SkyWatcher link loss - a park started before the board restarted sends nothing when its body runs",
+          "[skywatcher][linkloss][serial]") {
+    RestartedBoardRig r;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::promise<void> finished;
+    sw::set_slew_spawn_for_testing(*r.driver, [released, &finished](std::function<void()> body) {
+        return std::thread([released, &finished, body = std::move(body)] {
+            released.wait();
+            body();
+            finished.set_value();
+        });
+    });
+    r.driver->park();
+
+    r.restart_board();
+    const std::size_t from = r.board.frames().size();
+    release.set_value();
+    REQUIRE(finished.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+
+    sw::set_slew_spawn_for_testing(*r.driver, nullptr);
+
+    CHECK(r.frames_since(from, "KSGIJ") == 0);
+}
+
+TEST_CASE("SkyWatcher link loss - a pulse that ends after the board restarted does not restore the tracking drive",
+          "[skywatcher][linkloss][serial]") {
+    RestartedBoardRig r;
+    r.driver->pulse_guide(2, 12000);  // East: a live in-place rate change, restored at the end
+    r.step(60);                       // dispatch and its rate check are done; the hold is in flight
+    r.restart_board();
+    const std::size_t from = r.board.frames().size();
+    r.step(80);  // past the end of the hold
+
+    CHECK(r.frames_since(from, "IJG") == 0);
+}
+
+TEST_CASE("SkyWatcher link loss - a MoveAxis stop that completes after the board restarted does not restore tracking",
+          "[skywatcher][linkloss][serial]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    r.board.hold_running(1, true);  // the stop task keeps polling ':f'
+    r.driver->move_axis(0, 0.0);
+    r.restart_board();
+    r.board.hold_running(1, false);
+    const std::size_t from = r.board.frames().size();
+    r.step(10);  // the stop task sees the axis stopped and reaches its restore
+
+    CHECK(r.frames_since(from, "KGIJ") == 0);
+}
+
+TEST_CASE("SkyWatcher link loss - a pulse sent with Tracking off and ended after the board restarted leaves RA alone",
+          "[skywatcher][linkloss][serial]") {
+    RestartedBoardRig r;
+    r.driver->set_tracking(false);
+    r.driver->pulse_guide(2, 12000);
+    r.step(20);
+    r.driver->set_tracking(true);  // lands mid-pulse: the end would normally put RA back on the drive
+    r.restart_board();
+    const std::size_t from = r.board.frames().size();
+    r.step(200);  // past the end of the hold
+
+    CHECK(r.frames_since(from, "K") >= 1);  // the pulse ended after the restart; its stop is ungated
+    CHECK(r.frames_since(from, "IJG") == 0);
+}
+
+TEST_CASE("SkyWatcher link loss - a MoveAxis stop checks for a board restart itself before it restores tracking",
+          "[skywatcher][linkloss][serial]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    r.board.hold_running(1, true);
+    r.driver->move_axis(0, 0.0);
+    sw::set_status_poll_paused_for_testing(*r.driver, true);  // only the stop task can notice the restart
+    r.board.set_muted(true);
+    for (int i = 0; i < 3; ++i) CHECK_THROWS(r.protocol->inquire_position(sw::kAxisRa));
+    r.board.set_init_done(false);
+    r.board.set_muted(false);
+    for (int i = 0; i < 20 && r.protocol->link_faulted(); ++i) {
+        try {
+            r.protocol->inquire_status(sw::kAxisRa);  // the link recovers; the paused poll has not probed the board
+        } catch (const std::exception&) {             // NOLINT(bugprone-empty-catch)
+        }
+        r.step();
+    }
+    REQUIRE_FALSE(r.protocol->link_faulted());
+    r.board.hold_running(1, false);
+    const std::size_t from = r.board.frames().size();
+    r.step(10);  // the stop task reaches its restore
+
+    CHECK(r.frames_since(from, "KGIJ") == 0);
+    sw::set_status_poll_paused_for_testing(*r.driver, false);
 }

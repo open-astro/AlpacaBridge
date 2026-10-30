@@ -1,0 +1,3 @@
+### Fixed
+
+- **Sky-Watcher background workers on a faulted link**, Sky-Watcher driver, issue #1708. A rate-applied re-kick (`:I`/`:J`), a Park or FindHome body started before the fault, the end of a guide pulse and the restore at the end of a `MoveAxis(axis, 0)` stop no longer write to a link that is faulted or to a board that restarted; the pulse end and the stop wait still stop the axis and skip the tracking-drive restore. Covered by the six restarted-board cases in `AlpacaCore/tests/test_skywatcher_link_loss.cpp` (on the fake task clock) that assert no `:I` or `:J` frame follows, and no `:G` where the worker could start an axis (and no `:K`/`:S` where the case sends no stop).
