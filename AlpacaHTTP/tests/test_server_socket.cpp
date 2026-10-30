@@ -744,6 +744,7 @@ int main() {
     // the 501 the same way. Both must now be a 400 and a close. The pause
     // puts the body in a later recv than the headers, as a real client can.
     {
+        // case: whitespace before a header colon gets 400 and close
         const std::string body = "Connected=true&ClientID=1&x=123";
         EXPECT(body.size() == 31);
         const std::string cases[] = {

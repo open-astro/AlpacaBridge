@@ -1461,6 +1461,7 @@ int main() {
     // with whitespace before the colon (RFC 7230 section 3.2.4), is refused
     // so the parser never disagrees with the server's socket read loop.
     {
+        // case: parse refuses a short body or whitespace before a colon
         alpacahttp::Request framed;
         EXPECT(!framed.parse("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length: 31\r\n\r\n"));
         EXPECT(!framed.parse("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length : 2\r\n\r\n{}"));
