@@ -1512,14 +1512,21 @@ TEST_CASE("Bisque park - a stale Park's timeout leaves a newer Park refusing sle
                           [&] { return (!park1.valid() || ready(park1)) && (!park2.valid() || ready(park2)); });
         }
     } finish_parks{rig, park1, park2};
-    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+    // The Park threads start in real time, so wait for them in real time: stepping the clock does not give a thread
+    // time to start under load.
+    const auto wait_real = [](const std::function<bool()>& done) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (!done() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        return done();
+    };
+    REQUIRE(wait_real([&] { return rig.mount.park_polls.load() >= 1; }));
 
     REQUIRE_NOTHROW(rig.driver->abort_slew());
     // Park 2 starts 60 s into Park 1, so Park 1 times out with 60 s of Park 2's budget left.
     advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= std::chrono::seconds(60); }, 60);
     REQUIRE(rig.virtual_elapsed() >= std::chrono::seconds(60));
     park2 = std::async(std::launch::async, [&] { rig.driver->park(); });
-    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_commands.load() == 2; }, 5));
+    REQUIRE(wait_real([&] { return rig.mount.park_commands.load() == 2; }));
     // Park 1 times out (120 s after its start) while Park 2, started later, still polls.
     REQUIRE(advance_until(rig.clock, [&] { return ready(park1); }, 200));
     require_alpaca_error([&] { park1.get(); }, alpacacore::AlpacaError::DriverException);
