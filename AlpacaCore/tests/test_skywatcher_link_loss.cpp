@@ -315,3 +315,101 @@ TEST_CASE("SkyWatcher link loss - serial: a polled severed link keeps the fault 
     s.driver->set_connected(false);
     CHECK(s.driver->get_link_fault().empty());
 }
+
+// open-astro#1707: a loss verdict reached on the old session must not act on
+// the session a relink opened after it.
+namespace {
+
+struct StaleUdpLink {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount{alpacacore::test::FakeMountProfile::wave_100i(), clock};
+    sw::ConnectionInfo info;
+    sw::SkyWatcherProtocolWrapper protocol;
+
+    StaleUdpLink() {
+        REQUIRE(mount.ok());
+        info.type = sw::ConnectionType::Network;
+        info.host = "127.0.0.1";
+        info.udp_port = mount.port();
+        info.response_timeout_ms = 100;
+        protocol.set_task_clock(clock);
+        REQUIRE(protocol.connect(info));
+        mount.set_silent(true);
+        for (int i = 0; i < 3; ++i) CHECK_THROWS(protocol.inquire_position(sw::kAxisRa));
+        REQUIRE(protocol.link_faulted());
+        clock.advance(alpacacore::util::kLinkStalenessBound);
+        mount.set_silent(false);
+    }
+
+    // Relinks when link_alive() reaches `at`, then checks the new session.
+    void relink_at_and_check(sw::SkyWatcherProtocolWrapper::LinkLossPoint at) {
+        protocol.set_link_loss_hook_for_test([&](auto point) {
+            if (point == at) {
+                REQUIRE(protocol.connect(info));
+            }
+        });
+        const bool alive = protocol.link_alive();  // the old session's verdict
+        protocol.set_link_loss_hook_for_test({});
+        CHECK(alive);
+        CHECK(protocol.is_connected());
+        CHECK(protocol.link_alive());
+        CHECK(protocol.link_fault().empty());
+        CHECK_FALSE(protocol.consume_link_lost_at().has_value());
+        protocol.disconnect();
+    }
+};
+
+}  // namespace
+
+TEST_CASE("SkyWatcher link loss - a stale verdict does not latch a session relinked after it",
+          "[skywatcher][linkloss][udp]") {
+    StaleUdpLink s;
+    s.relink_at_and_check(sw::SkyWatcherProtocolWrapper::LinkLossPoint::AfterStaleVerdict);
+}
+
+TEST_CASE("SkyWatcher link loss - a latched loss does not close a session relinked before the close",
+          "[skywatcher][linkloss][udp]") {
+    StaleUdpLink s;
+    s.protocol.set_link_loss_hook_for_test([&](auto point) {
+        if (point == sw::SkyWatcherProtocolWrapper::LinkLossPoint::AfterStaleLatch) {
+            REQUIRE(s.protocol.connect(s.info));
+        }
+    });
+    s.protocol.link_alive();  // latches, then the hook relinks before the close
+    s.protocol.set_link_loss_hook_for_test({});
+    CHECK(s.protocol.is_connected());
+    CHECK(s.protocol.link_alive());
+    CHECK(s.protocol.link_fault().empty());
+    s.protocol.disconnect();
+}
+
+TEST_CASE("SkyWatcher link loss - serial: a node-gone verdict does not stamp or close a session relinked after it",
+          "[skywatcher][linkloss][serial]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherSerialBoard old_board;
+    FakeSkyWatcherSerialBoard new_board;
+    sw::ConnectionInfo old_info;
+    old_info.type = sw::ConnectionType::Serial;
+    old_info.port_path = old_board.slave_path();
+    old_info.baud_rate = 9600;
+    old_info.response_timeout_ms = 100;
+    sw::ConnectionInfo new_info = old_info;
+    new_info.port_path = new_board.slave_path();
+
+    sw::SkyWatcherProtocolWrapper protocol;
+    protocol.set_task_clock(clock);
+    REQUIRE(protocol.connect(old_info));
+    old_board.sever_link();  // the node is gone: link_alive() will say so
+    protocol.set_link_loss_hook_for_test([&](auto point) {
+        if (point == sw::SkyWatcherProtocolWrapper::LinkLossPoint::AfterNodeCheck) {
+            REQUIRE(protocol.connect(new_info));
+        }
+    });
+    protocol.link_alive();  // the old session's verdict; the hook relinks before the stamp
+    protocol.set_link_loss_hook_for_test({});
+
+    CHECK(protocol.is_connected());
+    CHECK(protocol.link_alive());
+    CHECK_FALSE(protocol.consume_link_lost_at().has_value());
+    protocol.disconnect();
+}
