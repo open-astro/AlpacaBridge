@@ -162,8 +162,6 @@ std::uint32_t nl80211_iftype(const std::string& ifname);
 // hosts the hotspot. On single-radio boards both name the same device; on
 // boards with a dedicated AP-type virtual interface (OPi 4 Pro ap0, ASIAIR
 // uap0) they differ.
-}  // namespace
-
 // The hotspot profile among the saved wifi connections: prefer the well-known
 // id (kApProfileId, created by the OpenAstro imagers), falling back to the
 // first ap-mode profile so a renamed hotspot is still manageable. Used by
@@ -182,6 +180,8 @@ std::pair<std::string, nlohmann::json> pick_ap_profile(const std::vector<WifiPro
     }
     return fallback;
 }
+
+}  // namespace
 
 struct WifiManager::BusHandle final : WifiProfileBackend {
     sd_bus* bus = nullptr;

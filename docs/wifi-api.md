@@ -150,8 +150,7 @@ DHCP on the fleet-wide subnet `172.24.1.0/24`; the portal is always at
   earlier release), requires a passphrase of 8–63 chars; an empty one is refused.
   An empty `Passphrase` keeps the stored secret only on a secured profile.
 - Upgrade note: a device with an open hotspot from an earlier release can no
-  longer activate it. Send `PUT` with a passphrase, or delete the hotspot and add
-  it again.
+  longer activate it. Send `PUT` with a passphrase.
 - `SsidHex` may be supplied instead of `Ssid` with the same encoding and
   precedence rules as `PUT /profiles`. This lets clients preserve a configured
   SSID while changing other AP settings.

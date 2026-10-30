@@ -521,6 +521,23 @@ int main() {
         }
     }
 
+    {
+        // case: set_ap lets an empty passphrase past the check on a secured hotspot profile (#1715)
+        FakeWifiProfileBackend backend;
+        auto secured = saved_profile("Hotspot", "ap");
+        secured["802-11-wireless-security"] = {{"key-mgmt", "wpa-psk"}};
+        backend.connections.emplace_back("/saved/ap", std::move(secured));
+        WifiManager manager("unused", backend);
+        std::string message;
+        try {
+            manager.set_ap("Hotspot", "", "bg", 0, true);
+        } catch (const WifiError& e) {
+            message = e.what();
+        }
+        EXPECT(message.find("Passphrase") == std::string::npos);
+        EXPECT(message.find("injected") != std::string::npos);
+    }
+
     std::cout << "Wi-Fi profile backend tests passed\n";
     return 0;
 }
