@@ -411,6 +411,13 @@ public:
     void set_open_delay(std::chrono::milliseconds delay) {
         open_delay_ms_.store(std::clamp<std::int64_t>(delay.count(), 0, 20000));
     }
+    // The Exposure control's max_value (10 s by default). Set before connecting: the driver reads the caps then.
+    void set_exposure_max(std::chrono::microseconds max) {
+        std::lock_guard lock(mutex_);
+        for (auto& caps : controls_) {
+            if (caps.type == Control::Exposure) caps.max_value = static_cast<long>(max.count());
+        }
+    }
     void set_max_read_wait(std::chrono::milliseconds timeout) {
         std::lock_guard lock(mutex_);
         max_read_wait_ms_ = static_cast<int>(std::clamp<std::int64_t>(timeout.count(), 1, 20000));

@@ -148,6 +148,17 @@ public:
     // --- scripting knobs ---------------------------------------------------
     std::set<std::string> throw_from;
 
+    /// Makes every later call of `fn` throw, until clear_fail_from(). Unlike throw_from it is locked, so a case
+    /// may set and clear it while the driver runs (contract sweep tier 3).
+    void fail_from(const std::string& fn) {
+        std::lock_guard<std::mutex> lock(sync_.calls_mutex);
+        sync_.failing_fn = fn;
+    }
+    void clear_fail_from() {
+        std::lock_guard<std::mutex> lock(sync_.calls_mutex);
+        sync_.failing_fn.clear();
+    }
+
     /// Test-only hook, run at the top of every forward (open-astro#339).
     /// Null in every ordinary case. See hit(). Read by hit() with NO
     /// synchronisation, like every other knob here: assign and clear it only
@@ -757,15 +768,22 @@ private:
     // moved-from object's sync_ null, so a stray hit()/call_count() on it
     // (a caller holding a moved-from fake past the move, say) segfaults
     // instead of misbehaving loudly. Sync's own hand-written move
-    // constructor sidesteps both: there is nothing meaningful to transfer
-    // out of a mutex-only struct, so moving one just re-defaults a fresh
-    // mutex in place, and the moved-from object stays fully usable.
+    // constructor sidesteps both: a mutex has nothing to transfer, so moving
+    // one re-defaults a fresh mutex in place and carries only failing_fn
+    // across, and the moved-from object stays fully usable.
     struct Sync {
         mutable std::mutex calls_mutex;
+        std::string failing_fn;  // fail_from(), guarded by calls_mutex
 
         Sync() = default;
-        Sync(Sync&&) noexcept {}
-        Sync& operator=(Sync&&) noexcept { return *this; }
+        Sync(Sync&& other) noexcept { *this = std::move(other); }
+        Sync& operator=(Sync&& other) noexcept {
+            if (this != &other) {
+                std::scoped_lock lock(calls_mutex, other.calls_mutex);
+                failing_fn = std::move(other.failing_fn);
+            }
+            return *this;
+        }
         Sync(const Sync&) = delete;
         Sync& operator=(const Sync&) = delete;
     };
@@ -786,7 +804,12 @@ private:
         if (before_call) {
             before_call(fn);
         }
-        if (throw_from.count(fn) != 0) {
+        bool failing = false;
+        {
+            std::lock_guard<std::mutex> lock(sync_.calls_mutex);
+            failing = sync_.failing_fn == fn;
+        }
+        if (failing || throw_from.count(fn) != 0) {
             throw AlpacaException(std::string("fake: injected failure in ") + fn, AlpacaError::DriverException);
         }
     }

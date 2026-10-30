@@ -58,6 +58,8 @@ public:
     bool auto_complete_exposure{true};
     bool fail_exposure_register_write{false};
     bool fail_exposure_start{false};
+    // Every exposure start reports Failed until cleared: a driver retry meets the fault again (sweep tier 3).
+    std::atomic<bool> fail_every_exposure{false};
     // false models a camera without a cooler: get_control_caps omits CoolerOn and CoolerPower.
     bool report_cooler_controls{true};
     std::optional<ControlCaps> bandwidth_caps =
@@ -312,6 +314,7 @@ public:
             throw AlpacaException("scripted exposure-trigger failure", AlpacaError::DriverException);
         }
         status_ = auto_complete_exposure ? ExposureStatus::Success : ExposureStatus::Working;
+        if (fail_every_exposure) status_ = ExposureStatus::Failed;
         if (usb2_settle_clock != nullptr) {
             const auto now = usb2_settle_clock->now();
             start_times_.push_back(now);

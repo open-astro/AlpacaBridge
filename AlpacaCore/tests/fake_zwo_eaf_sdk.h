@@ -61,9 +61,10 @@ public:
     int max_step{60000};
     int step_range{1000};
     int position{500};
-    bool moving{false};
+    // Atomic with fail_reads: the contract sweep sets and clears them while the driver polls (tier 3).
+    std::atomic<bool> moving{false};
     double temperature{12.5};
-    bool fail_reads{false};
+    std::atomic<bool> fail_reads{false};
     bool fail_temperature{false};
     // Issue #1500: the temperature or step range read reports the unit removed (EAF_ERROR_REMOVED).
     bool temperature_removed{false};
@@ -208,7 +209,7 @@ private:
         ++moving_calls;
         check_unit(focuser_id);
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         return moving;
     }
@@ -218,7 +219,7 @@ private:
         last_read_id = focuser_id;
         check_unit(focuser_id);
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         return position;
     }
