@@ -297,6 +297,8 @@ private:
     void require_connected() const;
     void require_healthy_transport() const;
     // Drops mutex_ for the axis exchanges and re-validates after them (decision 0016 rules 1 and 6).
+    // Every caller holds motion_start_mutex_, so no other reader or motion start runs while mutex_ is dropped:
+    // the stationary check and the telemetry key taken before the read still describe the mount afterwards.
     CgxSkyPosition read_sky_position(std::unique_lock<std::mutex>& lock, std::uint32_t* ra_encoder = nullptr,
                                      std::uint32_t* dec_encoder = nullptr,
                                      bool reuse_stationary_telemetry = false) const;
@@ -1212,7 +1214,7 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
             try {
                 // Lost matching invalidates the reference. Recover on the owned fd
                 // and leave tracking off rather than resume an uncertain frame.
-                // Under mutex_: never wait out another device's probe (#1457).
+                // Never wait out another device's probe (#1457); mutex_ is held here unless the caller passed its lock.
                 protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
                 rollback_succeeded = !write(false, previous_rate, "tracking rollback");
                 rolled_back = rollback_succeeded;
@@ -1229,7 +1231,7 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         }
         std::rethrow_exception(failure);
     }
-    if (release != nullptr) require_connected();  // Disconnect may have run while mutex_ was dropped.
+    if (release != nullptr) require_connected();  // Re-check after the exchanges (decision 0016 rule 6).
     tracking_state_valid_ = true;
 }
 void CelestronCgxTelescopeDriver::set_site_elevation(double elevation) {
@@ -1532,7 +1534,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
                 clock_.sleep_for(std::chrono::milliseconds(20));
             }
         }
-        require_connected();  // Disconnect may have run while mutex_ was dropped; the catch marks the labels unknown.
+        require_connected();  // Rule 6: re-check after the exchanges; the catch marks the labels unknown.
         // Sync re-labels the current mechanical position. Keep the homed
         // reference fixed, and remember the equivalent home labels in this
         // shifted frame for any later meridian-route re-home.

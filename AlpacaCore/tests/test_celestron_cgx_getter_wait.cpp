@@ -85,20 +85,52 @@ TEST_CASE("CGX state-only getters return while a position read waits on serial (
     }
 }
 
-TEST_CASE("CGX state-only getters return while SyncToCoordinates waits on serial (#1837)",
-          "[celestron][cgx][getter-wait]") {
-    GetterWaitRig rig;
+namespace {
+// Syncs while the first reply matching `filter` is held half-sent, then probes the state getters.
+// A held tracking-off or tracking-on ACK needs tracking on before Sync (it switches tracking off, then back on).
+void check_getters_while_sync_holds(GetterWaitRig& rig, std::pair<std::uint8_t, std::uint8_t> filter,
+                                    bool tracking_on) {
+    if (tracking_on) rig.driver->set_tracking(true);
     rig.clock.advance(1s);
-    rig.hold_ra_position_reply();
+    rig.mount.fragment_next_reply(filter);
     auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(3.0, 20.0); });
-    const bool held = rig.mount.wait_for_reply_fragment(2s);
+    // Sync's settle loop sleeps on the fake clock; keep it moving until the reply is held.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    bool held = false;
+    while (!held && std::chrono::steady_clock::now() < deadline) {
+        held = rig.mount.wait_for_reply_fragment(5ms);
+        if (!held) rig.clock.advance(20ms);
+    }
     if (!held) rig.mount.release_reply_tail();
     REQUIRE(held);
     rig.check_state_getters_return();
-    // Sync's settle loop sleeps on the fake clock; keep it moving until Sync ends.
     while (sync.wait_for(5ms) != std::future_status::ready) rig.clock.advance(20ms);
     try {
         sync.get();
     } catch (const std::exception&) {  // may time out once held past 500 ms
     }
+}
+}  // namespace
+
+TEST_CASE("CGX state-only getters return while SyncToCoordinates waits on serial (#1837)",
+          "[celestron][cgx][getter-wait]") {
+    GetterWaitRig rig;
+    check_getters_while_sync_holds(rig, {0x10, 0x01}, false);  // settle-loop axis read
+}
+
+TEST_CASE("CGX state-only getters return while Sync waits on the label write ACK (#1837)",
+          "[celestron][cgx][getter-wait]") {
+    GetterWaitRig rig;
+    check_getters_while_sync_holds(rig, {0x10, 0x04}, false);  // MC_SET_POSITION
+}
+
+TEST_CASE("CGX state-only getters return while Sync waits on a tracking ACK (#1837)",
+          "[celestron][cgx][getter-wait]") {
+    GetterWaitRig rig;
+    check_getters_while_sync_holds(rig, {0x10, 0x06}, true);  // tracking off before the labels
+}
+
+TEST_CASE("CGX state-only getters return while Sync restores tracking (#1837)", "[celestron][cgx][getter-wait]") {
+    GetterWaitRig rig;
+    check_getters_while_sync_holds(rig, {0x10, 0x07}, true);  // southern site: tracking-on rate command
 }
