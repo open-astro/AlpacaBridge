@@ -121,9 +121,8 @@ public:
     int get_device_number() const override { return device_number_; }
 
     std::string get_name() const override {
-        const_cast<ToupTekCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_ && !camera_info_.name.empty()) {
+        if (!camera_info_.name.empty()) {
             return camera_info_.name;
         }
         return branding_.label + " Camera";
@@ -151,10 +150,25 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // A disconnect during an in-flight connect is recorded BEFORE the
+        // transition lock is taken: the connect task holds that lock across the
+        // SDK open, so recording after it would block until the connect is over.
+        // A recorded disconnect on a connect that completes is honoured by the
+        // task tail (deferred disconnect), so it still wins.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        // transition_mutex_ spans the whole connect/disconnect and is taken by
+        // no getter, so mutex_ stays free during the SDK open (decision 0016
+        // item 4). connected_, the handle and the identity change only inside
+        // this lock; mutex_ is taken just to publish them, or to clear connected_
+        // and the handle (the identity stays for the getters).
+        std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         // exposure_lifecycle_mutex_ also serialises the thermal poller's
         // spawn (connect path, below) against its join (disconnect path), so
         // the std::thread object is never assigned and joined concurrently.
-        // Taken in both directions, before mutex_ (documented lock order).
+        // Taken in both directions, after transition_mutex_ and before mutex_
+        // (documented lock order).
         std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         if (!connected) {
             // Join the exposure thread BEFORE taking mutex_ and closing the handle:
@@ -168,17 +182,12 @@ public:
             // null the handle). Lock order: exposure_lifecycle_mutex_ -> mutex_.
             stop_exposure_thread();
             // The poller takes mutex_ on every tick, so join it out here too --
-            // before mutex_ is taken and the handle closed under it.
+            // before mutex_ is taken and the handle closed.
             stop_thermal_poller();
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Base gates BEFORE the idempotency check: a sync disconnect during an
-        // in-flight connect looks idempotent (both sides see disconnected) and
-        // would be silently dropped without the record; a connect must honor a
-        // newer pending disconnect by staying down.
-        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
-            return;
-        }
+        // Base gates BEFORE the idempotency check: a connect must honor a newer
+        // pending disconnect by staying down. connected_ only changes under
+        // transition_mutex_, so the read needs no mutex_.
         if (connected && consume_pending_disconnect(connected_.load())) {
             return;
         }
@@ -207,33 +216,34 @@ public:
             if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
                 throw AlpacaException("Camera index out of range", AlpacaError::InvalidValue);
             }
-            camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
-            camera_info_valid_ = true;
+            // The identity is built in locals and published under mutex_ at the
+            // end, so no getter sees a half-configured camera (item 3).
+            ToupCameraInfo info = cameras[static_cast<std::size_t>(camera_index_)];
 
             ALPACA_LOG_INFO(branding_.label, "SDK version: " + sdk.get_sdk_version());
             ALPACA_LOG_INFO(branding_.label,
-                            "Opening camera index " + std::to_string(camera_index_) + ": " + camera_info_.name);
+                            "Opening camera index " + std::to_string(camera_index_) + ": " + info.name);
 
-            handle_ = sdk.open_camera_by_id(camera_info_.id);
+            HToupcam handle = sdk.open_camera_by_id(info.id);
 
             // Configure: disable auto-exposure, enable RAW output, select
             // 16-bit bitdepth when the sensor supports it, and arm software
             // trigger mode before starting pull-mode streaming.
             try {
-                sdk.put_auto_exposure(handle_, false);
+                sdk.put_auto_exposure(handle, false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(branding_.label, "put_AutoExpoEnable failed: " + std::string(e.what()));
             }
 
             try {
-                sdk.put_raw(handle_, 1);
+                sdk.put_raw(handle, 1);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(branding_.label, "put_Option(RAW) failed: " + std::string(e.what()));
             }
 
-            if (camera_info_.bit_depth_max > 8) {
+            if (info.bit_depth_max > 8) {
                 try {
-                    sdk.put_bitdepth(handle_, 1);
+                    sdk.put_bitdepth(handle, 1);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN(branding_.label, "put_Option(BITDEPTH=1) failed: " + std::string(e.what()));
                 }
@@ -245,36 +255,38 @@ public:
             // get_firmware_version, start_pull_mode all propagate) would leak the SDK
             // open — the ref-counted open never balances — and hand a stale handle to
             // the next reconnect. Guard the whole post-open configuration in one try.
+            std::string serial;
+            std::string firmware;
             try {
-                sdk.put_trigger_mode(handle_, 1);  // software trigger
+                sdk.put_trigger_mode(handle, 1);  // software trigger
 
                 // Refresh frame dimensions and Bayer pattern from the open camera.
                 int width = 0;
                 int height = 0;
                 try {
-                    sdk.get_size(handle_, width, height);
+                    sdk.get_size(handle, width, height);
                 } catch (const std::exception& e) {
                     // Best-effort: keep the preloaded sensor size on failure.
                     ALPACA_LOG_DEBUG(branding_.label, "get_Size failed: " + std::string(e.what()));
                 }
                 if (width > 0 && height > 0) {
-                    camera_info_.max_width = width;
-                    camera_info_.max_height = height;
+                    info.max_width = width;
+                    info.max_height = height;
                 }
 
                 try {
                     unsigned four_cc = 0;
                     unsigned bpp = 0;
-                    sdk.get_raw_format(handle_, four_cc, bpp);
-                    if (four_cc == kFourCC_YYYY || (camera_info_.flags & 0x10) /* FLAG_MONO */) {
-                        camera_info_.is_color = false;
-                        camera_info_.bayer = ToupBayerPattern::None;
+                    sdk.get_raw_format(handle, four_cc, bpp);
+                    if (four_cc == kFourCC_YYYY || (info.flags & 0x10) /* FLAG_MONO */) {
+                        info.is_color = false;
+                        info.bayer = ToupBayerPattern::None;
                     } else {
-                        camera_info_.is_color = true;
-                        camera_info_.bayer = four_cc_to_bayer(four_cc);
+                        info.is_color = true;
+                        info.bayer = four_cc_to_bayer(four_cc);
                     }
                     if (bpp > 0) {
-                        camera_info_.bit_depth_max = static_cast<int>(bpp);
+                        info.bit_depth_max = static_cast<int>(bpp);
                     }
                 } catch (const std::exception& e) {
                     // Best-effort: keep the preloaded colour/format info on failure.
@@ -284,17 +296,37 @@ public:
                 try {
                     float px = 0.0f;
                     float py = 0.0f;
-                    sdk.get_pixel_size(handle_, 0xffffffffu, px, py);
-                    if (px > 0.0f) camera_info_.pixel_size_um_x = px;
-                    if (py > 0.0f) camera_info_.pixel_size_um_y = py;
+                    sdk.get_pixel_size(handle, 0xffffffffu, px, py);
+                    if (px > 0.0f) info.pixel_size_um_x = px;
+                    if (py > 0.0f) info.pixel_size_um_y = py;
                 } catch (const std::exception& e) {
                     // Best-effort: keep the preloaded pixel size on failure.
                     ALPACA_LOG_DEBUG(branding_.label, "get_PixelSize failed: " + std::string(e.what()));
                 }
 
-                serial_number_ = sdk.get_serial_number(handle_);
-                firmware_version_ = sdk.get_firmware_version(handle_);
+                serial = sdk.get_serial_number(handle);
+                firmware = sdk.get_firmware_version(handle);
 
+                sdk.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
+            } catch (const AlpacaException&) {
+                sdk.close_camera(handle);
+                throw;
+            } catch (const std::exception& e) {
+                sdk.close_camera(handle);
+                throw AlpacaException("Failed to configure " + branding_.label + " camera: " + e.what(),
+                                      AlpacaError::DriverException);
+            }
+
+            {
+                // Publish under mutex_ (the short state lock) only now: identity,
+                // limits and the handle appear together. Lock order mutex_ ->
+                // readout_mutex_.
+                std::lock_guard<std::mutex> lock(mutex_);
+                camera_info_ = std::move(info);
+                camera_info_valid_ = true;
+                serial_number_ = std::move(serial);
+                firmware_version_ = std::move(firmware);
+                handle_ = handle;
                 bin_ = 1;
                 start_x_ = 0;
                 start_y_ = 0;
@@ -304,20 +336,6 @@ public:
                 num_y_ = camera_info_.max_height & ~1;
                 roi_dirty_ = false;
                 format_dirty_ = false;
-
-                sdk.start_pull_mode(handle_, &ToupTekCameraDriver::on_event_static, this);
-            } catch (const AlpacaException&) {
-                sdk.close_camera(handle_);
-                handle_ = nullptr;
-                throw;
-            } catch (const std::exception& e) {
-                sdk.close_camera(handle_);
-                handle_ = nullptr;
-                throw AlpacaException("Failed to configure " + branding_.label + " camera: " + e.what(),
-                                      AlpacaError::DriverException);
-            }
-
-            {
                 // Same invariant as the redundant-reconnect path above: clear
                 // exposure_active_ (inside reset_exposure_state_locked) under
                 // readout_mutex_. No exposure thread runs yet here, but keeping every
@@ -328,35 +346,44 @@ public:
                 // may send AbortExposure while no exposure is active (PHD2 does
                 // this when Loop stops); that must not tear this stream down.
                 stream_clean_ = true;
+                connected_.store(true);
             }
-            connected_.store(true);
-            // Spawned with mutex_ still held (never joined here -- see the top
-            // of this function); its first tick blocks on mutex_ until
-            // set_connected returns, then primes the caches before the client's
-            // first DeviceState poll.
+            // Spawned with mutex_ released (never joined here -- see the top of
+            // this function); its first tick primes the caches before the
+            // client's first DeviceState poll.
             start_thermal_poller();
             return;
         }
 
-        // Disconnecting. Hold readout_mutex_ (after mutex_, preserving lock order)
-        // across the close so any in-flight get/set_readout_mode / set_gain /
-        // set_offset — which run under readout_mutex_ with a handle snapshot — has
-        // completed before Toupcam_Close, preventing a stale-handle SDK call. The
+        // Disconnecting. Clear state under mutex_ (and readout_mutex_, after it),
+        // then release mutex_ and close the handle outside it, still under
+        // readout_mutex_ and transition_mutex_ (decision 0016 items 4 and 6): any
+        // in-flight get/set_readout_mode / set_gain / set_offset -- which run
+        // under readout_mutex_ with a handle snapshot -- has completed before
+        // Toupcam_Close. A getter does not wait for the SDK close itself, but can
+        // still wait behind a concurrent ReadoutMode read, which holds mutex_ while it
+        // waits on readout_mutex_ (decision 0016 item 6). The
         // exposure_active_ store also belongs under readout_mutex_ (the documented
         // invariant that the flag only changes under that lock).
+        std::unique_lock<std::mutex> state_lock(mutex_);
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         exposure_active_.store(false);
-        if (handle_) {
-            try { sdk.stop(handle_); } catch (const std::exception&) {}
-            sdk.close_camera(handle_);
-            handle_ = nullptr;
-        }
-        camera_info_ = {};
-        camera_info_valid_ = false;
+        HToupcam handle = std::exchange(handle_, nullptr);
+        // camera_info_ stays: no getter asks the SDK for it again, which a second
+        // ToupTek device's open can hold (decision 0016 rule 1); connect overwrites it.
         serial_number_.clear();
         firmware_version_.clear();
         reset_exposure_state_locked();
         connected_.store(false);
+        state_lock.unlock();
+        if (handle) {
+            try {
+                sdk.stop(handle);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG(branding_.label, "Stop before close failed: " + std::string(e.what()));
+            }
+            sdk.close_camera(handle);
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }
@@ -797,8 +824,8 @@ public:
     void set_readout_mode(int mode) override {
         // Range check first so an out-of-range index is InvalidValue even while
         // disconnected (same precedence as the switch driver's validate_switch_id).
-        // While disconnected the list is just "Normal", so only 0 is accepted; the
-        // authoritative re-check against the live model happens under the lock below.
+        // While disconnected the list is the one read at start-up or the last connect
+        // ("Normal" with no identity); the re-check against the live model is under the lock below.
         if (mode < 0 || mode >= static_cast<int>(readout_mode_specs().size())) {
             throw AlpacaException("Readout mode index out of range", AlpacaError::InvalidValue);
         }
@@ -853,7 +880,7 @@ public:
         // SVBONY, Player One) returns a static/cached list while disconnected,
         // and imaging clients (NINA/APT/SGPro) read ReadoutModes during device
         // enumeration before connecting to populate dropdowns. Disconnected, the
-        // list derives from the preloaded camera_info_ caps (or just "Normal");
+        // list derives from the start-up or last-connect camera_info_ caps (or just "Normal");
         // the index getter/setter still require a live handle.
         const auto specs = readout_mode_specs();
         std::vector<std::string> names;
@@ -1487,6 +1514,13 @@ private:
     // before the trigger, so an abort landing mid-restart is not undone.
     std::atomic<uint64_t> abort_generation_{0};
     struct ExposureAborted {};
+    // Spans the whole of set_connected() (connect handshake and disconnect close);
+    // no getter takes it, so mutex_ is free during the SDK open (decision 0016).
+    // Lock order: transition_mutex_ -> exposure_lifecycle_mutex_ -> mutex_ ->
+    // readout_mutex_ -> SDK-wrapper mutex. Connect takes mutex_ only to publish the
+    // identity and handle; disconnect clears state under mutex_ + readout_mutex_,
+    // releases mutex_, then closes the handle under readout_mutex_.
+    std::mutex transition_mutex_;
     mutable std::mutex mutex_;
     // Serialises the exposure thread's LIFECYCLE: spawn (start_exposure) vs
     // join + handle close (set_connected(false)) vs join (stop_exposure). Without
@@ -1494,7 +1528,8 @@ private:
     // Toupcam_Close could spawn a fresh thread whose handle snapshot is then
     // closed under it (use-after-close inside WaitImageV4) — and two joiners /
     // a joiner racing the spawn's thread-assignment is UB on std::thread.
-    // Lock order: exposure_lifecycle_mutex_ -> mutex_ -> readout_mutex_ -> SDK.
+    // Lock order: transition_mutex_ -> exposure_lifecycle_mutex_ -> mutex_ ->
+    // readout_mutex_ -> SDK.
     // The exposure thread itself never takes it, so joins under it can't deadlock.
     std::mutex exposure_lifecycle_mutex_;
     // Serialises the two-step CG+HFW apply in set_readout_mode against the
@@ -1584,8 +1619,8 @@ private:
     }
 
     // Runs fn(handle_) with mutex_ HELD across the SDK call. set_connected(false)
-    // closes the handle under mutex_, so holding it here means a concurrent
-    // disconnect cannot Toupcam_Close the handle mid-call — closing the
+    // nulls handle_ under mutex_ before it closes the handle, so holding it here
+    // means a concurrent disconnect cannot Toupcam_Close the handle mid-call — closing the
     // use-after-close window that the bare handle_copy() snapshot idiom left open
     // (it released mutex_ before the SDK call). Use this for every fast SDK option
     // read/write. Do NOT use it for blocking SDK calls (Toupcam_WaitImageV4) or
@@ -1772,18 +1807,6 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG(branding_.label, "Preload enumerate failed: " + std::string(e.what()));
         }
-    }
-
-    void refresh_cached_camera_info_if_needed() {
-        if (connected_.load()) return;
-        try {
-            auto cameras = sdk_.enumerate_cameras();
-            if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
-                camera_info_valid_ = true;
-            }
-        } catch (const std::exception&) {}
     }
 
     void set_bin_locked(int bin_x, int bin_y) {
