@@ -150,7 +150,7 @@ private:
 }  // namespace
 
 // Falsified by: tick() dropping the wait_for_woken_settled() (laps() is read before the poller finished its lap) or
-// the wait_for_waiters() (the poller is not parked again), or not advancing the clock (laps() stays 0).
+// not advancing the clock (laps() stays 0).
 TEST_CASE("driver_rig - tick returns once the poller completed its lap and parked again", "[driver_rig]") {
     FakeTaskClock clock;
     ToyPoller poller(clock, std::chrono::seconds(1));
