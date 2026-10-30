@@ -223,7 +223,9 @@ public:
     void set_restart_callback(std::function<void()> callback);
 
     // Test seam: holds the log archive lock so a test can observe the busy answer.
-    std::unique_lock<std::mutex> hold_log_archive_lock_for_test() { return std::unique_lock<std::mutex>(log_archive_mutex_); }
+    std::unique_lock<std::mutex> hold_log_archive_lock_for_test() {
+        return std::unique_lock<std::mutex>(log_archive_mutex_);
+    }
 
     // Route request and generate response
     Response route(const Request& request, std::uint32_t server_transaction_id);
