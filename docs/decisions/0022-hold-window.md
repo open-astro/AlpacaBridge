@@ -47,7 +47,7 @@ Symbol: `HoldWindow`
 | Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | planned | #1832 | slew window only |
 | Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | planned | #1833 | |
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | planned | #1834 | |
-| OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | #1835 | |
+| OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1835 | slew window and per-axis pulse windows |
 | SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | planned | #1836 | |
 
 ## Alternatives rejected
