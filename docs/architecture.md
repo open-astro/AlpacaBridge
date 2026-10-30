@@ -175,10 +175,9 @@ Privileged operations use two mechanisms, both scoped tightly:
 
 - **Polkit**: the .deb ships
   `/usr/share/polkit-1/rules.d/50-alpacabridge-wifi.rules`, granting only the
-  `alpacabridge` service user exactly six NetworkManager actions
+  `alpacabridge` service user exactly five NetworkManager actions
   (`wifi.scan`, `settings.modify.system`, `network-control`,
-  `enable-disable-wifi`, `wifi.share.protected`, `wifi.share.open`). The
-  `wifi.share.*` pair is required for shared-mode (hotspot) activation.
+  `enable-disable-wifi`, `wifi.share.protected`). `wifi.share.protected` is required for shared-mode (hotspot) activation.
   Requires the `polkitd` package on the image.
 - **Ambient capabilities**: the systemd unit grants
   `CAP_SYS_TIME` (the synctime endpoint and a client's `Telescope.UTCDate`

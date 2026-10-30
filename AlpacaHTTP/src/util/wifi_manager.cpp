@@ -164,6 +164,25 @@ std::uint32_t nl80211_iftype(const std::string& ifname);
 // uap0) they differ.
 }  // namespace
 
+// The hotspot profile among the saved wifi connections: prefer the well-known
+// id (kApProfileId, created by the OpenAstro imagers), falling back to the
+// first ap-mode profile so a renamed hotspot is still manageable. Used by
+// get_ap/set_ap/delete so they can never disagree about which profile is
+// "the" hotspot (PR #198 review round 2).
+std::pair<std::string, nlohmann::json> pick_ap_profile(const std::vector<WifiProfileBackend::Connection>& connections) {
+    std::pair<std::string, nlohmann::json> fallback;
+    for (const auto& [path, s] : connections) {
+        if (!s.contains("802-11-wireless") || s["802-11-wireless"].value("mode", "") != "ap") {
+            continue;
+        }
+        if (s["connection"].value("id", "") == WifiManager::kApProfileId) {
+            return {path, s};
+        }
+        if (fallback.first.empty()) fallback = {path, s};
+    }
+    return fallback;
+}
+
 struct WifiManager::BusHandle final : WifiProfileBackend {
     sd_bus* bus = nullptr;
     ~BusHandle() {
@@ -605,24 +624,7 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
         return out;
     }
 
-    // The hotspot profile: prefer the well-known id (kApProfileId, created by
-    // the OpenAstro imagers), falling back to the first ap-mode profile so a
-    // renamed hotspot is still manageable. Used by get_ap/set_ap/delete so
-    // they can never disagree about which profile is "the" hotspot
-    // (PR #198 review round 2).
-    std::pair<std::string, nlohmann::json> ap_profile() {
-        std::pair<std::string, nlohmann::json> fallback;
-        for (auto& [path, s] : wifi_connections()) {
-            if (!s.contains("802-11-wireless") || s["802-11-wireless"].value("mode", "") != "ap") {
-                continue;
-            }
-            if (s["connection"].value("id", "") == WifiManager::kApProfileId) {
-                return {path, s};
-            }
-            if (fallback.first.empty()) fallback = {path, s};
-        }
-        return fallback;
-    }
+    std::pair<std::string, nlohmann::json> ap_profile() { return pick_ap_profile(wifi_connections()); }
 
     // Assign wifi devices to roles. Boards with a dedicated AP-type virtual
     // interface run hotspot and client on separate interfaces concurrently;
@@ -1311,12 +1313,21 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
         }
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    ensure_bus_locked();
-    auto roles = bus_->device_roles();
+    auto& backend = profile_backend_locked();
+    // An empty passphrase keeps the stored secret only on a secured profile;
+    // otherwise it would create or keep an open, NAT-sharing hotspot (#1715).
+    if (passphrase.empty()) {
+        const auto secured = pick_ap_profile(backend.wifi_connections()).second;
+        if (!secured.contains("802-11-wireless-security")) {
+            throw WifiError("Passphrase must be 8-63 characters for a hotspot without a stored passphrase");
+        }
+    }
+    ensure_bus_locked();  // the rest needs the real bus; refuses an injected test backend
+    auto roles = backend.device_roles();
     if (roles.count == 0) throw WifiError("no wifi device");
     const std::string& dev = roles.ap_path;
 
-    auto [existing_path, existing] = bus_->ap_profile();
+    auto [existing_path, existing] = pick_ap_profile(backend.wifi_connections());
 
     Section conn{{"id", SVal::str(kApProfileId)},
                  {"type", SVal::str("802-11-wireless")},
@@ -1343,9 +1354,9 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
     }
 
     if (existing_path.empty()) {
-        bus_->add_connection(spec, /*pin_shared_ip4=*/true);
+        backend.add_connection(spec, /*pin_shared_ip4=*/true);
     } else {
-        bus_->update_connection(existing_path, spec, /*pin_shared_ip4=*/true);
+        backend.update_connection(existing_path, spec, /*pin_shared_ip4=*/true);
     }
 
     // Re-resolve (AddConnection does not return the path through our helper)

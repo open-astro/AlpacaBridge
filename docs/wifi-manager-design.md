@@ -48,7 +48,7 @@ allowing (only) for user `alpacabridge`:
 - `org.freedesktop.NetworkManager.settings.modify.system`
 - `org.freedesktop.NetworkManager.network-control`
 - `org.freedesktop.NetworkManager.enable-disable-wifi`
-- `org.freedesktop.NetworkManager.wifi.share.protected` / `.share.open`
+- `org.freedesktop.NetworkManager.wifi.share.protected`
   (shared-mode/hotspot activation checks these in addition to
   network-control; without them ActivateConnection on the AP profile fails
   with "Not authorized to share connections via wifi")

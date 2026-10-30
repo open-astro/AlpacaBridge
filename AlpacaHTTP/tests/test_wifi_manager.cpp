@@ -504,6 +504,23 @@ int main() {
         EXPECT(threw || std::string(stored) == "US");
     }
 
+    {
+        // case: set_ap refuses an empty passphrase unless a secured hotspot profile exists (#1715)
+        for (const bool has_open_profile : {false, true}) {
+            FakeWifiProfileBackend backend;
+            if (has_open_profile) backend.connections.emplace_back("/saved/ap", saved_profile("Hotspot", "ap"));
+            WifiManager manager("unused", backend);
+            std::string message;
+            try {
+                manager.set_ap("Hotspot", "", "bg", 0, true);
+            } catch (const WifiError& e) {
+                message = e.what();
+            }
+            EXPECT(message.find("Passphrase") != std::string::npos);
+            EXPECT(backend.add_calls == 0 && backend.update_calls == 0);
+        }
+    }
+
     std::cout << "Wi-Fi profile backend tests passed\n";
     return 0;
 }

@@ -1,0 +1,3 @@
+### Fixed
+
+- **Open NAT-sharing hotspot from an empty passphrase**, WiFi manager, issue #1715. `PUT /management/v1/wifi/ap` with an empty `Passphrase` is now refused (message names `Passphrase`) unless the hotspot profile already has a security section, so the API can no longer create or re-activate an open hotspot; an empty passphrase still keeps the stored secret on a secured profile. The `wifi.share.open` polkit grant is dropped. A device with an open hotspot from an earlier release must set a passphrase. Covered by `AlpacaHTTP/tests/test_wifi_manager.cpp` ("set_ap refuses an empty passphrase unless a secured hotspot profile exists").

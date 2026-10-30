@@ -7432,22 +7432,6 @@ int main() {
         }
     }
 
-    {
-        // case: an empty hotspot passphrase is refused by name, never an open NAT-sharing AP (#1715)
-        // docs/wifi-api.md: a brand-new hotspot profile requires a passphrase (8-63 chars).
-        // The refusal must come from the passphrase check, not from the later bus connect.
-        alpacahttp::Router router;
-        const auto response = route_request(router, "PUT", "/management/v1/wifi/ap",
-                                            "{\"Ssid\":\"x\",\"Passphrase\":\"\",\"Band\":\"bg\",\"Enabled\":true}");
-        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
-        const auto message = json.is_discarded() ? std::string{} : json.value("ErrorMessage", std::string{});
-        if (message.find("Passphrase") == std::string::npos) {
-            std::cerr << "empty hotspot passphrase -> " << response.body() << "\n";
-        }
-        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
-        EXPECT(message.find("Passphrase") != std::string::npos);
-    }
-
     // Response header names are case-insensitive (RFC 7230 §3.2). The server's
     // keep-alive override does get_header("Connection") then set_header(
     // "Connection", ...) on top of whatever a handler set; with a
