@@ -3243,8 +3243,9 @@ TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its sle
     };
 
     SECTION("synchronous GOTO, then a foreign slew: no restore") {
-        REQUIRE_NOTHROW(
-            run_synchronous_slew(clock, [&] { driver->slew_to_coordinates(12.0, 45.0); }));  // ends after the 2 s grace
+        REQUIRE_NOTHROW(run_synchronous_slew(clock, [&] {
+            driver->slew_to_coordinates(12.0, 45.0);
+        }));  // the mount answers no GOTO: ends at about 250 ms
         mount->clear_log();
         foreign_slew_ends_untracked();
         CHECK(mount->count(":ST6") == 0);
