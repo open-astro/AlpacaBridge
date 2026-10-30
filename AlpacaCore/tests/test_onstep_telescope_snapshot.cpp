@@ -35,6 +35,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -67,6 +68,8 @@ struct SnapshotMount {
     std::atomic<bool> garble_altaz{false};     // :GA# answers something that does not parse
     std::atomic<bool> block_status{false};     // :GU# holds its reply until this is cleared
     std::atomic<bool> handshake_only{false};   // answers the handshake and nothing else (not :GU#, position, Alt/Az)
+    std::atomic<bool> silent_status{false};    // :GU# gets no reply, so its read times out
+    std::atomic<bool> overlong_goto{false};    // :MS# answers more than one reply may hold, so its send throws
     std::atomic<int> alt_seconds{0};           // :GA# answers +45*00:<alt_seconds>
     std::mutex mutex;
     std::string status = "NpEW180#";  // tracking, no GOTO, not parked (under `mutex`)
@@ -92,6 +95,8 @@ struct SnapshotMount {
         if (chunk.rfind(":GVP", 0) == 0) return "OnStep#";
         if (chunk.rfind(":GVN", 0) == 0) return "10.23a#";
         if (chunk.rfind(":GXEE", 0) == 0) return "1";
+        if (silent_status.load() && chunk.rfind(":GU", 0) == 0) return "";
+        if (overlong_goto.load() && chunk.rfind(":MS", 0) == 0) return std::string(65600, '0');
         if (handshake_only.load()) {
             if (chunk.rfind(":GU", 0) == 0) return "";  // no reply: the status parser would take "?#"
             if (chunk.rfind(":GR", 0) == 0 || chunk.rfind(":GD", 0) == 0 || chunk.rfind(":GA", 0) == 0 ||
@@ -964,6 +969,168 @@ TEST_CASE("OnStep snapshot - a reconnect joins a pulse-end body started after th
     CHECK_FALSE(onstep::pulse_measurement_running_for_testing(*rig.driver));  // joined by the connect
     REQUIRE(rig.clock.wait_for_waiters(1, seconds(2)));                       // the new session's poll
     CHECK(rig.clock.waiter_count() == 1);                                     // and nothing else
+}
+
+// #1893: with the site unknown, the members that use it refuse as the site getters do, instead of using latitude and
+// longitude 0. An Alt/Az slew retries the site read first and sends nothing when it still fails.
+TEST_CASE("OnStep snapshot - members that use the site refuse while it is unknown", "[onstep][telescope][snapshot]") {
+    Rig rig(/*with_site=*/false);
+    rig.mount->garble_site = true;       // the connect cannot read the mount's site
+    rig.mount->set_status("nNpEW180#");  // Tracking off, so an Alt/Az slew is not refused for Tracking
+    rig.connect();
+    rig.pause();
+    const auto refuses = [](const std::function<void()>& call, const std::string& member) {
+        try {
+            call();
+            FAIL(member + " answered with a site nobody set or read");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(std::string(ex.what()).find(member + " needs the site") != std::string::npos);
+            CHECK(std::string(ex.what()).find("Invalid OnStep site info response") != std::string::npos);
+        }
+    };
+    refuses([&] { (void)rig.driver->get_side_of_pier(); }, "SideOfPier");
+    refuses([&] { (void)rig.driver->get_destination_side_of_pier(1.0, 20.0); }, "DestinationSideOfPier");
+    refuses([&] { (void)rig.driver->get_sidereal_time(); }, "SiderealTime");
+    CHECK_FALSE(has_entry(*rig.driver, "SideOfPier"));
+    CHECK_FALSE(has_entry(*rig.driver, "SiderealTime"));
+
+    rig.clock.advance(seconds(3));  // past the site retry delay: the slew reads the site again first
+    const auto site_reads = rig.mount->count(":Gt");
+    refuses([&] { rig.driver->slew_to_alt_az_async(45.0, 180.0); }, "SlewToAltAzAsync");
+    CHECK(rig.mount->count(":Gt") == site_reads + 1);
+    refuses([&] { rig.driver->slew_to_alt_az(45.0, 180.0); }, "SlewToAltAz");
+    CHECK(rig.mount->count(":Sr") == 0);
+    CHECK(rig.mount->count(":Sd") == 0);
+    CHECK(rig.mount->count(":MS") == 0);
+
+    rig.mount->garble_site = false;  // the poll's full tick reads the site, and the members answer
+    rig.clock.advance(seconds(3));
+    REQUIRE(rig.tick(true));
+    CHECK_NOTHROW((void)rig.driver->get_side_of_pier());
+    CHECK_NOTHROW((void)rig.driver->get_sidereal_time());
+}
+
+// #1895: a poll that cannot start (no thread) fails the connect, which is undone as a Disconnect is, rather than
+// serving the first frame for the whole session.
+TEST_CASE("OnStep snapshot - a connect whose status poll cannot start fails and closes the port",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    std::atomic<bool> refuse{true};
+    onstep::set_status_poll_spawn_for_testing(*rig.driver, [&refuse](std::function<void()> body) {
+        if (refuse.load()) {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        }
+        return std::thread(std::move(body));
+    });
+    std::string message;
+    try {
+        rig.driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& ex) {
+        message = ex.what();
+    }
+    CHECK(message.find("status poll did not start") != std::string::npos);
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK_FALSE(onstep::OnStepProtocolWrapper::instance().is_connected());  // the port was closed
+    CHECK(error_of([&] { (void)rig.driver->get_right_ascension(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(rig.clock.waiter_count() == 0);
+
+    refuse = false;  // the next Connect starts the poll
+    rig.connect();
+    CHECK(rig.clock.wait_for_waiters(1, seconds(2)));
+}
+
+// #1895: a Tracking write on a connect whose :GU# read failed reads :GU# first, so the write-through lands in a
+// status the getter serves, instead of in a frame with no status until the next good tick.
+TEST_CASE("OnStep snapshot - a Tracking write after a connect that read no status is served at once",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.mount->silent_status = true;  // the connect's :GU# times out
+    rig.connect();
+    rig.pause();
+    REQUIRE(error_of([&] { (void)rig.driver->get_tracking(); }) == alpacacore::AlpacaError::DriverException);
+    rig.mount->silent_status = false;
+    rig.driver->set_tracking(false);  // the mount still tracks ("NpEW180#") until the next tick reads it
+    CHECK_FALSE(rig.driver->get_tracking());
+}
+
+// #1895: Unpark on a connect whose :GU# read failed reads :GU# first, so its write-through lands in a status the
+// getter serves; while :GU# stays silent it refuses instead of unparking blind.
+TEST_CASE("OnStep snapshot - an Unpark after a connect that read no status is served at once",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.mount->silent_status = true;  // the connect's :GU# times out
+    rig.connect();
+    rig.pause();
+    rig.mount->set_status("nNPEW180#");  // parked, but nothing has read it
+    CHECK(error_of([&] { rig.driver->unpark(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(rig.mount->count(":hR") == 0);  // nothing was sent while the status was unknown
+
+    rig.mount->silent_status = false;
+    rig.driver->unpark();
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
+// #1895: an unread status is not taken for "not parked": the commands that check for a park read :GU# first and
+// refuse while it does not answer. The stops still go out.
+TEST_CASE("OnStep snapshot - a status the connect could not read refuses the commands that check for a park",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.mount->silent_status = true;  // the connect's :GU# times out
+    rig.connect();
+    rig.pause();
+    rig.mount->set_status("nNPEW180#");  // parked, but nothing has read it
+    CHECK(error_of([&] { rig.driver->pulse_guide(0, 100); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_of([&] { rig.driver->move_axis(0, 1.0); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(rig.mount->count(":M") == 0);  // no :Mg, :RA or :Me went out
+    CHECK(rig.mount->count(":RA") == 0);
+    CHECK_NOTHROW(rig.driver->move_axis(0, 0.0));  // a stop is not held up by the unread status
+    CHECK_NOTHROW(rig.driver->abort_slew());
+
+    rig.mount->silent_status = false;  // once :GU# answers, the guard reads it
+    CHECK(error_of([&] { rig.driver->find_home(); }) == alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(error_of([&] { rig.driver->set_tracking(true); }) == alpacacore::AlpacaError::InvalidWhileParked);
+}
+
+// Turning tracking off is a stop: an unread status never holds it up, as for AbortSlew and MoveAxis(axis, 0).
+TEST_CASE("OnStep snapshot - Tracking off after a connect that read no status still stops tracking",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.mount->silent_status = true;  // the connect's :GU# times out
+    rig.connect();
+    rig.pause();
+    CHECK_NOTHROW(rig.driver->set_tracking(false));  // the :GU# read inside it fails too
+    CHECK(rig.mount->count(":ST0") == 1);
+}
+
+// #1887 (decision 0022 rule 2): the slew's hold window is cleared when the :MS# send itself throws, so Slewing
+// reads false right after, with no virtual time advanced (the 2 s hold would otherwise still be open). A silent
+// :MS# does not reach that path: it reads as an empty reply, which the refusal branch clears.
+TEST_CASE("OnStep snapshot - a GOTO whose :MS# send fails leaves Slewing false at once",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    rig.mount->set_status("NpEW180#");  // tracking, no GOTO
+    rig.mount->overlong_goto = true;
+    CHECK(error_of([&] { rig.driver->slew_to_coordinates_async(2.0, 20.0); }) ==
+          alpacacore::AlpacaError::DriverException);
+    REQUIRE(rig.mount->count(":MS") == 1);
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// #1887 (decision 0022 rule 2): the pulse's hold window is cleared when the :Mg send throws, so IsPulseGuiding reads
+// false right after, with no virtual time advanced. :Mg is sent blind, so a silent mount is not a failed send: the
+// connection is dropped instead, which fails the write.
+TEST_CASE("OnStep snapshot - a pulse guide whose :Mg send fails leaves IsPulseGuiding false at once",
+          "[onstep][telescope][snapshot][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.pause();
+    REQUIRE(rig.server.drop_connections());
+    CHECK(error_of([&] { rig.driver->pulse_guide(0, 2000); }) == alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
 }
 
 #endif  // !_WIN32

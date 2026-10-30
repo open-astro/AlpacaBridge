@@ -78,8 +78,9 @@ constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 // Decision 0022: Slewing reads true for this long after a GOTO goes out (slew_hold_), so a getter reads true before
 // any :GU# is sampled. Landing never reads the window: it is a :GU# that shows no GOTO, and it clears the window.
 // A stale reading cannot end the slew: a reading and the :MS# share the operation lock, and the dispatch
-// write-through shows the GOTO until a later reading replaces it. The mount shows the GOTO 1 ms after :MS# answers
-// (HM-17, OnStepX 10.23a, 2026-10-29).
+// write-through shows the GOTO until a later reading replaces it. Both firmwares set the GOTO state before :MS#
+// replies, so the first :GU# shows it (source and rig evidence: onstep.instructions.md, "A slew while a GOTO runs
+// is refused", #1887).
 constexpr auto kSlewForceGrace = std::chrono::seconds(2);
 // open-astro#1378: how far inside the horizon and overhead limits a MoveAxis
 // re-send must stay.
@@ -712,10 +713,29 @@ public:
             // fast-response targets, #1242), and the mount's site when the
             // config did not set both coordinates.
             seed_snapshot_locked();
+            // The seed takes each failed read as a silent mount's, so a link lost during the connect (decision
+            // 0009) shows only here: Connect fails instead of returning while Connected reads false (#1895).
+            if (!protocol.link_alive()) {
+                const std::string lost = OnStepProtocolWrapper::instance().link_lost_reason();
+                fail_connect_locked("the link was lost during the connect" +
+                                    (lost.empty() ? std::string() : " (" + lost + ")"));
+            }
             published_connected_ = true;  // the connect is complete (#910)
             // The poll starts once the connect is complete, with no driver lock held (decision 0006 rule 4).
             lock.unlock();
-            start_status_poller(kStatusPollPeriod);
+            std::string poll_refused;
+            try {
+                start_status_poller(kStatusPollPeriod);
+            } catch (const std::exception& ex) {
+                poll_refused = ex.what();
+            }
+            if (!poll_refused.empty()) {
+                // Nothing would refresh the state for the whole session (#1895): undone as a Disconnect is,
+                // the pulse-end body a PulseGuide may have started meanwhile joined first, with no lock held.
+                stop_status_poller();
+                lock.lock();
+                fail_connect_locked("the status poll did not start (" + poll_refused + ")");
+            }
         } else {
             // Decision 0016, item 4: Connected goes false under mutex_ BEFORE the close, which runs through
             // Wire with mutex_ released; a getter during the close reads NotConnected, not a closing link.
@@ -887,6 +907,9 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("Tracking");
+        // The write-through below needs a status to land in (#1895). Tracking=false is a stop, so an unread status
+        // never holds it up: :ST0 goes out and, if the read failed, the write-through does not land.
+        ensure_status_read_locked("Tracking", /*refuse=*/tracking);
         if (tracking) {
             check_not_parked_locked("Tracking");
         }
@@ -960,9 +983,10 @@ public:
         //
         // The RA is the polled frame's (decision 0010): the hour-angle SIGN this needs tolerates the poll's
         // second of staleness, and the getter never reaches the mount (an earlier live :GRa#/:GDe# here cost
-        // ConformU's 0.1 s FAST target, #1242). The site the connect or the poll read; without one the
-        // longitude is 0, as before.
+        // ConformU's 0.1 s FAST target, #1242). The site the connect or the poll read; without one this refuses,
+        // as the site getters do (#1893).
         const double ra = served_position_locked().ra_hours;
+        throw_if_site_unknown_locked("SideOfPier");
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
         return util::pier_side_for_hour_angle(hour_angle);
@@ -979,6 +1003,7 @@ public:
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_faulted_locked();  // the site and clock the connect read (decision 0009 rule 1)
+        throw_if_site_unknown_locked("DestinationSideOfPier");
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
         return util::pier_side_for_hour_angle(hour_angle);
@@ -1024,6 +1049,7 @@ public:
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw_if_faulted_locked();  // the site and clock the connect read (decision 0009 rule 1)
+        throw_if_site_unknown_locked("SiderealTime");
         return util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
     }
 
@@ -1401,7 +1427,8 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         refuse_while_faulted_locked("Unpark");
-        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
+        ensure_status_read_locked("Unpark");  // the write-through below needs a status to land in (#1895)
+        supersede_park_or_home_locked();      // a newer motion command wins (#1430)
         // A refusal used to read as success (#1379): OnStepX refuses :hR# before the
         // date and time are set or on a motor fault (Park.cpp restore()). "Not
         // parked" (11) is ASCOM's no-op, not a refusal.
@@ -1426,7 +1453,12 @@ public:
     void move_axis(int axis, double rate) override {
         StateLock lock(lock_gate_);
         check_connected();
-        check_not_parked_locked("MoveAxis");
+        // The parked check stays ahead of the argument checks, as on main: a parked mount answers
+        // InvalidWhileParked to a bad axis or rate too. Only a finite rate at or under the epsilon is a stop,
+        // which an unread status does not hold up (#1895); NaN is not one.
+        constexpr double kStopEpsilon = 1e-6;
+        const bool moving = !(std::abs(rate) <= kStopEpsilon);
+        check_not_parked_locked("MoveAxis", /*stop=*/!moving);
         if (axis != 0 && axis != 1) {
             throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
         }
@@ -1437,8 +1469,6 @@ public:
             throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
 
-        constexpr double kStopEpsilon = 1e-6;
-        const bool moving = std::abs(rate) > kStopEpsilon;
         if (moving) {
             refuse_while_faulted_locked("MoveAxis");  // before it ends a waiting Park or FindHome
         }
@@ -1610,7 +1640,7 @@ public:
     void abort_slew() override {
         StateLock lock(lock_gate_);
         check_connected();
-        check_not_parked_locked("AbortSlew");
+        check_not_parked_locked("AbortSlew", /*stop=*/true);
         supersede_park_or_home_locked();  // also ends a Park or FindHome still finishing (#1430)
         // Every stop on its own, so one lost command cannot skip the others (#781).
         const std::string stop_error = send_stops_locked(true, {0, 1, 2, 3});
@@ -1690,6 +1720,10 @@ public:
 
     void set_park_home_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         park_home_.set_spawn_for_testing(std::move(spawn));
+    }
+
+    void set_status_poll_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        status_poll_.set_spawn_for_testing(std::move(spawn));
     }
 
     void set_disconnect_before_close_hook_for_testing(std::function<void()> hook) {
@@ -2407,7 +2441,7 @@ private:
         check_connected();
         check_not_parked_locked(who);
         refuse_while_faulted_locked(who);  // named, before the site and Tracking reads (#1414)
-        compute_alt_az_target_locked(altitude, azimuth, ra_out, dec_out);
+        compute_alt_az_target_locked(altitude, azimuth, ra_out, dec_out, who);
         if (tracking_as_served_locked()) {
             throw AlpacaException(std::string(who) + " is not allowed while Tracking is true",
                                   AlpacaError::InvalidOperation);
@@ -2498,10 +2532,42 @@ private:
         return frame_status_locked().is_tracking;
     }
 
-    void check_not_parked_locked(const char* operation) const {
+    // `stop`: AbortSlew and MoveAxis(axis, 0) refuse only a status that reads parked, so an unread one never holds
+    // up a stop. Every other caller first needs a status read since the connect (ensure_status_read_locked()).
+    void check_not_parked_locked(const char* operation, bool stop = false) const {
+        if (!stop) {
+            ensure_status_read_locked(operation);
+        }
         if (frame_status_locked().is_parked) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
+        }
+    }
+
+    // A frame with no status (every :GU# since the connect failed) reads as idle and not parked to the control paths,
+    // and a write-through into it is not served (#1895). A command that checks or writes the status reads :GU# now
+    // instead, as the Tracking check of a slew does, and refuses when that read fails too: a latched fault and a
+    // lost link as they are, anything else as DriverException (a mount that does not answer :GU#).
+    // `refuse` false (Tracking=false, a stop) swallows that last case and carries on; a lost link and a latched fault
+    // still throw.
+    void ensure_status_read_locked(const char* operation, bool refuse = true) const {
+        const auto reading = snapshot_.read();
+        if (reading && reading->value.status_known) {
+            return;
+        }
+        refuse_while_faulted_locked(operation);  // a faulted mount is not asked: the read would wait out its timeout
+        try {
+            refresh_status_locked();
+        } catch (const std::exception& ex) {
+            if (is_link_lost(ex) || link_health_.faulted()) {
+                throw;
+            }
+            if (!refuse) {
+                return;
+            }
+            throw AlpacaException(std::string(operation) +
+                                      " failed: the mount has not answered :GU# since the connect (" + ex.what() + ")",
+                                  AlpacaError::DriverException);
         }
     }
 
@@ -2514,9 +2580,13 @@ private:
         }
     }
 
-    void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out) const {
+    // The site read is retried first (at most every kSiteInfoRetryDelay); a site still unknown refuses the slew
+    // instead of converting at latitude and longitude 0 (#1893).
+    void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
+                                      const char* who) const {
         validate_alt_az(altitude, azimuth);
         ensure_site_info_cached_locked();
+        throw_if_site_unknown_locked(who);
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_, lst, ra_out, dec_out);
     }
@@ -2933,7 +3003,8 @@ private:
     // The first frame, at the end of a connect, so the getters have an answer, status flags included, the
     // moment Connect returns. Each read on its own, as the cache warm-up did: a mount that answers none leaves a
     // frame with nothing known (the getters refuse it until a tick answers), and each failure counts toward the
-    // link fault. The mount's site is read here too while the config did not set it.
+    // link fault. The mount's site is read here too while the config did not set it. A link lost meanwhile is
+    // not one of these: the connect checks for it after the seed and fails (#1895).
     void seed_snapshot_locked() {
         const Wire protocol = wire();
         const auto token = snapshot_.begin_poll();
@@ -3112,26 +3183,47 @@ private:
         }
     }
 
-    // Call with no driver lock held (decision 0006 rule 4), at the end of a connect.
+    // Call with no driver lock held (decision 0006 rule 4), at the end of a connect. A refused start (no thread)
+    // throws: the connect fails rather than serve its first frame for the whole session (#1895).
     void start_status_poller(std::chrono::nanoseconds first_wait) {
         if (status_poll_paused_for_testing_.load()) {
             return;
         }
-        try {
-            status_poll_.start([this, first_wait](util::OperationContext& ctx) { run_status_poller(ctx, first_wait); });
-        } catch (const std::exception& e) {
-            ALPACA_LOG_ERROR("OnStep", std::string("Status poll did not start: ") + e.what());
-        }
+        status_poll_.start([this, first_wait](util::OperationContext& ctx) { run_status_poller(ctx, first_wait); });
+    }
+
+    // A connect that cannot finish (#1895) is undone as a Disconnect is: Connected false and the session state
+    // cleared under mutex_ before the close, which goes through Wire with mutex_ released (decision 0016 item 4).
+    // The caller holds the driver locks and no poll body runs (they were joined with no lock held, decision 0006
+    // rule 4). The wrapper keeps a loss stamp, so the next Connect still times the outage (#521).
+    [[noreturn]] void fail_connect_locked(const std::string& reason) {
+        published_connected_ = false;
+        connected_ = false;
+        reset_session_state_locked();
+        wire().disconnect();
+        throw AlpacaException("Failed to connect to OnStep mount: " + reason);
     }
 
     // ── Site ───────────────────────────────────────────────────────────────────
 
     bool site_known_locked() const { return site_latitude_known_ && site_longitude_known_; }
 
-    std::string site_unknown_message(const char* member) const {
-        return std::string(member) + " is not known: the mount's site could not be read" +
+    // `needs_site`: the member is not a site getter but uses the site (#1893).
+    std::string site_unknown_message(const char* member, bool needs_site = false) const {
+        return std::string(member) + (needs_site ? " needs the site, which" : "") +
+               " is not known: the mount's site could not be read" +
                (site_read_error_.empty() ? std::string() : " (" + site_read_error_ + ")") +
-               "; write it, or set the site in the device config";
+               (needs_site ? "; write SiteLatitude and SiteLongitude" : "; write it") +
+               ", or set the site in the device config";
+    }
+
+    // A member whose answer or motion uses the site (SideOfPier, DestinationSideOfPier, SiderealTime, the Alt/Az
+    // slews) refuses while the pair is not known, as the site getters do, instead of using latitude and longitude 0
+    // (#1893; decision 0019 rule 2, which this follows for consistency: rule 3 covers controllers that store no site).
+    void throw_if_site_unknown_locked(const char* member) const {
+        if (!site_known_locked()) {
+            throw AlpacaException(site_unknown_message(member, true), AlpacaError::InvalidOperation);
+        }
     }
 
     // Control path (a connect, a site write, the poll): reads :Gt#/:Gg# while
@@ -3520,6 +3612,13 @@ void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
 void set_park_home_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
         onstep->set_park_home_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_status_poll_spawn_for_testing(TelescopeDriver& driver,
+                                       std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_status_poll_spawn_for_testing(std::move(spawn));
     }
 }
 

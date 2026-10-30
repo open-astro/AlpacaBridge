@@ -52,6 +52,7 @@
 #include "skywatcher_fake_clock.h"
 
 namespace sw = alpacacore::vendor::skywatcher;
+using alpacacore::test::connect_and_park;
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
 using alpacacore::test::FakeTaskClock;
@@ -752,8 +753,7 @@ TEST_CASE("SkyWatcher limits - a floor crossed before the guard's first sample i
     mount.jump_axis_degrees(2, kGuardDecAxisDeg);
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {},
                                                   floor_deg(kGuardAltitudeDeg - 1.5), clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(2000)));  // the status poll, parked
+    REQUIRE(connect_and_park(*driver, clock, std::chrono::milliseconds(2000)));  // the status poll, parked
     REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
     // Age the polled frame past its freshness bound (still inside the cache's
     // TTL), so the guard's first sample reads the board, not the inside frame.
@@ -781,8 +781,7 @@ TEST_CASE("SkyWatcher limits - a meridian limit crossed before tracking's first 
     mount.jump_axis_degrees(1, 92.0);  // 8 min past the meridian: inside the limit
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {},
                                                   meridian_minutes(10.0), clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(2000)));  // the status poll, parked
+    REQUIRE(connect_and_park(*driver, clock, std::chrono::milliseconds(2000)));  // the status poll, parked
 
     mount.jump_axis_degrees(1, 94.0);  // 16 min past the meridian, before the dispatch
     driver->set_tracking(true);

@@ -398,9 +398,14 @@ it is never reachable through `router.cpp` or the web UI.
   armed before the `:MS#` goes out and cleared when the `:MS#` is refused or fails, by AbortSlew and the
   Park/FindHome pre-stops, on connect and disconnect, and at the GOTO's end. Landing never reads the
   window: it is a reading that shows no GOTO, from the poll or a control path, and it clears the window,
-  so a short GOTO reports landed when the mount stops, not at 2 s. `:GU#` shows the GOTO 1 ms after `:MS#`
-  answers (HM-17 OnStepX 10.23a, 2026-10-29), so the window only keeps `Slewing` true until the first
-  reading. A stale reading cannot end the slew or send the tracking restore: a reading and the `:MS#` share
+  so a short GOTO reports landed when the mount stops, not at 2 s. Landing relies on `:MS#` setting the
+  GOTO state before it replies, so the first `:GU#` after it shows the GOTO. From the source: OnStepX
+  `Goto::request()` sets `state = GS_GOTO` (`Goto.cpp`) and `:GU#` writes `N` only for `GS_NONE`
+  (`Status.command.cpp`), read at OnStepX 10.18a (`c3d28e101b`) and 10.29a (`main`, `0420f16f1b`); OnStep 4.x
+  `goTo()` sets `trackingState=TrackingMoveTo` (`Goto.ino:382`) and `:GU#` writes `N` only otherwise
+  (`Command.ino:714`), read at OnStep 4.24q (`3b73bffcfb`) and the same in the final 4.24s (`release-4.24`). On hardware, `:GU#` showed the GOTO 1 ms after `:MS#`
+  answered (HM-17 OnStepX 10.23a, 2026-10-29). So the window only keeps `Slewing` true until the first
+  reading (#1887). A stale reading cannot end the slew or send the tracking restore: a reading and the `:MS#` share
   the operation lock, and the dispatch write-through shows the GOTO until a later reading replaces it (#1835).
   `AbortSlew` ends the grace, so the next slew goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
   GOTO state while it brakes after `:Q#` (HM-17 2026-10-24: about 1.6 s), and a slew in that time
@@ -431,7 +436,8 @@ it is never reachable through `router.cpp` or the web UI.
 - **Getters and `DeviceState` are served from a polled snapshot, never from the mount** (#1783,
   [decision 0010](../../docs/decisions/0010-snapshot-served-state.md), the SynScan and Celestron shape).
   One status poll per connection runs in an `AsyncOperation` slot (`status_poll_`), started at the end
-  of a connect (its first tick 1 s later: the connect seeds the frame) and joined, with the pulse-end
+  of a connect (its first tick 1 s later: the connect seeds the frame; a poll that does not start, or a link
+  lost during the connect's reads, fails the connect, which is undone as a Disconnect is, #1895) and joined, with the pulse-end
   tick's slot, before a disconnect or a relink closes the port and at the start of every connect, with
   no driver lock held. Every `kStatusPollPeriod` (1 s, start to start on
   the task clock, missed ticks skipped) it reads `:GU#` then `:GRa#`/`:GDe#`, and every
@@ -450,7 +456,13 @@ it is never reachable through `router.cpp` or the web UI.
   `Slewing` (with the driver's own MoveAxis flags, slew grace and pending Park/FindHome), `SideOfPier`
   (from the frame's RA) and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
   (`device_state_age()`). A field the mount has not answered yet throws `DriverException` "not
-  available"; a latched fault and a lost link refuse as above. Client commands write through
+  available"; a latched fault and a lost link refuse as above. While the frame has no status (every `:GU#`
+  since the connect failed), a command that checks for a park or writes the status through (`PulseGuide`, a
+  moving `MoveAxis`, `FindHome`, `Tracking=true`, `Unpark`, the slews and syncs) reads `:GU#` first and throws
+  `DriverException` ("the mount has not answered :GU# since the connect") when that read fails too, rather than take
+  the unread status for "not parked"; `AbortSlew`, `MoveAxis(axis, 0)` and `Tracking=false` are stops and are
+  never refused over an unread status (`Tracking=false` tries the read, sends `:ST0#` if it fails, and its
+  write-through then does not land; a lost link and a latched fault still throw) (#1895). Client commands write through
   (`snapshot_.write()`): a sync's position, `Tracking`, `Unpark`, a slew start (`Slewing` true), a park
   or home the mount took, and a pulse, a MoveAxis start and AbortSlew drop the tick in flight, so a tick
   that sampled before the command cannot publish over it. Control paths keep their direct reads and
@@ -626,8 +638,12 @@ it is never reachable through `router.cpp` or the web UI.
   command, so it is client-side only. `SiteLatitude` and `SiteLongitude` throw `InvalidOperation`
   (with the reason the last `:Gt#`/`:Gg#` read failed) until the coordinate is known: written from
   the device config at connect, by a client, or read from the mount at connect or by the status poll
-  (#1783; they answered a default 0.0 before, decision 0019). `SiderealTime`, `SideOfPier`,
-  `DestinationSideOfPier` and `SlewToAltAz` still use longitude 0 until it is known.
+  (#1783; they answered a default 0.0 before, decision 0019). `SideOfPier`, `DestinationSideOfPier`,
+  `SiderealTime` and both `SlewToAltAz` forms throw `InvalidOperation` too ("<member> needs the site", with the
+  same reason) until both coordinates are known (#1893; they used latitude and longitude 0 before): decision 0019
+  rule 2, followed for consistency, since its rule 3 covers controllers that store no site. An Alt/Az slew retries
+  the site read first (at most every `kSiteInfoRetryDelay`) and sends nothing when it still fails. With a known
+  site, the normal case and ConformU's, nothing changes.
 - **No `gps_status` action: OnStep cannot report a GPS fix** (#1653). iOptron and Celestron answer
   `gps_status` (#1574) so a client lets the mount's site win only on a fix; OnStep has no reply that
   says the site or time came from GPS. OnStepX (`097cc579`, `Site.cpp` `gpsCheck()`) puts a GPS

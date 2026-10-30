@@ -1417,3 +1417,52 @@ TEST_CASE("OnStep link loss - AbortSlew reports a link lost at its tracking rest
     CHECK(mount.received(":Q#"));                  // the stops went out first
     CHECK_FALSE(mount.received(":ST60.164275#"));  // the restore found the link gone
 }
+
+// #1895: the connect's first reads take each failure as a silent mount's, so a link lost during them used to
+// leave a connect that returned success while Connected read false. It fails the connect now.
+TEST_CASE("OnStep link loss - a link lost during the connect's first reads fails the connect",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
+    mount.sever_on(":GRa#");  // the seed's position read: the adapter goes as it is sent
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& ex) {
+        message = ex.what();
+    }
+    CHECK(message.find("lost during the connect") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(OnStepProtocolWrapper::instance().is_connected());
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// #1895 with #521: failing the connect disconnects the link, which must not consume the loss stamp, or the next
+// Connect would not time the outage and would leave the motion that ran unattended.
+TEST_CASE("OnStep link loss - a link lost during the connect's first reads keeps its loss time for the next connect",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    WindowReset window_reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount first;
+    PortLink link(first.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), clock);
+    first.sever_on(":GRa#");
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    REQUIRE_FALSE(driver->get_connected());
+
+    alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(1500));
+    clock.advance(std::chrono::milliseconds(2000));
+    FakeOnStepSerialMount replugged;
+    link.repoint(replugged.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(replugged.received(":Q#"));
+    CHECK(replugged.received(":Qn#"));
+    CHECK(replugged.received(":Qs#"));
+    CHECK(replugged.received(":Qe#"));
+    CHECK(replugged.received(":Qw#"));
+    driver->set_connected(false);
+}
