@@ -162,9 +162,7 @@ int main() {
         // case: age pruning still removes old dated files and keeps today's
         const fs::path dir = make_dir();
         const fs::path old_file = dir / "alpacabridge-2000-01-01.log";
-        {
-            std::ofstream(old_file) << "old\n";
-        }
+        std::ofstream(old_file) << "old\n";
         const fs::path file = start(dir, 4096);
         write_lines(5);
         util::set_log_retention_days(90);
