@@ -209,7 +209,7 @@ private:
         ++moving_calls;
         check_unit(focuser_id);
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         return moving;
     }
@@ -219,7 +219,7 @@ private:
         last_read_id = focuser_id;
         check_unit(focuser_id);
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         return position;
     }

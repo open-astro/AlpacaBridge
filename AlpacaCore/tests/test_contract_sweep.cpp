@@ -2737,6 +2737,8 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
 
 // The SDK cameras expose for a minute, long enough that no driver deadline ends the exposure inside the budget.
 constexpr double kTier3SdkExposureSeconds = 60.0;
+// The SVBONY and Player One fakes cap an exposure at 10 s; 9 s outlasts the control leg and the fault.
+constexpr double kTier3CappedExposureSeconds = 9.0;
 
 #ifdef ALPACACORE_ENABLE_ZWO
 // An AM mount: ":MS#" is accepted and the mount then reports itself slewing (no 'N' in ":GU#") for good; the setters
@@ -2771,9 +2773,17 @@ Tier3Recipe tier3_recipe_zwo_camera() {
                 t3_fake<Fake>(hosted).auto_complete_exposure = false;
                 t3_start_exposure(hosted, kTier3SdkExposureSeconds);
             },
-            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_exposure_status(Fake::ExposureStatus::Failed); },
-            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_exposure_status(Fake::ExposureStatus::Working); },
-            "FakeZWOSDK::set_exposure_status(Failed) mid-exposure"};
+            [](Hosted& hosted) {
+                auto& fake = t3_fake<Fake>(hosted);
+                fake.fail_every_exposure = true;
+                fake.set_exposure_status(Fake::ExposureStatus::Failed);
+            },
+            [](Hosted& hosted) {
+                auto& fake = t3_fake<Fake>(hosted);
+                fake.fail_every_exposure = false;
+                fake.set_exposure_status(Fake::ExposureStatus::Working);
+            },
+            "FakeZWOSDK::fail_every_exposure = true mid-exposure"};
 }
 
 // The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
@@ -2912,7 +2922,7 @@ Tier3Recipe tier3_recipe_svbony_camera() {
                 auto& fake = t3_fake<Fake>(hosted);
                 fake.set_max_read_wait(std::chrono::seconds(20));
                 fake.block_video_data();
-                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+                t3_start_exposure(hosted, kTier3CappedExposureSeconds);
             },
             [](Hosted& hosted) {
                 auto& fake = t3_fake<Fake>(hosted);
@@ -2930,7 +2940,7 @@ Tier3Recipe tier3_recipe_playerone_camera() {
     using Fake = alpacacore::test::FakePlayerOneSDK;
     return {[](Hosted& hosted) {
                 t3_fake<Fake>(hosted).set_image_ready(false);
-                t3_start_exposure(hosted, kTier3SdkExposureSeconds);
+                t3_start_exposure(hosted, kTier3CappedExposureSeconds);
             },
             [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(true); },
             [](Hosted& hosted) { t3_fake<Fake>(hosted).set_readiness_error(false); },

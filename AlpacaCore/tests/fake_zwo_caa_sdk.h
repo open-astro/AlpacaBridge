@@ -110,7 +110,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++motion_calls;
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         return {moving, false};
     }
@@ -118,7 +118,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++degree_calls;
         if (fail_reads) {
-            throw std::runtime_error("link down");
+            throw AlpacaException("link down", AlpacaError::DriverException);
         }
         return degree;
     }
