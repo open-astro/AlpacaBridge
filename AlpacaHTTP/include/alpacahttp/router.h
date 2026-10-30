@@ -222,6 +222,11 @@ public:
     // Set restart callback (called when restart endpoint is requested)
     void set_restart_callback(std::function<void()> callback);
 
+    // Test seam: holds the log archive lock so a test can observe the busy answer.
+    std::unique_lock<std::mutex> hold_log_archive_lock_for_test() {
+        return std::unique_lock<std::mutex>(log_archive_mutex_);
+    }
+
     // Route request and generate response
     Response route(const Request& request, std::uint32_t server_transaction_id);
 
@@ -244,6 +249,9 @@ private:
     // writes cannot interleave and leave the file and memory disagreeing.
     // route() never takes it.
     std::mutex description_write_mutex_;
+    // Serialises the log archive build (GET /management/v1/logfiles?download),
+    // taken with try_lock so a second request is refused, not queued.
+    std::mutex log_archive_mutex_;
     std::string machine_hostname_;
 
     // open-astro#547.
