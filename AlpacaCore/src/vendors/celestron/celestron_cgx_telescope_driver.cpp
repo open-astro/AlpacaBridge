@@ -1465,22 +1465,23 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         const auto settle_deadline = clock_.now() + std::chrono::milliseconds(500);
         std::optional<std::pair<std::uint32_t, std::uint32_t>> previous;
         // The settle and label-readback loops run on the wire with mutex_ dropped (decision 0016 rules 1 and 2).
-        std::optional<MutexRelease> unlocked(std::in_place, lock);
-        while (true) {
-            const auto ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
-            const auto dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
-            const bool stable = previous && std::abs(signed_cgx_encoder_delta(ra_encoder, previous->first)) <= 2 &&
-                                std::abs(signed_cgx_encoder_delta(dec_encoder, previous->second)) <= 2;
-            previous = std::pair{ra_encoder, dec_encoder};
-            const auto state = settle.feed(stable);
-            if (state == util::ConsecutiveSettle::State::Settled) break;
-            if (state == util::ConsecutiveSettle::State::TimedOut || clock_.now() >= settle_deadline) {
-                throw AlpacaException("Celestron CGX encoders did not settle before Sync",
-                                      AlpacaError::DriverException);
+        {
+            const MutexRelease unlocked(lock);
+            while (true) {
+                const auto ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
+                const auto dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
+                const bool stable = previous && std::abs(signed_cgx_encoder_delta(ra_encoder, previous->first)) <= 2 &&
+                                    std::abs(signed_cgx_encoder_delta(dec_encoder, previous->second)) <= 2;
+                previous = std::pair{ra_encoder, dec_encoder};
+                const auto state = settle.feed(stable);
+                if (state == util::ConsecutiveSettle::State::Settled) break;
+                if (state == util::ConsecutiveSettle::State::TimedOut || clock_.now() >= settle_deadline) {
+                    throw AlpacaException("Celestron CGX encoders did not settle before Sync",
+                                          AlpacaError::DriverException);
+                }
+                clock_.sleep_for(std::chrono::milliseconds(20));
             }
-            clock_.sleep_for(std::chrono::milliseconds(20));
         }
-        unlocked.reset();
         require_connected();  // Rule 6: re-check after the exchanges.
         if (parked_) throw AlpacaException("Cannot sync while parked", AlpacaError::InvalidWhileParked);
         if (!reference_valid_locked())
@@ -1499,29 +1500,30 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         const std::uint32_t next_dec_rehome_label =
             offset_encoder_label(dec_rehome_label_, signed_cgx_encoder_delta(positions.second, current_dec_encoder));
         reference_write_started = true;  // Even a failed ACK may have changed the controller labels.
-        unlocked.emplace(lock);
-        protocol_.set_axis_position(CgxAxis::RightAscension, positions.first);
-        protocol_.set_axis_position(CgxAxis::Declination, positions.second);
-        // MC_SET_POSITION itself produces a brief readback transient even on
-        // stationary hardware. Verify retained labels, not its first sample.
-        util::ConsecutiveSettle reference_settle(3, 15);
-        const auto reference_deadline = clock_.now() + std::chrono::milliseconds(500);
-        while (true) {
-            const auto ra_delta =
-                signed_cgx_encoder_delta(protocol_.get_axis_position(CgxAxis::RightAscension), positions.first);
-            const auto dec_delta =
-                signed_cgx_encoder_delta(protocol_.get_axis_position(CgxAxis::Declination), positions.second);
-            const auto state = reference_settle.feed(std::abs(ra_delta) <= 2 && std::abs(dec_delta) <= 2);
-            if (state == util::ConsecutiveSettle::State::Settled) break;
-            if (state == util::ConsecutiveSettle::State::TimedOut || clock_.now() >= reference_deadline) {
-                throw AlpacaException("Celestron CGX did not retain the synchronized encoder reference: RA delta=" +
-                                          std::to_string(ra_delta) + " Dec delta=" + std::to_string(dec_delta) +
-                                          " counts",
-                                      AlpacaError::DriverException);
+        {
+            const MutexRelease unlocked(lock);
+            protocol_.set_axis_position(CgxAxis::RightAscension, positions.first);
+            protocol_.set_axis_position(CgxAxis::Declination, positions.second);
+            // MC_SET_POSITION itself produces a brief readback transient even on
+            // stationary hardware. Verify retained labels, not its first sample.
+            util::ConsecutiveSettle reference_settle(3, 15);
+            const auto reference_deadline = clock_.now() + std::chrono::milliseconds(500);
+            while (true) {
+                const auto ra_delta =
+                    signed_cgx_encoder_delta(protocol_.get_axis_position(CgxAxis::RightAscension), positions.first);
+                const auto dec_delta =
+                    signed_cgx_encoder_delta(protocol_.get_axis_position(CgxAxis::Declination), positions.second);
+                const auto state = reference_settle.feed(std::abs(ra_delta) <= 2 && std::abs(dec_delta) <= 2);
+                if (state == util::ConsecutiveSettle::State::Settled) break;
+                if (state == util::ConsecutiveSettle::State::TimedOut || clock_.now() >= reference_deadline) {
+                    throw AlpacaException("Celestron CGX did not retain the synchronized encoder reference: RA delta=" +
+                                              std::to_string(ra_delta) + " Dec delta=" + std::to_string(dec_delta) +
+                                              " counts",
+                                          AlpacaError::DriverException);
+                }
+                clock_.sleep_for(std::chrono::milliseconds(20));
             }
-            clock_.sleep_for(std::chrono::milliseconds(20));
         }
-        unlocked.reset();
         require_connected();  // Disconnect may have run while mutex_ was dropped; the catch marks the labels unknown.
         // Sync re-labels the current mechanical position. Keep the homed
         // reference fixed, and remember the equivalent home labels in this
