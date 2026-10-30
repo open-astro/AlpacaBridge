@@ -2295,16 +2295,20 @@ void check_tier1_cases_have_a_subject() {
     for (const auto& t : Catch::getRegistryHub().getTestCaseRegistry().getAllTests()) {
         registered.insert(t.getTestCaseInfo().name);
     }
-    for (const auto& e : alpacacore::test::contract::contract_entries()) {
+    // Case names use the macro id, which differs from ContractEntry::id for some entries (celestron_cgx_telescope).
+    const auto check = [&](const char* macro_id, const ContractEntry& e) {
         auto d = e.make(0);
         REQUIRE(d != nullptr);
-        const std::string stem = std::string("Contract sweep - ") + e.id + " - ";
-        INFO(e.id);
+        const std::string stem = std::string("Contract sweep - ") + macro_id + " - ";
+        INFO(macro_id);
         CHECK(!invalid_value_probes(*d, e).empty() == has_invalid_subject(e));
         CHECK((registered.count(stem + "InvalidValue precedes NotConnected") == 1) == has_invalid_subject(e));
         CHECK(!can_getter_probes(*d, e).empty() == has_can_subject(e));
         CHECK((registered.count(stem + "Can getters") == 1) == has_can_subject(e));
-    }
+    };
+#define CS_T1_GUARD(id) check(#id, alpacacore::test::contract::contract_entry_##id());
+    CONTRACT_SWEEP_ENTRIES(CS_T1_GUARD)
+#undef CS_T1_GUARD
 }
 
 TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected", "[contract][tier1][filterwheel]") {
