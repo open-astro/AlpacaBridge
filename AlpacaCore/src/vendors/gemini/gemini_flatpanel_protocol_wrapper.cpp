@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -514,6 +515,7 @@ public:
         }
 
         connected_ = true;
+        link_lost_.store(false);
         ALPACA_LOG_INFO("Gemini", "Flat panel connected" + (firmware.empty() ? "" : (", firmware: " + firmware)));
         return firmware;
     }
@@ -527,6 +529,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
     }
+
+    bool link_alive() const noexcept { return !link_lost_.load(); }
 
     bool get_light_on() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -731,6 +735,21 @@ private:
         close_serial();
     }
 
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV/EBADF on the fd): decision
+    // 0009 rule 2 loses the link at once. Release the port so a replugged panel
+    // can be reopened, latch link_lost_ for the driver's Connected getter and
+    // fail with NotConnected. During connect() nothing is latched: the
+    // handshake retries and connect() closes the port itself.
+    [[noreturn]] void fail_link_locked(const std::string& reason) {
+        if (connected_) {
+            ALPACA_LOG_ERROR("Gemini",
+                             "Flat panel link lost on " + config_.serial_port + ": " + reason + " (port released)");
+            link_lost_.store(true);
+            disconnect_locked();
+        }
+        throw AlpacaException(reason, AlpacaError::NotConnected);
+    }
+
     void close_serial() {
 #ifdef _WIN32
         if (serial_handle_ != INVALID_HANDLE_VALUE) {
@@ -756,7 +775,11 @@ private:
         }
 #else
         if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
-            throw AlpacaException("Write failed: " + util::errno_string(errno), AlpacaError::DriverException);
+            const int err = errno;
+            if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) {
+                fail_link_locked("Serial link lost (errno " + std::to_string(err) + ")");
+            }
+            throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
 #endif
     }
@@ -805,8 +828,7 @@ private:
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("Response too long", AlpacaError::DriverException);
             case util::ReadOutcome::LinkDead:
-                throw AlpacaException("Serial link lost (errno " + std::to_string(r.err) + ")",
-                                      AlpacaError::DriverException);
+                fail_link_locked("Serial link lost (errno " + std::to_string(r.err) + ")");
             default:
                 throw AlpacaException("Read timeout", AlpacaError::DriverException);
         }
@@ -846,6 +868,7 @@ private:
     mutable std::mutex mutex_;
     FlatPanelConnectionConfig config_;
     bool connected_ = false;
+    std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect
 
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
@@ -867,6 +890,8 @@ std::string GeminiFlatPanelProtocolWrapper::connect(const FlatPanelConnectionCon
 void GeminiFlatPanelProtocolWrapper::disconnect() { impl_->disconnect(); }
 
 bool GeminiFlatPanelProtocolWrapper::is_connected() const { return impl_->is_connected(); }
+
+bool GeminiFlatPanelProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
 
 bool GeminiFlatPanelProtocolWrapper::get_light_on() { return impl_->get_light_on(); }
 

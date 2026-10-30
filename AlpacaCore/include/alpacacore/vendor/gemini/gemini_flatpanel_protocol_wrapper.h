@@ -206,6 +206,13 @@ public:
      */
     bool is_connected() const;
 
+    /**
+     * @brief False once an exchange has seen the port gone (a hangup, or
+     * EIO/ENXIO/ENODEV/EBADF on the fd); the port is then already released
+     * (decision 0009 rule 2). Cleared by the next successful connect(). Lock-free.
+     */
+    bool link_alive() const noexcept;
+
     // --- Query commands ---
 
     /** @brief Get whether the light is on. Command >S# */
