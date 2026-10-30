@@ -666,9 +666,12 @@ TEST_CASE("SynScan pulse state refuses a latched link fault without I/O and reco
     if (guiding) REQUIRE_NOTHROW(driver->pulse_guide(0, 25000));
     REQUIRE(driver->get_is_pulse_guiding() == guiding);
     const double altitude = driver->get_altitude();
+    // The connect started the status poll, whose first tick is still queued behind the test's exchanges on the
+    // wrapper mutex (not FIFO): unpaused, it can read after the third failure below and count a fourth, or
+    // after the unmute and clear the latch (nightly run 40958614341). Pausing joins it.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     st->mute.store(true);
-    // A poll that meets the background poll returns without counting: poll until the third failure latches.
-    for (int i = 0; i < 50 && driver->get_link_fault().empty(); ++i) {
+    for (int i = 0; i < 3; ++i) {
         poll_status_now_for_testing(*driver);
     }
     REQUIRE(driver->get_connected());
@@ -729,9 +732,12 @@ TEST_CASE("SynScan commanded state refuses a latched fault while safety stops st
     if (moving) driver->move_axis(1, 0.01);
     REQUIRE(driver->get_slewing() == moving);
     (void)driver->get_altitude();
+    // The connect started the status poll, whose first tick is still queued behind the test's exchanges on the
+    // wrapper mutex (not FIFO): unpaused, it can read after the third failure below and count a fourth, or
+    // after the unmute and clear the latch (nightly run 40958614341). Pausing joins it.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     st->mute.store(true);
-    // A poll that meets the background poll returns without counting: poll until the third failure latches.
-    for (int i = 0; i < 50 && driver->get_link_fault().empty(); ++i) {
+    for (int i = 0; i < 3; ++i) {
         poll_status_now_for_testing(*driver);
     }
     const auto fault = driver->get_link_fault();
@@ -754,7 +760,7 @@ TEST_CASE("SynScan commanded state refuses a latched fault while safety stops st
     for (const auto& value : driver->get_device_state()) {
         CHECK(value.name == "TimeStamp");
     }
-    st->mute.store(false);  // replies work again, but no status poll has cleared the latch
+    st->mute.store(false);  // replies work again, but no poll has cleared the latch
     const int before_stop = st->command_count('P');
     REQUIRE_NOTHROW(driver->move_axis(1, 0.0));
     CHECK(st->command_count('P') > before_stop);
