@@ -919,8 +919,8 @@ TEST_CASE("ZWO Mount Telescope Driver - A guide rate write during the connect re
     driver->set_connected(false);
 }
 
-// Falsified by: zwo_telescope_driver.cpp set_connected(false) joining disconnect_thread_ inline (the teardown waits
-// for the wire behind the exchange in flight, so the call no longer returns at once).
+// Falsified by: zwo_telescope_driver.cpp set_connected(false) calling teardown_slot_.cancel_all_and_join() after
+// teardown_slot_.start() (the call waits for the wire behind the exchange in flight, so it no longer returns at once).
 TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange is in flight",
           "[zwo][telescope][unit][getter-stall]") {
     using namespace alpacacore::test;

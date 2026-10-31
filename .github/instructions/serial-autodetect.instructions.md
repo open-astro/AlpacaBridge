@@ -41,8 +41,8 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   grace per late byte, since the grace restarts after each) and returns `LinkDead` with the errno for a hangup. It never latches, closes, throws, sleeps or flushes:
   the wrapper keeps its flush, command delay and exception text and decides what `LinkDead` means. It is two concrete
   overloads, not a `ByteChannel` (decision 0013 section 7). The rule binds new reads and the ones migrated so far: the
-  Gemini focuser and flat panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that
-  hears a hangup logs "no ack" and does not report a lost link), the serial auto-detect probe and handshake loops
+  Gemini focuser and flat panel and the iOptron iEAF and iEFW `read_response()` and ack drains (the iEAF ack drain
+  reports a hangup as a lost link, decision 0009; the iEFW one logs "no ack" and does not report a lost link), the serial auto-detect probe and handshake loops
   (Gemini, iEAF/iEFW, iOptron, Celestron, SynScan, ZWO mount, OnStep, Sky-Watcher probe, the four Wanderer handshakes), the
   SynScan handset probe and the QHY CFW3 `read_reply`, and the connected-path `read_response()` of the iOptron mount,
   Celestron NexStar, SynScan, ZWO mount and OnStep, over serial and TCP, with the OnStep `drain_stale()` after a blind

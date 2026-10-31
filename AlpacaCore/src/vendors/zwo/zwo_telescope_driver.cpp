@@ -33,6 +33,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <iomanip>
 #include <mutex>
 #include <numbers>
@@ -201,9 +202,6 @@ public:
           manual_axis_tracking_restore_({std::nullopt, std::nullopt}),
           slew_force_until_(std::chrono::steady_clock::time_point{}),
           pulse_guiding_end_(std::chrono::steady_clock::time_point{}),
-          pulse_generation_(0),
-          pulse_thread_stop_(false),
-          pulse_cancel_(false),
           pulse_queue_end_(std::chrono::steady_clock::time_point{}),
           parked_cached_(false),
           park_command_active_(false),
@@ -226,19 +224,17 @@ public:
                 ALPACA_LOG_WARN("ZWO", "Error while disconnecting ZWO mount driver: " + std::string(e.what()));
             }
         }
-        // Join EVERY background thread before members are destroyed: the
-        // GOTO setup thread, the async disconnect teardown (which itself
-        // joins the poll/pulse threads), and — if we were never connected or
-        // a teardown never ran — the poll/pulse threads directly.
-        cancel_goto_thread_request();
-        if (goto_thread_.joinable()) {
-            goto_thread_.join();
-        }
-        if (disconnect_thread_.joinable()) {
-            disconnect_thread_.join();
-        }
+        // Join EVERY background body before members are destroyed, under
+        // set_connected_mutex_ like the other reapers (failure 0011): the GOTO
+        // body (fenced first), the last disconnect teardown (which itself joins
+        // the pulse drain and the poll), and -- if we were never connected or a
+        // teardown never ran -- the pulse drain and the poll directly.
+        std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
+        fence_goto();
+        goto_slot_.cancel_all_and_join();
+        teardown_slot_.cancel_all_and_join();
+        stop_pulse_drain();
         stop_poll_thread();
-        stop_pulse_thread();
     }
 
     int get_device_number() const override {
@@ -311,13 +307,13 @@ public:
         }
 
         // Serialize whole set_connected bodies (sync PUT, async-task tail,
-        // Connected=true refresh). The poll/pulse/teardown thread members
-        // below are joined, re-assigned and flag-gated here; two overlapping
+        // Connected=true refresh). The poll, pulse, GOTO and teardown slots
+        // below are started, reaped and flag-gated here; two overlapping
         // bodies (e.g. the async connect task's start_poll_thread racing a
-        // sync disconnect teardown's stop_poll_thread) would join/assign the
-        // same std::thread from two threads and re-clear poll_stop_ under the
-        // other side's join — UB and a permanent wedge (found by the
-        // [stress] telescope suite). No worker-thread body takes this mutex.
+        // sync disconnect teardown's stop_poll_thread) would reap the same
+        // slot from two threads and re-clear poll_stop_ under the other
+        // side's join -- a permanent wedge (found by the [stress] telescope
+        // suite; failure 0011). No body takes this mutex.
         std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
 
         if (!connected) {
@@ -333,23 +329,21 @@ public:
                 ++utc_session_;
             }
             poll_stop_.store(true);
-            pulse_thread_stop_.store(true);
-            pulse_cancel_.store(true);
-            pulse_cv_.notify_all();
-            cancel_goto_thread_request();
             protocol_.cancel_pending_io();
             // open-astro#720: fence before teardown, so a pending GOTO setup
-            // cannot send ":MS" after Connected=false returns.
-            cancel_and_join_goto_thread();
+            // cannot send ":MS" after Connected=false returns. Disconnect is a
+            // stop path, so it also reaps the body (decision 0006 rule 3).
+            fence_goto();
+            goto_slot_.cancel_all_and_join();
 
-            // Joinable member thread, NOT detached: the destructor (and the
-            // next connect) joins it, so the teardown can never touch a
-            // destroyed driver (C2). Reap a finished teardown from a previous
-            // disconnect before reusing the member.
-            if (disconnect_thread_.joinable()) {
-                disconnect_thread_.join();
-            }
-            disconnect_thread_ = std::thread([this]() {
+            // The teardown runs in its own slot, never detached: the destructor
+            // (and the next connect) reaps it, so it can never touch a destroyed
+            // driver (C2). Reap the previous teardown first, so two never run
+            // at once. A disconnect sends no stop: an accepted GOTO keeps
+            // running after Connected=false.
+            teardown_slot_.cancel_all_and_join();
+            // The body ignores its stop reason: the wipe and the close always run.
+            teardown_slot_.start([this](util::OperationContext&) {
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     manual_axis_slewing_[0] = false;
@@ -376,7 +370,7 @@ public:
                     clear_last_slew_error_locked();
                 }
                 stop_poll_thread();
-                stop_pulse_thread();
+                stop_pulse_drain();
                 try {
                     protocol_.disconnect();
                 } catch (const std::exception& e) {
@@ -390,9 +384,7 @@ public:
         // state wipe / protocol disconnect cannot interleave with this
         // connect (the teardown takes mutex_ too, but only join gives a
         // strict ordering).
-        if (disconnect_thread_.joinable()) {
-            disconnect_thread_.join();
-        }
+        teardown_slot_.cancel_all_and_join();
 
         // set_connected_mutex_ is this driver's transition lock and the protocol wrapper's own mutex is
         // its I/O lock: the handshake below runs under them and never under mutex_, which each step
@@ -433,10 +425,10 @@ public:
                 tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             poll_pause_.store(false);
+            // A drain still running keeps its current task; the next pulse starts a new drain.
             pulse_queue_.clear();
             pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-            pulse_thread_stop_.store(false);
-            pulse_cancel_.store(false);
+            pulse_drain_active_ = false;
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
@@ -460,7 +452,6 @@ public:
             target_dec_degrees_ = 0.0;
             target_ra_set_ = false;
             target_dec_set_ = false;
-            pulse_generation_.store(0);
         };
         auto apply_or_load_site_info = [&]() {
             // Held across the whole send and read-back, so a setter's write lands before or after this
@@ -595,14 +586,14 @@ public:
             }
             refresh_cached_values();
             start_poll_thread();
-            start_pulse_thread();
             return;
         }
 
         if (connected) {
             stop_poll_thread();
-            stop_pulse_thread();
-            cancel_and_join_goto_thread();
+            stop_pulse_drain();
+            fence_goto();
+            goto_slot_.cancel_all_and_join();
             reset_session_state_for_connect();
             if (!protocol.connect(connection_info_)) {
                 // The wrapper's reason (a port another device holds, #1202)
@@ -695,7 +686,6 @@ public:
                     throw AlpacaException("ZWO mount transport lost during connect", AlpacaError::DriverException);
                 caches_ready_.store(true);
                 start_poll_thread();
-                start_pulse_thread();
                 return;
             } catch (...) {
                 connected_.store(false);
@@ -711,7 +701,7 @@ public:
                 }
                 protocol.cancel_pending_io();
                 stop_poll_thread();
-                stop_pulse_thread();
+                stop_pulse_drain();
                 protocol.disconnect();
                 throw;
             }
@@ -1233,7 +1223,7 @@ public:
 
         // open-astro#720: a pending GOTO setup must not send ":MS" after the
         // stop or the jog below. One fence covers both branches.
-        cancel_and_join_goto_thread();
+        fence_goto();
 
         auto& protocol = protocol_;
 
@@ -1527,7 +1517,7 @@ public:
         check_connected();
         ensure_not_parked("FindHome");
         // open-astro#720: a pending GOTO setup must not send ":MS" after ":hC".
-        cancel_and_join_goto_thread();
+        fence_goto();
         reset_position_offsets();
         protocol_.go_home();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1550,7 +1540,7 @@ public:
             if (park_failed_) clear_last_slew_error_locked();
         }
         // open-astro#720: a pending GOTO setup must not send ":MS" after ":hP".
-        cancel_and_join_goto_thread();
+        fence_goto();
         reset_position_offsets();
         if (get_at_park()) {
             return;
@@ -1586,12 +1576,12 @@ public:
         check_connected(true);
         ensure_not_parked("AbortSlew");
         reset_position_offsets();
-        // open-astro#575 / #720: fence a GOTO setup thread still writing the
-        // target (cancel AND join), so it neither sends ":MS" after this abort
-        // nor records its rejection as a slew failure. A ":MS" already on the
-        // wire when the cancel lands goes out before the ":Q" below, which
-        // stops it. The join waits for at most one mount round trip.
-        cancel_and_join_goto_thread();
+        // open-astro#575 / #720: fence a GOTO body still writing the target
+        // (revoke its claim, wait for its call in flight), so it neither sends
+        // ":MS" after this abort nor records its rejection as a slew failure. A
+        // ":MS" already on the wire when the fence lands goes out before the
+        // ":Q" below, which stops it.
+        fence_goto();
         protocol_.abort_motion();
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[0] = false;
@@ -1670,7 +1660,6 @@ public:
             ? (direction == 1 ? -expected_deg : expected_deg)
             : 0.0;
 
-        pulse_cancel_.store(false);
         PulseTask task;
         task.direction = direction;
         task.duration_ms = effective_duration;
@@ -1678,8 +1667,8 @@ public:
         task.guide_rate_deg_per_sec = 0.0;
         task.expected_ra_hours = expected_hours;
         task.expected_dec_degrees = expected_dec;
-        task.generation = pulse_generation_.load();
 
+        bool start_drain = false;
         {
             // Match the connect reset's pulse -> state order (#714); state remains the leaf.
             std::lock_guard<std::mutex> lock(pulse_mutex_);
@@ -1693,8 +1682,24 @@ public:
             pulse_guiding_end_ = pulse_queue_end_ + kPulseGuideHold;
             pulse_queue_.push_back(task);
             snapshot_.write([](PolledFrame&) {});
+            // A drain that is running takes the task; only the caller that finds none starts one.
+            start_drain = !pulse_drain_active_;
+            pulse_drain_active_ = true;
         }
-        pulse_cv_.notify_one();
+        if (!start_drain) return;
+        try {
+            pulse_slot_.start([this](util::OperationContext& ctx) { drain_pulses(ctx); });
+        } catch (...) {
+            // No drain runs, so nobody would send what is queued (decision 0006 "Thread refusal").
+            {
+                std::lock_guard<std::mutex> lock(pulse_mutex_);
+                pulse_queue_.clear();
+                pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+                pulse_drain_active_ = false;
+            }
+            if (!connected_.load()) throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
+            throw;
+        }
     }
 
     void set_park() override {
@@ -1785,9 +1790,29 @@ public:
             throw;
         }
 
-        uint64_t slew_epoch = 0;
+        // decision 0006 "Claim": initiator_mutex_ makes the claim and the start one step per initiator, so the body
+        // started last is always the one that holds goto_claim_. Only slew initiators take it; no body, fence, getter,
+        // connect or disconnect does, so holding it across start() cannot block a stale body.
+        std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
+        std::uint64_t claim = 0;
+        bool setup_was_pending = false;
+        bool goto_was_active = false;
+        auto force_until_before = std::chrono::steady_clock::time_point{};
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // Race (b): a disconnect that fenced after check_connected() above.
+            if (!connected_.load()) {
+                poll_pause_.store(false);
+                throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
+            }
+            // The claim comes before the flags (decision 0006 rule 3); a superseded body waiting at the send
+            // gate wakes and leaves.
+            claim = goto_generation_.bump();
+            goto_claim_ = claim;
+            goto_send_cv_.notify_all();
+            setup_was_pending = goto_setup_pending_;
+            goto_was_active = goto_active_;
+            force_until_before = slew_force_until_;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             manual_axis_tracking_restore_[0] = std::nullopt;
@@ -1799,7 +1824,6 @@ public:
             // that retries a rejected goto must not be told the OLD goto
             // failed.
             clear_last_slew_error_locked();
-            slew_epoch = slew_error_epoch_;
             parked_cached_ = false;
             park_command_active_ = false;
             park_motion_seen_ = false;
@@ -1808,182 +1832,133 @@ public:
             write_frame_locked();
         }
 
-        // Joinable member thread, NOT detached (H1): cancel + join any
-        // previous GOTO setup first, then reset the cancel flag for this one.
-        // Park, FindHome, MoveAxis, AbortSlew, Sync, Unpark and set_connected(false)
-        // cancel and join via cancel_and_join_goto_thread(); the destructor cancels
-        // and joins too. The reap stays inline here because goto_reap_mutex_
-        // must be held across the respawn and is not recursive.
-        // goto_reap_mutex_ serializes concurrent SlewAsync callers — without
-        // it two callers join and assign goto_thread_ simultaneously (UB,
-        // found by the [stress] telescope suite). The GOTO body never takes
-        // this mutex, so the join cannot deadlock.
-        std::lock_guard<std::mutex> reap_lock(goto_reap_mutex_);
-        cancel_goto_thread_request();
-        if (goto_thread_.joinable()) {
-            goto_thread_.join();
+        // The slot starts the new body without waiting for the one it replaces (decision 0006 rule 2).
+        try {
+            goto_slot_.start([this, target_ra, target_dec, claim](util::OperationContext& ctx) {
+                run_goto(ctx, claim, target_ra, target_dec);
+            });
+        } catch (...) {
+            // decision 0006 "Thread refusal": no body runs, so release the poll pause this call set and publish the
+            // stopped state, unless a fence took the claim meanwhile (initiator_mutex_ keeps other slews out).
+            poll_pause_.store(false);
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (goto_claim_ == claim) {
+                goto_setup_pending_ = false;
+                goto_active_ = setup_was_pending ? false : goto_was_active;
+                slew_force_until_ = setup_was_pending ? std::chrono::steady_clock::time_point{} : force_until_before;
+                write_frame_locked();
+            }
+            if (!connected_.load()) {
+                throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
+            }
+            throw;
         }
-        {
-            std::lock_guard<std::mutex> cancel_lock(goto_mutex_);
-            goto_cancel_.store(false);
-        }
-        goto_thread_ = std::thread([this, target_ra, target_dec, slew_epoch]() {
-            auto resume_poll = [this, slew_epoch]() {
+    }
+
+    // The GOTO body: site/time sync, then ":Sr"/":Sd"/":MS" with the e3/e5/e7 retries. Every wire call goes through
+    // the send gate (send_goto_locked()). decision 0006 "Claim": the body writes driver state only while it holds the
+    // claim it was started for, and releases the poll pause in the same mutex_ section as its flag block; a body that
+    // lost the claim writes nothing, because the fence that took it already cleaned up.
+    void run_goto(util::OperationContext& ctx, std::uint64_t claim, double target_ra, double target_dec) {
+        // open-astro#720: a GOTO that stops before ":MS" (or after the mount rejected it) started no slew, so it must
+        // not leave its 5 s Slewing force window behind.
+        auto abandon = [&]() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (goto_claim_ != claim) return;
+            slew_force_until_ = std::chrono::steady_clock::time_point{};
+            goto_active_ = false;
+            goto_setup_pending_ = false;
+            poll_pause_.store(false);
+        };
+        // open-astro#575: a stopped body (a fence, a newer GOTO, a lost link, Connected=false) is not a failure.
+        auto fail = [&](const std::string& what) {
+            {
                 std::lock_guard<std::mutex> lock(mutex_);
-                // A superseded worker must not release its replacement's setup pause.
-                if (slew_error_epoch_ == slew_epoch) poll_pause_.store(false);
-            };
-            // open-astro#720: a cancelled GOTO started no slew (it exits before
-            // ":MS", or after the mount rejected it), so it must not leave its
-            // 5 s Slewing force window behind. A newer SlewToTargetAsync has
-            // already moved the epoch on and owns the state.
-            auto abandon = [this, slew_epoch, &resume_poll]() {
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (slew_error_epoch_ == slew_epoch) {
-                        slew_force_until_ = std::chrono::steady_clock::time_point{};
-                        goto_active_ = false;
-                        goto_setup_pending_ = false;
-                    }
-                }
-                resume_poll();
-            };
-            auto& protocol = protocol_;
-            try {
-                if (goto_cancel_.load()) {
-                    abandon();
+                if (goto_claim_ == claim && ctx.stop_reason() == util::StopReason::None && connected_.load()) {
+                    last_slew_error_ = "SlewToTargetAsync failed: " + what;
+                    goto_setup_pending_ = false;
+                    poll_pause_.store(false);
                     return;
-                }
-                // open-astro#720: every checkpoint below lets a cancel-and-join
-                // wait for at most the one round trip in flight.
-                if (!synchronize_mount_time_and_site_for_goto()) {
-                    abandon();
-                    return;
-                }
-                // The sync's last round trip (":SMTI") may be the one the
-                // cancel landed in.
-                if (goto_cancel_.load()) {
-                    abandon();
-                    return;
-                }
-                for (int attempt = 0; attempt < 3 && !goto_cancel_.load(); ++attempt) {
-                    try {
-                        // Target registers are shared with Sync and property writes; restore both on every retry.
-                        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
-                        if (goto_cancel_.load()) {
-                            abandon();
-                            return;
-                        }
-                        protocol.set_target_ra(target_ra);
-                        if (goto_cancel_.load()) {
-                            abandon();
-                            return;
-                        }
-                        protocol.set_target_dec(target_dec);
-                        if (goto_cancel_.load()) {
-                            abandon();
-                            return;
-                        }
-                        if (!protocol.goto_target()) {
-                            throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
-                        }
-                        {
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            if (slew_error_epoch_ == slew_epoch) {
-                                goto_setup_pending_ = false;
-                                slew_force_until_ = clock_.now() + std::chrono::seconds(5);
-                                // A stopped sample taken before MS acceptance cannot finish this GOTO.
-                                snapshot_.write([](PolledFrame&) {});
-                            }
-                        }
-                        resume_poll();
-                        return;
-                    } catch (const AlpacaException& ex) {
-                        if (attempt < 2 && is_ms_mount_busy_error(ex)) {
-                            ALPACA_LOG_WARN("ZWO", "GOTO rejected with e3 (mount busy); aborting motion and retrying");
-                            // A cancelled thread must not send ":Q" on top of
-                            // the newer command.
-                            if (goto_cancel_.load()) {
-                                abandon();
-                                return;
-                            }
-                            protocol.abort_motion();
-                            // Cancellable backoff: a disconnect/destruction
-                            // must not wait out the retry sleep.
-                            std::unique_lock<std::mutex> cancel_lock(goto_mutex_);
-                            clock_.wait_for(cancel_lock, goto_cv_, std::chrono::milliseconds(300),
-                                            [this]() { return goto_cancel_.load(); });
-                            continue;
-                        }
-                        if (attempt == 0 &&
-                            (is_ms_time_site_not_synchronized_error(ex) ||
-                             is_ms_target_under_horizon_error(ex))) {
-                            ALPACA_LOG_WARN(
-                                "ZWO",
-                                "GOTO rejected with " +
-                                    std::string(is_ms_time_site_not_synchronized_error(ex) ? "e7" : "e5") +
-                                    "; synchronizing site/time and retrying once");
-                            if (!synchronize_mount_time_and_site_for_goto()) {
-                                abandon();
-                                return;
-                            }
-                            continue;
-                        }
-                        if (is_ms_time_site_not_synchronized_error(ex)) {
-                            ALPACA_LOG_WARN(
-                                "ZWO",
-                                "GOTO rejected by mount (e7: time and position not synchronized); "
-                                "verify SiteLatitude/SiteLongitude and UTCDate.");
-                        } else if (is_ms_target_under_horizon_error(ex)) {
-                            ALPACA_LOG_WARN(
-                                "ZWO",
-                                "GOTO rejected by mount (e5: target under horizon); "
-                                "verify SiteLatitude/SiteLongitude and UTCDate.");
-                        } else {
-                            ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
-                        }
-                        // open-astro#575: a cancellation (AbortSlew, or a
-                        // reap by a newer initiator) is not a failure -- the
-                        // canceller already owns clearing/replacing
-                        // last_slew_error_. Nor is a rejection after a newer
-                        // command (Park/FindHome/MoveAxis/Unpark) cleared the
-                        // slot: the epoch says that command owns it now.
-                        if (goto_cancel_.load()) {
-                            abandon();
-                            return;
-                        }
-                        {
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            if (slew_error_epoch_ == slew_epoch) {
-                                last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
-                                goto_setup_pending_ = false;
-                            }
-                        }
-                        resume_poll();
-                        return;
-                    }
-                }
-                // Only a cancel ends the loop; every other path returns above.
-                abandon();
-                return;
-            } catch (const std::exception& ex) {
-                ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
-                // A cancelled GOTO that then fails (a rejected ":Sr" the
-                // canceller waited for) is abandoned like any other.
-                if (goto_cancel_.load()) {
-                    abandon();
-                    return;
-                }
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (slew_error_epoch_ == slew_epoch) {
-                        last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
-                        goto_setup_pending_ = false;
-                    }
                 }
             }
-            resume_poll();
-        });
+            abandon();
+        };
+        auto send = [&](std::string_view label, auto&& fn) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            return send_goto_locked(lock, claim, ctx, label, fn);
+        };
+        auto& protocol = protocol_;
+        try {
+            if (!synchronize_mount_time_and_site_for_goto(ctx, claim)) {
+                abandon();
+                return;
+            }
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                try {
+                    // Target registers are shared with Sync and property writes; restore both on every retry.
+                    std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+                    bool accepted = false;
+                    if (!send(":Sr", [&] { protocol.set_target_ra(target_ra); }) ||
+                        !send(":Sd", [&] { protocol.set_target_dec(target_dec); }) ||
+                        !send(":MS", [&] { accepted = protocol.goto_target(); })) {
+                        abandon();
+                        return;
+                    }
+                    if (!accepted) {
+                        throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
+                    }
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (goto_claim_ == claim) {
+                        goto_setup_pending_ = false;
+                        slew_force_until_ = clock_.now() + std::chrono::seconds(5);
+                        // A stopped sample taken before MS acceptance cannot finish this GOTO.
+                        snapshot_.write([](PolledFrame&) {});
+                        poll_pause_.store(false);
+                    }
+                    return;
+                } catch (const AlpacaException& ex) {
+                    if (attempt < 2 && is_ms_mount_busy_error(ex)) {
+                        ALPACA_LOG_WARN("ZWO", "GOTO rejected with e3 (mount busy); aborting motion and retrying");
+                        // A fenced body sends no ":Q" on top of the newer command, and a fence or a disconnect
+                        // wakes the backoff at once.
+                        if (!send(":Q", [&] { protocol.abort_motion(); }) ||
+                            !ctx.wait_for(std::chrono::milliseconds(300))) {
+                            abandon();
+                            return;
+                        }
+                        continue;
+                    }
+                    if (attempt == 0 &&
+                        (is_ms_time_site_not_synchronized_error(ex) || is_ms_target_under_horizon_error(ex))) {
+                        ALPACA_LOG_WARN("ZWO",
+                                        "GOTO rejected with " +
+                                            std::string(is_ms_time_site_not_synchronized_error(ex) ? "e7" : "e5") +
+                                            "; synchronizing site/time and retrying once");
+                        if (!synchronize_mount_time_and_site_for_goto(ctx, claim)) {
+                            abandon();
+                            return;
+                        }
+                        continue;
+                    }
+                    if (is_ms_time_site_not_synchronized_error(ex)) {
+                        ALPACA_LOG_WARN("ZWO",
+                                        "GOTO rejected by mount (e7: time and position not synchronized); "
+                                        "verify SiteLatitude/SiteLongitude and UTCDate.");
+                    } else if (is_ms_target_under_horizon_error(ex)) {
+                        ALPACA_LOG_WARN("ZWO",
+                                        "GOTO rejected by mount (e5: target under horizon); "
+                                        "verify SiteLatitude/SiteLongitude and UTCDate.");
+                    } else {
+                        ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
+                    }
+                    fail(ex.what());
+                    return;
+                }
+            }
+        } catch (const std::exception& ex) {
+            ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
+            fail(ex.what());
+        }
     }
 
     void sync_to_coordinates(double ra, double dec) override {
@@ -2025,7 +2000,7 @@ public:
         ensure_not_parked(operation);
         // A pending setup/retry must not consume the target registers replaced by Sync.
         // This clears setup ownership/errors, not an accepted physical slew; moving-response recovery below stops it.
-        cancel_and_join_goto_thread();
+        fence_goto();
         reset_position_offsets();
 
         auto& protocol = protocol_;
@@ -2153,7 +2128,7 @@ public:
 
     void unpark() override {
         check_connected();
-        cancel_and_join_goto_thread();
+        fence_goto();
         reset_position_offsets();
         auto& protocol = protocol_;
         // Guard the poll thread's park-state warm against re-parking us: some
@@ -2390,22 +2365,18 @@ private:
     }
 
     void reset_position_offsets() {
-        // Signal cancellation first so the pulse thread's reconciliation read
-        // (which runs outside mutex_) can exit early, avoiding lock contention.
-        pulse_cancel_.store(true);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ra_offset_hours_ = 0.0;
-            dec_offset_deg_ = 0.0;
-            pulse_generation_.fetch_add(1);
-            pulse_guiding_end_ = clock_.now();
-            snapshot_.write([](PolledFrame&) {});
-        }
-        {
-            std::lock_guard<std::mutex> lock(pulse_mutex_);
-            pulse_queue_.clear();
-            pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-        }
+        // One section: a pulse queued after it starts a drain this cancel cannot reach, and the cancelled drain's
+        // reconciliation, which re-checks its stop reason under mutex_, cannot write offsets after they are zeroed.
+        std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
+        pulse_queue_.clear();
+        pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+        pulse_drain_active_ = false;
+        pulse_slot_.cancel();
+        ra_offset_hours_ = 0.0;
+        dec_offset_deg_ = 0.0;
+        pulse_guiding_end_ = clock_.now();
+        snapshot_.write([](PolledFrame&) {});
     }
 
     void ensure_not_parked(const char* operation) const {
@@ -2437,58 +2408,57 @@ private:
         }
     }
 
-    // Returns false, having sent nothing more, once goto_cancel_ is set
-    // (open-astro#720): the GOTO setup thread then exits.
-    bool synchronize_mount_time_and_site_for_goto() {
+    // Returns false, having sent nothing more, once the body no longer owns the mount (open-astro#720): every wire
+    // call goes through the send gate, and the site and UTC caches are written only while the body holds its claim.
+    bool synchronize_mount_time_and_site_for_goto(util::OperationContext& ctx, std::uint64_t claim) {
         auto& protocol = protocol_;
+        std::unique_lock<std::mutex> lock(mutex_);
 
         std::optional<SiteInfo> site_to_write;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (pending_site_latitude_.has_value() && pending_site_longitude_.has_value()) {
-                SiteInfo pending;
-                pending.latitude_degrees = pending_site_latitude_.value();
-                pending.longitude_degrees = pending_site_longitude_.value();
-                site_to_write = pending;
-            } else if (site_coords_valid_) {
-                SiteInfo cached;
-                cached.latitude_degrees = site_latitude_deg_;
-                cached.longitude_degrees = site_longitude_deg_;
-                site_to_write = cached;
-            }
+        if (pending_site_latitude_.has_value() && pending_site_longitude_.has_value()) {
+            SiteInfo pending;
+            pending.latitude_degrees = pending_site_latitude_.value();
+            pending.longitude_degrees = pending_site_longitude_.value();
+            site_to_write = pending;
+        } else if (site_coords_valid_) {
+            SiteInfo cached;
+            cached.latitude_degrees = site_latitude_deg_;
+            cached.longitude_degrees = site_longitude_deg_;
+            site_to_write = cached;
         }
 
         if (!site_to_write.has_value()) {
-            if (goto_cancel_.load()) {
+            std::optional<SiteInfo> read;
+            if (!send_goto_locked(lock, claim, ctx, ":GMGE", [&] {
+                    try {
+                        read = protocol.get_site_info();
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                        // No site on the mount: the GOTO goes on without a site write.
+                    }
+                })) {
                 return false;
             }
-            try {
-                site_to_write = protocol.get_site_info();
-            } catch (const std::exception&) {
-            }
+            site_to_write = read;
         }
 
         if (site_to_write.has_value()) {
-            if (goto_cancel_.load()) {
+            if (!send_goto_locked(lock, claim, ctx, ":SMGE", [&] { protocol.set_site_info(site_to_write.value()); })) {
                 return false;
             }
-            protocol.set_site_info(site_to_write.value());
-            std::lock_guard<std::mutex> lock(mutex_);
-            site_latitude_deg_ = site_to_write->latitude_degrees;
-            site_longitude_deg_ = site_to_write->longitude_degrees;
-            site_coords_valid_ = true;
+            if (goto_claim_ == claim) {
+                site_latitude_deg_ = site_to_write->latitude_degrees;
+                site_longitude_deg_ = site_to_write->longitude_degrees;
+                site_coords_valid_ = true;
+            }
         }
 
         const auto now = std::chrono::system_clock::now();
         const int offset_minutes = 0;
         const TimeInfo info = from_utc_time_point(now, offset_minutes);
-        if (goto_cancel_.load()) {
+        if (!send_goto_locked(lock, claim, ctx, ":SMTI", [&] { protocol.set_time_info(info); })) {
             return false;
         }
-        protocol.set_time_info(info);
-
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load() || goto_cancel_.load()) return false;
+        if (!connected_.load() || goto_claim_ != claim) return false;
         utc_offset_.set(now, clock_.now());
         timezone_offset_minutes_ = offset_minutes;
         timezone_valid_ = true;
@@ -2552,20 +2522,14 @@ private:
         link_lost_at_.note(now);
         snapshot_.reset();
         poll_stop_.store(true);
-        pulse_cancel_.store(true);
-        pulse_thread_stop_.store(true);
-        goto_cancel_.store(true);
+        // cancel() never blocks on a body, so it may run under mutex_ (decision 0006), in the section that drops the
+        // link and so before any newer connect. The connect or teardown that follows clears the pulse queue.
+        pulse_slot_.cancel();
+        goto_slot_.cancel();
         protocol_.cancel_pending_io();
-        lock.unlock();  // The state lock is a leaf; wake the motion workers outside it.
-        {
-            // Pair with each wait's predicate check before notifying, without changing a newer connect's flags.
-            std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
-            pulse_cv_.notify_all();
-        }
-        {
-            std::lock_guard<std::mutex> goto_lock(goto_mutex_);
-            goto_cv_.notify_all();
-        }
+        lock.unlock();
+        // A GOTO body waiting at the send gate re-reads connected_ and leaves.
+        goto_send_cv_.notify_all();
     }
 
     template <typename T>
@@ -2812,14 +2776,37 @@ private:
         double guide_rate_deg_per_sec = 0.0;
         double expected_ra_hours = 0.0;
         double expected_dec_degrees = 0.0;
-        uint64_t generation = 0;
     };
 
-    void run_pulse_task(const PulseTask& task) {
+    // The pulse drain body: sends the queued pulses in order. pulse_guide() starts it when it finds no drain running
+    // (pulse_drain_active_); the drain clears that flag in the section where it finds the queue empty. A cancelled
+    // drain (reset_position_offsets(), link loss, disconnect) or a superseded one leaves the queue and the flag to
+    // whoever stopped or replaced it.
+    void drain_pulses(util::OperationContext& ctx) {
+        while (true) {
+            PulseTask task;
+            {
+                std::lock_guard<std::mutex> lock(pulse_mutex_);
+                if (ctx.stop_reason() != util::StopReason::None) return;
+                if (pulse_queue_.empty()) {
+                    pulse_drain_active_ = false;
+                    return;
+                }
+                task = pulse_queue_.front();
+                pulse_queue_.pop_front();
+            }
+            run_pulse_task(task, ctx);
+        }
+    }
+
+    void run_pulse_task(const PulseTask& task, util::OperationContext& ctx) {
         auto& protocol = protocol_;
 
+        // A task popped before reset_position_offsets() cancelled the slot must not re-extend IsPulseGuiding or
+        // send its :Mg after the reset; both checks run under mutex_, which the cancel holds (0006 Rule 3).
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (ctx.stop_reason() != util::StopReason::None) return;
             const auto now = clock_.now();
             const auto end = now + std::chrono::milliseconds(task.duration_ms) + kPulseGuideHold;
             if (end > pulse_guiding_end_) {
@@ -2833,24 +2820,20 @@ private:
                 " duration_ms=" + std::to_string(task.duration_ms));
 
         int remaining_ms = task.duration_ms;
-        while (remaining_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
+        while (remaining_ms > 0) {
             const int step = std::min(remaining_ms, 3000);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_.load() || ctx.stop_reason() != util::StopReason::None) return;
+            }
             try {
                 protocol.pulse_guide(task.direction, step);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "PulseGuide command failed: " + std::string(e.what()));
                 break;
             }
-
-            int wait_ms = step;
-            while (wait_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
-                const int sleep_ms = std::min(wait_ms, 100);
-                std::unique_lock<std::mutex> lock(pulse_mutex_);
-                clock_.wait_for(lock, pulse_cv_, std::chrono::milliseconds(sleep_ms),
-                                [this] { return pulse_thread_stop_.load() || pulse_cancel_.load(); });
-                wait_ms -= sleep_ms;
-            }
-
+            // One clock wait per step; a cancel wakes it at once.
+            if (!ctx.wait_for(std::chrono::milliseconds(step))) return;
             remaining_ms -= step;
         }
 
@@ -2858,15 +2841,15 @@ private:
         // The mount may or may not update its reported coordinates during pulse
         // guiding; reconciling here prevents double-counting (offset + actual
         // movement) without losing the prediction when coordinates don't update.
-        if (!pulse_cancel_.load() && task.generation == pulse_generation_.load()) {
+        if (ctx.stop_reason() == util::StopReason::None) {
             const auto token = snapshot_.begin_poll();
             try {
                 // Best-effort reconciliation must not hold up the next queued pulse for a full link timeout.
                 const EquatorialCoordinates eq = protocol.get_current_equatorial(250);
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_.load() || pulse_cancel_.load() || task.generation != pulse_generation_.load() ||
+                if (!connected_.load() || ctx.stop_reason() != util::StopReason::None ||
                     token != snapshot_.begin_poll())
-                    return;  // IsPulseGuiding uses the published deadline, not this worker's hold loop.
+                    return;  // IsPulseGuiding uses the published deadline, not this body's hold.
                 if (cached_equatorial_.has_value()) {
                     // Compute the expected final position from the pre-pulse base + offset.
                     double target_ra = std::fmod(cached_equatorial_->ra_hours + ra_offset_hours_, 24.0);
@@ -2889,68 +2872,22 @@ private:
         // pulsed simultaneously (e.g. East + North), skipping the hold
         // between tasks prevents the total time from exceeding ConformU's
         // 6-second IsPulseGuiding timeout.
+        bool more_queued = false;
         {
-            bool more_queued = false;
-            {
-                std::lock_guard<std::mutex> lock(pulse_mutex_);
-                more_queued = !pulse_queue_.empty();
-            }
-            if (!more_queued) {
-                int hold_ms = static_cast<int>(kPulseGuideHold.count());
-                while (hold_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
-                    const int sleep_ms = std::min(hold_ms, 100);
-                    std::unique_lock<std::mutex> lock(pulse_mutex_);
-                    clock_.wait_for(lock, pulse_cv_, std::chrono::milliseconds(sleep_ms),
-                                    [this] { return pulse_thread_stop_.load() || pulse_cancel_.load(); });
-                    hold_ms -= sleep_ms;
-                }
-            }
+            std::lock_guard<std::mutex> lock(pulse_mutex_);
+            more_queued = !pulse_queue_.empty();
         }
+        if (!more_queued) static_cast<void>(ctx.wait_for(kPulseGuideHold));
     }
 
-    void start_pulse_thread() {
+    // Stops the pulse drain and drops what it had queued. The pulse slot's reapers are the disconnect teardown,
+    // connect (after it reaped the teardown) and the destructor, never two at once.
+    void stop_pulse_drain() {
+        pulse_slot_.cancel_all_and_join();
         std::lock_guard<std::mutex> lock(pulse_mutex_);
-        if (pulse_thread_.joinable()) {
-            return;
-        }
-        pulse_thread_stop_.store(false);
-        pulse_cancel_.store(false);
-        pulse_thread_ = std::thread([this]() {
-            while (true) {
-                PulseTask task;
-                {
-                    std::unique_lock<std::mutex> lock(pulse_mutex_);
-                    pulse_cv_.wait(lock, [&]() {
-                        return pulse_thread_stop_.load() || !pulse_queue_.empty();
-                    });
-                    if (pulse_thread_stop_.load()) {
-                        break;
-                    }
-                    task = pulse_queue_.front();
-                    pulse_queue_.pop_front();
-                }
-                run_pulse_task(task);
-            }
-        });
-    }
-
-    void stop_pulse_thread() {
-        {
-            std::lock_guard<std::mutex> lock(pulse_mutex_);
-            pulse_thread_stop_.store(true);
-            pulse_cancel_.store(true);
-        }
-        pulse_cv_.notify_all();
-        if (pulse_thread_.joinable()) {
-            pulse_thread_.join();
-        }
-        {
-            std::lock_guard<std::mutex> lock(pulse_mutex_);
-            pulse_queue_.clear();
-            pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-            pulse_thread_stop_.store(false);
-            pulse_cancel_.store(false);
-        }
+        pulse_queue_.clear();
+        pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+        pulse_drain_active_ = false;
     }
 
     // open-astro#575: every clear of the stored slew failure (new initiator,
@@ -2962,42 +2899,72 @@ private:
         write_frame_locked();
     }
 
-    // Ask a running GOTO setup thread to exit promptly (it re-checks the
-    // flag between protocol calls and its retry backoff waits on goto_cv_).
-    // The store happens under goto_mutex_ so a waiter cannot miss the wakeup.
-    // Flag only: the callers join afterwards (cancel_and_join_goto_thread(),
-    // slew_to_target_async()'s reap, the destructor).
-    void cancel_goto_thread_request() {
-        {
-            std::lock_guard<std::mutex> lock(goto_mutex_);
-            goto_cancel_.store(true);
+    // The GOTO send gate (the Celestron send_motion_locked() shape): every wire call of the GOTO body goes through
+    // it, one call per entry. Under mutex_ it waits until no other call is in flight or the body has lost the mount,
+    // then tests ownership (its claim, its stop reason, connected_) and counts the call in the same critical section,
+    // so there is no gap between the check and the send (decision 0006 rule 3: the body re-checks its stop reason
+    // under the driver mutex before it touches hardware). `lock` is released around `fn` (decision 0016 rule 1) and
+    // held again on return or throw. Returns false, with `fn` not run, when the body no longer owns the mount.
+    template <typename Fn>
+    bool send_goto_locked(std::unique_lock<std::mutex>& lock, std::uint64_t claim, util::OperationContext& ctx,
+                          std::string_view label, Fn&& fn) {
+        const auto owns = [&] {
+            return goto_claim_ == claim && ctx.stop_reason() == util::StopReason::None && connected_.load();
+        };
+        goto_send_cv_.wait(lock, [&] { return !owns() || goto_sends_in_flight_ == 0; });
+        if (!owns()) {
+            return false;
         }
-        goto_cv_.notify_all();
+        ++goto_sends_in_flight_;
+        struct EndSend {
+            std::unique_lock<std::mutex>& lock;
+            unsigned& in_flight;
+            std::condition_variable& cv;
+            ~EndSend() {
+                lock.lock();
+                --in_flight;
+                cv.notify_all();
+            }
+        } end_send{lock, goto_sends_in_flight_, goto_send_cv_};
+        lock.unlock();
+        if (goto_send_hook_) goto_send_hook_(label);
+        fn();
+        return true;
     }
 
-    // open-astro#720 fence: after this returns no GOTO setup thread started
-    // before the call can put anything on the wire. The join waits for at
-    // most the one mount round trip in flight (the body checks goto_cancel_
-    // between protocol calls). The caller must NOT hold mutex_, pulse_mutex_,
-    // target_write_mutex_ or the protocol mutex: the GOTO body takes the state,
-    // target and protocol locks, so joining under one deadlocks. Does not reset goto_cancel_;
-    // only slew_to_target_async() does, under goto_mutex_.
-    void cancel_and_join_goto_thread() {
-        {
-            std::lock_guard<std::mutex> reap_lock(goto_reap_mutex_);
-            cancel_goto_thread_request();
-            if (goto_thread_.joinable()) {
-                goto_thread_.join();
-            }
+    // open-astro#720 fence, for MoveAxis, FindHome, Park, AbortSlew, Sync and Unpark, and before the GOTO slot's
+    // reap on disconnect, connect and destruction. One mutex_ section: take the claim from any GOTO body, clean up
+    // what a body that never sent ":MS" leaves (its force window and its poll pause), cancel() the slot (never a
+    // join, decision 0006 rule 3), then wait for the calls in flight. On return no body started before the call
+    // owns the mount and none has a call on the wire, so the caller's own command is the next one. Call without
+    // pulse_mutex_, target_write_mutex_, site_write_mutex_ or the protocol mutex held: a body holds the count while
+    // it waits for those.
+    void fence_goto() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (goto_claim_ != 0 && goto_setup_pending_) {
+            slew_force_until_ = std::chrono::steady_clock::time_point{};
+            poll_pause_.store(false);
         }
-        // Every caller starts other motion or none (Park, FindHome, MoveAxis,
-        // AbortSlew, Sync, Unpark, disconnect): the driver's GOTO is no longer in flight.
-        // Taken after the reap lock is released, never nested in it.
-        std::lock_guard<std::mutex> lock(mutex_);
         goto_active_ = false;
         goto_setup_pending_ = false;
+        goto_claim_ = 0;
+        goto_slot_.cancel();
+        goto_send_cv_.notify_all();
+        goto_send_cv_.wait(lock, [this] { return goto_sends_in_flight_ == 0; });
     }
 
+public:
+    void set_goto_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        goto_slot_.set_spawn_for_testing(std::move(spawn));
+    }
+    void set_teardown_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        teardown_slot_.set_spawn_for_testing(std::move(spawn));
+    }
+    void set_goto_send_hook_for_testing(std::function<void(std::string_view)> hook) {
+        goto_send_hook_ = std::move(hook);
+    }
+
+private:
     const int device_number_;
     const ConnectionInfo connection_info_;
 
@@ -3079,47 +3046,28 @@ private:
     mutable bool goto_active_ = false;
     bool goto_setup_pending_ = false;  // mutex_: retries remain setup until MS succeeds
     // open-astro#575: an async slew that fails AFTER the initiator returned
-    // (mount rejects the GOTO, logged and forgotten by the setup thread) used
+    // (mount rejects the GOTO, logged and forgotten by the setup body) used
     // to leave Slewing read FALSE once slew_force_until_ expired --
     // indistinguishable from a landed goto. Set (under mutex_) by the GOTO
-    // setup thread on a REAL failure (never on the thread's own
-    // cancellation), cleared by the next slew initiator, AbortSlew, and
+    // body on a REAL failure while it holds its claim (never once it was
+    // stopped), cleared by the next slew initiator, AbortSlew, and
     // connect/disconnect. Consulted by get_slewing() before the force window.
     mutable std::string last_slew_error_;
     mutable bool park_failed_ = false;
-    // Bumped by every clear_last_slew_error_locked() (under mutex_): the GOTO
-    // setup thread records a failure only if no newer command cleared the
-    // slot since its initiator did.
+    // Bumped by every clear_last_slew_error_locked() (under mutex_): Sync's
+    // motion-ownership epoch, so an older Sync learns that a newer motion
+    // command owns the mount (sync_to_pair()).
     uint64_t slew_error_epoch_ = 0;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
-    std::atomic<uint64_t> pulse_generation_;
     mutable std::mutex pulse_mutex_;
-    mutable std::condition_variable pulse_cv_;
     std::deque<PulseTask> pulse_queue_;
-    std::thread pulse_thread_;
-    mutable std::atomic<bool> pulse_thread_stop_;
-    mutable std::atomic<bool> pulse_cancel_;
-    // Async teardown spawned by set_connected(false) — a joinable member so
-    // the destructor can join it (a detached thread touching `this` is a
-    // use-after-free if the driver dies mid-teardown; driver-lifecycle.instructions.md rule).
-    std::thread disconnect_thread_;
-    // Serializes set_connected() bodies (sync PUT / async task / refresh) so
-    // poll_operation_ start/join, pulse_thread_/disconnect_thread_ join+assign and their
-    // stop flags can never interleave between two bodies. Taken after the
-    // base pending-disconnect gates; never taken by any worker-thread body.
+    bool pulse_drain_active_ = false;  // pulse_mutex_: a drain body runs and will take a queued task
+    // Serializes set_connected() bodies (sync PUT / async task / refresh) and
+    // the destructor's reaps, so the poll, pulse, GOTO and teardown slots'
+    // start/reap and their stop flags can never interleave between two
+    // bodies. Taken after the base pending-disconnect gates; never taken by
+    // any body.
     std::mutex set_connected_mutex_;
-    // Async GOTO setup thread (~1 s of protocol calls + retries) — joinable
-    // member with cancel flag + cv, joined on the next GOTO and in the
-    // destructor; the cv makes the retry backoff cancellable.
-    std::thread goto_thread_;
-    // Serializes the cancel/join/respawn of goto_thread_ in
-    // slew_to_coordinates_async: two concurrent slew calls would otherwise
-    // join and assign the same std::thread member from two threads (UB).
-    // Never taken by the GOTO thread body, so the join under it cannot hang.
-    std::mutex goto_reap_mutex_;
-    mutable std::atomic<bool> goto_cancel_{false};
-    mutable std::mutex goto_mutex_;
-    mutable std::condition_variable goto_cv_;
     std::chrono::steady_clock::time_point pulse_queue_end_;
     mutable bool parked_cached_;
     mutable bool park_command_active_;
@@ -3133,11 +3081,48 @@ private:
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
+
+    // The GOTO send gate (send_goto_locked(), fence_goto()), all under mutex_: the claim of the body that owns the
+    // mount (0: none; only the slew claim sets it, only fence_goto() zeroes it), the wire calls GOTO bodies have
+    // committed, and the wait for them.
+    std::uint64_t goto_claim_ = 0;
+    unsigned goto_sends_in_flight_ = 0;
+    mutable std::condition_variable goto_send_cv_;
+    // Orders slew initiators: held across the claim and goto_slot_.start(). Lock order: first, then mutex_ for the
+    // claim block and the refused-start publish only. Never taken by a body, a fence, a getter or set_connected().
+    std::mutex initiator_mutex_;
+    std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
+    util::OperationGeneration goto_generation_;
+    util::OperationGeneration pulse_generation_;
+    util::OperationGeneration teardown_generation_;
+    // Declared last, so they are destroyed (and join) before any member their bodies touch; the teardown slot
+    // first, because its body joins the pulse slot.
+    mutable util::AsyncOperation goto_slot_{"ZWO SlewToTargetAsync", goto_generation_, clock_};
+    mutable util::AsyncOperation pulse_slot_{"ZWO PulseGuide", pulse_generation_, clock_};
+    util::AsyncOperation teardown_slot_{"ZWO disconnect", teardown_generation_, clock_};
 };
 
 std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(const TelescopeDriver& driver) {
     const auto* zwo = dynamic_cast<const ZWOTelescopeDriver*>(&driver);
     return zwo ? zwo->utc_anchor_for_testing() : std::nullopt;
+}
+
+void set_goto_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
+        zwo->set_goto_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
+        zwo->set_teardown_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook) {
+    if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
+        zwo->set_goto_send_hook_for_testing(std::move(hook));
+    }
 }
 
 std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,

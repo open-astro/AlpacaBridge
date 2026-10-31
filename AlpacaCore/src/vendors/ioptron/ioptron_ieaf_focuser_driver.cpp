@@ -82,11 +82,12 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Firmware captured at connect; surfaced in the web UI only (never
-    // DriverInfo). Guarded solely by firmware_mutex_ — non-empty exactly while
-    // connected, so there is no atomic-vs-mutex ordering to reason about.
+    // DriverInfo). Guarded solely by firmware_mutex_ — non-empty from connect
+    // to disconnect; a lost link hides it (the wrapper's lock-free latch), so
+    // the web UI never shows firmware beside Connected false.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
-        if (firmware_.empty()) {
+        if (firmware_.empty() || !protocol_.link_alive()) {
             return std::nullopt;
         }
         return firmware_;
@@ -94,7 +95,13 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (decision 0009 rule 2): once an exchange
+    // has seen the port gone the wrapper latches the loss and releases the port.
+    // Both reads are lock-free.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
+
+    // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
+    std::string get_link_fault() const override { return protocol_.link_fault(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -129,11 +136,18 @@ public:
         if (connected && consume_pending_disconnect(connected_.load())) {
             return;
         }
-        if (connected == connected_.load()) {
+        // The connect check reads the link-aware value, so Connect over a lost
+        // link reconnects (decision 0009 rule 4); the disconnect check reads
+        // the raw flag, so a lost link still runs the teardown (#1289).
+        if (connected ? connected_.load() && protocol_.link_alive() : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            // Start clean: after a lost link the raw flag, the firmware and a
+            // status frame from before the loss are still set, and the
+            // reconnected focuser must not be served that frame.
+            teardown_locked();
             // An auto-detected focuser resolves its port here, not in the factory (#659).
             IeafDeviceInfo info;
             util::connect_resolved(
@@ -158,13 +172,7 @@ public:
             ALPACA_LOG_INFO("iOptron",
                             model_name_ + " focuser connected (model code " + std::to_string(info.model) + ")");
         } else {
-            protocol_.disconnect();
-            {
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_.clear();
-            }
-            connected_.store(false);
-            invalidate_status_cache();
+            teardown_locked();
             ALPACA_LOG_INFO("iOptron", "iEAF focuser disconnected");
         }
     }
@@ -285,10 +293,32 @@ private:
         status_cache_.reset();
     }
 
+    // NotConnected while disconnected and once the wrapper has seen the port
+    // gone (decision 0009 rule 3); lock-free, and checked before the status
+    // cache, so a frame from before the loss is never served.
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("Focuser link lost; Connect again once the focuser is back",
+                                  AlpacaError::NotConnected);
+        }
+    }
+
+    // Disconnect body shared by the explicit disconnect and the connect. Caller
+    // holds transition_mutex_. Driver state first, port close second
+    // (driver-lifecycle.instructions.md, issue #387). The wrapper's disconnect()
+    // also clears the kept loss reason; after a lost link the port is already
+    // released and the close is a no-op.
+    void teardown_locked() {
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
+        }
+        connected_.store(false);
+        invalidate_status_cache();
+        protocol_.disconnect();
     }
 
     util::TaskClock& clock_;

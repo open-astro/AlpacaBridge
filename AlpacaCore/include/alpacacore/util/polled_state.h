@@ -54,6 +54,9 @@ namespace alpacacore::util {
  *   than it, sets the loss latch once and calls `on_lost()` on the poll thread
  *   with no driver lock held, then the poll ends (no autonomous reconnect,
  *   decision 0009). reset() clears the latch for the next connect.
+ * - lose_link(), from the probe on positive evidence that the transport is
+ *   gone (decision 0009 rule 2a), sets the same latch at once; the poll ends
+ *   after its current cycle and calls `on_lost()` once, as above.
  * - A frame older than `max_age` is stale. Stale alone never refuses
  *   (decision 0010, point 6): served() returns the reading with `stale` set.
  *
@@ -174,6 +177,11 @@ public:
     }
 
     bool link_lost() const { return lost_.load(); }
+
+    /// Positive evidence that the transport is gone (decision 0009 rule 2a): sets the loss latch now, without
+    /// waiting out util::kLinkStalenessBound. Called from the probe, so it belongs to the connection that
+    /// reset() last opened; the poll ends after the current cycle and calls `on_lost()` once.
+    void lose_link() { (void)latch_lost(current_epoch()); }
 
     /// How long ago the held frame was measured on the task clock.
     std::optional<std::chrono::nanoseconds> age() const {

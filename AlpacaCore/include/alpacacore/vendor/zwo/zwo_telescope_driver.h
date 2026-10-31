@@ -17,13 +17,26 @@
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string_view>
+#include <thread>
 
 namespace alpacacore::vendor::zwo {
 
 /// Test-only view of the stored time: disconnected public getters must refuse even an offline anchor.
 std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(const TelescopeDriver& driver);
+
+/// Test-only: replaces the GOTO slot's thread factory (call before the first slew), so a test can refuse a start.
+void set_goto_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test-only: replaces the disconnect teardown slot's thread factory (call before the first Connected=false).
+void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test-only: called with the frame prefix (":Sr", ":MS", ...) after a GOTO wire call is counted at the send gate and
+/// before it is sent (call before the first slew).
+void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
 
 std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,
                                                       util::TaskClock& clock = util::default_task_clock());

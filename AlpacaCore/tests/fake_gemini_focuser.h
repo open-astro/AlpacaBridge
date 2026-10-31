@@ -143,6 +143,14 @@ public:
     /// One shot, then spent: the next reply the fake sends is held for @p delay (blind commands do not use it up).
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
+    /// One shot, then spent: the next reply to exactly @p cmd (e.g. ":06#") is held for @p delay, so a test can pull
+    /// the cable while one chosen exchange of a sequence (a connect's seed) waits for its reply.
+    void hold_reply_to(const std::string& cmd, std::chrono::milliseconds delay) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hold_cmd_ = cmd;
+        hold_cmd_ms_ = static_cast<int>(delay.count());
+    }
+
     /// One shot, then spent: the next reply is held until release_reply(), with no timer. wait_reply_held() blocks
     /// until the reader thread is holding it.
     void gate_next_reply() { gate_armed_.store(true); }
@@ -244,6 +252,17 @@ private:
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
         }
+        int hold_cmd_ms = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!hold_cmd_.empty() && cmd == hold_cmd_) {
+                hold_cmd_ms = hold_cmd_ms_;
+                hold_cmd_.clear();
+            }
+        }
+        if (hold_cmd_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(hold_cmd_ms));
+        }
         if (gate_armed_.exchange(false)) {
             std::unique_lock<std::mutex> lock(gate_mutex_);
             gate_held_ = true;
@@ -269,6 +288,8 @@ private:
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
+    std::string hold_cmd_;  // hold_reply_to(), guarded by mutex_
+    int hold_cmd_ms_ = 0;
 
     std::atomic<bool> garbage_state_{false};
     std::atomic<bool> garbage_temperature_{false};

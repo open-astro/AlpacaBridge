@@ -742,15 +742,15 @@ private:
         close_serial();
     }
 
-    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
-    // closed): decision 0009 rule 2 loses the link at once. Release the port so a replugged panel can be reopened,
-    // latch link_lost_ for the driver's Connected getter and fail with NotConnected. During connect() nothing is
-    // latched: the handshake retries and connect() closes the port itself.
     void set_fault(const std::string& text) {
         std::lock_guard<std::mutex> lock(fault_mutex_);
         fault_ = text;
     }
 
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
+    // closed): decision 0009 rule 2 loses the link at once. Release the port so a replugged panel can be reopened,
+    // latch link_lost_ for the driver's Connected getter and fail with NotConnected. During connect() nothing is
+    // latched: the handshake retries and connect() closes the port itself.
     [[noreturn]] void fail_link_locked(const std::string& reason) {
         if (connected_) {
             ALPACA_LOG_ERROR("Gemini",

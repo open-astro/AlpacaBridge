@@ -270,7 +270,7 @@ TEST_CASE("Gemini Focuser Driver - a getter after a successful connect never thr
     CHECK_NOTHROW(rig.driver().get_is_moving());
 }
 
-// Falsified by: gemini_focuser_driver.cpp: Connected read connected_ alone (drop the !state_.link_lost() term), so a
+// Falsified by: gemini_focuser_driver.cpp: link_up() drop the !state_.link_lost() term, so a
 // fault standing past util::kLinkStalenessBound left Connected true and the getters on a latched DriverException.
 TEST_CASE("Gemini Focuser Snapshot - a fault that stands past the link-loss bound drops Connected",
           "[gemini][focuser][snapshot][unit][fake]") {
@@ -419,4 +419,186 @@ TEST_CASE("Gemini Focuser Snapshot - DeviceState TimeStamp is when the frame was
     INFO("TimeStamp is " << behind.count() << " ms behind now");
     CHECK(behind >= std::chrono::milliseconds(60));  // the 90 ms frame age; a request-time stamp is ~0
     CHECK(behind < std::chrono::milliseconds(5000));
+}
+
+// ---------------------------------------------------------------------------
+// Decision 0009 rule 2a (issue #1723): a pulled adapter loses the link at once,
+// not after util::kLinkStalenessBound. Connected reads false, every member
+// throws NotConnected, DeviceState is empty, the port is released, the poll
+// ends, and only a client Connect reopens it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using alpacacore::test::ReplugPort;
+using alpacacore::test::require_alpaca_error;
+
+constexpr int kNotConnected = static_cast<int>(alpacacore::AlpacaError::NotConnected);
+
+// Pulls the cable once the fake has received `cmd` more than `seen` times (it is then holding that reply, see
+// hold_next_reply() and hold_reply_to()), so the exchange on the wire sees the hangup. Runs off the test thread:
+// no test macros here.
+std::thread unplug_when_asked(FakeGeminiFocuser& fake, std::string cmd, int seen) {
+    return std::thread([&fake, cmd = std::move(cmd), seen] {
+        const auto deadline = std::chrono::steady_clock::now() + kBound;
+        while (fake.count(cmd) <= seen && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms);  // real time: the fake's reader thread records the command
+        }
+        fake.unplug();
+    });
+}
+
+// The members a lost link refuses, and the released port.
+void require_lost(alpacacore::FocuserDriver& driver, const std::string& old_pts) {
+    CHECK_FALSE(driver.get_connected());
+    CHECK(driver.get_device_state().empty());
+    require_alpaca_error([&] { (void)driver.get_position(); }, kNotConnected);
+    require_alpaca_error([&] { (void)driver.get_is_moving(); }, kNotConnected);
+    require_alpaca_error([&] { (void)driver.get_temperature(); }, kNotConnected);
+    require_alpaca_error([&] { (void)driver.get_max_step(); }, kNotConnected);
+    require_alpaca_error([&] { (void)driver.get_temp_comp(); }, kNotConnected);
+    require_alpaca_error([&] { driver.move(500); }, kNotConnected);
+    require_alpaca_error([&] { driver.halt(); }, kNotConnected);
+    // The wrapper released the port: no claim is left on the dead node.
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(old_pts));
+}
+
+bool reports_loss(const alpacacore::FocuserDriver& driver) {
+    return driver.get_link_fault().find("Serial link lost") != std::string::npos;
+}
+
+}  // namespace
+
+TEST_CASE("Gemini Focuser Link - a cable pulled during a command loses the link at once",
+          "[gemini][focuser][unit][fake][link-lost]") {
+    GeminiRig rig;
+    REQUIRE(rig.connect());
+    const std::string old_pts = rig.fake().slave_path();
+    REQUIRE(alpacacore::util::is_serial_port_in_use(old_pts));
+
+    rig.fake().hold_next_reply(300ms);  // the focuser sits on the ":24#" reply while the cable is pulled
+    std::thread pull = unplug_when_asked(rig.fake(), ":24#", rig.fake().count(":24#"));
+    const auto start = std::chrono::steady_clock::now();
+    require_alpaca_error([&] { (void)rig.driver().get_temp_comp(); }, kNotConnected);
+    pull.join();
+    CHECK(std::chrono::steady_clock::now() - start < 2s);  // the hangup, not a serial timeout
+    require_lost(rig.driver(), old_pts);
+    // Decision 0009 rule 5: the loss reason is kept while the link stays lost.
+    CHECK(reports_loss(rig.driver()));
+
+    // The next poll finds the link gone and ends; releasing the transport again does not drop the reason.
+    rig.clock().advance(kTick);
+    REQUIRE(rig.clock().wait_for_woken_settled(kBound));
+    CHECK(rig.clock().waiter_count() == 0);
+    CHECK(reports_loss(rig.driver()));
+
+    // Disconnect after the loss closes nothing twice and clears the reason.
+    REQUIRE_NOTHROW(rig.driver().set_connected(false));
+    CHECK_FALSE(rig.driver().get_connected());
+    CHECK(rig.driver().get_link_fault().empty());
+}
+
+TEST_CASE("Gemini Focuser Link - a write to a pulled adapter loses the link at once",
+          "[gemini][focuser][unit][fake][link-lost]") {
+    GeminiRig rig;
+    REQUIRE(rig.connect());
+    const std::string old_pts = rig.fake().slave_path();
+
+    rig.fake().unplug();  // idle: the next command's write is what meets the dead port
+    require_alpaca_error([&] { rig.driver().halt(); }, kNotConnected);
+    require_lost(rig.driver(), old_pts);
+    CHECK(reports_loss(rig.driver()));
+    REQUIRE_NOTHROW(rig.driver().set_connected(false));
+    CHECK(rig.driver().get_link_fault().empty());  // a Disconnect clears the reason
+}
+
+TEST_CASE("Gemini Focuser Link - a cable pulled during a poll ends the poll at once",
+          "[gemini][focuser][unit][fake][link-lost]") {
+    GeminiRig rig;
+    REQUIRE(rig.connect());
+    const std::string old_pts = rig.fake().slave_path();
+
+    rig.fake().hold_next_reply(300ms);  // the next poll's ":00#" reply
+    std::thread pull = unplug_when_asked(rig.fake(), ":00#", rig.fake().count(":00#"));
+    rig.clock().advance(kTick);
+    // The woken poll body runs its exchange in real time, then exits instead of parking for the next tick.
+    REQUIRE(rig.clock().wait_for_woken_settled(kBound));
+    pull.join();
+    CHECK(rig.clock().waiter_count() == 0);
+    require_lost(rig.driver(), old_pts);
+    CHECK(reports_loss(rig.driver()));
+    REQUIRE_NOTHROW(rig.driver().set_connected(false));
+}
+
+TEST_CASE("Gemini Focuser Link - a cable pulled during a poll's temperature read ends the poll at once",
+          "[gemini][focuser][unit][fake][link-lost]") {
+    GeminiRig rig;
+    REQUIRE(rig.connect());
+    const std::string old_pts = rig.fake().slave_path();
+
+    // The ":06#" read is optional, so its failure is swallowed in measure(); the poll must still end in this cycle
+    // (probe() throws, so the frame is dropped), not park for the next tick with the link already gone.
+    rig.fake().hold_reply_to(":06#", 300ms);
+    std::thread pull = unplug_when_asked(rig.fake(), ":06#", rig.fake().count(":06#"));
+    rig.clock().advance(kTick);
+    REQUIRE(rig.clock().wait_for_woken_settled(kBound));
+    pull.join();
+    CHECK(rig.clock().waiter_count() == 0);  // no second tick was needed: on_lost ran, the poll is not parked
+    require_lost(rig.driver(), old_pts);
+    CHECK(reports_loss(rig.driver()));
+    REQUIRE_NOTHROW(rig.driver().set_connected(false));
+}
+
+TEST_CASE("Gemini Focuser Link - a cable pulled during the connect's first poll fails the Connect",
+          "[gemini][focuser][unit][fake][link-lost]") {
+    GeminiRig rig;
+    rig.fake().hold_reply_to(":00#", 300ms);  // the seed's first exchange sits on its reply while the cable goes
+    std::thread pull = unplug_when_asked(rig.fake(), ":00#", 0);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, kNotConnected);
+    pull.join();
+    CHECK_FALSE(rig.driver().get_connected());
+    CHECK_FALSE(rig.driver().get_device_firmware().has_value());
+    CHECK(rig.clock().waiter_count() == 0);  // no poll body is left behind
+    // A connect that never completed is not a lost session: the reason went to the client in the refusal.
+    CHECK(rig.driver().get_link_fault().empty());
+}
+
+TEST_CASE("Gemini Focuser Link - a cable pulled during the connect's temperature read fails the Connect",
+          "[gemini][focuser][unit][fake][link-lost]") {
+    GeminiRig rig;
+    // The ":06#" read is optional, so its hangup is swallowed by measure(); probe() sees the released port and
+    // throws, so no frame publishes and the Connect fails NotConnected.
+    rig.fake().hold_reply_to(":06#", 300ms);
+    std::thread pull = unplug_when_asked(rig.fake(), ":06#", 0);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, kNotConnected);
+    pull.join();
+    CHECK_FALSE(rig.driver().get_connected());
+    CHECK(rig.clock().waiter_count() == 0);  // no poll body was started: the seed published no frame
+    CHECK(rig.driver().get_link_fault().empty());
+}
+
+TEST_CASE("Gemini Focuser Link - a Connect over a lost link reopens without a Disconnect first",
+          "[gemini][focuser][unit][fake][link-lost]") {
+    FakeTaskClock clock;  // before the driver, which waits on it
+    FakeGeminiFocuser focuser;
+    FakeGeminiFocuser replugged;
+    ReplugPort port(focuser);
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, port.path.string(), 9600, clock);
+    REQUIRE(connect_and_park(*driver, clock, kBound));
+
+    focuser.unplug();
+    require_alpaca_error([&] { driver->halt(); }, kNotConnected);  // the write meets the dead port
+    REQUIRE_FALSE(driver->get_connected());
+    CHECK(reports_loss(*driver));
+
+    // No Disconnect, and no poll tick since the loss: a Connect while the raw flag is still set must not be taken
+    // as already connected.
+    port.replug(replugged);
+    replugged.set_position(1700);
+    REQUIRE(connect_and_park(*driver, clock, kBound));
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // the next Connect clears the reason
+    CHECK(driver->get_position() == 1700);
+    CHECK(replugged.connects() == 1);
+    REQUIRE_NOTHROW(driver->set_connected(false));
 }

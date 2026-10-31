@@ -15,11 +15,9 @@
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 #include <alpacacore/version.h>
-#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
-#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -546,28 +544,7 @@ TEST_CASE("Gemini flat panel protocol wrapper - a hangup before the reply throws
 
 namespace {
 
-// A by-id style symlink the driver is configured with, so a replugged panel (a
-// new fake on a new pty) comes back under the same name, as a by-id path does.
-// The driver never holds the raw /dev/pts/N, which devpts reissues once freed.
-struct ReplugPort {
-    std::filesystem::path path;
-    explicit ReplugPort(const FakeGeminiFlatPanel& panel) {
-        static std::atomic<int> serial{0};
-        path = std::filesystem::temp_directory_path() /
-               ("alpacacore-gemini-panel-" + std::to_string(::getpid()) + "-" + std::to_string(serial.fetch_add(1)));
-        std::filesystem::create_symlink(panel.slave_path(), path);
-    }
-    void replug(const FakeGeminiFlatPanel& panel) {
-        std::filesystem::remove(path);
-        std::filesystem::create_symlink(panel.slave_path(), path);
-    }
-    ~ReplugPort() {
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-    }
-    ReplugPort(const ReplugPort&) = delete;
-    ReplugPort& operator=(const ReplugPort&) = delete;
-};
+using alpacacore::test::ReplugPort;
 
 // The AlpacaException code fn threw, or 0. Safe on a non-test thread.
 int alpaca_code_of(const std::function<void()>& fn) {

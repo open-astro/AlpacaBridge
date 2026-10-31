@@ -53,7 +53,7 @@ vendor-agnostic; do them in the driver from the start.
   `set_connected()` against `set_connected()` only; never take it in a getter.
 - **Operation task threads: use the slot where a driver has adopted it.** The Celestron
   (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide, the OnStep
-  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), and the Gemini focuser and flat panel run their operation bodies (async slew,
+  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), the ZWO telescope's GOTO setup, pulse drain, disconnect teardown and telemetry poll (#1918), and the Gemini focuser and flat panel run their operation bodies (async slew,
   park, home, pulse-guide timer, slew-completion tail, move re-send) in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](../../docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
@@ -67,8 +67,7 @@ vendor-agnostic; do them in the driver from the start.
   driver's own state (`slewing_cached_`, `parking_`) before the slot keeps the failure;
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
-- **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in the
-  ZWO telescope (`goto_thread_`, `pulse_thread_`, `disconnect_thread_`),
+- **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
   the exposure workers of cameras not yet on `util::CaptureSession` (Player One is; decision 0020),
   the QHY cooler-off and temperature workers and the GPIO
   soft-PWM workers; the list is a sample, not a roster.
