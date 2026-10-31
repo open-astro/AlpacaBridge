@@ -47,6 +47,7 @@
 #include "fake_celestron_cgx_mount.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
+#include "pty_responder.h"
 #endif
 
 using alpacacore::DeviceType;
@@ -1973,6 +1974,305 @@ TEST_CASE("Celestron AbortSlew - the cancel reaches the mount and the held park 
     mount.driver->set_connected(false);  // joins the park body: it has seen the claim by now
     REQUIRE(mount.st->cancel_first.load() > 0);
     CHECK(mount.st->goto_last.load() == 0);  // the park body lost the slot before the gate: no GOTO at all
+}
+
+// Decision 0009 rule 2a (issue #1723): a pulled cable loses a serial link at once. The snapshot mount answers on a pty
+// behind a by-id style link (ReplugPort), so a case pulls the cable mid-exchange (PtyResponder::unplug_on) or while
+// idle (unplug) and plugs a new mount in under the same name. The driver runs on a FakeTaskClock, as above.
+namespace {
+
+namespace err = alpacacore::AlpacaError;
+
+// Long enough that a read which waited it out could not pass for a hangup (each such case checks the call returned in
+// under half of it), short enough for the one case whose connect waits one out.
+constexpr int kLinkReadTimeoutMs = 1000;
+constexpr auto kAtOnce = std::chrono::milliseconds(kLinkReadTimeoutMs / 2);
+
+struct SerialLinkRig {
+    FakeTaskClock clock;
+    std::shared_ptr<SnapshotMount> st = std::make_shared<SnapshotMount>();
+    std::unique_ptr<alpacacore::test::PtyResponder> mount = plug();
+    alpacacore::test::ReplugPort port{*mount};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    explicit SerialLinkRig(std::optional<double> latitude = -33.856784, std::optional<double> longitude = 151.215297) {
+        cel::ConnectionInfo info;
+        info.type = cel::ConnectionType::Serial;
+        info.port_path = port.path.string();
+        info.response_timeout_ms = kLinkReadTimeoutMs;
+        driver = cel::create_celestron_telescope_with_site(0, info, latitude, longitude, 42.0, false,
+                                                           cel::CelestronAlignmentSetting::Auto, clock);
+    }
+    ~SerialLinkRig() {
+        if (driver) driver->set_connected(false);  // the wrapper is a process-wide singleton
+    }
+    SerialLinkRig(const SerialLinkRig&) = delete;
+    SerialLinkRig& operator=(const SerialLinkRig&) = delete;
+
+    std::unique_ptr<alpacacore::test::PtyResponder> plug() const {
+        const auto state = st;
+        return std::make_unique<alpacacore::test::PtyResponder>(
+            [state](const std::string& c) { return snapshot_reply(*state, c); }, "Celestron handset");
+    }
+    // A new mount on a new pty, under the configured name.
+    void replug() {
+        mount = plug();
+        port.replug(*mount);
+    }
+    // Connects and parks the poll body on the clock, so only the case's own calls reach the mount.
+    void connect() {
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        cel::set_status_poll_paused_for_testing(*driver, true);
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    }
+    // Moves the task clock and waits until every woken body has parked on it again or ended.
+    void advance(std::chrono::milliseconds by) {
+        clock.advance(by);
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
+};
+
+std::function<bool(const std::string&)> on_command(char command) {
+    return [command](const std::string& chunk) { return !chunk.empty() && chunk[0] == command; };
+}
+
+bool is_aux_command(const std::string& chunk, unsigned char op) {
+    return chunk.size() > 3 && chunk[0] == 'P' && static_cast<unsigned char>(chunk[3]) == op;
+}
+
+// The first exchange after a GOTO that is not itself one: the motion body's first completion read.
+std::function<bool(const std::string&)> after_goto() {
+    auto seen = std::make_shared<bool>(false);
+    return [seen](const std::string& chunk) {
+        const bool is_goto = !chunk.empty() && (chunk[0] == 'r' || chunk[0] == 'R' || is_aux_command(chunk, 0x02));
+        if (is_goto) {
+            *seen = true;
+            return false;
+        }
+        return *seen;
+    };
+}
+
+// Rule 3: Connected false, operations NotConnected, DeviceState empty, the port released.
+void check_lost(alpacacore::TelescopeDriver& driver) {
+    CHECK_FALSE(driver.get_connected());
+    CHECK_FALSE(cel::CelestronProtocolWrapper::instance().is_connected());
+    CHECK(driver.get_device_state().empty());
+    CHECK(driver.get_supported_actions().empty());  // the fake answers the GPS module probe, so it was listed
+    CHECK_FALSE(driver.can_action("gps_status"));
+    require_alpaca_error([&] { (void)driver.get_right_ascension(); }, err::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_slewing(); }, err::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_at_park(); }, err::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_tracking(); }, err::NotConnected);
+}
+
+}  // namespace
+
+TEST_CASE("Celestron Link - a cable pulled during a command loses the link at once and Connect reopens it",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    const double ra_at_connect = driver.get_right_ascension();
+
+    rig.mount->unplug_on(on_command('T'));  // the tracking write's '#' never comes: the cable is pulled first
+    const auto took = timed([&] { require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected); });
+    CHECK(took < kAtOnce);
+    check_lost(driver);
+    const std::string reason = driver.get_link_fault();
+    CHECK(reason.find("serial link lost (hangup)") != std::string::npos);
+
+    // Rule 4: nothing relinks on its own. The poll body ends at its next tick and time reopens nothing.
+    rig.replug();
+    cel::set_status_poll_paused_for_testing(driver, false);
+    rig.advance(std::chrono::seconds(10));
+    CHECK(rig.clock.waiter_count() == 0);  // the poll body has ended
+    CHECK_FALSE(cel::poll_status_now_for_testing(driver));
+    CHECK(rig.mount->received().empty());
+    CHECK_FALSE(driver.get_connected());
+    CHECK(driver.get_link_fault() == reason);  // rule 5: kept until the next Connect or Disconnect
+
+    // The client's Connect reopens the replugged port without a Disconnect first, and clears the reason.
+    driver.set_connected(true);
+    CHECK(driver.get_connected());
+    CHECK(driver.get_link_fault().empty());
+    CHECK(std::abs(driver.get_right_ascension() - ra_at_connect) < 1e-9);
+}
+
+TEST_CASE("Celestron Link - a write to a pulled mount loses the link at once and Disconnect clears the reason",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    rig.mount->unplug();  // idle: the next command's write meets the dead port (EIO)
+
+    SECTION("a command") {
+        require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    }
+    SECTION("a fire-and-forget command") {
+        require_alpaca_error([&] { (void)driver.command_blind("M", true); }, err::NotConnected);
+    }
+    check_lost(driver);
+    CHECK(driver.get_link_fault().find("serial link lost (write)") != std::string::npos);
+    driver.set_connected(false);
+    CHECK(driver.get_link_fault().empty());
+}
+
+TEST_CASE("Celestron Link - a hangup in a fire-and-forget command's reply drain fails that call",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    rig.mount->unplug_on(on_command('M'));  // the drain after the write hangs up instead of going quiet
+    require_alpaca_error([&] { (void)driver.command_blind("M", true); }, err::NotConnected);
+    check_lost(driver);
+}
+
+TEST_CASE("Celestron Link - a cable pulled during the status poll ends the poll in that tick",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    SECTION("the position read") { rig.mount->unplug_on(on_command('e')); }
+    SECTION("the pier-side read, whose failure the sample does without") { rig.mount->unplug_on(on_command('p')); }
+    bool ticked = true;
+    const auto took = timed([&] { ticked = cel::poll_status_now_for_testing(driver); });  // tick 0: a full frame
+    REQUIRE(rig.mount->unplugged());
+    CHECK_FALSE(ticked);
+    CHECK(took < kAtOnce);
+    check_lost(driver);
+    CHECK(driver.get_link_fault().find("serial link lost (hangup)") != std::string::npos);
+}
+
+TEST_CASE("Celestron Link - a cable pulled during the poll's site read ends the poll in that tick",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig(std::nullopt, std::nullopt);  // no configured site: the connect reads the mount's
+    rig.st->w_fail = true;                          // and gets no answer, so the poll reads it again
+    rig.connect();
+    rig.st->w_fail = false;
+    rig.advance(std::chrono::seconds(31));  // the poll's site retry delay has passed
+    rig.mount->unplug_on(on_command('w'));
+    CHECK_FALSE(cel::poll_status_now_for_testing(*rig.driver));
+    REQUIRE(rig.mount->unplugged());
+    check_lost(*rig.driver);
+}
+
+TEST_CASE("Celestron Link - a cable pulled during a FindHome completion check ends the poll in that tick",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    driver.find_home();
+    rig.mount->unplug_on([](const std::string& chunk) { return is_aux_command(chunk, 0x12); });  // MC_LEVEL_DONE
+    CHECK_FALSE(cel::poll_status_now_for_testing(driver));
+    REQUIRE(rig.mount->unplugged());
+    check_lost(driver);
+    require_alpaca_error([&] { (void)driver.get_at_home(); }, err::NotConnected);
+}
+
+TEST_CASE("Celestron Link - a cable pulled during the connect fails the Connect with NotConnected",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.mount->unplug_on(on_command('V'));  // the first handshake query; the connect swallows its failure
+    require_alpaca_error([&] { driver.set_connected(true); }, err::NotConnected);
+    CHECK_FALSE(driver.get_connected());
+    CHECK_FALSE(cel::CelestronProtocolWrapper::instance().is_connected());
+    rig.replug();
+    driver.set_connected(true);
+    CHECK(driver.get_connected());
+}
+
+TEST_CASE("Celestron Link - a cable pulled mid-slew loses the link and the slew body ends on its own",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    const auto idle = rig.clock.waiter_count();  // the paused poll body
+    rig.mount->unplug_on(after_goto());
+    driver.slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, std::chrono::seconds(5)));  // the GOTO is out, the body waits
+    rig.advance(std::chrono::milliseconds(250));  // its first completion read meets the pulled cable
+    REQUIRE(rig.mount->unplugged());
+    check_lost(driver);
+    // Each further completion read fails at once on the released port; the third in a row ends the body.
+    for (int i = 0; i < 4 && rig.clock.waiter_count() > idle; ++i) rig.advance(std::chrono::milliseconds(250));
+    CHECK(rig.clock.waiter_count() == idle);
+    CHECK_FALSE(driver.get_connected());
+}
+
+TEST_CASE("Celestron Link - a cable pulled mid-park loses the link and the park body ends on its own",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    const auto idle = rig.clock.waiter_count();
+    rig.mount->unplug_on(after_goto());
+    driver.park();
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, std::chrono::seconds(5)));
+    rig.advance(std::chrono::milliseconds(8250));  // past the park's forced-Slewing window: it reads the mount
+    REQUIRE(rig.mount->unplugged());
+    check_lost(driver);
+    for (int i = 0; i < 4 && rig.clock.waiter_count() > idle; ++i) rig.advance(std::chrono::milliseconds(250));
+    CHECK(rig.clock.waiter_count() == idle);
+    CHECK_FALSE(driver.get_connected());
+}
+
+TEST_CASE("Celestron Link - a cable pulled mid-pulse loses the link and the pulse chain ends",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    REQUIRE(driver.get_can_pulse_guide());
+    const auto idle = rig.clock.waiter_count();
+    auto guides = std::make_shared<int>(0);
+    rig.mount->unplug_on([guides](const std::string& chunk) { return is_aux_command(chunk, 0x26) && ++*guides == 2; });
+    driver.pulse_guide(2, 5000);  // 2.55 s now, the rest chained on the axis's slot
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, std::chrono::seconds(5)));
+    rig.advance(std::chrono::milliseconds(2550));  // the chain's second chunk meets the pulled cable
+    REQUIRE(rig.mount->unplugged());
+    check_lost(driver);
+    require_alpaca_error([&] { (void)driver.get_is_pulse_guiding(); }, err::NotConnected);
+    CHECK(rig.clock.waiter_count() == idle);  // the chain ended on its failed re-arm
+}
+
+// Over TCP a hangup is not a pulled cable: it stays a DriverException and the fault latch and the staleness bound
+// decide, as before (the OnStep TCP seam is the same).
+TEST_CASE("Celestron Link - over TCP a hangup is a failed exchange, not a lost link",
+          "[celestron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 5000;
+    auto driver = cel::create_celestron_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+
+    st->mute = true;
+    const int before = st->transactions.load();
+    int code = 0;
+    std::thread call([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const alpacacore::AlpacaException& e) {
+            code = e.error_code();
+        }
+    });
+    REQUIRE(snapshot_wait_for([&] { return st->transactions.load() > before; }));
+    REQUIRE(server.drop_connections());  // the read in flight meets the reset
+    call.join();
+    CHECK(code == err::DriverException);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32

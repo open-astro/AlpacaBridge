@@ -76,6 +76,27 @@ public:
     /// Writes bytes to the host unprompted (a mount that keeps talking).
     void push(const std::string& bytes) { pty_write_bounded(pty_.master_fd(), bytes, stop_); }
 
+    /// A USB unplug while the device is idle: stops answering and closes both pty ends, so the host's next write
+    /// fails with EIO. Not reversible; slave_path() is empty afterwards.
+    void unplug() {
+        stop_.store(true);
+        if (reader_.joinable()) {
+            reader_.join();
+        }
+        pty_.sever();
+    }
+
+    /// A USB unplug in the middle of an exchange: the first chunk `when` accepts is recorded and left unanswered, and
+    /// the reader closes both pty ends at once, so the host's read for the reply hangs up. Set it before the exchange;
+    /// `when` runs on the reader thread. Not reversible.
+    void unplug_on(std::function<bool(const std::string& chunk)> when) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        unplug_on_ = std::move(when);
+    }
+
+    /// True once unplug_on() has fired.
+    bool unplugged() const { return unplugged_.load(); }
+
 private:
     void run() {
         while (!stop_.load()) {
@@ -96,9 +117,16 @@ private:
                 continue;
             }
             const std::string chunk(buf, static_cast<std::size_t>(n));
+            bool pull = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 received_ += chunk;
+                pull = unplug_on_ && unplug_on_(chunk);
+            }
+            if (pull) {
+                pty_.sever();
+                unplugged_.store(true);
+                return;
             }
             if (silent_.load()) {
                 continue;
@@ -119,8 +147,10 @@ private:
     std::thread reader_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> silent_{false};
+    std::atomic<bool> unplugged_{false};
     mutable std::mutex mutex_;
     std::string received_;
+    std::function<bool(const std::string&)> unplug_on_;
 };
 
 /// Answers the NexStar / SynScan protocol echo ("K" + byte -> byte + "#").

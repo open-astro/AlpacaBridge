@@ -78,6 +78,13 @@ public:
     /// Why the last connect() returned false, written for the operator (a port
     /// another device holds, a failed open); empty when no reason is known.
     std::string last_connect_error() const;
+    /// False once an exchange over serial has seen the port gone (a hangup on a read, or EIO/ENXIO/ENODEV on a
+    /// write); the port is then already released and the exchange threw NotConnected (decision 0009 rule 2a).
+    /// Cleared by the next connect(). Lock-free.
+    bool link_alive() const noexcept;
+    /// Why the link was lost, or empty; kept until the next connect() for the driver's get_link_fault() (decision
+    /// 0009 rule 5). Takes only a small text mutex that no exchange holds, so it never waits on the wire.
+    std::string link_fault() const;
 
     std::string send_command(const std::string& command,
                              bool require_hash_terminator = true,

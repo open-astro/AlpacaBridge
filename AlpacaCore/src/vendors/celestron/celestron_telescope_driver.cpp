@@ -259,12 +259,17 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    // Lock-free (decision 0016 rule 3): both flags are atomics.
-    bool get_connected() const override { return connected_.load() && !link_lost_.load(); }
+    // Lock-free (decision 0016 rule 3): both flags and the wrapper's loss latch are atomics.
+    bool get_connected() const override { return connected_.load() && !link_lost(); }
 
     // Reads only the published copy under its own narrow mutex, so a configureddevices poll does not wait on the
-    // mount connection.
+    // mount connection. A serial link lost at once (decision 0009 rule 5) reports the wrapper's loss reason, which
+    // the wrapper keeps until the next Connect; a Disconnect hides it with connected_.
     std::string get_link_fault() const override {
+        if (connected_.load()) {
+            std::string lost = CelestronProtocolWrapper::instance().link_fault();
+            if (!lost.empty()) return lost;
+        }
         std::lock_guard<std::mutex> lock(link_fault_mutex_);
         return link_fault_text_;
     }
@@ -287,7 +292,7 @@ public:
         std::unique_lock<std::mutex> ilock(initiator_mutex_, std::defer_lock);
         // Decision 0009 point 4: a lost link is relinked only by the client's Connected=true, which tears the dead
         // session down (slew bodies included) and connects afresh.
-        const bool relink = connected && connected_.load() && link_lost_.load();
+        const bool relink = connected && connected_.load() && link_lost();
         if (!connected || relink) {
             ilock.lock();
             // Cancel + join the status poll and the background slew/pulse task
@@ -346,7 +351,7 @@ public:
 
     std::vector<std::string> get_supported_actions() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_ || link_lost_.load() || !has_gps_) return {};
+        if (!connected_ || link_lost() || !has_gps_) return {};
         return {std::string(kGpsStatusAction)};
     }
 
@@ -372,7 +377,7 @@ public:
 
     bool can_action(std::string_view action_name) const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return connected_ && !link_lost_.load() && has_gps_ && util::is_gps_status_action(action_name);
+        return connected_ && !link_lost() && has_gps_ && util::is_gps_status_action(action_name);
     }
 
     std::string command_blind(std::string_view command, bool raw) override {
@@ -2431,6 +2436,12 @@ private:
         } catch (...) {
             ALPACA_LOG_WARN("Celestron", "site read at connect failed; the site stays unread");
         }
+        // Decision 0009 rule 2a: a pulled cable during any exchange above (each failure there is swallowed) released
+        // the port. The Connect fails; the caller's catch closes and clears the session.
+        if (!protocol.link_alive()) {
+            throw AlpacaException("Failed to connect to Celestron mount: " + protocol.link_fault(),
+                                  AlpacaError::NotConnected);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         snapshot_.publish(token, seed);
         if (!time_write) {
@@ -2445,10 +2456,14 @@ private:
     }
 
     void check_connected() const {
-        if (!connected_ || link_lost_.load()) {
+        if (!connected_ || link_lost()) {
             throw AlpacaException("Not connected to Celestron mount", AlpacaError::NotConnected);
         }
     }
+
+    // Decision 0009: lost when a fault stood past the staleness bound (link_lost_, set by the poll), or at once on
+    // positive evidence: the wrapper saw the serial port gone and released it. Lock-free.
+    bool link_lost() const { return link_lost_.load() || !CelestronProtocolWrapper::instance().link_alive(); }
 
     // NotConnected before a NotImplemented answer (ASCOM contract precedence).
     void ensure_connected() const {
@@ -2944,7 +2959,7 @@ private:
         SamplePlan home_plan;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_ || link_lost_.load() || stopped()) {
+            if (!connected_ || link_lost() || stopped()) {
                 return false;
             }
             check_home = homing_;
@@ -2964,7 +2979,7 @@ private:
             std::string failure;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || stopped()) {
+                if (!connected_ || link_lost() || stopped()) {
                     return false;
                 }
                 if (homing_ && motion_generation_ == home_generation) {
@@ -2985,7 +3000,7 @@ private:
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_ || link_lost_.load() || stopped()) {
+            if (!connected_ || link_lost() || stopped()) {
                 return false;
             }
             plan = sample_plan_locked(tick % kSlowPollEvery == 0);
@@ -3001,7 +3016,7 @@ private:
             } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSiteInfoRetryDelay
             }
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_ || stopped()) {
+            if (!connected_ || link_lost() || stopped()) {
                 return false;
             }
             if (!site) {
@@ -3021,8 +3036,8 @@ private:
         } catch (const std::exception& e) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || stopped()) {
-                    return false;
+                if (!connected_ || link_lost() || stopped()) {
+                    return false;  // a pulled cable ends the poll in this tick, not by the staleness bound
                 }
                 note_position_failure_locked(e);
                 if (!declare_link_lost_if_stale_locked()) {
@@ -3035,8 +3050,8 @@ private:
         }
         run_status_poll_after_sample_hook();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_ || link_lost_.load() || stopped()) {
-            return false;
+        if (!connected_ || link_lost() || stopped()) {
+            return false;  // a hangup a slow field swallowed in the sample is still a lost link: nothing is published
         }
         const auto previous = snapshot_.read();
         snapshot_.publish(token, decode_sample(sample, previous ? previous->value : PolledFrame{}));
@@ -3970,7 +3985,9 @@ private:
     mutable util::StateSnapshot<PolledFrame> snapshot_{clock_, kSnapshotMaxAge};
     util::OperationGeneration poll_generation_;
     util::AsyncOperation status_poll_{"Celestron status poll", poll_generation_, clock_};
-    std::atomic<bool> link_lost_{false};  // decision 0009: set under mutex_ by the poll body, cleared by a connect
+    // Decision 0009 rule 2b: set under mutex_ by the poll body, cleared by a connect. Rule 2a (a pulled cable) is the
+    // wrapper's link_alive(); link_lost() reads both.
+    std::atomic<bool> link_lost_{false};
     std::atomic<bool> status_poll_paused_for_testing_{false};
     std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
     mutable std::mutex status_poll_hook_mutex_;
