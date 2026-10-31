@@ -122,8 +122,8 @@ public:
     bool get_has_shutter() const override { return bool{}; }
     double get_heat_sink_temperature() const override { return double{}; }
     ImageArray get_image_array() const override {
-        ++image_getter_calls;
         ImageArray frame = image_array_;  // the frame at call time, not after the delay
+        ++image_getter_calls;             // counted after the copy: a test may wait on it, then replace the member
         std::this_thread::sleep_for(image_array_delay);
         if (image_array_error_) throw *image_array_error_;
         return frame;

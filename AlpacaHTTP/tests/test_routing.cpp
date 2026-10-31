@@ -1408,11 +1408,13 @@ int main() {
         EXPECT(nlohmann::json::parse(fresh.body()).at("Value") == nlohmann::json::parse("[[50,52],[51,53]]"));
         camera->set_image_array(frame(70));
         camera->image_array_delay = std::chrono::milliseconds(300);
+        camera->image_getter_calls = 0;
         std::thread old_frame_reader([&] {
             const auto old_frame = get_image("application/json", 3, 4);
             EXPECT(nlohmann::json::parse(old_frame.body()).at("Value") == nlohmann::json::parse("[[70,72],[71,73]]"));
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // The reader has copied frame 70 once the stub counts the call; only then replace the member.
+        while (camera->image_getter_calls.load() == 0) std::this_thread::yield();
         camera->set_image_array(frame(90));
         EXPECT(put_camera("abortexposure", "").status_code() == 200);
         const auto after_abort = get_image("application/json", 5, 6);
