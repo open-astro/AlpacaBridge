@@ -247,7 +247,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   held its worker, and therefore `stop()`, until the 300s lifetime cap.
   systemd's default 90s `TimeoutStopSec` would SIGKILL the service first,
   and the same applies to the management restart/shutdown endpoints: the
-  router's detached thread always calls `stop()` for a restart, and for a
+  router's delayed thread (Router-owned, joined at teardown) always calls `stop()` for a restart, and for a
   shutdown only when no shutdown callback is installed (otherwise the
   embedder's own `stop()` is the call that blocks). Before keep-alive a
   worker only ever held one request, so this was a genuine regression the
@@ -350,7 +350,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - Workers carry a generation number (`worker_generation_`, bumped by every
     `run_server()`, waits notified). A worker that detached itself because
     `stop()` was called on it (no current handler does; the management
-    endpoints restart on a detached thread) exits on the generation check
+    endpoints restart on the Router's delayed thread) exits on the generation check
     instead of surviving as an extra thread once `start()` clears
     `shutdown_workers_`. Wake permits are released per live worker
     (`worker_count_`), not per `thread_pool_size`, so any number of detached
@@ -432,7 +432,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     `ready_queue_`/`reactor_incoming_` through `close_connection` rather than
     clearing it. (PR #235 review flagged a start-time reset as an underflow
     that would gate `accept()` forever; the restart endpoint runs `stop()` on
-    the router's detached thread, so every connection is already closed and
+    the router's delayed thread, so every connection is already closed and
     the count already zero before the reset ran, but the reset was wrong on
     principle and is gone.)
   - Restart-path tests must not use `is_running()` as a readiness signal:
