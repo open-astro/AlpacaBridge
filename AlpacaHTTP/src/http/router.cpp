@@ -2514,6 +2514,12 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                                         const std::string& method_name, const DeviceCall& call) {
     const Request& request = call.request();
 
+    // A PUT on a camera can start, end or drop a frame: no imagearray GET shares a build across it.
+    std::optional<ImageBuildEpoch> image_epoch;
+    if (request.method() != HttpMethod::GET && device->get_device_type() == alpacacore::DeviceType::Camera) {
+        image_epoch.emplace();
+    }
+
     return call.run("device method", [&]() -> Response {
         // Handle common AlpacaDriver methods
         if (method_name == "name") {
@@ -3631,7 +3637,8 @@ Response Router::dispatch_camera_method(std::shared_ptr<alpacacore::CameraDriver
                 const std::string accept = has_accept ? request.get_header("accept") : std::string();
                 util::log_debug("Camera imagearray Accept: " + (has_accept ? util::escape_for_log(accept) : "<none>") +
                                 ", imagebytes=" + std::string(accepts_imagebytes(accept) ? "true" : "false"));
-                auto payload = build(camera->get_image_array(), accept, call);
+                auto payload =
+                    build_shared(camera.get(), [&camera] { return camera->get_image_array(); }, accept, call);
                 Response response;
                 response.set_content_type(payload.content_type);
                 response.set_body(std::move(payload.body));

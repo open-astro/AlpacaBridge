@@ -34,10 +34,12 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/last_exposure.h>
 
+#include <atomic>
 #include <chrono>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -80,7 +82,10 @@ public:
     void set_last_exposure_error(std::optional<alpacacore::AlpacaException> error) {
         last_exposure_error_ = std::move(error);
     }
-    mutable int image_getter_calls = 0;
+    // Atomic: a threaded test calls the getters from several router threads (#1716).
+    mutable std::atomic<int> image_getter_calls{0};
+    // get_image_array() sleeps this long, so parallel requests overlap.
+    std::chrono::milliseconds image_array_delay{0};
 
     int get_bayer_offset_x() const override { return int{}; }
     int get_bayer_offset_y() const override { return int{}; }
@@ -117,9 +122,11 @@ public:
     bool get_has_shutter() const override { return bool{}; }
     double get_heat_sink_temperature() const override { return double{}; }
     ImageArray get_image_array() const override {
-        ++image_getter_calls;
+        ImageArray frame = image_array_;  // the frame at call time, not after the delay
+        ++image_getter_calls;             // counted after the copy: a test may wait on it, then replace the member
+        std::this_thread::sleep_for(image_array_delay);
         if (image_array_error_) throw *image_array_error_;
-        return image_array_;
+        return frame;
     }
     std::string get_image_array_variant() const override {
         ++image_getter_calls;
