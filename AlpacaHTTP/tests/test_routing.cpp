@@ -1492,6 +1492,7 @@ int main() {
         EXPECT(!parses("PUT /api/v1/telescope/0/connected HTTP/1.1\r\nContent-Length : 2\r\n\r\n{}"));
         EXPECT(!parses("GET /management/apiversions HTTP/1.1\r\nX-Foo\t: bar\r\n\r\n"));
         EXPECT(!alpacahttp::Request::header_line_ok("X: a\nB: c"));
+        EXPECT(!alpacahttp::Request::header_line_ok("X: a\rB: c"));
         EXPECT(!alpacahttp::Request::header_line_ok(" X: a"));
         EXPECT(!parses("PUT /x HTTP/1.1\n Content-Length: 2\n\n{}"));
         alpacahttp::Request good;
