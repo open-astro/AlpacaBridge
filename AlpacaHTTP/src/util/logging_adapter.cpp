@@ -48,11 +48,11 @@ namespace {
     bool g_file_logging_enabled = false;
     int g_log_retention_days = 0;  // 0 = forever
     std::uintmax_t g_log_max_file_bytes = 0;  // 0 = unlimited
-    std::uintmax_t g_log_marker_bytes = 0;    // size of the cap marker line for the current cap
     std::uintmax_t g_log_file_bytes = 0;      // size of the open file: at open plus bytes written
-    bool g_log_file_capped = false;           // cap reached; file writes dropped until the next open
 
-    const std::regex kLogFilenameRegex(R"(^alpacabridge-(\d{4})-(\d{2})-(\d{2})\.log$)");
+    // A day's file, or one of its rotated parts (.1 newest .. .kMaxRotatedLogFiles).
+    static_assert(kMaxRotatedLogFiles >= 1 && kMaxRotatedLogFiles <= 99, "part numbers are one or two digits");
+    const std::regex kLogFilenameRegex(R"(^alpacabridge-(\d{4})-(\d{2})-(\d{2})(\.[1-9]\d?)?\.log$)");
 
     const char* level_to_string(alpacacore::logging::LogLevel level) {
         switch (level) {
@@ -154,7 +154,6 @@ namespace {
             std::error_code size_ec;
             const auto size = std::filesystem::file_size(path, size_ec);
             g_log_file_bytes = size_ec ? 0 : size;
-            g_log_file_capped = false;
         } else {
             g_log_file_name.clear();
             g_log_file_date.clear();
@@ -211,13 +210,26 @@ namespace {
         return removed;
     }
 
-    // The one line written when the cap is reached. Fixed width for a given
-    // cap, so its size can be reserved up front. Written straight to the file,
-    // never through log_*, which would re-take g_file_mutex.
-    std::string size_cap_marker(std::uintmax_t cap) {
-        return format_log_line(alpacacore::logging::LogLevel::Warn, "AlpacaHTTP",
-                               "Log file size cap reached (" + std::to_string(cap / (1024ull * 1024)) +
-                                   " MiB, logging.max_file_size_mb); file logging paused until the next day");
+    // The full file becomes part .1, older parts shift up one and the part past
+    // kMaxRotatedLogFiles is deleted; a fresh file is opened. A failed rename
+    // leaves the file in place and logging carries on in it (never dropped).
+    // Caller holds g_file_mutex with the file open.
+    void rotate_log_file_locked() {
+        const auto part = [](int n) {
+            return g_log_directory / ("alpacabridge-" + g_log_file_date + "." + std::to_string(n) + ".log");
+        };
+        const auto path = g_log_directory / g_log_file_name;
+        g_log_file.close();
+        std::error_code ec;
+        std::filesystem::remove(part(kMaxRotatedLogFiles), ec);
+        for (int n = kMaxRotatedLogFiles - 1; n >= 1; --n) {
+            std::filesystem::rename(part(n), part(n + 1), ec);
+        }
+        std::filesystem::rename(path, part(1), ec);
+        g_log_file.open(path, std::ios::app);
+        std::error_code size_ec;
+        const auto size = std::filesystem::file_size(path, size_ec);
+        g_log_file_bytes = size_ec ? 0 : size;
     }
 
     void write_to_file(const std::string& line) {
@@ -234,19 +246,16 @@ namespace {
                 prune_old_files_locked();
             }
         }
-        if (!g_log_file.is_open() || g_log_file_capped) {
+        if (!g_log_file.is_open()) {
             return;
         }
-        const std::uintmax_t cap = g_log_max_file_bytes;
-        std::string text = line + '\n';
-        if (cap > 0) {
-            // Keep room for the marker so the final size stays within the cap.
-            if (g_log_file_bytes + text.size() + g_log_marker_bytes > cap) {
-                g_log_file_capped = true;
-                if (g_log_file_bytes + g_log_marker_bytes > cap) {
-                    return;  // no room (a restart on a full file): append nothing
-                }
-                text = size_cap_marker(cap) + '\n';
+        const std::string text = line + '\n';
+        // A line that would cross the cap starts a fresh file; a line longer
+        // than the cap is still written, alone in its file.
+        if (g_log_max_file_bytes > 0 && g_log_file_bytes > 0 && g_log_file_bytes + text.size() > g_log_max_file_bytes) {
+            rotate_log_file_locked();
+            if (!g_log_file.is_open()) {
+                return;
             }
         }
         g_log_file << text;
@@ -389,10 +398,16 @@ std::vector<LogFileInfo> list_log_files() {
         result.push_back(std::move(info));
     }
 
-    std::sort(result.begin(), result.end(),
-              [](const LogFileInfo& a, const LogFileInfo& b) {
-                  return a.name > b.name; // newest first (date in name)
-              });
+    // Newest first: by date, then the day's current file before its parts .1, .2, ...
+    // in number order (a plain name sort would put .9 before .1 and .10 before .2).
+    const auto part = [](const std::string& name) {
+        return name.size() > 27 ? std::stoi(name.substr(24, name.size() - 28)) : 0;  // "alpacabridge-YYYY-MM-DD.N.log"
+    };
+    std::sort(result.begin(), result.end(), [&part](const LogFileInfo& a, const LogFileInfo& b) {
+        const auto a_date = a.name.substr(13, 10);
+        const auto b_date = b.name.substr(13, 10);
+        return a_date != b_date ? a_date > b_date : part(a.name) < part(b.name);
+    });
     return result;
 }
 
@@ -537,8 +552,6 @@ void set_log_retention_days(int days) {
 void set_log_max_file_bytes(std::uintmax_t bytes) {
     std::lock_guard<std::mutex> lock(g_file_mutex);
     g_log_max_file_bytes = bytes;
-    // Fixed width for a given cap, so measure it once here, not on every line.
-    g_log_marker_bytes = bytes > 0 ? size_cap_marker(bytes).size() + 1 : 0;
 }
 
 std::size_t prune_old_log_files() {
