@@ -51,6 +51,7 @@ struct IoctlStub {
     std::string path;                  // stub device file; empty = inactive
     std::vector<std::int32_t> levels;  // raw level of each SET_LEVEL, in order
     int off_writes = 0;                // raw level 1 == logical OFF
+    int requests = 0;                  // every stubbed SET_MODE, ENABLE and SET_LEVEL
 };
 
 IoctlStub& ioctl_stub() {
@@ -78,16 +79,17 @@ extern "C" int ioctl(int fd, unsigned long request, ...) {
     void* arg = va_arg(ap, void*);
     va_end(ap);
     if ((request == kSetLevel || request == kSetMode || request == kEnable) && fd_is_stub(fd)) {
+        auto& st = ioctl_stub();
+        std::lock_guard<std::mutex> lock(st.m);
+        ++st.requests;
         if (request == kSetLevel) {
             const auto level = static_cast<const std::int32_t*>(arg)[1];
-            auto& st = ioctl_stub();
-            std::lock_guard<std::mutex> lock(st.m);
             st.levels.push_back(level);
             if (level == 1) {
                 ++st.off_writes;
             }
-            st.cv.notify_all();
         }
+        st.cv.notify_all();
         return 0;
     }
     using Fn = int (*)(int, unsigned long, void*);
@@ -417,6 +419,7 @@ struct StubDeviceFile {
         st.path = path;
         st.levels.clear();
         st.off_writes = 0;
+        st.requests = 0;
     }
     ~StubDeviceFile() {
         auto& st = ioctl_stub();
@@ -475,4 +478,100 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - a Disconnect before any Connect keeps
     driver->set_connected(true);
     driver->set_connected(false);
     CHECK(stub.open_fds() == 0);
+}
+
+// Decision 0021 rule 1: a connect must not drive a PWM port to the cached 100 before a client sets it.
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - connect writes nothing to a PWM port no client set",
+          "[zwo][switch][asiair-plus][unit][power-on]") {
+    StubDeviceFile stub;
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = stub.path;
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    driver->set_connected(true);
+    // Bounded wait for a write that must not come (the worker's first pass is immediate).
+    auto& st = ioctl_stub();
+    int requests = 0;
+    {
+        std::unique_lock<std::mutex> lock(st.m);
+        st.cv.wait_for(lock, std::chrono::milliseconds(300), [&] { return st.requests > 0; });
+        requests = st.requests;
+    }
+    driver->set_connected(false);
+    CHECK(requests == 0);
+    // Disconnect must not drive the unset line either: close() settles only a port a client armed.
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        CHECK(st.requests == 0);
+    }
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - a client's PWM write still reaches the fd after connect",
+          "[zwo][switch][asiair-plus][unit][power-on]") {
+    StubDeviceFile stub;
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = stub.path;
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    driver->set_connected(true);
+    driver->set_switch_value(3, 50.0);
+    auto& st = ioctl_stub();
+    bool wrote = false;
+    {
+        std::unique_lock<std::mutex> lock(st.m);
+        wrote = st.cv.wait_for(lock, std::chrono::seconds(5), [&] { return !st.levels.empty(); });
+    }
+    driver->set_connected(false);
+    CHECK(wrote);
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - connect with no PWM port writes nothing",
+          "[zwo][switch][asiair-plus][unit][power-on]") {
+    StubDeviceFile stub;
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = stub.path;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    driver->set_connected(true);
+    auto& st = ioctl_stub();
+    int requests = 0;
+    {
+        std::unique_lock<std::mutex> lock(st.m);
+        st.cv.wait_for(lock, std::chrono::milliseconds(300), [&] { return st.requests > 0; });
+        requests = st.requests;
+    }
+    driver->set_connected(false);
+    CHECK(requests == 0);
+}
+
+// Decision 0021 rule 1: close() settles a PWM line to its steady level, so the next connect reports that level.
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - a reconnect reports the level close settled and writes nothing",
+          "[zwo][switch][asiair-plus][unit][power-on]") {
+    StubDeviceFile stub;
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = stub.path;
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    auto& st = ioctl_stub();
+    driver->set_connected(true);
+    driver->set_switch_value(3, 50.0);
+    {
+        std::unique_lock<std::mutex> lock(st.m);
+        REQUIRE(st.cv.wait_for(lock, std::chrono::seconds(5), [&] { return !st.levels.empty(); }));
+    }
+    driver->set_connected(false);
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        st.requests = 0;
+    }
+    driver->set_connected(true);
+    int requests = 0;
+    {
+        std::unique_lock<std::mutex> lock(st.m);
+        st.cv.wait_for(lock, std::chrono::milliseconds(300), [&] { return st.requests > 0; });
+        requests = st.requests;
+    }
+    const double reported = driver->get_switch_value(3);
+    driver->set_connected(false);
+    CHECK(requests == 0);
+    CHECK(reported == 100.0);
 }
