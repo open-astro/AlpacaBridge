@@ -76,6 +76,7 @@ private:
 // One refill reads every element's power, so DeviceState costs one burst.
 struct ThermalStatus {
     std::array<int, kMaxThermalElements> values{};
+    bool closed{};  // a disconnect won the I/O lock first: not a device frame, never a link fault
 };
 
 constexpr std::chrono::milliseconds kStatusTtl{100};
@@ -181,7 +182,9 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
+        // below runs under it and the I/O lock, never under mutex_ (decision 0016).
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -198,32 +201,37 @@ public:
 
         auto& sdk = sdk_;
         if (connected) {
-            const auto cameras = sdk.enumerate_cameras();
-            const auto candidates = thermal_candidates(sdk, cameras);
-            util::ThermalCameraRequest request;
-            request.camera_index = camera_index_;
-            request.serial = bound_serial_;
-            const auto choice = util::choose_thermal_camera(request, candidates, kThermalLabels);
-            if (!choice.chosen.has_value()) {
-                ALPACA_LOG_WARN("PlayerOne", choice.refusal);
-                throw AlpacaException(choice.refusal, choice.error_code);
-            }
-            const auto& info = cameras[choice.chosen.value()];
-            bound_ = candidates[choice.chosen.value()];
-            listed_ = candidates;
-            camera_id_ = info.camera_id;
-            camera_name_ = info.name;
-            serial_number_ = info.serial_number;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                const auto cameras = sdk.enumerate_cameras();
+                const auto candidates = thermal_candidates(sdk, cameras);
+                util::ThermalCameraRequest request;
+                request.camera_index = camera_index_;
+                request.serial = bound_serial_;
+                const auto choice = util::choose_thermal_camera(request, candidates, kThermalLabels);
+                if (!choice.chosen.has_value()) {
+                    ALPACA_LOG_WARN("PlayerOne", choice.refusal);
+                    throw AlpacaException(choice.refusal, choice.error_code);
+                }
+                const auto& info = cameras[choice.chosen.value()];
+                const auto& bound = candidates[choice.chosen.value()];
 
-            sdk.open_camera(camera_id_);
-            try {
-                sdk.init_camera(camera_id_);
-                build_elements_locked(sdk.probe_config_caps(camera_id_));
-            } catch (...) {
-                sdk.close_camera(camera_id_);
-                camera_id_ = -1;
-                throw;
+                sdk.open_camera(info.camera_id);
+                try {
+                    sdk.init_camera(info.camera_id);
+                    auto elements = build_elements(sdk.probe_config_caps(info.camera_id), bound, candidates);
+                    // The short state lock publishes identity and the element list at the end of connect.
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    camera_id_ = info.camera_id;
+                    camera_name_ = info.name;
+                    serial_number_ = info.serial_number;
+                    elements_ = std::move(elements);
+                } catch (...) {
+                    sdk.close_camera(info.camera_id);
+                    throw;
+                }
             }
+            // After the I/O lock is released: the cache lock is taken before it, never inside it.
             status_cache_.reset();
             connected_.store(true);
             return;
@@ -231,15 +239,20 @@ public:
 
         // Clear driver state and publish disconnected BEFORE the SDK close so
         // a racing operational call fails fast at ensure_connected() instead
-        // of hitting a just-closed camera (ops here snapshot the id via
-        // camera_id_copy() and call the SDK without holding mutex_) — same
-        // fix as the ZWO dew-heater switch, per the driver-lifecycle.instructions.md disconnect rule.
-        const int close_id = camera_id_;
-        camera_id_ = -1;
-        elements_.clear();
+        // of hitting a just-closed camera - same fix as the ZWO dew-heater
+        // switch, per the driver-lifecycle.instructions.md disconnect rule.
+        int close_id = -1;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_id = camera_id_;
+            camera_id_ = -1;
+            elements_.clear();
+            connected_.store(false);
+        }
         status_cache_.reset();
-        connected_.store(false);
         if (close_id >= 0) {
+            // Waits for an exchange in flight: the camera is never closed under one.
+            std::lock_guard<std::mutex> io(io_mutex_);
             sdk.close_camera(close_id);
         }
     }
@@ -303,10 +316,23 @@ public:
     double get_switch_value(int id) const override {
         validate_switch_id(id);
         ensure_connected();
-        const auto elements = elements_copy();
-        const int camera_id = camera_id_copy();
-        const auto status = status_cache_.get([this, &elements, camera_id] {
+        // The refill takes the I/O lock inside the cache's own lock (order: transition_mutex_, cache
+        // mutex, I/O lock, mutex_), so no caller may hold mutex_ or the I/O lock around the cache.
+        const auto status = status_cache_.get([this] {
+            std::lock_guard<std::mutex> io(io_mutex_);
             ThermalStatus fresh;
+            std::vector<ThermalElement> elements;
+            int camera_id = -1;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                elements = elements_;
+                camera_id = camera_id_;
+            }
+            if (camera_id < 0) {
+                // A disconnect won the race; its reset() drops this frame, and it is no link fault.
+                fresh.closed = true;
+                return fresh;
+            }
             for (std::size_t i = 0; i < elements.size(); ++i) {
                 fresh.values[i] = elements[i].kind == ThermalElementKind::DewHeater
                                       ? sdk_.get_heater_power_percent(camera_id)
@@ -314,6 +340,9 @@ public:
             }
             return fresh;
         });
+        if (status.closed) {
+            throw AlpacaException("Camera ID not available", AlpacaError::NotConnected);
+        }
         return static_cast<double>(status.values[static_cast<std::size_t>(id)]);
     }
 
@@ -333,11 +362,15 @@ public:
         if (value_long < element.min_value || value_long > element.max_value) {
             throw AlpacaException(element.name + " value out of range", AlpacaError::InvalidValue);
         }
-        const int camera_id = camera_id_copy();
-        if (element.kind == ThermalElementKind::DewHeater) {
-            sdk_.set_heater_power_percent(camera_id, static_cast<int>(value_long));
-        } else {
-            sdk_.set_fan_power_percent(camera_id, static_cast<int>(value_long));
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            // Read under the I/O lock: a disconnect that closed the camera first leaves -1 and throws.
+            const int camera_id = camera_id_copy();
+            if (element.kind == ThermalElementKind::DewHeater) {
+                sdk_.set_heater_power_percent(camera_id, static_cast<int>(value_long));
+            } else {
+                sdk_.set_fan_power_percent(camera_id, static_cast<int>(value_long));
+            }
         }
         status_cache_.invalidate();
     }
@@ -422,11 +455,6 @@ private:
         return elements_[static_cast<std::size_t>(id)];
     }
 
-    std::vector<ThermalElement> elements_copy() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return elements_;
-    }
-
     int camera_id_copy() const {
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_id_ < 0) {
@@ -435,8 +463,11 @@ private:
         return camera_id_;
     }
 
-    void build_elements_locked(const PlayerOneConfigCaps& caps) {
-        elements_.clear();
+    // Pure: the caller publishes the result under mutex_. Throws when the camera has neither control.
+    static std::vector<ThermalElement> build_elements(const PlayerOneConfigCaps& caps,
+                                                      const util::ThermalCameraCandidate& bound,
+                                                      const std::vector<util::ThermalCameraCandidate>& listed) {
+        std::vector<ThermalElement> elements;
         if (caps.has_heater_power) {
             ThermalElement e;
             e.kind = ThermalElementKind::DewHeater;
@@ -445,7 +476,7 @@ private:
             e.writable = caps.heater_power_writable;
             e.min_value = caps.heater_power_min;
             e.max_value = caps.heater_power_max;
-            elements_.push_back(std::move(e));
+            elements.push_back(std::move(e));
         }
         if (caps.has_fan_power) {
             ThermalElement e;
@@ -455,13 +486,14 @@ private:
             e.writable = caps.fan_power_writable;
             e.min_value = caps.fan_power_min;
             e.max_value = caps.fan_power_max;
-            elements_.push_back(std::move(e));
+            elements.push_back(std::move(e));
         }
-        if (elements_.empty()) {
-            const std::string message = util::thermal_capability_refusal(bound_, listed_, kThermalLabels);
+        if (elements.empty()) {
+            const std::string message = util::thermal_capability_refusal(bound, listed, kThermalLabels);
             ALPACA_LOG_WARN("PlayerOne", message);
             throw AlpacaException(message, AlpacaError::NotImplemented);
         }
+        return elements;
     }
 
     std::unique_ptr<ThermalSdkOverCameraSdk> owned_sdk_;
@@ -470,14 +502,16 @@ private:
     int device_number_;
     int camera_index_;
     std::string bound_serial_;
-    // The connect's camera listing, for the refusal when the bound camera has no controls.
-    util::ThermalCameraCandidate bound_;
-    std::vector<util::ThermalCameraCandidate> listed_;
     int camera_id_{-1};
     std::string serial_number_;
     std::string camera_name_;
     std::vector<ThermalElement> elements_;
     std::atomic<bool> connected_;
+    // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
+    // it guards identity and the element list, never held across an SDK call). transition_mutex_ spans
+    // set_connected() only and no getter takes it; io_mutex_ serialises every camera call.
+    std::mutex transition_mutex_;
+    mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
     mutable util::TtlStatusCache<ThermalStatus> status_cache_;
 };
