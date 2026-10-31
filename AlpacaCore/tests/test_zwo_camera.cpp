@@ -358,3 +358,42 @@ TEST_CASE("ZWO Camera Driver - Name and identity getters answer while a connect 
     CHECK(camera->get_name() == sdk.camera.name);
     camera->set_connected(false);
 }
+
+// Decision 0016 rule 6: a name refresh that read the SDK by id while a connect ran must not overwrite what the
+// connect published. The refresh is held inside get_camera_info_by_id on a latch, a connect completes, the SDK
+// then reports another name, and the refresh is released.
+// Falsified by: zwo_camera_driver.cpp refresh_cached_camera_info_if_needed() writing camera_info_ without the
+// connected_/connect_in_flight_/camera_id_ re-check (get_name() then returns the stale refresh name).
+TEST_CASE("ZWO Camera Driver - A name refresh that overlapped a connect does not overwrite the connect's info",
+          "[zwo][camera][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    static thread_local bool is_refresher = false;
+    std::atomic<bool> refresh_entered{false};
+    std::atomic<bool> release_refresh{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call != "get_camera_info_by_id" || !is_refresher) return;
+        refresh_entered = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!release_refresh.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+
+    std::thread refresher([&] {
+        is_refresher = true;
+        (void)camera->get_name();
+    });
+    REQUIRE(wait_for_flag(refresh_entered));
+
+    const std::string connect_name = sdk.camera.name;
+    camera->set_connected(true);
+    sdk.camera.name = "Stale Refresh Name";
+    release_refresh = true;
+    refresher.join();
+
+    CHECK(camera->get_name() == connect_name);
+    camera->set_connected(false);
+}

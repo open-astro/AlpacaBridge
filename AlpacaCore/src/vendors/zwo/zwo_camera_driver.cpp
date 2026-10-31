@@ -1652,6 +1652,11 @@ private:
                 ZWOCameraInfo info;
                 if (sdk_.get_camera_info_by_id(camera_id.value(), info)) {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    // A connect ran while the by-id read was out: it owns camera_info_ now
+                    // (decision 0016 rule 6), and this read may come from a stale id.
+                    if (connected_.load() || connect_in_flight_.load() || camera_id_ != camera_id) {
+                        return;
+                    }
                     camera_info_ = info;
                     camera_info_valid_ = true;
                 }
