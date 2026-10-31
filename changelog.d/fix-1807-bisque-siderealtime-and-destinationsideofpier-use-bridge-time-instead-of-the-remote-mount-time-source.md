@@ -1,0 +1,3 @@
+### Fixed
+
+- **Bisque SiderealTime and DestinationSideOfPier follow the TheSkyX computer clock** (Bisque, issue #1807): both now compute local sidereal time from the same remote instant `UTCDate` answers, so the three agree when the bridge host and TheSkyX clocks differ. While no remote UTC is established, both raise what `UTCDate` raises (`InvalidOperation` with Use Computer Clock off); `SiderealTime` now throws `NotConnected` while disconnected. Neither getter queries TheSkyX. Covered by the `Bisque SiderealTime` and `Bisque DestinationSideOfPier` cases in `AlpacaCore/tests/test_bisque_telescope.cpp`.

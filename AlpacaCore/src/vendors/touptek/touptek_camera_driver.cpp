@@ -496,24 +496,19 @@ public:
 
     bool get_cooler_on() const override {
         ensure_connected();
-        if (!get_can_get_cooler_power()) return false;
+        require_cooler();
         auto& sdk = sdk_;
         return with_handle([&](HToupcam h) { return sdk.get_tec_enable(h); });
     }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
-        if (!get_can_get_cooler_power()) {
-            if (cooler_on) {
-                throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
-            }
-            return;
-        }
+        require_cooler();
         auto& sdk = sdk_;
         with_handle([&](HToupcam h) { sdk.put_tec_enable(h, cooler_on); });
     }
     double get_cooler_power() const override {
         ensure_connected();
-        if (!get_can_get_cooler_power()) return 0.0;
+        require_cooler();
         auto& sdk = sdk_;
         try {
             // Both reads under one with_handle so they come from the same open.
@@ -1660,6 +1655,13 @@ private:
         }
         if (start_x_ < 0 || start_y_ < 0 || start_x_ > max_w - num_x_ || start_y_ > max_h - num_y_) {
             throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
+        }
+    }
+
+    // CoolerOn and CoolerPower are "not implemented" on a camera without a cooler (ICameraV4).
+    void require_cooler() const {
+        if (!get_can_get_cooler_power()) {
+            throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
         }
     }
 
