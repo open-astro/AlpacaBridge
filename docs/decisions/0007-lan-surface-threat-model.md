@@ -15,7 +15,7 @@ Five surfaces: (1) Device API `/api/v1/<type>/<n>/...`; (2) Management API `/man
 ### Trust statement
 
 - **A LAN host is trusted to operate and configure the server.** Alpaca has no login, so a peer that can open a TCP connection may drive devices, register or remove them, set the log level and the clock, join or leave a Wi-Fi network, stop or restart the service, and start a software update. The limit of that trust is the process: a LAN host is not trusted to make the server unresponsive for other clients (held sockets, oversized input, unbounded work) and cannot reach anything beyond the service privileges.
-- **A browser page is not trusted.** A page the operator opens elsewhere can send requests to the board from the operator browser. It is held by `reject_cross_origin_request` (`AlpacaHTTP/src/http/router.cpp`), an opt-in Host allowlist against DNS rebinding, off by default (`http.host_check_enabled`; `reject_disallowed_host`, called from `Router::route()`; NS-02, issue #392) and framing headers against clickjacking (NS-08, not landed).
+- **A browser page is not trusted.** A page the operator opens elsewhere can send requests to the board from the operator browser. It is held by `reject_cross_origin_request` (`AlpacaHTTP/src/http/router.cpp`), an opt-in Host allowlist against DNS rebinding, off by default (`http.host_check_enabled`; `reject_disallowed_host`, called from `Router::route()`; NS-02, issue #392) and framing headers against clickjacking (NS-08, issue #1717: `Response::to_header_string()` sends `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` and `X-Content-Type-Options: nosniff` on every response).
 - **A device in radio range is not trusted.** On an open hotspot anyone in range is on the LAN. The hotspot must carry a passphrase by default (NS-06). The server refuses to create or start an open one (#1715); an open profile from an earlier release still autoconnects at boot until the operator turns it off or sets a passphrase, and until then radio range equals LAN trust.
 - **Localhost gets no extra trust**: a local browser is still a browser.
 
@@ -42,7 +42,7 @@ The guard compares `Origin` with `Host` as strings. It passes every GET and ever
 - **Who can reach it.** Any LAN host loads the static files (`Router::handle_static_file()`); the operator browser runs them.
 - **What it can do.** Everything the APIs can, with the operator reach. It renders server-supplied strings (device names, descriptions, `LastConnectError`, log lines, Wi-Fi SSIDs from a scan).
 - **What is trusted and why.** Nothing from the network is trusted as markup: an SSID and a driver error are chosen by third parties. `AlpacaHTTP/web/app.js` has 28 `innerHTML`-class sites (text search count); none has been audited for an unescaped server- or network-supplied value. This record does not claim the UI is free of script injection; the audit of these sites is tracked with the NS-14 low-severity items (web UI item).
-- **Framing.** No `X-Frame-Options`, `frame-ancestors` or CSP is sent, so an attacker page can frame the UI (NS-08).
+- **Framing.** `Response::to_header_string()` (`AlpacaHTTP/src/core/response.cpp`) adds `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` and `X-Content-Type-Options: nosniff` to every response, so an attacker page cannot frame the UI (NS-08, issue #1717). No other CSP directive is sent: the UI uses inline script and style.
 
 ### Surface 4: Wi-Fi API
 
@@ -88,7 +88,6 @@ A change passes only when every rule in the Rules section below holds.
 
 ### Known gaps (open)
 
-- No framing or CSP headers (NS-08).
 - No per-host connection cap (NS-03+05).
 - Driver-reaching device PUTs are not origin-guarded; safe while no CORS preflight is answered. The DNS-rebinding path to them is open by default: the Host allowlist (NS-02) closes it only when `http.host_check_enabled` is on. The reviewer check holds the rest.
 - Unbounded detached threads per shutdown and restart request ([#1739](https://github.com/open-astro/AlpacaBridge/issues/1739)).
@@ -104,7 +103,7 @@ A change passes only when every rule in the Rules section below holds.
 | NS-04 | all HTTP surfaces | fixed | request body cap lowered from 10 MiB to 64 KiB (issue #741) |
 | NS-06 | Wi-Fi API | open | hotspot passphrase by default; server side done (set_ap refuses an open hotspot, #1715); an open profile from an earlier release still autoconnects at boot until turned off |
 | NS-07 | Device API, Management API | fixed | JSON output replaces invalid UTF-8 with U+FFFD instead of throwing (`error_handler_t::replace` in `Response::set_body`, `AlpacaHTTP/src/core/response.cpp`, issue #764) |
-| NS-08 | Web UI | open | framing headers and CSP |
+| NS-08 | Web UI | fixed | framing headers (`X-Frame-Options`, CSP `frame-ancestors`, `nosniff`) sent by `Response::to_header_string()`; no other CSP directive |
 | NS-09 | Device API | fixed | the iOptron telescope no longer changes the mount altitude limit (`:SAL`) or meridian treatment (`:SMT`); a GOTO the firmware refuses is reported and not retried (issue #763) |
 | NS-10 | Management API | open | the WeeWX feed URL follows redirects and reads an unbounded body (`http_get()` in `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp`); its scheme is limited to `http,https` for the request and every redirect |
 | NS-11 | Management API | fixed | a device config may name only the board's own GPIO chip and lines (`AlpacaCore/include/alpacacore/util/hardware_config_refusal.h`, issue #765, PR #818) |

@@ -103,6 +103,59 @@ int main() {
         EXPECT(r.body().find("Caf\xEF\xBF\xBD Bar") != std::string::npos);
     }
 
+    // Issue #1717: every serialised response carries the anti-framing and
+    // nosniff headers, unless the response already set that name.
+    {
+        const auto count = [](const std::string& head, const std::string& needle) {
+            std::size_t n = 0;
+            for (std::size_t at = head.find(needle); at != std::string::npos; at = head.find(needle, at + 1)) {
+                ++n;
+            }
+            return n;
+        };
+        const std::string xfo = "X-Frame-Options: DENY\r\n";
+        const std::string csp = "Content-Security-Policy: frame-ancestors 'none'\r\n";
+        const std::string nosniff = "X-Content-Type-Options: nosniff\r\n";
+        const auto expect_defaults = [&](const std::string& head) {
+            EXPECT(count(head, xfo) == 1);
+            EXPECT(count(head, csp) == 1);
+            EXPECT(count(head, nosniff) == 1);
+        };
+
+        Response html;
+        html.set_status(200, "OK");
+        html.set_body("<html></html>");
+        html.set_content_type("text/html");
+        expect_defaults(html.to_header_string());
+
+        Response json;
+        AlpacaResponse alpaca;
+        alpaca.value = nlohmann::json::array({net("Cafe", 70)});
+        json.set_body(alpaca);
+        expect_defaults(json.to_header_string());
+
+        // Built as send_error() builds it.
+        Response error;
+        error.set_status(400, "Bad Request");
+        error.set_body("Bad request");
+        expect_defaults(error.to_header_string());
+
+        // A header the response set itself keeps its value, once (any case).
+        Response own;
+        own.set_status(200, "OK");
+        own.set_body("x");
+        own.set_header("x-frame-options", "SAMEORIGIN");
+        own.set_header("Content-Security-Policy", "frame-ancestors 'self'");
+        own.set_header("X-CONTENT-TYPE-OPTIONS", "custom");
+        const std::string head = own.to_header_string();
+        EXPECT(head.find("x-frame-options: SAMEORIGIN\r\n") != std::string::npos);
+        EXPECT(head.find("Content-Security-Policy: frame-ancestors 'self'\r\n") != std::string::npos);
+        EXPECT(head.find("X-CONTENT-TYPE-OPTIONS: custom\r\n") != std::string::npos);
+        EXPECT(head.find("DENY") == std::string::npos);
+        EXPECT(head.find("'none'") == std::string::npos);
+        EXPECT(head.find("nosniff") == std::string::npos);
+    }
+
     std::cout << "PASS\n";
     return 0;
 }
