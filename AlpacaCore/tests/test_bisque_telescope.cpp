@@ -12,6 +12,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <functional>
 #include <future>
@@ -34,7 +36,6 @@
 #include "fake_bisque_mount.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
-#include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
 
@@ -1305,13 +1306,82 @@ TEST_CASE("Bisque snapshot - the alt-az read is served from the frame too", "[bi
     CHECK(rig.mount.altaz_reads.load() == after_connect + 1);
 }
 
-// #1298: the LST helper cut UTC to whole seconds.
+// #1298: the LST helper cut UTC to whole seconds. #1807: SiderealTime follows the TheSkyX clock, so the fake clock
+// drives it and the check needs no sleep.
 TEST_CASE("Bisque Telescope Driver - SiderealTime follows the clock to under a second", "[bisque][telescope][unit]") {
-    alpacacore::vendor::bisque::ConnectionInfo conn;
-    conn.host = "localhost";
-    conn.tcp_port = 3040;
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
-    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+    ClockedBisque rig;
+    const double first = rig.driver->get_sidereal_time();
+    rig.clock.advance(std::chrono::milliseconds(300));
+    double moved_s = (rig.driver->get_sidereal_time() - first) * 3600.0;
+    if (moved_s < -43200.0) {
+        moved_s += 86400.0;  // wrapped past 24 h between the reads
+    }
+    CHECK(moved_s == Catch::Approx(0.3 * 1.00273790935).margin(0.01));
+}
+
+// #1807: SiderealTime and DestinationSideOfPier use the TheSkyX computer's clock, the one UTCDate answers from.
+namespace {
+constexpr double kSydneyLongitude = 151.215297;
+double lst_at_millis(int64_t millis) {
+    return alpacacore::util::local_sidereal_hours(
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(millis)), kSydneyLongitude);
+}
+double hours_apart(double a, double b) {
+    const double d = std::fmod(std::abs(a - b), 24.0);
+    return std::min(d, 24.0 - d);
+}
+}  // namespace
+
+TEST_CASE("Bisque SiderealTime - answers LST of the remote clock, not the bridge host clock",
+          "[bisque][telescope][utcdate][sidereal]") {
+    ClockedBisque rig;
+    rig.driver->set_site_longitude(kSydneyLongitude);
+    // The remote clock is years from the host clock, so a host-clock LST is far off.
+    const int64_t remote = 946684800123;
+    rig.mount.utc_millis = remote;
+    REQUIRE(poll_now(*rig.driver));
+    CHECK(hours_apart(rig.driver->get_sidereal_time(), lst_at_millis(remote)) < 1e-6);
+    const int before = rig.mount.transactions;
+    rig.clock.advance(std::chrono::seconds(90));
+    CHECK(hours_apart(rig.driver->get_sidereal_time(), lst_at_millis(remote + 90000)) < 1e-6);
+    CHECK(rig.mount.transactions == before);
+}
+
+TEST_CASE("Bisque SiderealTime - disconnected throws NotConnected", "[bisque][telescope][utcdate][sidereal]") {
+    ClockedBisque rig;
+    rig.driver->set_connected(false);
+    require_alpaca_error([&] { (void)rig.driver->get_sidereal_time(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)rig.driver->get_destination_side_of_pier(5.0, 20.0); },
+                         alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("Bisque SiderealTime - no remote UTC raises what UTCDate raises", "[bisque][telescope][utcdate][sidereal]") {
+    ClockedBisque rig;
+    rig.mount.use_computer_clock = false;
+    REQUIRE(poll_now(*rig.driver));
+    require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)rig.driver->get_sidereal_time(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)rig.driver->get_destination_side_of_pier(5.0, 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("Bisque DestinationSideOfPier - the meridian follows the remote clock",
+          "[bisque][telescope][utcdate][sidereal]") {
+    ClockedBisque rig;
+    rig.driver->set_site_longitude(kSydneyLongitude);
+    // Remote clock 12 h ahead of the host: its LST is about 12 h from the host's.
+    const auto host_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    const int64_t remote = host_ms + 12LL * 3600 * 1000;
+    rig.mount.utc_millis = remote;
+    REQUIRE(poll_now(*rig.driver));
+    const double lst = lst_at_millis(remote);
+    const auto wrap = [](double h) { return std::fmod(h + 24.0, 24.0); };
+    // Hour angle +0.5 h under the remote clock (west of the meridian, pier east); -11.5 h under the host clock.
+    CHECK(rig.driver->get_destination_side_of_pier(wrap(lst - 0.5), 20.0) == 0);
+    // Hour angle -0.5 h under the remote clock (east of the meridian, pier west); +11.5 h under the host clock.
+    CHECK(rig.driver->get_destination_side_of_pier(wrap(lst + 0.5), 20.0) == 1);
 }
 
 // ── #1478 spec-audit items ───────────────────────────────────────────────────
