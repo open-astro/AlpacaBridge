@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/version.h>
 
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -345,8 +347,8 @@ TEST_CASE("ZWO dew heater binding - a serial wins over cameraId and a bare camer
 
 // Decision 0016: UniqueID needs no device access, so a connect that holds the SDK open must not park it.
 // (GetSwitchName throws NotConnected until the connect publishes, so it is timed once connected below.)
-// Falsified by: zwo_switch_driver.cpp set_connected(true) holding mutex_ across open_camera() (get_unique_id() then
-// waits the whole 300 ms open).
+// Falsified by: zwo_switch_driver.cpp set_connected(true) holding mutex_ across open_camera_link() (get_unique_id()
+// then waits the whole 300 ms open).
 TEST_CASE("ZWO Dew Heater Switch Driver - Name and UniqueID answer while a connect holds the SDK open",
           "[zwo][switch][unit][getter-stall]") {
     using namespace alpacacore::test;
@@ -395,7 +397,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Identity and names answer while a stat
 }
 
 // A disconnect must wait for the exchange in flight, never close the camera under it (the I/O lock).
-// Falsified by: zwo_switch_driver.cpp set_connected(false) calling close_camera() without io_mutex_, or
+// Falsified by: zwo_switch_driver.cpp set_connected(false) calling close_camera_link() without io_mutex_, or
 // set_switch_value() reading the id and then calling the SDK without it (closed_while_busy is set).
 TEST_CASE("ZWO Dew Heater Switch Driver - A disconnect waits for the exchange in flight instead of closing under it",
           "[zwo][switch][unit][getter-stall]") {
@@ -477,4 +479,55 @@ TEST_CASE("ZWO Dew Heater Switch Driver - A disconnect during queued status read
 
     CHECK(other.load() == 0);
     CHECK(not_connected.load() == kReaders);
+}
+
+// ---- The dew heater and the camera driver share one open (issue #1667) ----
+
+namespace {
+
+using alpacacore::test::FakeZWOSDK;
+using alpacacore::vendor::zwo::ZWOSdkDewHeaterSdk;
+
+// Camera driver and dew heater switch on one fake camera, as one process holds them.
+struct SharedCamera {
+    FakeZWOSDK sdk;
+    ZWOSdkDewHeaterSdk dew_sdk{sdk};
+    std::unique_ptr<alpacacore::CameraDriver> camera =
+        alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    std::unique_ptr<alpacacore::SwitchDriver> heater =
+        alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, sdk.camera.camera_id, dew_sdk);
+};
+
+}  // namespace
+
+// Falsified by: the camera driver or the switch closing the camera's one real open while the other still holds it.
+TEST_CASE("ZWO camera and dew heater - one real open, closed by the last holder", "[zwo][switch][camera][unit][link]") {
+    SharedCamera rig;
+    rig.camera->set_connected(true);
+    rig.heater->set_connected(true);
+    CHECK(rig.sdk.holders(rig.sdk.camera.camera_id) == 2);
+    CHECK(rig.sdk.open_count() == 1);
+    CHECK(rig.sdk.call_count("init_camera") == 1);
+
+    rig.camera->set_connected(false);  // the camera disconnects first: the switch still reads
+    CHECK(rig.sdk.open_count() == 1);
+    CHECK(rig.heater->get_switch_value(0) == Catch::Approx(0.0));
+
+    rig.heater->set_connected(false);
+    CHECK(rig.sdk.open_count() == 0);
+}
+
+// Falsified by: as above, for the reverse order (the switch closes the open under the camera).
+TEST_CASE("ZWO dew heater and camera - the switch disconnects first and the camera keeps its handle",
+          "[zwo][switch][camera][unit][link]") {
+    SharedCamera rig;
+    rig.heater->set_connected(true);
+    rig.camera->set_connected(true);
+
+    rig.heater->set_connected(false);
+    CHECK(rig.sdk.open_count() == 1);
+    CHECK(rig.camera->get_ccd_temperature() == Catch::Approx(15.0));
+
+    rig.camera->set_connected(false);
+    CHECK(rig.sdk.open_count() == 0);
 }

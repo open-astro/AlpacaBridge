@@ -10,13 +10,12 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
-#include <alpacacore/util/error_handling.h>
 #include <ASICamera2.h>
-#include <mutex>
-#include <sstream>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
+
 #include <iomanip>
-#include <unordered_map>
+#include <sstream>
 
 namespace alpacacore::vendor::zwo {
 
@@ -231,6 +230,27 @@ void throw_on_error(ASI_ERROR_CODE code, const std::string& context) {
     throw AlpacaException(context + ": " + error_code_to_string(code), map_error_code(code));
 }
 
+std::string read_serial_number(int camera_id) {
+    ASI_SN sn{};
+    throw_on_error(ASIGetSerialNumber(camera_id, &sn), "ASIGetSerialNumber");
+    std::ostringstream oss;
+    for (unsigned char byte : sn.id) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+    }
+    return oss.str();
+}
+
+// The SDK needs ASIInitCamera once after every ASIOpenCamera, so the table's real open does both: a handle that
+// opened but did not initialise is closed before the error propagates.
+void open_and_init(int camera_id) {
+    throw_on_error(ASIOpenCamera(camera_id), "ASIOpenCamera");
+    const ASI_ERROR_CODE code = ASIInitCamera(camera_id);
+    if (code != ASI_SUCCESS) {
+        ASICloseCamera(camera_id);
+        throw_on_error(code, "ASIInitCamera");
+    }
+}
+
 ZWOCameraInfo convert_camera_info(const ASI_CAMERA_INFO& info) {
     ZWOCameraInfo out;
     out.camera_id = info.CameraID;
@@ -267,14 +287,17 @@ ZWOCameraInfo convert_camera_info(const ASI_CAMERA_INFO& info) {
 
 } // namespace
 
+// Every SDK call runs under the table's one mutex: per-device calls in table_.call(), enumeration and info under
+// table_.lock_unchecked(). The one exception is ASIGetDataAfterExp, a blocking bulk download:
+// table_.call_unserialised() checks the link, then runs with no lock held. ASIGetSDKVersion returns a static string and
+// takes no lock.
 class ZWOSDKWrapper::Impl {
 public:
-    std::mutex mutex_;
-    struct CameraUsage {
-        int open_count = 0;
-        bool initialized = false;
-    };
-    std::unordered_map<int, CameraUsage> usage_;
+    SharedOpenTable table_{SharedOpenTable::Ops{
+        [](int id) { open_and_init(id); },
+        [](int id) { throw_on_error(ASICloseCamera(id), "ASICloseCamera"); },
+        [](int id) { return read_serial_number(id); },
+    }};
 };
 
 ZWOSDKWrapper::ZWOSDKWrapper()
@@ -288,7 +311,7 @@ ZWOSDKWrapper& ZWOSDKWrapper::instance() {
 }
 
 std::vector<ZWOCameraInfo> ZWOSDKWrapper::enumerate_cameras(std::vector<ZwoUnreadableSlot>* unreadable) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    const auto lock = pimpl_->table_.lock_unchecked();
     const int count = ASIGetNumOfConnectedCameras();
     std::vector<ZWOCameraInfo> result;
     if (count <= 0) {
@@ -329,22 +352,18 @@ std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras(
             result.push_back(std::move(camera));
             continue;
         }
-        bool opened = false;
+        // The table's open reads the serial; a held id whose serial changed is retired and reopened here.
         try {
-            open_camera(info.camera_id);
-            opened = true;
-            camera.serial = get_serial_number(info.camera_id);
+            const auto opened = pimpl_->table_.open(info.camera_id);
+            camera.serial = opened.serial;
+            try {
+                pimpl_->table_.close(info.camera_id, opened.link);
+            } catch (const std::exception&) {
+                // The serial is already read; a throwing close is not ours to report.
+            }
         } catch (const std::exception&) {
             // A body that will not open or read has no usable serial.
             camera.serial.clear();
-        }
-        if (opened) {
-            try {
-                close_camera(info.camera_id);
-            } catch (const std::exception&) {
-                // The serial is already read; a throwing close is not ours to report.
-                opened = false;
-            }
         }
         result.push_back(std::move(camera));
     }
@@ -355,7 +374,7 @@ bool ZWOSDKWrapper::get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) {
     // Not ASIGetCameraPropertyByID: it answers only for an opened camera
     // (ASI_ERROR_CAMERA_CLOSED otherwise, SDK 1.41 on the Pi rig, issue #738),
     // and the driver looks its camera up before opening it.
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    const auto lock = pimpl_->table_.lock_unchecked();
     int count = ASIGetNumOfConnectedCameras();
     for (int i = 0; i < count; ++i) {
         ASI_CAMERA_INFO sdk_info{};
@@ -369,7 +388,7 @@ bool ZWOSDKWrapper::get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) {
 }
 
 bool ZWOSDKWrapper::get_camera_info_by_index(int camera_index, ZWOCameraInfo& info) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    const auto lock = pimpl_->table_.lock_unchecked();
     ASI_CAMERA_INFO sdk_info{};
     ASI_ERROR_CODE code = ASIGetCameraProperty(&sdk_info, camera_index);
     if (code != ASI_SUCCESS) {
@@ -380,166 +399,143 @@ bool ZWOSDKWrapper::get_camera_info_by_index(int camera_index, ZWOCameraInfo& in
     return true;
 }
 
-void ZWOSDKWrapper::open_camera(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    auto& usage = pimpl_->usage_[camera_id];
-    if (usage.open_count == 0) {
-        throw_on_error(ASIOpenCamera(camera_id), "ASIOpenCamera");
-    }
-    ++usage.open_count;
-}
+SharedOpenTable::Opened ZWOSDKWrapper::open_camera_link(int camera_id) { return pimpl_->table_.open(camera_id); }
 
-void ZWOSDKWrapper::init_camera(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    auto& usage = pimpl_->usage_[camera_id];
-    if (!usage.initialized) {
-        throw_on_error(ASIInitCamera(camera_id), "ASIInitCamera");
-        usage.initialized = true;
-    }
-}
+void ZWOSDKWrapper::close_camera_link(int camera_id, std::uint64_t link) { pimpl_->table_.close(camera_id, link); }
 
-void ZWOSDKWrapper::close_camera(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    auto it = pimpl_->usage_.find(camera_id);
-    if (it == pimpl_->usage_.end() || it->second.open_count <= 0) {
-        return;
-    }
-    --it->second.open_count;
-    if (it->second.open_count == 0) {
-        throw_on_error(ASICloseCamera(camera_id), "ASICloseCamera");
-        it->second.initialized = false;
-        pimpl_->usage_.erase(it);
-    }
+void ZWOSDKWrapper::with_link(int camera_id, std::uint64_t link, const std::function<void()>& fn) {
+    pimpl_->table_.with_link(camera_id, link, fn);
 }
 
 std::vector<ZWOControlCaps> ZWOSDKWrapper::get_control_caps(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int num_controls = 0;
-    throw_on_error(ASIGetNumOfControls(camera_id, &num_controls), "ASIGetNumOfControls");
-    std::vector<ZWOControlCaps> caps;
-    if (num_controls <= 0) {
-        return caps;
-    }
-    caps.reserve(static_cast<std::size_t>(num_controls));
-    for (int i = 0; i < num_controls; ++i) {
-        ASI_CONTROL_CAPS sdk_caps{};
-        throw_on_error(ASIGetControlCaps(camera_id, i, &sdk_caps), "ASIGetControlCaps");
-        auto mapped = to_control_type(sdk_caps.ControlType);
-        if (!mapped.has_value()) {
-            continue;
+    return pimpl_->table_.call(camera_id, [&] {
+        int num_controls = 0;
+        throw_on_error(ASIGetNumOfControls(camera_id, &num_controls), "ASIGetNumOfControls");
+        std::vector<ZWOControlCaps> caps;
+        if (num_controls <= 0) {
+            return caps;
         }
-        ZWOControlCaps caps_entry;
-        caps_entry.type = mapped.value();
-        caps_entry.name = sdk_caps.Name;
-        caps_entry.description = sdk_caps.Description;
-        caps_entry.max_value = sdk_caps.MaxValue;
-        caps_entry.min_value = sdk_caps.MinValue;
-        caps_entry.default_value = sdk_caps.DefaultValue;
-        caps_entry.is_auto_supported = (sdk_caps.IsAutoSupported == ASI_TRUE);
-        caps_entry.is_writable = (sdk_caps.IsWritable == ASI_TRUE);
-        caps.push_back(std::move(caps_entry));
-    }
-    return caps;
+        caps.reserve(static_cast<std::size_t>(num_controls));
+        for (int i = 0; i < num_controls; ++i) {
+            ASI_CONTROL_CAPS sdk_caps{};
+            throw_on_error(ASIGetControlCaps(camera_id, i, &sdk_caps), "ASIGetControlCaps");
+            auto mapped = to_control_type(sdk_caps.ControlType);
+            if (!mapped.has_value()) {
+                continue;
+            }
+            ZWOControlCaps caps_entry;
+            caps_entry.type = mapped.value();
+            caps_entry.name = sdk_caps.Name;
+            caps_entry.description = sdk_caps.Description;
+            caps_entry.max_value = sdk_caps.MaxValue;
+            caps_entry.min_value = sdk_caps.MinValue;
+            caps_entry.default_value = sdk_caps.DefaultValue;
+            caps_entry.is_auto_supported = (sdk_caps.IsAutoSupported == ASI_TRUE);
+            caps_entry.is_writable = (sdk_caps.IsWritable == ASI_TRUE);
+            caps.push_back(std::move(caps_entry));
+        }
+        return caps;
+    });
 }
 
 bool ZWOSDKWrapper::get_control_value(int camera_id, ZWOControlType type, long& value, bool& is_auto) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    ASI_BOOL auto_flag = ASI_FALSE;
-    ASI_ERROR_CODE code = ASIGetControlValue(camera_id, to_asi_control_type(type), &value, &auto_flag);
-    if (code != ASI_SUCCESS) {
-        return false;
-    }
-    is_auto = (auto_flag == ASI_TRUE);
-    return true;
+    return pimpl_->table_.call(camera_id, [&] {
+        ASI_BOOL auto_flag = ASI_FALSE;
+        const ASI_ERROR_CODE code = ASIGetControlValue(camera_id, to_asi_control_type(type), &value, &auto_flag);
+        if (code != ASI_SUCCESS) {
+            return false;
+        }
+        is_auto = (auto_flag == ASI_TRUE);
+        return true;
+    });
 }
 
 void ZWOSDKWrapper::set_control_value(int camera_id, ZWOControlType type, long value, bool is_auto) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    ASI_BOOL auto_flag = is_auto ? ASI_TRUE : ASI_FALSE;
-    throw_on_error(ASISetControlValue(camera_id, to_asi_control_type(type), value, auto_flag), "ASISetControlValue");
+    pimpl_->table_.call(camera_id, [&] {
+        ASI_BOOL auto_flag = is_auto ? ASI_TRUE : ASI_FALSE;
+        throw_on_error(ASISetControlValue(camera_id, to_asi_control_type(type), value, auto_flag),
+                       "ASISetControlValue");
+    });
 }
 
 ZWOROIFormat ZWOSDKWrapper::get_roi_format(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int width = 0;
-    int height = 0;
-    int bin = 1;
-    ASI_IMG_TYPE img_type = ASI_IMG_RAW8;
-    throw_on_error(ASIGetROIFormat(camera_id, &width, &height, &bin, &img_type), "ASIGetROIFormat");
-    ZWOROIFormat format;
-    format.width = width;
-    format.height = height;
-    format.bin = bin;
-    format.image_type = from_asi_image_type(img_type);
-    return format;
+    return pimpl_->table_.call(camera_id, [&] {
+        int width = 0;
+        int height = 0;
+        int bin = 1;
+        ASI_IMG_TYPE img_type = ASI_IMG_RAW8;
+        throw_on_error(ASIGetROIFormat(camera_id, &width, &height, &bin, &img_type), "ASIGetROIFormat");
+        ZWOROIFormat format;
+        format.width = width;
+        format.height = height;
+        format.bin = bin;
+        format.image_type = from_asi_image_type(img_type);
+        return format;
+    });
 }
 
 void ZWOSDKWrapper::set_roi_format(int camera_id, int width, int height, int bin, ZWOImageType type) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(ASISetROIFormat(camera_id, width, height, bin, to_asi_image_type(type)), "ASISetROIFormat");
+    pimpl_->table_.call(camera_id, [&] {
+        throw_on_error(ASISetROIFormat(camera_id, width, height, bin, to_asi_image_type(type)), "ASISetROIFormat");
+    });
 }
 
 ZWOStartPos ZWOSDKWrapper::get_start_pos(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int start_x = 0;
-    int start_y = 0;
-    throw_on_error(ASIGetStartPos(camera_id, &start_x, &start_y), "ASIGetStartPos");
-    return ZWOStartPos{start_x, start_y};
+    return pimpl_->table_.call(camera_id, [&] {
+        int start_x = 0;
+        int start_y = 0;
+        throw_on_error(ASIGetStartPos(camera_id, &start_x, &start_y), "ASIGetStartPos");
+        return ZWOStartPos{start_x, start_y};
+    });
 }
 
 void ZWOSDKWrapper::set_start_pos(int camera_id, int start_x, int start_y) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(ASISetStartPos(camera_id, start_x, start_y), "ASISetStartPos");
+    pimpl_->table_.call(camera_id,
+                        [&] { throw_on_error(ASISetStartPos(camera_id, start_x, start_y), "ASISetStartPos"); });
 }
 
 void ZWOSDKWrapper::start_exposure(int camera_id, bool is_dark) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    ASI_BOOL dark_flag = is_dark ? ASI_TRUE : ASI_FALSE;
-    throw_on_error(ASIStartExposure(camera_id, dark_flag), "ASIStartExposure");
+    pimpl_->table_.call(camera_id, [&] {
+        ASI_BOOL dark_flag = is_dark ? ASI_TRUE : ASI_FALSE;
+        throw_on_error(ASIStartExposure(camera_id, dark_flag), "ASIStartExposure");
+    });
 }
 
 void ZWOSDKWrapper::stop_exposure(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(ASIStopExposure(camera_id), "ASIStopExposure");
+    pimpl_->table_.call(camera_id, [&] { throw_on_error(ASIStopExposure(camera_id), "ASIStopExposure"); });
 }
 
 ZWOExposureStatus ZWOSDKWrapper::get_exposure_status(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    ASI_EXPOSURE_STATUS status = ASI_EXP_IDLE;
-    throw_on_error(ASIGetExpStatus(camera_id, &status), "ASIGetExpStatus");
-    return from_asi_exposure_status(status);
+    return pimpl_->table_.call(camera_id, [&] {
+        ASI_EXPOSURE_STATUS status = ASI_EXP_IDLE;
+        throw_on_error(ASIGetExpStatus(camera_id, &status), "ASIGetExpStatus");
+        return from_asi_exposure_status(status);
+    });
 }
 
 void ZWOSDKWrapper::get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) {
-    // Do NOT hold the wrapper mutex — ASIGetDataAfterExp is a blocking USB
-    // bulk download that can take seconds on large sensors, and holding the
-    // global lock across it would stall every other SDK call (stop_exposure,
-    // status polls, other cameras). Same exemption as the Player One /
-    // ToupTek blocking image waits: the driver publishes disconnected and
-    // stops the exposure before closing, so the worst case for a racing
-    // disconnect is an SDK error on a closed id — not a hang.
-    throw_on_error(ASIGetDataAfterExp(camera_id, buffer, buffer_size), "ASIGetDataAfterExp");
+    // ASIGetDataAfterExp is a blocking USB bulk download that can take seconds on large sensors, and holding the
+    // table's mutex across it would stall every other SDK call (stop_exposure, status polls, other cameras). The
+    // table checks the link, then runs this with no lock held; a removal code retires the open at once, but the
+    // close waits for this download to return (call_unserialised()), so a loss never closes the id under it.
+    pimpl_->table_.call_unserialised(
+        camera_id, [&] { throw_on_error(ASIGetDataAfterExp(camera_id, buffer, buffer_size), "ASIGetDataAfterExp"); });
 }
 
 void ZWOSDKWrapper::pulse_guide_on(int camera_id, ZWOGuideDirection direction) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(ASIPulseGuideOn(camera_id, to_asi_guide_direction(direction)), "ASIPulseGuideOn");
+    pimpl_->table_.call(camera_id, [&] {
+        throw_on_error(ASIPulseGuideOn(camera_id, to_asi_guide_direction(direction)), "ASIPulseGuideOn");
+    });
 }
 
 void ZWOSDKWrapper::pulse_guide_off(int camera_id, ZWOGuideDirection direction) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(ASIPulseGuideOff(camera_id, to_asi_guide_direction(direction)), "ASIPulseGuideOff");
+    pimpl_->table_.call(camera_id, [&] {
+        throw_on_error(ASIPulseGuideOff(camera_id, to_asi_guide_direction(direction)), "ASIPulseGuideOff");
+    });
 }
 
 std::string ZWOSDKWrapper::get_serial_number(int camera_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    ASI_SN sn{};
-    throw_on_error(ASIGetSerialNumber(camera_id, &sn), "ASIGetSerialNumber");
-    std::ostringstream oss;
-    for (unsigned char byte : sn.id) {
-        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
-    }
-    return oss.str();
+    return pimpl_->table_.call(camera_id, [&] { return read_serial_number(camera_id); });
 }
 
 std::string ZWOSDKWrapper::get_sdk_version() {

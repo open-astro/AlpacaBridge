@@ -87,8 +87,8 @@ TEST_CASE("ZWO camera catalog carries USB Limit without persisting an implicit d
     result.driver->set_connected(true);
     long value = 0;
     bool is_auto = true;
-    REQUIRE(rig.sdk.get_control_value(rig.sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value,
-                                      is_auto));
+    REQUIRE(rig.sdk.raw_get_control_value(rig.sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value,
+                                          is_auto));
     CHECK(value == (config.find_value("usbBandwidth") ? 65 : 40));
     CHECK_FALSE(is_auto);
 }
