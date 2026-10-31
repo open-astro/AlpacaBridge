@@ -12,8 +12,8 @@ Related decision: [LAN surface threat model](../../docs/decisions/0007-lan-surfa
   (empty result, no error), which presented as "hotspot shows off while
   broadcasting". Use a dedicated "o"-typed reader.
 - Shared-mode (hotspot) activation needs polkit
-  `org.freedesktop.NetworkManager.wifi.share.protected`/`.share.open` in
-  addition to `network-control` — the failure ("Not authorized to share
+  `org.freedesktop.NetworkManager.wifi.share.protected` in
+  addition (never `.share.open`: the server never starts an open hotspot, #1715) to `network-control` — the failure ("Not authorized to share
   connections via wifi") only appears at ActivateConnection time and was
   found by live-testing the endpoint, not by review.
 - NM `Update()` with a `802-11-wireless-security` section declaring

@@ -158,6 +158,25 @@ void throw_bus(const char* what, int r, const sd_bus_error* err = nullptr) {
 // Defined with the other nl80211 helpers below.
 std::uint32_t nl80211_iftype(const std::string& ifname);
 
+// The hotspot profile among the saved wifi connections: prefer the well-known
+// id (kApProfileId, created by the OpenAstro imagers), falling back to the
+// first ap-mode profile so a renamed hotspot is still manageable. Used by
+// get_ap/set_ap/delete so they can never disagree about which profile is
+// "the" hotspot (PR #198 review round 2).
+std::pair<std::string, nlohmann::json> pick_ap_profile(const std::vector<WifiProfileBackend::Connection>& connections) {
+    std::pair<std::string, nlohmann::json> fallback;
+    for (const auto& [path, s] : connections) {
+        if (!s.contains("802-11-wireless") || s["802-11-wireless"].value("mode", "") != "ap") {
+            continue;
+        }
+        if (s["connection"].value("id", "") == WifiManager::kApProfileId) {
+            return {path, s};
+        }
+        if (fallback.first.empty()) fallback = {path, s};
+    }
+    return fallback;
+}
+
 // Which wifi device handles client (infrastructure) operations and which
 // hosts the hotspot. On single-radio boards both name the same device; on
 // boards with a dedicated AP-type virtual interface (OPi 4 Pro ap0, ASIAIR
@@ -605,24 +624,7 @@ struct WifiManager::BusHandle final : WifiProfileBackend {
         return out;
     }
 
-    // The hotspot profile: prefer the well-known id (kApProfileId, created by
-    // the OpenAstro imagers), falling back to the first ap-mode profile so a
-    // renamed hotspot is still manageable. Used by get_ap/set_ap/delete so
-    // they can never disagree about which profile is "the" hotspot
-    // (PR #198 review round 2).
-    std::pair<std::string, nlohmann::json> ap_profile() {
-        std::pair<std::string, nlohmann::json> fallback;
-        for (auto& [path, s] : wifi_connections()) {
-            if (!s.contains("802-11-wireless") || s["802-11-wireless"].value("mode", "") != "ap") {
-                continue;
-            }
-            if (s["connection"].value("id", "") == WifiManager::kApProfileId) {
-                return {path, s};
-            }
-            if (fallback.first.empty()) fallback = {path, s};
-        }
-        return fallback;
-    }
+    std::pair<std::string, nlohmann::json> ap_profile() { return pick_ap_profile(wifi_connections()); }
 
     // Assign wifi devices to roles. Boards with a dedicated AP-type virtual
     // interface run hotspot and client on separate interfaces concurrently;
@@ -1311,7 +1313,16 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
         }
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    ensure_bus_locked();
+    // An empty passphrase keeps the stored secret only on a secured profile;
+    // otherwise it would create or start an open, NAT-sharing hotspot (#1715).
+    // Turning an existing open hotspot off stays allowed.
+    if (passphrase.empty()) {
+        const auto [profile_path, profile] = pick_ap_profile(profile_backend_locked().wifi_connections());
+        if (!profile.contains("802-11-wireless-security") && (enabled || profile_path.empty())) {
+            throw WifiError("Passphrase must be 8-63 characters for a hotspot without a stored passphrase");
+        }
+    }
+    ensure_bus_locked();  // the rest needs the real bus; refuses an injected test backend
     auto roles = bus_->device_roles();
     if (roles.count == 0) throw WifiError("no wifi device");
     const std::string& dev = roles.ap_path;
