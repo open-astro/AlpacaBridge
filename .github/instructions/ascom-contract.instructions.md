@@ -283,7 +283,7 @@ notes carry only the pin map and per-board deltas.
   flag, never the wrapper's `is_open()`. A new GPIO power-port driver implements all of it.
 - **Never power-cycle on disconnect**: `close()` releases the lines without driving a
   boolean line low; a PWM port first stops its worker and drives a defined steady
-  level (duty > 0 ⇒ high). Users who want a port off must set it off in the client
+  level (duty > 0 ⇒ high); a port the worker never drove is left alone. Users who want a port off must set it off in the client
   before disconnecting. Do NOT add a drive-low-on-close path without making it opt-in
   config — it would silently flip the policy for everyone who upgrades. Documented
   user-facing in [`AlpacaCore/PowerPorts.md`](../../AlpacaCore/PowerPorts.md).
