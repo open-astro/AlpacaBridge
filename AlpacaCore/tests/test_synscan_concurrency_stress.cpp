@@ -342,10 +342,9 @@ TEST_CASE("SynScan telescope - handset muted and severed mid-storm, then relinke
     CHECK(alpacacore::test::settle_connected(*driver, false, 5s));
 }
 
-// set_connected(true) releases mutex_ before start_status_poller() (the poll slot starts without the lock held), so
-// a concurrent set_connected(false) can land between the unlock and the start. Whichever way the race goes the
-// driver must end consistent: connected means a live status poll, disconnected means none (a late-started poll
-// finds connected_ false on its first tick and polls nothing).
+// set_connected() calls are serialised on transition_mutex_, so a concurrent set_connected(false) lands before the
+// connect starts or after it has finished. Whichever way the race goes the driver must end consistent: connected
+// means a live status poll, disconnected means none.
 TEST_CASE("SynScan telescope - connect racing disconnect leaves the status poll matching Connected",
           "[synscan][telescope][stress]") {
     using namespace std::chrono_literals;
