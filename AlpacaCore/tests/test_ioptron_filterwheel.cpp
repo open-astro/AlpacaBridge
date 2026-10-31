@@ -698,7 +698,8 @@ TEST_CASE("iEFW Link - a loss after failed reads is NotConnected and later calls
 // A loss mid-move: the move latch (Position -1) from before the loss is not carried into the reconnected session.
 // Falsified by: ioptron_filterwheel_driver.cpp:141 the connect without teardown_locked() (Connected reads true
 // while the reconnect is still reading the wheel's firmware: the raw flag from before the loss and the fresh link).
-// The latch reset itself is not caught by one mutation: teardown_locked() and publish_connect_state() each clear it.
+// Falsified by: ioptron_filterwheel_driver.cpp:441 publish_connect_state() without `moving_ = false;` (the reconnected
+// wheel's Position reads -1, the stale move latch, instead of its slot 2).
 TEST_CASE("iEFW Link - a Connect over a lost link mid-move reopens without a Disconnect and drops the move latch",
           "[ioptron][filterwheel][unit][fake][link-lost]") {
     alpacacore::test::FakeIoptronIeaf fake;
@@ -765,7 +766,7 @@ TEST_CASE("iEFW Link - a cable pulled during the connect handshake fails the Con
 }
 
 // The firmware and stored-offset reads after the handshake log a failure and carry on; a hangup there is a loss.
-// Falsified by: ioptron_filterwheel_driver.cpp:427 publish_connect_state() without the link_alive() check (the
+// Falsified by: ioptron_filterwheel_driver.cpp:426 publish_connect_state() without the link_alive() check (the
 // Connect succeeds onto a released port: no error, Connected false, the loss reason kept).
 TEST_CASE("iEFW Link - a cable pulled while the connect reads the firmware fails the Connect and latches nothing",
           "[ioptron][filterwheel][unit][fake][link-lost]") {

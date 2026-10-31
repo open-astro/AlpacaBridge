@@ -135,8 +135,8 @@ public:
         }
 
         if (connected) {
-            // Start clean: after a lost link the raw flag, the firmware and a move
-            // latch from before the loss are still set, and Connected must not read
+            // Start clean: after a lost link the raw flag and the firmware
+            // from before the loss are still set, and Connected must not read
             // true while the reconnect is still reading the wheel.
             teardown_locked();
             {
@@ -351,7 +351,6 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             firmware_.clear();
-            moving_ = false;
             connected_.store(false);
         }
         status_cache_.reset();
@@ -436,6 +435,9 @@ private:
         if (seed) {
             focus_offsets_ = std::move(stored);
         }
+        // The move latch from before a loss or a Disconnect ends here, under the I/O lock: a set_position that
+        // won the lock before the teardown's connected_ flag was seen can still set it after the teardown, but
+        // none can run once the handshake holds the lock. Position is not readable while disconnected.
         moving_ = false;
     }
 
