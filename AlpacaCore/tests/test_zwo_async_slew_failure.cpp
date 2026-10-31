@@ -25,11 +25,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -817,10 +821,10 @@ TEST_CASE("ZWO async - a MoveAxis during GOTO setup owns the error slot (#575)",
     driver->set_connected(false);
 }
 
-// open-astro#720: every initiator that commands the mount fences a GOTO setup
-// thread that is still writing the target (cancel AND join) before it sends
-// its own command. The GOTO here would be accepted, so a ":MS" on the wire is
-// the stale GOTO overriding the newer command.
+// open-astro#720: every initiator that commands the mount fences a GOTO body
+// that is still writing the target (revoke its claim, wait for the call in
+// flight) before it sends its own command. The GOTO here would be accepted, so
+// a ":MS" on the wire is the stale GOTO overriding the newer command.
 TEST_CASE("ZWO async - Park during GOTO setup cancels the pending GOTO (#720)",
           "[zwo][telescope][async][slewfailure]") {
     Rig rig;
@@ -1120,7 +1124,9 @@ TEST_CASE("ZWO async - Disconnect during a slew sends no stop and leaves the mou
 // open-astro#720 through the send gate: Park or a jog that lands while the GOTO body waits for the mount's ":Sr" reply
 // waits for that one exchange, then sends its own command, and nothing the old body would send follows it. A PIN: the
 // join on the thread-based code gives the same order and the gate must keep it.
-// Falsified by: removing the goto_cancel_ check before set_target_dec (the fenced body sends ":Sd").
+// Falsified by: zwo_telescope_driver.cpp send_goto_locked(): dropping both ownership terms of the gate (goto_claim_ ==
+// claim and ctx.stop_reason() == StopReason::None, leaving connected_), so the fenced body still sends ":Sd" and
+// ":MS". Either term alone refuses ":Sd": the fence zeroes the claim and also cancels the slot.
 TEST_CASE("ZWO async - Park or a jog during a held GOTO target write waits one exchange and sends after it (PIN)",
           "[zwo][telescope][async][operation-slot]") {
     const bool park = GENERATE(true, false);
@@ -1167,6 +1173,200 @@ TEST_CASE("ZWO async - Park or a jog during a held GOTO target write waits one e
     CHECK(mount.count(":Sd") == 0);
     CHECK(mount.count(":MS") == 0);
     if (!park) REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
+    driver->set_connected(false);
+}
+
+namespace {
+
+// A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
+struct Latch {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool open = false;
+
+    void block() {
+        std::unique_lock<std::mutex> lock(mutex);
+        entered = true;
+        cv.notify_all();
+        static_cast<void>(cv.wait_for(lock, std::chrono::seconds(2), [&] { return open; }));
+    }
+    bool wait_entered() {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
+    }
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            open = true;
+        }
+        cv.notify_all();
+    }
+};
+
+std::thread refuse_thread(std::function<void()>) {
+    throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+}
+
+}  // namespace
+
+// open-astro#720, the drain: a GOTO call the send gate has counted (here ":Sr", stopped by the seam after the count
+// and before the send) lands before the fencing command, which waits for it instead of overtaking it.
+// Falsified by: zwo_telescope_driver.cpp fence_goto(): removing the goto_send_cv_ drain (the wait for
+// goto_sends_in_flight_ == 0), so ":hP" reaches the mount while the counted ":Sr" is still unsent.
+TEST_CASE("ZWO async - a fence waits for the GOTO call the send gate has counted",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*driver, [&](std::string_view label) {
+        if (label == ":Sr") latch.block();
+    });
+    rig.connect();
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(latch.wait_entered());
+    auto park = std::async(std::launch::async, [&] { driver->park(); });
+    const bool sent_while_counted = mount.wait_for_count(":hP", 1, std::chrono::milliseconds(200));
+    latch.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the latch
+    const bool returned = park.wait_for(kInitiatorBudget) == std::future_status::ready;
+    park.wait();
+    CHECK_FALSE(sent_while_counted);
+    CHECK(returned);
+
+    const auto all = mount.commands();
+    const auto sr_at = std::find_if(all.begin(), all.end(), [](const std::string& c) { return c.starts_with(":Sr"); });
+    const auto park_at = std::find(all.begin(), all.end(), std::string(":hP"));
+    REQUIRE(sr_at != all.end());
+    REQUIRE(park_at != all.end());
+    CHECK(sr_at < park_at);
+    CHECK(mount.count(":Sd") == 0);
+    CHECK(mount.count(":MS") == 0);
+    driver->set_connected(false);
+}
+
+// decision 0006 "Thread refusal": a second GOTO whose body the slot cannot start supersedes the first (held on ":Sr")
+// and publishes the stopped state itself: Slewing false, and the poll it paused reads status again.
+// Falsified by: zwo_telescope_driver.cpp slew_to_target_async(): removing the poll_pause_ release in the refused-start
+// catch, so the poll stays paused and ":GU" never grows.
+TEST_CASE("ZWO async - a refused GOTO start publishes the stopped state", "[zwo][telescope][async][operation-slot]") {
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    int spawns = 0;
+    alpacacore::vendor::zwo::set_goto_spawn_for_testing(*driver, [&](std::function<void()> body) {
+        return ++spawns == 1 ? std::thread(std::move(body)) : refuse_thread(std::move(body));
+    });
+    rig.connect();
+
+    mount.hold_reply(":Sr");
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
+    bool refused = false;
+    try {
+        driver->slew_to_coordinates_async(6.5, 30.0);
+    } catch (const alpacacore::AlpacaException& ex) {
+        refused = ex.error_code() == alpacacore::AlpacaError::DriverException;
+    }
+    mount.release();
+    CHECK(refused);
+
+    const int status = mount.count(":GU");
+    rig.tick();
+    CHECK(mount.wait_for_count(":GU", status + 1, std::chrono::seconds(5)));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK(mount.count(":MS") == 0);
+    driver->set_connected(false);
+}
+
+// Round 4 finding 1 (b): a redundant Connected=true that lands while a GOTO's start is being refused leaves the
+// GOTO's claim alone, so the refusal still publishes the stopped state.
+// Falsified by: zwo_telescope_driver.cpp set_connected(): the connect reset (reset_session_state_for_connect) setting
+// goto_claim_ = 0, so the refusal skips its publish and Slewing stays true.
+TEST_CASE("ZWO async - a redundant Connected=true during a refused GOTO start keeps the stopped-state publish",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_goto_spawn_for_testing(*driver, [&](std::function<void()> body) {
+        latch.block();
+        return refuse_thread(std::move(body));
+    });
+    rig.connect();
+
+    auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates_async(5.5, 20.0); });
+    REQUIRE(latch.wait_entered());
+    driver->set_connected(true);
+    latch.release();
+    bool refused = false;
+    try {
+        slew.get();
+    } catch (const alpacacore::AlpacaException& ex) {
+        refused = ex.error_code() == alpacacore::AlpacaError::DriverException;
+    }
+    CHECK(refused);
+
+    const int status = mount.count(":GU");
+    rig.tick();
+    CHECK(mount.wait_for_count(":GU", status + 1, std::chrono::seconds(5)));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK(mount.count(":Sr") == 0);
+    driver->set_connected(false);
+}
+
+// A GOTO fenced before ":MS" leaves no paused poll behind: the fence releases the pause the slew set, because the
+// fenced body no longer owns the driver state and writes none of it.
+// Falsified by: zwo_telescope_driver.cpp fence_goto(): removing poll_pause_.store(false), so ":GU" never grows.
+TEST_CASE("ZWO async - AbortSlew during a held GOTO target write resumes the poll",
+          "[zwo][telescope][async][operation-slot]") {
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    mount.hold_reply(":Sr");
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
+    auto abort = std::async(std::launch::async, [&] { driver->abort_slew(); });
+    static_cast<void>(wait_until([&] { return mount.count(":Q") > 0; }, 200));
+    mount.release();
+    const bool returned = abort.wait_for(kInitiatorBudget) == std::future_status::ready;
+    abort.wait();
+    CHECK(returned);
+
+    const int status = mount.count(":GU");
+    rig.tick();
+    CHECK(mount.wait_for_count(":GU", status + 1, std::chrono::seconds(5)));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK(mount.count(":MS") == 0);
+    driver->set_connected(false);
+}
+
+// The e3 stop goes through the send gate too: a jog that fences a GOTO whose ":MS" is on the wire waits for that
+// exchange; the mount answers e3 (busy), and the fenced body sends no ":Q" on top of the jog. A PIN: the thread-based
+// code checked its cancel flag before the stop.
+// Falsified by: zwo_telescope_driver.cpp run_goto(): the e3 path calling protocol.abort_motion() directly instead of
+// through send(":Q", ...), so a ":Q" follows the jog.
+TEST_CASE("ZWO async - a GOTO fenced while its :MS is answered e3 sends no stop (PIN)",
+          "[zwo][telescope][async][operation-slot]") {
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    mount.reject_goto("e3", 1);
+    mount.delay_next(":MS", std::chrono::milliseconds(150));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return mount.count(":MS") > 0; }, 5000));
+    std::chrono::microseconds elapsed{0};
+    REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 1.0); }));
+    CHECK(elapsed < kInitiatorBudget);
+    CHECK_FALSE(wait_until([&] { return mount.count(":Q") > 0; }, 500));
+    CHECK(mount.count(":MS") == 1);
+    CHECK(jog_count(mount) == 1);
+    REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
     driver->set_connected(false);
 }
 
