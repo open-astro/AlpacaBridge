@@ -18,7 +18,7 @@ logging:
   file_enabled: true  # Write logs to disk in addition to stderr. Env: ALPACAHTTP_FILE_LOGGING
   directory: /var/log/AlpacaBridge  # Daily files: alpacabridge-YYYY-MM-DD.log. Env: ALPACAHTTP_LOG_DIRECTORY. Falls back to $XDG_STATE_HOME/AlpacaBridge/logs (or ~/.local/state/AlpacaBridge/logs) if not writable.
   retention_days: 90  # Auto-delete daily files older than this. 0 = keep forever. Env: ALPACAHTTP_LOG_RETENTION_DAYS
-  max_file_size_mb: 10  # Cap on one day's log file, in MiB. At the cap a marker line is written and file logging pauses until the next day. 0 = no cap. Keep it at or below 10 so the log viewer and archive can read the whole file. Env: ALPACAHTTP_LOG_MAX_FILE_SIZE_MB
+  max_file_size_mb: 5  # Cap on one log file, in MiB. At the cap the file rotates to alpacabridge-YYYY-MM-DD.1.log (up to .19 kept per day, 100 MiB/day at 5) and logging continues; no line is dropped. 0 = no cap. At 5 or below the web viewer shows each file inline; above 10 the viewer and archive cannot read a file. Env: ALPACAHTTP_LOG_MAX_FILE_SIZE_MB
 
 # Server information
 server:
