@@ -2019,7 +2019,7 @@ public:
         sync_to_pair(target_ra, target_dec, "SyncToTarget");
     }
 
-    // sync_to_target() handles ensure_not_parked and reset_position_offsets.
+    // Syncs to the given pair; callers validate it (and, for SyncToCoordinates, publish it) first.
     void sync_to_pair(double target_ra, double target_dec, const char* operation) {
         check_connected();
         ensure_not_parked(operation);
