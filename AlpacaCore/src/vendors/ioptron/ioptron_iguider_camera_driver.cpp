@@ -420,6 +420,7 @@ public:
     }
 
     void stop_exposure() override {
+        ensure_connected();
         throw AlpacaException("iGuider cannot stop an exposure early (CanStopExposure is false)",
                               AlpacaError::MethodNotImplemented);
     }
@@ -496,6 +497,7 @@ public:
     }
 
     void pulse_guide(int, int) override {
+        ensure_connected();
         throw AlpacaException("iGuider has no ST-4 port; guide through the mount (CanPulseGuide is false)",
                               AlpacaError::MethodNotImplemented);
     }

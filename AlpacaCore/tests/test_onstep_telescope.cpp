@@ -195,17 +195,13 @@ TEST_CASE("OnStep Telescope Driver - State machine", "[onstep][telescope][unit]"
 TEST_CASE("OnStep Telescope Driver - Unsupported methods", "[onstep][telescope][unit]") {
     auto driver = make_driver(0);
 
-    // Guide rate and pier side are fixed/read-only on this driver; the
-    // setters must report PropertyNotImplemented, not a generic driver error
-    // or a silent no-op (ConformU distinguishes "not implemented" from
-    // "driver error").
-    require_alpaca_error([&]() { driver->set_guide_rate({0.001, 0.001}); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->set_right_ascension_rate(1.0); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->sync_to_alt_az(45.0, 90.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    // Guide rate and pier side are fixed/read-only on this driver. While disconnected the connection
+    // check comes first (#1919), not a generic driver error or a silent no-op.
+    require_alpaca_error([&]() { driver->set_guide_rate({0.001, 0.001}); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_right_ascension_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_alt_az(45.0, 90.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_tracking_rate(1); }, alpacacore::AlpacaError::PropertyNotImplemented);
 }
 
@@ -1901,6 +1897,23 @@ TEST_CASE("OnStep Telescope Driver - Park during a MoveAxis stops the move and p
     (void)mount->clock.wait_for_woken_settled(std::chrono::seconds(5));
     CHECK(mount->count(":Me#") == moves);  // the re-send ended with the move
 
+    driver->set_connected(false);
+}
+
+// Connected, the settings OnStep does not offer keep their capability answers (disconnected: NotConnected, above).
+TEST_CASE("OnStep Telescope Driver - connected unsupported setters keep their NotImplemented answers",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    namespace AlpacaError = alpacacore::AlpacaError;
+    require_alpaca_error([&]() { driver->set_guide_rate({0.001, 0.001}); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->set_side_of_pier(0); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->set_declination_rate(1.0); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->set_right_ascension_rate(1.0); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->sync_to_alt_az(45.0, 90.0); }, AlpacaError::MethodNotImplemented);
     driver->set_connected(false);
 }
 

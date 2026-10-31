@@ -165,9 +165,9 @@ struct ContractEntry {
     // or "assumption", with the reference. The sweep requires one of those words.
     const char* source;
     // Switch only (with_switch_caps): what MaxSwitch and CanWrite/CanAsync do while disconnected, where that
-    // is read from, and a writable id for the set_switch probe. A writable id is one whose writability the
-    // driver checks BEFORE the connection (iOptron, ToupTek StellaVita: a read-only port would answer
-    // NotImplemented) or that the connected device reports writable (the rest check the connection first).
+    // is read from, and a writable id for the set_switch probe. A writable id is one the connected device
+    // reports writable; every driver checks the connection before writability, so a read-only id answers
+    // NotConnected while disconnected too (the sweep also probes id 0).
     DisconnectedRead switch_max_disconnected = DisconnectedRead::Static;
     DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
     int switch_writable_id = -1;

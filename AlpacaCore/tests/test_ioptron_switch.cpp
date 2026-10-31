@@ -180,21 +180,34 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Unsupported methods", "[ioptro
     auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(
         0, alpacacore::vendor::ioptron::default_imate_powerbox_config());
 
-    // The DC3 pass-through is read-only: writes must throw NotImplemented, and
-    // (unlike a writable port) this is a static property independent of the
-    // connection state.
-    require_alpaca_error([&]() { driver->set_switch(0, false); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->set_switch_value(0, 0.0); }, alpacacore::AlpacaError::NotImplemented);
-
-    // Asynchronous mutation is not implemented for any port (CanAsync == false).
-    require_alpaca_error([&]() { driver->set_async(1, true); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->set_async_value(1, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+    // The DC3 pass-through is read-only and asynchronous mutation is not implemented for any port
+    // (CanAsync == false). While disconnected the connection check comes first (#1919).
+    require_alpaca_error([&]() { driver->set_switch(0, false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_switch_value(0, 0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_async(1, true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_async_value(1, 1.0); }, alpacacore::AlpacaError::NotConnected);
 
     // Action/Command methods are unsupported on this device.
     require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->command_bool("test", false); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->command_string("test", false); }, alpacacore::AlpacaError::NotImplemented);
+}
+
+// Connected, the read-only DC3 port rejects writes and no port has async control: NotImplemented (disconnected,
+// NotConnected comes first: the case above).
+TEST_CASE("iOptron iMate PowerBox Switch Driver - connected read-only and async writes are NotImplemented",
+          "[ioptron][switch][unit]") {
+    alpacacore::test::FakeIoptronGpio gpio;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(
+        0, alpacacore::vendor::ioptron::default_imate_powerbox_config(), gpio);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&]() { driver->set_switch(0, false); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_switch_value(0, 0.0); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_async(1, true); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_async_value(1, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+    driver->set_connected(false);
 }
 
 // 9. Constructor rejects an empty port configuration.

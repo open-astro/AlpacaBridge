@@ -304,9 +304,9 @@ notes carry only the pin map and per-board deltas.
   against the stock firmware's actual value or on real hardware — never re-derived
   from bench psychoacoustics: ASIAIR Pro/CM4 1 kHz, ASIAIR Plus RK3568 50 Hz, iMate
   50 Hz, StellaVita 100 Hz.
-- **Read-only pass-through ports** (e.g. iMate DC3): writes throw `NotImplemented`
-  *before* the connection check, so the static capability holds while disconnected
-  and is unit-testable without hardware.
+- **Read-only pass-through ports** (e.g. iMate DC3): writes check the connection first
+  (a disconnected write answers `NotConnected`), then throw `NotImplemented`; the
+  capability is unit-tested on a connected fake.
 
 ### Platform 7 InterfaceVersion + DeviceState
 

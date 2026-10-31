@@ -874,10 +874,12 @@ public:
     }
 
     bool get_fast_readout() const override {
+        ensure_connected();
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
 
     void set_fast_readout(bool) override {
+        ensure_connected();
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
 
@@ -931,6 +933,7 @@ public:
     }
 
     std::vector<std::string> get_gains() const override {
+        ensure_connected();
         throw AlpacaException("Named gain list not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -1113,6 +1116,7 @@ public:
     }
 
     std::vector<std::string> get_offsets() const override {
+        ensure_connected();
         throw AlpacaException("Named offset list not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -1347,10 +1351,12 @@ public:
     void set_start_y(int start_y) override { set_start_pos_locked(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
     void set_sub_exposure_duration(double) override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
