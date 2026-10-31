@@ -12,8 +12,8 @@
 
 #pragma once
 
-// Helpers every driver test file shares. Free functions, no state; a file
-// includes this header instead of keeping its own copy.
+// Helpers and a polled-driver rig every driver test file shares: free functions, plus PolledRig;
+// a file includes this header instead of keeping its own copy.
 
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/telescope_driver.h>
@@ -23,7 +23,9 @@
 #include <cstdio>
 #include <ctime>
 #include <functional>
+#include <memory>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -74,6 +76,52 @@ inline bool connect_and_park(alpacacore::AlpacaDriver& driver, FakeTaskClock& cl
     driver.set_connected(true);
     return clock.wait_for_waiters(1, bound);
 }
+
+// The poll period and the real-time bound a PolledRig ticks and parks with.
+struct RigTiming {
+    std::chrono::nanoseconds period;
+    std::chrono::milliseconds bound;
+};
+
+// A fake clock, a fake and the driver under test, built in that order and destroyed in reverse (the driver goes
+// first). A thin wrapper over connect_and_park(), tick() and require_alpaca_error(): it adds no rendezvous logic.
+// The factory builds the driver without connecting it, so a case can set up the fake before connect().
+template <typename Fake, typename Driver>
+class PolledRig {
+public:
+    using Factory = std::function<std::unique_ptr<Driver>(Fake&, FakeTaskClock&)>;
+
+    PolledRig(RigTiming timing, Factory make) : timing_(timing), driver_(make(fake_, clock_)) {}
+
+    PolledRig(const PolledRig&) = delete;
+    PolledRig& operator=(const PolledRig&) = delete;
+
+    ~PolledRig() {
+        try {
+            if (driver_ && driver_->get_connected()) driver_->set_connected(false);
+        } catch (...) {  // a destructor must not throw
+        }
+    }
+
+    // connect_and_park(): whether the poll body parked on the clock. REQUIRE(rig.connect()) to fail on a miss.
+    bool connect() { return connect_and_park(*driver_, clock_, timing_.bound); }
+
+    void tick(int n = 1) {
+        for (int i = 0; i < n; ++i) alpacacore::test::tick(clock_, timing_.period, timing_.bound);
+    }
+
+    void expect_error(int code, const std::function<void()>& fn) { require_alpaca_error(fn, code); }
+
+    Fake& fake() { return fake_; }
+    FakeTaskClock& clock() { return clock_; }
+    Driver& driver() { return *driver_; }
+
+private:
+    RigTiming timing_;
+    FakeTaskClock clock_;
+    Fake fake_;
+    std::unique_ptr<Driver> driver_;
+};
 
 // "2026-10-10T21:46:30.626Z" -> system_clock time point. Fails the test case on any other shape.
 inline std::chrono::system_clock::time_point parse_timestamp(const std::string& text) {
