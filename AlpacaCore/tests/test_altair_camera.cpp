@@ -225,10 +225,11 @@ TEST_CASE("Altair Camera Driver - Unsupported members", "[altair][camera][unit]"
     REQUIRE(driver->get_connected());
     // Mono sensor: no Bayer offsets.
     require_alpaca_error([&]() { driver->get_bayer_offset_x(); }, AlpacaError::PropertyNotImplemented);
-    // Uncooled: switching the cooler on is not implemented; off is a no-op.
+    // Uncooled: every CoolerOn and CoolerPower access is not implemented.
     require_alpaca_error([&]() { driver->set_cooler_on(true); }, AlpacaError::NotImplemented);
-    driver->set_cooler_on(false);
-    CHECK(driver->get_cooler_on() == false);
+    require_alpaca_error([&]() { driver->set_cooler_on(false); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { static_cast<void>(driver->get_cooler_on()); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { static_cast<void>(driver->get_cooler_power()); }, AlpacaError::NotImplemented);
     driver->set_connected(false);
 }
 
