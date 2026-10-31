@@ -55,7 +55,7 @@ Symbol: `transition_mutex_`
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | | `util::LockGate` drops `mutex_` per exchange |
 | Player One camera |  | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | partial | #1841 | `mutex_` held across the SDK connect |
 | Player One filter wheel |  | `AlpacaCore/src/vendors/playerone/playerone_filterwheel_driver.cpp` | adopted |  |  |
-| Player One thermal switch | `mutex_` | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | partial | #1839 | no transition or I/O lock; `mutex_` held across the SDK connect |
+| Player One thermal switch |  | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | adopted |  |  |
 | QHY camera |  | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | adopted |  | on the I/O-lock order |
 | QHY CFW3 filter wheel |  | `AlpacaCore/src/vendors/qhy/qhy_cfw3_filterwheel_driver.cpp` | adopted |  |  |
 | QHY filter wheel |  | `AlpacaCore/src/vendors/qhy/qhy_filterwheel_driver.cpp` | adopted |  |  |
