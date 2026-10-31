@@ -2032,7 +2032,9 @@ public:
 
         // Every newer initiator (GOTO, MoveAxis, FindHome, Park, Unpark, AbortSlew) bumps slew_error_epoch_. Once it
         // has moved, a newer command owns the motion and this older Sync must not stop it, unless that command is a
-        // GOTO the mount has not accepted yet: its retry restores its own target.
+        // GOTO the mount has not accepted yet: its retry restores its own target. Only GOTO acceptance is fenced
+        // exactly; MoveAxis, FindHome, Park and Unpark bump the epoch after their wire command, so a check that
+        // lands in that window can still stop them.
         uint64_t sync_epoch = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
