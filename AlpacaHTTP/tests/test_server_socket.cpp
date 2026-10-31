@@ -675,6 +675,87 @@ int main() {
             deadline_server.stop();
         }
 
+        // The send deadline is not the only bound: a peer that makes no
+        // progress for the stall bound (kSocketTimeoutSeconds in production)
+        // is cut off then, long before a distant deadline. Stall 200 ms,
+        // deadline 10 s: the drain must end at EOF within 2 s.
+        {
+            // case: send stall closes a peer that never reads before the deadline
+            Watchdog watchdog(std::chrono::seconds(20), "send stall on a peer that never reads");
+            alpacahttp::Config stall_config;
+            stall_config.set_http_port(0);
+            stall_config.set_discovery_enabled(false);
+            stall_config.set_thread_pool_size(1);
+            alpacahttp::Server stall_server(stall_config);
+            stall_server.set_send_limits_for_test(std::chrono::seconds(10), 4096, std::chrono::milliseconds(200));
+            stall_server.start_async();
+            const auto stall_port = wait_for_bound_port(stall_server, 2000);
+            EXPECT(stall_port != 0);
+
+            int fd = connect_local(stall_port, 4096);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            send_all(fd, image_request);
+            EXPECT(read_response_headers(fd).find("Content-Length: ") != std::string::npos);
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+            timeval drain_timeout{};
+            drain_timeout.tv_sec = 2;
+            EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &drain_timeout, sizeof(drain_timeout)) == 0);
+            std::size_t drained = 0;
+            ssize_t last = 0;
+            std::vector<char> sink(65536);
+            const auto drain_start = std::chrono::steady_clock::now();
+            while ((last = ::recv(fd, sink.data(), sink.size(), 0)) > 0) {
+                drained += static_cast<std::size_t>(last);
+            }
+            EXPECT(last == 0);  // EOF from the server, not our own receive timeout
+            EXPECT(drained < payload_size);
+            EXPECT(std::chrono::steady_clock::now() - drain_start < std::chrono::seconds(2));
+            ::close(fd);
+            stall_server.stop();
+        }
+
+        // A slow reader that keeps making progress (4 KiB every 50 ms, inside
+        // the 500 ms stall bound) is cut off at the 1 s deadline, well short
+        // of the 4 MiB body (about 50 s at that rate).
+        {
+            // case: send deadline cuts off a slow reader that keeps making progress
+            Watchdog watchdog(std::chrono::seconds(20), "send deadline on a slow reader");
+            alpacahttp::Config slow_config;
+            slow_config.set_http_port(0);
+            slow_config.set_discovery_enabled(false);
+            slow_config.set_thread_pool_size(1);
+            alpacahttp::Server slow_server(slow_config);
+            slow_server.set_send_limits_for_test(std::chrono::seconds(1), 4096, std::chrono::milliseconds(500));
+            slow_server.start_async();
+            const auto slow_port = wait_for_bound_port(slow_server, 2000);
+            EXPECT(slow_port != 0);
+
+            int fd = connect_local(slow_port, 4096);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            send_all(fd, image_request);
+            EXPECT(read_response_headers(fd).find("Content-Length: ") != std::string::npos);
+
+            std::size_t drained = 0;
+            ssize_t last = 1;
+            std::vector<char> chunk(4096);
+            const auto read_start = std::chrono::steady_clock::now();
+            while (last > 0 && std::chrono::steady_clock::now() - read_start < std::chrono::seconds(4)) {
+                last = ::recv(fd, chunk.data(), chunk.size(), 0);
+                if (last > 0) {
+                    drained += static_cast<std::size_t>(last);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            EXPECT(last == 0);  // EOF from the server before our own 4 s cap
+            EXPECT(drained < payload_size);
+            EXPECT(std::chrono::steady_clock::now() - read_start < std::chrono::seconds(3));
+            ::close(fd);
+            slow_server.stop();
+        }
+
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
     }
 

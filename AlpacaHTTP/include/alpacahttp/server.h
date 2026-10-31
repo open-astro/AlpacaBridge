@@ -99,12 +99,15 @@ public:
     int listener_fd_for_test() const { return static_cast<int>(server_fd_.load()); }
 
 #ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
-    // Test-only: shorten the per-response send deadline (120 s) and, when
+    // Test-only: shorten the per-response send deadline (120 s), the send
+    // no-progress bound (30 s, when `stall` is above zero) and, when
     // `send_buffer_bytes` is above zero, the SO_SNDBUF of each accepted
     // socket, so a test can stall a send on a body that fits no buffer
     // without waiting out the production bound. Set before start().
-    void set_send_limits_for_test(std::chrono::milliseconds deadline, int send_buffer_bytes) {
+    void set_send_limits_for_test(std::chrono::milliseconds deadline, int send_buffer_bytes,
+                                  std::chrono::milliseconds stall = std::chrono::milliseconds(0)) {
         send_deadline_ = deadline;
+        send_stall_ = stall;
         send_buffer_bytes_ = send_buffer_bytes;
     }
 #endif
@@ -282,6 +285,8 @@ private:
     // Per-response send deadline override; zero means kSendDeadlineSeconds
     // (server.cpp). Only the test hook sets it.
     std::chrono::milliseconds send_deadline_{0};
+    // Send no-progress override; zero means kSocketTimeoutSeconds.
+    std::chrono::milliseconds send_stall_{0};
     int send_buffer_bytes_{0};
 
     void run_server();

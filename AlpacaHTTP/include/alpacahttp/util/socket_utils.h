@@ -96,11 +96,14 @@ inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
 //
 // `deadline` bounds the whole response: SO_SNDTIMEO only bounds a call that
 // makes no progress, so a peer that drains a few bytes per interval would
-// otherwise hold the sender forever. The send never blocks in the kernel; on
-// a full buffer it waits with poll(POLLOUT) for the time left, and returns
-// false at the deadline so the caller closes the connection.
+// otherwise hold the sender forever. The send never blocks in the kernel, so
+// SO_SNDTIMEO no longer applies; on a full buffer it waits with poll(POLLOUT)
+// for the shorter of the time left and `stall`, the no-progress bound. It
+// returns false when either runs out (errno ETIMEDOUT) so the caller closes
+// the connection. Progress restarts the `stall` wait.
 inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t first_length, const char* second,
-                             std::size_t second_length, std::chrono::steady_clock::time_point deadline) {
+                             std::size_t second_length, std::chrono::steady_clock::time_point deadline,
+                             std::chrono::milliseconds stall) {
     std::array<iovec, 2> vectors{
         {{const_cast<char*>(first), first_length}, {const_cast<char*>(second), second_length}}};
     std::size_t index = 0;
@@ -130,10 +133,15 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
             }
             // Round up so a sub-millisecond remainder still waits.
             const auto wait_ms = std::min<std::chrono::milliseconds::rep>(
-                std::chrono::ceil<std::chrono::milliseconds>(left).count(), std::numeric_limits<int>::max());
+                std::min(std::chrono::ceil<std::chrono::milliseconds>(left), stall).count(),
+                std::numeric_limits<int>::max());
             pollfd wait_fd = {handle, POLLOUT, 0};
             const int ready = poll(&wait_fd, 1, static_cast<int>(wait_ms));
             if (ready < 0 && errno != EINTR) {
+                return false;
+            }
+            if (ready == 0 && std::chrono::steady_clock::now() < deadline) {
+                errno = ETIMEDOUT;  // the peer made no progress for `stall`
                 return false;
             }
             continue;

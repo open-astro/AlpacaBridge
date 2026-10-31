@@ -516,7 +516,8 @@ namespace {
 constexpr int kListenBacklog = 64;
 
 // Per-connection socket timeout: a peer that stalls mid-request (slowloris)
-// or mid-response is disconnected after this many seconds of inactivity.
+// or mid-response is disconnected after this many seconds without progress.
+// A response is also bounded as a whole by kSendDeadlineSeconds.
 constexpr int kSocketTimeoutSeconds = 30;
 
 // Window for the one log line about connections refused by the per-IP cap.
@@ -950,7 +951,8 @@ void send_error(util::SocketHandle socket_fd, int status, const char* reason, co
     const std::string& response_body = error_response.body();
     util::socket_send_allv(socket_fd, response_headers.data(), response_headers.size(), response_body.data(),
                            response_body.size(),
-                           std::chrono::steady_clock::now() + std::chrono::seconds(kSendDeadlineSeconds));
+                           std::chrono::steady_clock::now() + std::chrono::seconds(kSendDeadlineSeconds),
+                           std::chrono::seconds(kSocketTimeoutSeconds));
 }
 
 // True when the client wants the connection kept open after this request
@@ -1280,7 +1282,10 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
         (send_deadline_.count() > 0 ? send_deadline_
                                     : std::chrono::milliseconds(std::chrono::seconds(kSendDeadlineSeconds)));
     if (!util::socket_send_allv(conn.fd, response_headers.data(), response_headers.size(), response_body.data(),
-                                response_body.size(), send_deadline)) {
+                                response_body.size(), send_deadline,
+                                send_stall_.count() > 0
+                                    ? send_stall_
+                                    : std::chrono::milliseconds(std::chrono::seconds(kSocketTimeoutSeconds)))) {
         // A client that stops reading triggers this, so not WARNING (decision 0007 rule 9).
         util::log_info("Closing connection, response not fully sent: " +
                        util::socket_error_message(util::socket_get_last_error()));

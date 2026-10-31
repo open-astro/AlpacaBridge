@@ -422,7 +422,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     a connection over it is closed at once with no response, logged at INFO
     at most once a minute. Every response send is bounded by
     `kSendDeadlineSeconds` (120 s, `socket_send_allv`'s `deadline`), after
-    which the connection is closed; tested in `test_server_socket.cpp`.
+    which the connection is closed, as is one that makes no progress for
+    `kSocketTimeoutSeconds` (30 s, the `stall` argument); tested in
+    `test_server_socket.cpp`.
   - `Config::motion_watchdog_seconds` (open-astro#547; 30 s default, matching
     AlpacaCore's `kClientSilenceStopInterval` in `util/motion_policy.h`; 0
     disables) is settable the same way, from the config file (`server:`
