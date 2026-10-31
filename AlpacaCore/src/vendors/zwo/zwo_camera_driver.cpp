@@ -194,7 +194,20 @@ public:
         auto& sdk = sdk_;
 
         if (connected) {
-            int resolved_id = resolve_camera_id_locked();
+            // Decision 0016 rule 4: the handshake runs under transition_mutex_ with mutex_
+            // released, so Name and the other identity getters answer while the SDK opens.
+            // Everything it learns lands in locals and is published under mutex_ at the end.
+            // A preloaded name stands when the SDK cannot answer by id.
+            ZWOCameraInfo info = camera_info_;
+            bool info_valid = camera_info_valid_;
+            connect_in_flight_.store(true);
+            lock.unlock();
+            struct ClearInFlight {
+                std::atomic<bool>& flag;
+                ~ClearInFlight() { flag.store(false); }
+            } clear_in_flight{connect_in_flight_};
+
+            const int resolved_id = resolve_camera_id();
             sdk.open_camera(resolved_id);
             // Guard the ENTIRE remaining init: the ZWO open is ref-counted, so
             // an unclosed open on a throw is a permanent leak (the next connect
@@ -203,38 +216,55 @@ public:
             try {
                 sdk.init_camera(resolved_id);
 
-                refresh_camera_info_locked(resolved_id);
-                load_control_caps_locked(resolved_id);
-                apply_usb_bandwidth_locked(resolved_id);
-                select_default_image_type_locked();
+                ZWOCameraInfo fresh;
+                if (sdk.get_camera_info_by_id(resolved_id, fresh)) {
+                    info = std::move(fresh);
+                    info_valid = true;
+                }
+                std::unordered_map<ZWOControlType, ZWOControlCaps> caps;
+                for (const auto& cap : sdk.get_control_caps(resolved_id)) {
+                    caps[cap.type] = cap;
+                }
+                apply_usb_bandwidth(resolved_id, caps, info.name);
+                const ZWOImageType image_type = select_default_image_type(info, info_valid);
 
-                bin_x_ = 1;
-                bin_y_ = 1;
-                start_x_ = 0;
-                start_y_ = 0;
-                int max_width = camera_info_valid_ ? camera_info_.max_width : 0;
-                int max_height = camera_info_valid_ ? camera_info_.max_height : 0;
-                num_x_ = max_width;
-                num_y_ = max_height;
-                roi_width_effective_ = max_width - (max_width % 8);
-                roi_height_effective_ = max_height - (max_height % 2);
-                roi_crop_x_ = 0;
-                roi_crop_y_ = 0;
+                const int max_width = info_valid ? info.max_width : 0;
+                const int max_height = info_valid ? info.max_height : 0;
+                const int roi_width = max_width - (max_width % 8);
+                const int roi_height = max_height - (max_height % 2);
 
-                if (roi_width_effective_ > 0 && roi_height_effective_ > 0) {
-                    sdk.set_roi_format(resolved_id, roi_width_effective_, roi_height_effective_, bin_x_, image_type_);
-                    sdk.set_start_pos(resolved_id, start_x_, start_y_);
+                if (roi_width > 0 && roi_height > 0) {
+                    sdk.set_roi_format(resolved_id, roi_width, roi_height, 1, image_type);
+                    sdk.set_start_pos(resolved_id, 0, 0);
                 }
 
                 // Some cameras have no serial number and ASIGetSerialNumber
                 // returns an error — non-fatal, connect with an empty serial
                 // (same policy as the EAF/EFW/CAA siblings).
+                std::string serial;
                 try {
-                    serial_number_ = sdk.get_serial_number(resolved_id);
+                    serial = sdk.get_serial_number(resolved_id);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO", "Camera serial number unavailable: " + std::string(e.what()));
-                    serial_number_.clear();
                 }
+
+                lock.lock();
+                camera_id_ = resolved_id;
+                camera_info_ = info;
+                camera_info_valid_ = info_valid;
+                control_caps_ = std::move(caps);
+                image_type_ = image_type;
+                bin_x_ = 1;
+                bin_y_ = 1;
+                start_x_ = 0;
+                start_y_ = 0;
+                num_x_ = max_width;
+                num_y_ = max_height;
+                roi_width_effective_ = roi_width;
+                roi_height_effective_ = roi_height;
+                roi_crop_x_ = 0;
+                roi_crop_y_ = 0;
+                serial_number_ = std::move(serial);
             } catch (...) {
                 try {
                     sdk.close_camera(resolved_id);
@@ -1163,6 +1193,8 @@ private:
     std::unordered_map<ZWOControlType, ZWOControlCaps> control_caps_;
 
     std::atomic<bool> connected_;
+    // True while set_connected(true) runs its SDK handshake with mutex_ released.
+    std::atomic<bool> connect_in_flight_{false};
     // True from connect until the first CCDTemperature read of the connection (#722).
     mutable std::atomic<bool> first_temperature_read_pending_{false};
     static constexpr int kFirstTemperatureRetries = 5;
@@ -1558,7 +1590,8 @@ private:
         sdk_.set_start_pos(active_camera_id, applied_x, applied_y);
     }
 
-    int resolve_camera_id_locked() {
+    // Touches no driver state, so it runs with mutex_ released.
+    int resolve_camera_id() {
         std::vector<ZwoUnreadableSlot> unreadable;
         const auto found = sdk_.enumerate_identified_cameras(trim_zwo_name(binding_.identity.camera_name), &unreadable);
         const auto result = resolve_zwo_camera(binding_.identity, found, binding_.claimed_serials);
@@ -1577,16 +1610,7 @@ private:
         const auto& camera = result.camera.value();
         ALPACA_LOG_INFO("ZWO", "Using camera index " + std::to_string(camera.index) + ": " + camera.name + " (ID " +
                                    std::to_string(camera.camera_id) + ")");
-        camera_id_ = camera.camera_id;
         return camera.camera_id;
-    }
-
-    void refresh_camera_info_locked(int camera_id) {
-        ZWOCameraInfo info;
-        if (sdk_.get_camera_info_by_id(camera_id, info)) {
-            camera_info_ = info;
-            camera_info_valid_ = true;
-        }
     }
 
     void preload_camera_info_locked() {
@@ -1609,7 +1633,8 @@ private:
     }
 
     void refresh_cached_camera_info_if_needed() {
-        if (connected_.load()) {
+        // A connect in flight owns the SDK: the by-id read would wait out its open.
+        if (connected_.load() || connect_in_flight_.load()) {
             return;
         }
 
@@ -1627,6 +1652,11 @@ private:
                 ZWOCameraInfo info;
                 if (sdk_.get_camera_info_by_id(camera_id.value(), info)) {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    // A connect ran while the by-id read was out: it owns camera_info_ now
+                    // (decision 0016 rule 6), and this read may come from a stale id.
+                    if (connected_.load() || connect_in_flight_.load() || camera_id_ != camera_id) {
+                        return;
+                    }
                     camera_info_ = info;
                     camera_info_valid_ = true;
                 }
@@ -1636,22 +1666,16 @@ private:
         }
     }
 
-    void load_control_caps_locked(int camera_id) {
-        control_caps_.clear();
-        auto caps = sdk_.get_control_caps(camera_id);
-        for (const auto& cap : caps) {
-            control_caps_[cap.type] = cap;
-        }
-    }
-
-    void apply_usb_bandwidth_locked(int camera_id) {
-        const auto it = control_caps_.find(ZWOControlType::BandwidthOverload);
-        if (it == control_caps_.end() || !it->second.is_writable) {
+    // Runs with mutex_ released: the caps and the camera name come from the connect in flight.
+    void apply_usb_bandwidth(int camera_id, const std::unordered_map<ZWOControlType, ZWOControlCaps>& control_caps,
+                             const std::string& camera_name) {
+        const auto it = control_caps.find(ZWOControlType::BandwidthOverload);
+        if (it == control_caps.end() || !it->second.is_writable) {
             if (binding_.usb_bandwidth) {
                 throw AlpacaException("USB Limit is not writable on this camera; clear usbBandwidth in setup",
                                       AlpacaError::DriverException);
             }
-            ALPACA_LOG_INFO("ZWO", camera_info_.name + ": USB Limit unavailable; leaving SDK setting unchanged");
+            ALPACA_LOG_INFO("ZWO", camera_name + ": USB Limit unavailable; leaving SDK setting unchanged");
             return;
         }
         const auto& caps = it->second;
@@ -1681,7 +1705,7 @@ private:
                     throw AlpacaException("camera did not confirm the requested value in manual mode",
                                           AlpacaError::DriverException);
                 }
-                ALPACA_LOG_WARN("ZWO", camera_info_.name + ": USB Limit default requested " +
+                ALPACA_LOG_WARN("ZWO", camera_name + ": USB Limit default requested " +
                                            std::to_string(default_bandwidth) + " (clamped to " +
                                            std::to_string(applied) + "), read back " + std::to_string(actual) +
                                            (is_auto ? " auto" : " manual") + "; continuing connection");
@@ -1691,32 +1715,27 @@ private:
             throw AlpacaException("USB Limit: " + std::string(e.what()), AlpacaError::DriverException);
         }
         ALPACA_LOG_INFO(
-            "ZWO", camera_info_.name + " (camera id " + std::to_string(camera_id) + "): USB Limit " +
+            "ZWO", camera_name + " (camera id " + std::to_string(camera_id) + "): USB Limit " +
                        (requested ? std::to_string(*requested) : "default " + std::to_string(default_bandwidth)) +
                        " applied " + std::to_string(applied) + " manual; range " + std::to_string(caps.min_value) +
                        ".." + std::to_string(caps.max_value) + ", SDK default " + std::to_string(caps.default_value));
     }
 
-    void select_default_image_type_locked() {
-        if (!camera_info_valid_) {
-            image_type_ = ZWOImageType::Raw8;
-            return;
+    static ZWOImageType select_default_image_type(const ZWOCameraInfo& camera_info, bool camera_info_valid) {
+        if (!camera_info_valid) {
+            return ZWOImageType::Raw8;
         }
-        if (supports_format(camera_info_.supported_formats, ZWOImageType::Raw16)) {
-            image_type_ = ZWOImageType::Raw16;
-            return;
+        if (supports_format(camera_info.supported_formats, ZWOImageType::Raw16)) {
+            return ZWOImageType::Raw16;
         }
-        if (supports_format(camera_info_.supported_formats, ZWOImageType::Raw8)) {
-            image_type_ = ZWOImageType::Raw8;
-            return;
+        if (supports_format(camera_info.supported_formats, ZWOImageType::Raw8)) {
+            return ZWOImageType::Raw8;
         }
-        if (supports_format(camera_info_.supported_formats, ZWOImageType::Y8)) {
-            image_type_ = ZWOImageType::Y8;
-            return;
+        if (supports_format(camera_info.supported_formats, ZWOImageType::Y8)) {
+            return ZWOImageType::Y8;
         }
-        if (supports_format(camera_info_.supported_formats, ZWOImageType::Rgb24)) {
-            image_type_ = ZWOImageType::Rgb24;
-            return;
+        if (supports_format(camera_info.supported_formats, ZWOImageType::Rgb24)) {
+            return ZWOImageType::Rgb24;
         }
         util::throw_invalid_camera_image("camera reports no supported image format");
     }
