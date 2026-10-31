@@ -630,6 +630,7 @@ int main() {
         // short of the full body; a server still waiting would have sent all
         // of it as the client read.
         {
+            // case: send deadline closes a peer that never reads
             Watchdog watchdog(std::chrono::seconds(20), "send deadline on a peer that never reads");
             alpacahttp::Config deadline_config;
             deadline_config.set_http_port(0);
@@ -681,6 +682,7 @@ int main() {
     // connection from 127.0.0.1 is closed with no response while 127.0.0.2
     // is still served, and a slot frees when one of the two closes.
     {
+        // case: per-address connection cap refuses the third and frees on close
         Watchdog watchdog(std::chrono::seconds(30), "per-address connection cap");
         alpacahttp::Config cap_config;
         cap_config.set_http_port(0);
