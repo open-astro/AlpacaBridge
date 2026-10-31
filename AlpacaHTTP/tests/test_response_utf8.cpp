@@ -106,6 +106,7 @@ int main() {
     // Issue #1717: every serialised response carries the anti-framing and
     // nosniff headers, unless the response already set that name.
     {
+        // case: every response carries the framing and nosniff headers, a header set by the response is kept once
         const auto count = [](const std::string& head, const std::string& needle) {
             std::size_t n = 0;
             for (std::size_t at = head.find(needle); at != std::string::npos; at = head.find(needle, at + 1)) {
