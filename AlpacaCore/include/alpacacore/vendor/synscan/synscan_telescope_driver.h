@@ -59,16 +59,15 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
-/// Test seams of the status poll (decision 0010): stop or resume its ticks, and run a hook between a tick's sample
-/// and its publish (no lock held) so a case can land a client write in that window. `driver` must come from the
-/// factories above; anything else is ignored.
+/// Test seams of the status poll (decision 0010): the poll's own module seams (util::PolledState). Pausing makes the
+/// poll wait its ticks on the task clock and probe nothing; poll_status_now runs one full tick (alt/az, pier side and
+/// tracking mode included) on the calling thread, paused or not. `driver` must come from the factories above;
+/// anything else is ignored.
 void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
-/// Runs one full tick on the calling thread, paused or not. False when the connection is gone.
-bool poll_status_now_for_testing(TelescopeDriver& driver);
+void poll_status_now_for_testing(TelescopeDriver& driver);
+/// Runs `hook` between a probe's last exchange and its decode, no lock held, so a case can land a client write in the
+/// window where a frame is dropped (decision 0010 point 3). An empty function removes it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
-void set_status_poll_before_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
-/// Takes or drops the hold the readback-tick hunt keeps while it owns the line; a held poll tick makes no exchange.
-void hold_status_poll_for_testing(TelescopeDriver& driver, bool hold);
 
 /// Test seam: replaces the wall time the driver uses for local sidereal time (park and SetPark target,
 /// DestinationSideOfPier, SiderealTime); an empty function restores std::chrono::system_clock. `driver` must come from
