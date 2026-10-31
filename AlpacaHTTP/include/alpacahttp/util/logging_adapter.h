@@ -86,6 +86,12 @@ bool is_valid_log_filename(const std::string& name);
 // at configure time and then on every day-rollover inside the file sink.
 void set_log_retention_days(int days);
 
+// Cap one day's log file at `bytes` (0 = unlimited). When the next line would
+// not fit, a single marker line is written inside the cap and further file
+// writes are dropped until the next day. stderr and the external sink are
+// unaffected. init_logging applies logging.max_file_size_mb here.
+void set_log_max_file_bytes(std::uintmax_t bytes);
+
 // Delete daily log files whose embedded date is older than retention_days
 // before today. Safe to call repeatedly; no-op when retention is disabled.
 // Returns the number of files removed.
