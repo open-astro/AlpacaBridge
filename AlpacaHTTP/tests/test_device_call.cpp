@@ -324,9 +324,41 @@ void case_client_transaction_id() {
     EXPECT(DeviceCall(*get_request, kServerTx).server_tx_id() == kServerTx);
 }
 
+// #1693: an escape without two hex digits stays literal in the GET query and the PUT form;
+// a valid escape in the last two characters still decodes; '+' is still a space.
+// Falsified by: decoding "%4G"/"%of" through strtol again in either url_decode copy, or
+// tightening the "i + 2 < size" bound so "a%20" stops decoding.
+void case_url_decode_invalid_and_trailing_escapes() {
+    auto q1 = make("GET", "/x?Parameters=50%off");
+    EXPECT(q1->get_query_param("Parameters") == "50%off");
+    auto q2 = make("GET", "/x?P=%4G&Q=%&R=%4&S=a+b%2Bc");
+    EXPECT(q2->get_query_param("P") == "%4G");
+    EXPECT(q2->get_query_param("Q") == "%");
+    EXPECT(q2->get_query_param("R") == "%4");
+    EXPECT(q2->get_query_param("S") == "a b+c");
+    auto q3 = make("GET", "/x?ClientID=1&%zz=2");
+    EXPECT(q3->has_query_param("%zz"));
+    auto q4 = make("GET", "/x?N=a%20");
+    EXPECT(q4->get_query_param("N") == "a ");
+
+    auto f1_req = put_form("Parameters=50%off&P=%4G&Q=%&S=a+b%2Bc");
+    DeviceCall f1(*f1_req, kServerTx);
+    EXPECT(f1.form_field("Parameters").value_or("<none>") == "50%off");
+    EXPECT(f1.form_field("P").value_or("<none>") == "%4G");
+    EXPECT(f1.form_field("Q").value_or("<none>") == "%");
+    EXPECT(f1.form_field("S").value_or("<none>") == "a b+c");
+    auto f3_req = put_form("%zz=2");
+    DeviceCall f3(*f3_req, kServerTx);
+    EXPECT(f3.form_field("%zz").value_or("<none>") == "2");
+    auto f4_req = put_form("N=a%20");
+    DeviceCall f4(*f4_req, kServerTx);
+    EXPECT(f4.form_field("N").value_or("<none>") == "a ");
+}
+
 }  // namespace
 
 int main() {
+    case_url_decode_invalid_and_trailing_escapes();
     case_query_before_json();
     case_json_key_before_value();
     case_json_value_fallback();
