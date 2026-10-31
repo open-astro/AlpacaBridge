@@ -367,7 +367,7 @@ The driver's userspace soft-PWM accepts any value in 1–100,000 Hz, but the pra
 
 ### Disconnect behavior
 
-Same policy as the ASIair Pro driver: `close()` stops each PWM worker and sets that port to the steady level of its duty (`PWM_GPIO_SET_LEVEL`: on for any duty above 0, off at 0%), and boolean ports keep their commanded level; then it releases our fd. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
+Same policy as the ASIair Pro driver: `close()` stops each PWM worker and sets a PWM port that a client or the server-start power-on pass set (since the device node was opened) to the steady level of its duty (`PWM_GPIO_SET_LEVEL`: on for any duty above 0, off at 0%); a PWM port neither of them set is left alone (no request is sent), and boolean ports keep their commanded level. Then it releases our fd. The next connect reports the settled level (100 or 0) and writes nothing. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
 
 ### What about the USB power ports and the button?
 
