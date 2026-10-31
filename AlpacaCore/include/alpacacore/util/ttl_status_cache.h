@@ -48,12 +48,16 @@ namespace alpacacore::util {
  * readers share one device round trip. Lock order is driver mutex (if held)
  * -> cache mutex -> SDK mutex; the converted adopters (ZWO EAF, CAA, dew switch, ToupTek AAF, ToupTek thermal switch,
  * ZWO EFW, Player One PW, ToupTek AFW) refill under cache mutex -> io_mutex_ -> mutex_ (leaf) and hold no driver lock
- * when they call the cache. Never call get() from inside the refill. fault() takes only `fault_mutex_`, a leaf under
- * the cache mutex (cache mutex -> fault_mutex_), never held across the refill, so a getter that reads it never waits
- * for device I/O (decision 0016).
+ * when they call the cache. Never call get() from inside the refill. fault() and fault_stale() take only
+ * `fault_mutex_`, a leaf under the cache mutex (cache mutex -> fault_mutex_), never held across the refill, so a getter
+ * that reads it never waits for device I/O (decision 0016); being a leaf, it may also be taken under a driver's I/O
+ * lock (the iEFW checks the latch before a move under its io_mutex_).
  *
  * Clock: the TTL reads the TaskClock passed to the constructor (decision 0005), the real
  * steady clock by default; a driver on an injected clock passes it so a test ages the frame with advance().
+ * The same clock stamps the moment the fault latches, so fault_stale() can tell a driver when the fault has
+ * stood past util::kLinkStalenessBound (decision 0009 rule 2). A driver that never calls fault_stale() sees no
+ * change from the stamp.
  * Writers call invalidate() after the write; connect/disconnect call reset().
  */
 template <typename Status>
@@ -78,8 +82,12 @@ public:
         }
         try {
             Status fresh = fetch();
-            const bool restored = health_.on_reply();
-            publish_fault();
+            bool restored = false;
+            {
+                std::lock_guard<std::mutex> fault_lock(fault_mutex_);
+                restored = health_.on_reply();
+                fault_ = health_.fault();
+            }
             if (restored) {
                 ALPACA_LOG_INFO(log_component_, label_ + " communications restored");
             }
@@ -88,8 +96,13 @@ public:
             return fresh;
         } catch (const std::exception& e) {
             status_.reset();
-            const auto latched = health_.note_failure(e.what(), fault_threshold_);
-            publish_fault();
+            const auto failed_at = clock_->now();
+            std::optional<std::string> latched;
+            {
+                std::lock_guard<std::mutex> fault_lock(fault_mutex_);
+                latched = health_.note_failure(e.what(), fault_threshold_, failed_at);
+                fault_ = health_.fault();
+            }
             if (latched) {
                 ALPACA_LOG_ERROR(log_component_, label_ + " communications compromised: " + *latched);
             } else if (!health_.faulted()) {
@@ -112,6 +125,15 @@ public:
         return fault_;
     }
 
+    /// True once the latched fault has stood, with no good refill, for at least `bound` on the cache's clock
+    /// (decision 0009 rule 2: past util::kLinkStalenessBound the link counts as lost; the driver acts on it).
+    /// False while healthy and after reset(). Like fault(), it takes only `fault_mutex_` and never waits on a refill.
+    bool fault_stale(std::chrono::nanoseconds bound = kLinkStalenessBound) const {
+        const auto now = clock_->now();
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        return health_.fault_stale(now, bound);
+    }
+
     /// After a write that changes device state: the next read goes to the device.
     /// Writes do not check the latch here: an SDK-backed driver's own call fails if
     /// the device is gone.
@@ -124,17 +146,12 @@ public:
     void reset() {
         std::lock_guard<std::mutex> lock(mutex_);
         status_.reset();
+        std::lock_guard<std::mutex> fault_lock(fault_mutex_);
         health_.reset();
-        publish_fault();
-    }
-
-private:
-    /// Copies the latched reason for fault(); the caller holds mutex_.
-    void publish_fault() {
-        std::lock_guard<std::mutex> lock(fault_mutex_);
         fault_ = health_.fault();
     }
 
+private:
     std::string label_;
     std::string log_component_;
     const TaskClock* clock_;
@@ -143,9 +160,11 @@ private:
     mutable std::mutex mutex_;
     std::optional<Status> status_;
     clock::time_point filled_at_{};
-    PolledLinkHealth health_;
     mutable std::mutex fault_mutex_;
-    std::string fault_;
+    // Written under mutex_ AND fault_mutex_, so either lock reads it: get() reads the failure count under mutex_
+    // alone, fault_stale() reads the latch under fault_mutex_ alone.
+    PolledLinkHealth health_;
+    std::string fault_;  // health_.fault(), copied under fault_mutex_ with each change
 };
 
 }  // namespace alpacacore::util

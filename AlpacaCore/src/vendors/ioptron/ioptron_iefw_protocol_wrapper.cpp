@@ -330,6 +330,11 @@ public:
         return fault_;
     }
 
+    void lose_link(const std::string& reason) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lose_link_locked(reason);
+    }
+
     std::string get_firmware() {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
@@ -431,11 +436,10 @@ private:
         fault_ = text;
     }
 
-    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
-    // closed): decision 0009 rule 2 loses the link at once. Release the port so a replugged wheel can be reopened,
-    // latch link_lost_ for the driver's Connected getter and fail with NotConnected. During connect() nothing is
-    // latched: the handshake retries and connect() closes the port itself.
-    [[noreturn]] void fail_link_locked(const std::string& reason) {
+    // Decision 0009 rules 2 and 3: release the port so a replugged wheel can be reopened, keep the reason and latch
+    // link_lost_ for the driver's Connected getter. A no-op when no session is open: during connect() the handshake
+    // retries and connect() closes the port itself, and a link already lost keeps its first reason.
+    void lose_link_locked(const std::string& reason) {
         if (connected_) {
             ALPACA_LOG_ERROR("iOptron",
                              "iEFW link lost on " + config_.serial_port + ": " + reason + " (port released)");
@@ -443,6 +447,12 @@ private:
             link_lost_.store(true);
             disconnect_locked();
         }
+    }
+
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
+    // closed): decision 0009 rule 2 loses the link at once and fails with NotConnected.
+    [[noreturn]] void fail_link_locked(const std::string& reason) {
+        lose_link_locked(reason);
         throw AlpacaException(reason, AlpacaError::NotConnected);
     }
 
@@ -536,7 +546,7 @@ private:
     mutable std::mutex mutex_;
     IefwConnectionConfig config_;
     bool connected_ = false;
-    std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect
+    std::atomic<bool> link_lost_{false};  // set by lose_link_locked(), cleared by the next connect
     // The loss reason for get_link_fault(); its own mutex, never held across an exchange, so a getter cannot wait on
     // the wire while mutex_ is held by one.
     mutable std::mutex fault_mutex_;
@@ -562,6 +572,8 @@ bool IefwProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 bool IefwProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
 
 std::string IefwProtocolWrapper::link_fault() const { return impl_->link_fault(); }
+
+void IefwProtocolWrapper::lose_link(const std::string& reason) { impl_->lose_link(reason); }
 
 std::string IefwProtocolWrapper::get_firmware() { return impl_->get_firmware(); }
 

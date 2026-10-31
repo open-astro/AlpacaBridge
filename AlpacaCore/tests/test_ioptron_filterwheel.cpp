@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_iefw_protocol_wrapper.h>
@@ -30,6 +31,7 @@
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_ioptron_ieaf.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -503,10 +505,11 @@ TEST_CASE("iOptron iEFW protocol wrapper - a hangup before the reply throws seri
 
 // ---------------------------------------------------------------------------
 // Decision 0009 rule 2 (issue #1723): a pulled cable loses the link at once.
-// Connected reads false, every member throws NotConnected, DeviceState is
-// empty, the port is released, get_link_fault() keeps the reason until the
-// next Connect or Disconnect, and only a client Connect reopens it. A wheel
-// that stops answering with the cable in only faults (rule 1).
+// Connected reads false, every device operation throws NotConnected,
+// DeviceState is empty, the port is released, get_link_fault() keeps the
+// reason until the next Connect or Disconnect, and only a client Connect
+// reopens it. A wheel that stops answering with the cable in faults (rule 1)
+// until the fault has stood for kLinkStalenessBound, then loses the link.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -566,12 +569,45 @@ void require_lost(alpacacore::FilterWheelDriver& driver, const std::string& old_
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(old_pts));
 }
 
+constexpr int kDriverException = static_cast<int>(alpacacore::AlpacaError::DriverException);
+
+// A wheel on a fake task clock (decision 0005) whose :WP# replies do not parse with the cable in: three failed
+// Position reads latch the status cache's fault at the clock's current time. No real waits.
+struct FaultedIefw {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronIeaf fake;
+    std::unique_ptr<alpacacore::FilterWheelDriver> driver;
+    std::string pts;
+
+    FaultedIefw() {
+        fake.set_model(99);
+        fake.set_wheel_slot(3);
+        pts = fake.slave_path();
+        driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, pts, "iefw15", clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        fake.fail_wheel_position(true);
+        for (int i = 0; i < 3; ++i) {
+            REQUIRE(alpaca_code_of([&] { (void)driver->get_position(); }) == kDriverException);
+        }
+        REQUIRE(driver->get_link_fault().find("consecutive failures") != std::string::npos);
+    }
+    ~FaultedIefw() {
+        try {
+            driver->set_connected(false);
+        } catch (...) {
+        }
+    }
+};
+
+const std::string kStaleReasonStart = "iEFW Position fault stood for 30 s with no good reply: ";
+
 }  // namespace
 
-// Falsified by: ioptron_iefw_protocol_wrapper.cpp:486 read_response() throwing on ReadOutcome::LinkDead without
+// Falsified by: ioptron_iefw_protocol_wrapper.cpp:496 read_response() throwing on ReadOutcome::LinkDead without
 // fail_link_locked() (the call throws DriverException, Connected stays true, the port stays claimed);
-// ioptron_filterwheel_driver.cpp:100 get_connected() without link_alive() (Connected reads true, DeviceState
-// is not empty); :89 get_device_firmware() without link_alive() (the firmware is still shown); :133 the connect
+// ioptron_filterwheel_driver.cpp:102 get_connected() without link_alive() (Connected reads true, DeviceState
+// is not empty); :91 get_device_firmware() without link_alive() (the firmware is still shown); :135 the connect
 // check reading the raw flag (the Connect over the lost link returns at once and Connected stays false).
 TEST_CASE("iEFW Link - a cable pulled during a Position read loses the link at once and Connect reopens",
           "[ioptron][filterwheel][unit][fake][link-lost]") {
@@ -614,7 +650,7 @@ TEST_CASE("iEFW Link - a cable pulled during a Position read loses the link at o
     CHECK_FALSE(driver->get_connected());
 }
 
-// Falsified by: ioptron_iefw_protocol_wrapper.cpp:529 send_command_ack_locked() without the LinkDead branch (the
+// Falsified by: ioptron_iefw_protocol_wrapper.cpp:539 send_command_ack_locked() without the LinkDead branch (the
 // hangup is taken for a silent firmware: set_position() returns and Connected stays true).
 TEST_CASE("iEFW Link - a cable pulled before a move's ack loses the link at once",
           "[ioptron][filterwheel][unit][fake][link-lost]") {
@@ -639,8 +675,8 @@ TEST_CASE("iEFW Link - a cable pulled before a move's ack loses the link at once
     REQUIRE_NOTHROW(driver->set_connected(false));
 }
 
-// Falsified by: ioptron_iefw_protocol_wrapper.cpp:461 write_data() without the EIO/ENXIO/ENODEV branch (the move
-// throws DriverException "Write failed", Connected stays true); ioptron_filterwheel_driver.cpp:133 the disconnect
+// Falsified by: ioptron_iefw_protocol_wrapper.cpp:471 write_data() without the EIO/ENXIO/ENODEV branch (the move
+// throws DriverException "Write failed", Connected stays true); ioptron_filterwheel_driver.cpp:135 the disconnect
 // check reading the link-aware value (the Disconnect returns at once and the reason is kept);
 // ioptron_iefw_protocol_wrapper.cpp:318 disconnect() without set_fault("") (the reason outlives the Disconnect).
 TEST_CASE("iEFW Link - a write to a pulled wheel loses the link at once and Disconnect clears the reason",
@@ -665,8 +701,8 @@ TEST_CASE("iEFW Link - a write to a pulled wheel loses the link at once and Disc
 // The status cache counts the read that lost the link as a failed read; after two earlier failures that one latches
 // its "communications compromised" DriverException. A lost link is NotConnected all the same, and later calls are
 // refused before the cache is read.
-// Falsified by: ioptron_filterwheel_driver.cpp:218 get_position() without the ensure_connected() in its catch
-// (the losing read throws DriverException "communications compromised"); :340 ensure_connected() without the
+// Falsified by: ioptron_filterwheel_driver.cpp:220 get_position() without the ensure_connected() in its catch
+// (the losing read throws DriverException "communications compromised"); :354 ensure_connected() without the
 // link_alive() check (the losing read throws DriverException, the later calls "iEFW not connected" from the wrapper).
 TEST_CASE("iEFW Link - a loss after failed reads is NotConnected and later calls are refused before the cache",
           "[ioptron][filterwheel][unit][fake][link-lost]") {
@@ -696,9 +732,9 @@ TEST_CASE("iEFW Link - a loss after failed reads is NotConnected and later calls
 }
 
 // A loss mid-move: the move latch (Position -1) from before the loss is not carried into the reconnected session.
-// Falsified by: ioptron_filterwheel_driver.cpp:141 the connect without teardown_locked() (Connected reads true
+// Falsified by: ioptron_filterwheel_driver.cpp:143 the connect without teardown_locked() (Connected reads true
 // while the reconnect is still reading the wheel's firmware: the raw flag from before the loss and the fresh link).
-// Falsified by: ioptron_filterwheel_driver.cpp:441 publish_connect_state() without `moving_ = false;` (the reconnected
+// Falsified by: ioptron_filterwheel_driver.cpp:473 publish_connect_state() without `moving_ = false;` (the reconnected
 // wheel's Position reads -1, the stale move latch, instead of its slot 2).
 TEST_CASE("iEFW Link - a Connect over a lost link mid-move reopens without a Disconnect and drops the move latch",
           "[ioptron][filterwheel][unit][fake][link-lost]") {
@@ -733,7 +769,7 @@ TEST_CASE("iEFW Link - a Connect over a lost link mid-move reopens without a Dis
     REQUIRE_NOTHROW(driver->set_connected(false));
 }
 
-// Falsified by: ioptron_iefw_protocol_wrapper.cpp:439 fail_link_locked() without its `if (connected_)` guard (the
+// Falsified by: ioptron_iefw_protocol_wrapper.cpp:443 lose_link_locked() without its `if (connected_)` guard (the
 // handshake's hangup keeps a loss reason after the failed Connect).
 TEST_CASE("iEFW Link - a cable pulled during the connect handshake fails the Connect and latches nothing",
           "[ioptron][filterwheel][unit][fake][link-lost]") {
@@ -766,7 +802,7 @@ TEST_CASE("iEFW Link - a cable pulled during the connect handshake fails the Con
 }
 
 // The firmware and stored-offset reads after the handshake log a failure and carry on; a hangup there is a loss.
-// Falsified by: ioptron_filterwheel_driver.cpp:426 publish_connect_state() without the link_alive() check (the
+// Falsified by: ioptron_filterwheel_driver.cpp:458 publish_connect_state() without the link_alive() check (the
 // Connect succeeds onto a released port: no error, Connected false, the loss reason kept).
 TEST_CASE("iEFW Link - a cable pulled while the connect reads the firmware fails the Connect and latches nothing",
           "[ioptron][filterwheel][unit][fake][link-lost]") {
@@ -792,7 +828,7 @@ TEST_CASE("iEFW Link - a cable pulled while the connect reads the firmware fails
 // Decision 0009 rule 1: a wheel that stops answering with the cable in is not a lost link. Three failed Position
 // reads latch the status cache's fault: DriverException, Connected stays true, get_link_fault() gives the fault
 // text, and a good reply clears it. The third read is a real 4 s read timeout (the wrapper's serial timeout).
-// Falsified by: ioptron_filterwheel_driver.cpp:110 get_link_fault() without the status cache's fault() (it
+// Falsified by: ioptron_filterwheel_driver.cpp:112 get_link_fault() without the status cache's fault() (it
 // reads empty while the fault is latched).
 TEST_CASE("iEFW Link - a silent wheel with the cable in latches a fault and stays Connected",
           "[ioptron][filterwheel][unit][fake][link-lost]") {
@@ -858,4 +894,85 @@ TEST_CASE("iEFW Link - the wrapper keeps the loss reason until the next connect 
     REQUIRE(wrapper.link_fault() == kLostReason);
     wrapper.disconnect();  // so does a disconnect
     CHECK(wrapper.link_fault().empty());
+}
+
+// Decision 0009 rule 1: a latched fault refuses writes as well as reads. A wheel that does not answer :WP# would
+// otherwise take :WM with no ack and report the move done.
+// Falsified by: ioptron_filterwheel_driver.cpp:284 the move's fault check (the move returns and :WM01# is sent).
+TEST_CASE("iEFW Link - a move on a wheel with a latched fault is refused and a good reply restores",
+          "[ioptron][filterwheel][unit][fake][link-lost]") {
+    FaultedIefw wheel;
+    const std::string fault = wheel.driver->get_link_fault();
+    CHECK(alpaca_what_of([&] { wheel.driver->set_position(1); }) ==
+          "iOptron iEFW communications compromised: " + fault);
+    CHECK(alpaca_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
+    CHECK(wheel.fake.count(":WM") == 0);
+    CHECK(wheel.driver->get_connected());
+
+    wheel.fake.fail_wheel_position(false);
+    CHECK(wheel.driver->get_position() == 3);  // the first good reply restores, no reconnect
+    CHECK(wheel.driver->get_link_fault().empty());
+    REQUIRE_NOTHROW(wheel.driver->set_position(1));
+    CHECK(wheel.fake.count(":WM01#") == 1);
+}
+
+// Decision 0009 rule 2: a fault that has stood for util::kLinkStalenessBound is a lost link, found by the next
+// failed Position read: Connected false, operations NotConnected, port released, the reason kept until the next
+// Connect (rule 5); only that Connect reopens.
+// Falsified by: ttl_status_cache.h:103 get() calling the unstamped note_failure() (the read throws
+// DriverException, Connected stays true); ioptron_filterwheel_driver.cpp:223 get_position() without the
+// staleness check in its catch (the same); :375 the check without its ensure_connected() (the port is released but
+// the read throws the cache's DriverException).
+TEST_CASE("iEFW Link - a fault standing past the staleness bound loses the link on the next Position read",
+          "[ioptron][filterwheel][unit][fake][link-lost]") {
+    FaultedIefw wheel;
+    wheel.clock.advance(alpacacore::util::kLinkStalenessBound);
+    CHECK(wheel.driver->get_connected());  // nothing loses it until a read or a move fails
+
+    require_alpaca_error([&] { (void)wheel.driver->get_position(); }, kNotConnected);
+    require_lost(*wheel.driver, wheel.pts);
+    const std::string reason = wheel.driver->get_link_fault();
+    CHECK(reason.rfind(kStaleReasonStart, 0) == 0);
+    CHECK(reason.find("consecutive failures") != std::string::npos);
+    const int connects = wheel.fake.connects();
+    CHECK(alpaca_what_of([&] { (void)wheel.driver->get_position(); }) == kLostCall);
+    CHECK(wheel.driver->get_link_fault() == reason);
+    CHECK(wheel.fake.connects() == connects);  // nothing reopens it on its own
+
+    wheel.fake.fail_wheel_position(false);
+    wheel.driver->set_connected(true);  // a client Connect over the lost link reopens and clears the reason
+    REQUIRE(wheel.driver->get_connected());
+    CHECK(wheel.driver->get_link_fault().empty());
+    CHECK(wheel.driver->get_position() == 3);
+}
+
+// The same loss found by a refused move; a Disconnect clears the kept reason (rule 5).
+// Falsified by: ioptron_filterwheel_driver.cpp:283 set_position() without the staleness check (the move is
+// refused with DriverException and Connected stays true); :375 the check without its ensure_connected() (the port
+// is released but the move is refused with DriverException).
+TEST_CASE("iEFW Link - a fault standing past the staleness bound loses the link on a refused move",
+          "[ioptron][filterwheel][unit][fake][link-lost]") {
+    FaultedIefw wheel;
+    wheel.clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(5));
+    require_alpaca_error([&] { wheel.driver->set_position(1); }, kNotConnected);
+    CHECK(wheel.fake.count(":WM") == 0);
+    require_lost(*wheel.driver, wheel.pts);
+    CHECK(wheel.driver->get_link_fault().rfind(kStaleReasonStart, 0) == 0);
+    REQUIRE_NOTHROW(wheel.driver->set_connected(false));
+    CHECK(wheel.driver->get_link_fault().empty());
+}
+
+// Just under the bound the fault is still only a fault (rule 1): reads and moves throw DriverException and
+// Connected stays true.
+// Falsified by: ioptron_filterwheel_driver.cpp:370 the staleness check losing the link on any latched fault
+// (the read throws NotConnected).
+TEST_CASE("iEFW Link - a fault just under the staleness bound does not lose the link",
+          "[ioptron][filterwheel][unit][fake][link-lost]") {
+    FaultedIefw wheel;
+    wheel.clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::milliseconds(1));
+    CHECK(alpaca_code_of([&] { (void)wheel.driver->get_position(); }) == kDriverException);
+    CHECK(alpaca_code_of([&] { wheel.driver->set_position(1); }) == kDriverException);
+    CHECK(wheel.driver->get_connected());
+    CHECK(alpacacore::util::is_serial_port_in_use(wheel.pts));
+    CHECK(wheel.driver->get_link_fault().find("consecutive failures") != std::string::npos);
 }
