@@ -25,7 +25,9 @@
 #include <memory>
 #include <mutex>
 #include <semaphore>
+#include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "config.h"
@@ -95,6 +97,17 @@ public:
     // none, so a test can close it behind the server and drive the
     // descriptor-loss rebind in run_server().
     int listener_fd_for_test() const { return static_cast<int>(server_fd_.load()); }
+
+#ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
+    // Test-only: shorten the per-response send deadline (120 s) and, when
+    // `send_buffer_bytes` is above zero, the SO_SNDBUF of each accepted
+    // socket, so a test can stall a send on a body that fits no buffer
+    // without waiting out the production bound. Set before start().
+    void set_send_limits_for_test(std::chrono::milliseconds deadline, int send_buffer_bytes) {
+        send_deadline_ = deadline;
+        send_buffer_bytes_ = send_buffer_bytes;
+    }
+#endif
 
     // Wait for server to stop
     void wait();
@@ -260,6 +273,16 @@ private:
     // the bound the accept loop pauses and new clients wait in the listen
     // backlog.
     std::atomic<std::size_t> live_connections_{0};
+    // Open connections per peer address (Config::max_connections_per_ip).
+    // Incremented at accept and decremented in close_connection(), the single
+    // close path, so it stays exact like live_connections_. Entries at zero
+    // are erased.
+    std::mutex per_ip_mutex_;
+    std::unordered_map<std::string, std::size_t> per_ip_connections_;
+    // Per-response send deadline override; zero means kSendDeadlineSeconds
+    // (server.cpp). Only the test hook sets it.
+    std::chrono::milliseconds send_deadline_{0};
+    int send_buffer_bytes_{0};
 
     void run_server();
     void reactor_loop();

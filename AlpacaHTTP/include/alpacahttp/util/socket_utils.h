@@ -15,16 +15,20 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 
@@ -89,8 +93,14 @@ inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
 // Send two buffers as one logical write without concatenating them. Keeping
 // headers and bodies in one sendmsg call avoids the small-write Nagle/delayed-
 // ACK stall while large bodies do not need a second full response copy.
+//
+// `deadline` bounds the whole response: SO_SNDTIMEO only bounds a call that
+// makes no progress, so a peer that drains a few bytes per interval would
+// otherwise hold the sender forever. The send never blocks in the kernel; on
+// a full buffer it waits with poll(POLLOUT) for the time left, and returns
+// false at the deadline so the caller closes the connection.
 inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t first_length, const char* second,
-                             std::size_t second_length) {
+                             std::size_t second_length, std::chrono::steady_clock::time_point deadline) {
     std::array<iovec, 2> vectors{
         {{const_cast<char*>(first), first_length}, {const_cast<char*>(second), second_length}}};
     std::size_t index = 0;
@@ -105,12 +115,30 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
         struct msghdr message {};
         message.msg_iov = vectors.data() + index;
         message.msg_iovlen = vectors.size() - index;
-        const ssize_t sent = sendmsg(handle, &message, MSG_NOSIGNAL);
+        const ssize_t sent = sendmsg(handle, &message, MSG_NOSIGNAL | MSG_DONTWAIT);
         if (sent < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            return false;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                return false;
+            }
+            const auto left = deadline - std::chrono::steady_clock::now();
+            if (left <= std::chrono::steady_clock::duration::zero()) {
+                errno = ETIMEDOUT;
+                return false;
+            }
+            // Round up so a sub-millisecond remainder still waits.
+            const auto wait_ms = std::min<std::chrono::milliseconds::rep>(
+                std::chrono::ceil<std::chrono::milliseconds>(left).count(), std::numeric_limits<int>::max());
+            struct pollfd wait_fd {};
+            wait_fd.fd = handle;
+            wait_fd.events = POLLOUT;
+            const int ready = poll(&wait_fd, 1, static_cast<int>(wait_ms));
+            if (ready < 0 && errno != EINTR) {
+                return false;
+            }
+            continue;
         }
         if (sent == 0) {
             return false;

@@ -1,0 +1,3 @@
+### Fixed
+
+- **HTTP send deadline and per-address connection cap**, AlpacaHTTP, issue #1714. A response not fully sent within 120 s now closes its connection (`socket_send_allv` waits with `poll(POLLOUT)` against a deadline), so a client that stops reading no longer holds a worker; covered by the "never reads" case in `AlpacaHTTP/tests/test_server_socket.cpp`. New `http.max_connections_per_ip` (default 32, 0 = off, env `ALPACAHTTP_MAX_CONNECTIONS_PER_IP`) closes a connection over the per-address limit at accept with no response, logged at most once a minute; the third connection from one address is refused while another address is served in `test_server_socket.cpp`, and the key and variable are parsed in `AlpacaHTTP/tests/test_config.cpp`.

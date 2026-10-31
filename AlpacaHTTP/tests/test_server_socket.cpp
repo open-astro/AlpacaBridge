@@ -621,7 +621,134 @@ int main() {
             one_worker_server.stop();
         }
 
+        // A peer that takes the headers and then never reads must lose its
+        // connection once the send deadline passes, not hold the worker for
+        // the 120 s production bound. The deadline is shortened to 200 ms and
+        // the accepted socket's send buffer shrunk, so the 4 MiB body cannot
+        // fit. The client reads nothing until well past the deadline, then
+        // drains: a server that gave up has closed, so the drain ends at EOF
+        // short of the full body; a server still waiting would have sent all
+        // of it as the client read.
+        {
+            Watchdog watchdog(std::chrono::seconds(20), "send deadline on a peer that never reads");
+            alpacahttp::Config deadline_config;
+            deadline_config.set_http_port(0);
+            deadline_config.set_discovery_enabled(false);
+            deadline_config.set_thread_pool_size(1);
+            alpacahttp::Server deadline_server(deadline_config);
+            deadline_server.set_send_limits_for_test(std::chrono::milliseconds(200), 4096);
+            deadline_server.start_async();
+            const auto deadline_port = wait_for_bound_port(deadline_server, 2000);
+            EXPECT(deadline_port != 0);
+
+            int fd = connect_local(deadline_port, 4096);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            send_all(fd, image_request);
+            EXPECT(read_response_headers(fd).find("Content-Length: ") != std::string::npos);
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+            timeval drain_timeout{};
+            drain_timeout.tv_sec = 2;
+            EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &drain_timeout, sizeof(drain_timeout)) == 0);
+            std::size_t drained = 0;
+            ssize_t last = 0;
+            std::vector<char> sink(65536);
+            const auto drain_start = std::chrono::steady_clock::now();
+            while ((last = ::recv(fd, sink.data(), sink.size(), 0)) > 0) {
+                drained += static_cast<std::size_t>(last);
+            }
+            EXPECT(last == 0);  // EOF from the server, not our own receive timeout
+            EXPECT(drained < payload_size);
+            EXPECT(std::chrono::steady_clock::now() - drain_start < std::chrono::seconds(2));
+            ::close(fd);
+
+            // The only worker is free again.
+            int next_fd = connect_local(deadline_port);
+            EXPECT(next_fd >= 0);
+            set_receive_timeout(next_fd);
+            std::string carry;
+            send_all(next_fd, kGet11);
+            EXPECT(read_one_response(next_fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(next_fd);
+            deadline_server.stop();
+        }
+
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    // Per-address connection cap: with max_connections_per_ip = 2, a third
+    // connection from 127.0.0.1 is closed with no response while 127.0.0.2
+    // is still served, and a slot frees when one of the two closes.
+    {
+        Watchdog watchdog(std::chrono::seconds(30), "per-address connection cap");
+        alpacahttp::Config cap_config;
+        cap_config.set_http_port(0);
+        cap_config.set_discovery_enabled(false);
+        cap_config.set_max_connections_per_ip(2);
+        alpacahttp::Server cap_server(cap_config);
+        cap_server.start_async();
+        const auto cap_port = wait_for_bound_port(cap_server, 2000);
+        EXPECT(cap_port != 0);
+
+        const auto connect_from = [cap_port](const char* source) {
+            int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+            EXPECT(fd >= 0);
+            sockaddr_in local{};
+            local.sin_family = AF_INET;
+            local.sin_addr.s_addr = inet_addr(source);
+            EXPECT(::bind(fd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0);
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(cap_port);
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+            if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+                ::close(fd);
+                return -1;
+            }
+            return fd;
+        };
+        const auto get_status = [&kGet11](int fd) {
+            send_all(fd, kGet11);
+            std::string carry;
+            return read_one_response(fd, carry).substr(0, 12);
+        };
+
+        // Both held open and proven served, so the server has counted them.
+        int first = connect_from("127.0.0.1");
+        int second = connect_from("127.0.0.1");
+        EXPECT(first >= 0 && second >= 0);
+        EXPECT(get_status(first) == "HTTP/1.1 200");
+        EXPECT(get_status(second) == "HTTP/1.1 200");
+
+        int third = connect_from("127.0.0.1");
+        EXPECT(third >= 0);
+        EXPECT(peer_closed(third, 2000));
+        ::close(third);
+
+        int other = connect_from("127.0.0.2");
+        EXPECT(other >= 0);
+        EXPECT(get_status(other) == "HTTP/1.1 200");
+        ::close(other);
+
+        // Closing one frees its slot (the count falls in the close path).
+        ::close(first);
+        bool served_again = false;
+        const auto retry_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!served_again && std::chrono::steady_clock::now() < retry_until) {
+            int again = connect_from("127.0.0.1");
+            EXPECT(again >= 0);
+            send_all(again, kGet11);
+            std::string carry;
+            served_again = read_one_response(again, carry).rfind("HTTP/1.1 200 ", 0) == 0;
+            ::close(again);
+            if (!served_again) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        EXPECT(served_again);
+        ::close(second);
+        cap_server.stop();
     }
 
     // A connection is force-closed after kMaxRequestsPerConnection requests,
