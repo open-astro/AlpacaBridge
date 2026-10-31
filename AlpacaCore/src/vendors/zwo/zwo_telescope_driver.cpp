@@ -2030,17 +2030,19 @@ public:
 
         auto& protocol = protocol_;
 
-        // Every newer initiator (GOTO, Sync, abort, park) bumps slew_error_epoch_. Once it has
-        // moved, a newer command owns the motion and this older Sync must not stop it.
+        // Every newer initiator (GOTO, MoveAxis, FindHome, Park, Unpark, AbortSlew) bumps slew_error_epoch_. Once it has
+        // moved, a newer command owns the motion and this older Sync must not stop it, unless that
+        // command is a GOTO the mount has not accepted yet: its retry restores its own target.
         uint64_t sync_epoch = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             sync_epoch = slew_error_epoch_;
         }
-        // Caller holds target_write_mutex_ (a newer GOTO takes it before its first wire write).
+        // Caller holds target_write_mutex_ (a newer GOTO holds it from its first wire write until
+        // it clears goto_setup_pending_ after MS acceptance).
         auto require_ownership = [&]() {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (slew_error_epoch_ != sync_epoch) {
+            if (slew_error_epoch_ != sync_epoch && !goto_setup_pending_) {
                 throw AlpacaException("Sync superseded by a newer motion command", AlpacaError::InvalidOperation);
             }
         };
