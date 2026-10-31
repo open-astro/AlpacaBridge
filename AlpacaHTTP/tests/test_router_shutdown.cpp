@@ -83,19 +83,34 @@ void check_server_teardown(const std::string& path, void (alpacahttp::Server::*s
 }
 
 // Repeated restarts must not pile up finished threads (open-astro#1739).
+// A start reaps finished threads, so keep posting until only the newest is left.
 void check_finished_threads_reaped() {
     auto router = std::make_unique<alpacahttp::Router>();
     auto count = std::make_shared<std::atomic<int>>(0);
     router->set_restart_callback([count] { ++*count; });
-    for (int i = 1; i <= 3; ++i) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    int posts = 0;
+    do {
         EXPECT(route_post(*router, "/management/v1/restart").status_code() == 200);
-        for (int wait = 0; wait < 500 && *count < i; ++wait) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // flag is set after the callback returns
-    }
-    EXPECT(*count == 3);
+        ++posts;
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    } while (posts < 3 || (router->delayed_thread_count_for_test() != 1 && std::chrono::steady_clock::now() < deadline));
+    EXPECT(*count >= 3);
     EXPECT(router->delayed_thread_count_for_test() == 1);
+}
+
+// A second request during the 100 ms delay is dropped: only the first callback runs.
+void check_second_request_dropped() {
+    auto router = std::make_unique<alpacahttp::Router>();
+    auto restarts = std::make_shared<std::atomic<int>>(0);
+    auto shutdowns = std::make_shared<std::atomic<int>>(0);
+    router->set_restart_callback([restarts] { ++*restarts; });
+    router->set_shutdown_callback([shutdowns] { ++*shutdowns; });
+    EXPECT(route_post(*router, "/management/v1/restart").status_code() == 200);
+    EXPECT(route_post(*router, "/management/v1/shutdown").status_code() == 200);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT(*restarts == 1);
+    EXPECT(*shutdowns == 0);
 }
 
 }  // namespace
@@ -112,6 +127,8 @@ int main() {
     check_server_teardown("/management/v1/restart", &alpacahttp::Server::set_restart_callback);
     // case: repeated restarts join their finished delayed threads (#1739)
     check_finished_threads_reaped();
+    // case: a second shutdown or restart during the delay is dropped (#1739)
+    check_second_request_dropped();
     std::cout << "Router shutdown tests passed\n";
     return 0;
 }

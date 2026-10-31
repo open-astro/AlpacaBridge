@@ -231,7 +231,8 @@ public:
 
     // Cancel the pending delayed shutdown/restart callback and join its thread.
     // Server::~Server() calls this first, so the callback (which reaches the
-    // Server) cannot run after teardown starts (open-astro#1739).
+    // Server) cannot run after teardown starts (open-astro#1739). One-way:
+    // delayed_cancelled_ never resets, so the Router starts no further delayed callback.
     void cancel_delayed_callback();
     std::size_t delayed_thread_count_for_test() {
         std::lock_guard<std::mutex> lock(delayed_mutex_);
