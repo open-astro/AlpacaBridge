@@ -47,10 +47,12 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -91,6 +93,15 @@ struct LandingOffsetHandset {
     // The once-a-second RA readback sawtooth (#1030), phased from `sawtooth_epoch`.
     std::atomic<bool> sawtooth{false};
     std::atomic<int> position_reads{0};  // precise `e` reads served
+    std::atomic<int> status_reads{0};    // `L` slew-status reads served
+    // The `e` reply with this 1-based ordinal (0: none) is held, still unanswered, until hold_e is cleared or 6 s of
+    // real time pass; e_held is set while it waits.
+    std::atomic<int> hold_e_at{0};
+    // When set, the GOTO command arms hold_e_at for the second `e` after it: the slew-end measurement is the first,
+    // the landing hunt's first read the second.
+    std::atomic<bool> hold_e_after_goto{false};
+    std::atomic<bool> hold_e{false};
+    std::atomic<bool> e_held{false};
     std::atomic<Clock::rep> sawtooth_epoch{0};
     // Every other GOTO lands one further second of RA east (#1030).
     std::atomic<bool> reroll{false};
@@ -207,7 +218,14 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
             case 'K':
                 return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
             case 'e': {
-                st->position_reads.fetch_add(1);
+                const int ordinal = st->position_reads.fetch_add(1) + 1;
+                if (ordinal == st->hold_e_at.load()) {
+                    st->e_held.store(true);
+                    for (int i = 0; i < 6000 && st->hold_e.load(); ++i) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    st->e_held.store(false);
+                }
                 uint32_t ra = st->ra_now();
                 if (st->sawtooth.load()) {
                     const auto low = static_cast<uint32_t>(std::lround(st->sawtooth_phase() * kCountsPerSecondOfRa));
@@ -221,6 +239,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 const uint32_t ra = static_cast<uint32_t>(std::strtoul(chunk.substr(1, 6).c_str(), nullptr, 16));
                 const uint32_t dec = static_cast<uint32_t>(std::strtoul(chunk.substr(10, 6).c_str(), nullptr, 16));
                 const int ordinal = st->goto_count.fetch_add(1) + 1;
+                if (st->hold_e_after_goto.load()) st->hold_e_at.store(st->position_reads.load() + 2);
                 st->set_ra_motor(kSiderealArcsecPerSec, false);  // a GOTO lands tracking
                 uint32_t offset = st->ra_offset_counts.load() * (st->growing.load() ? ordinal : 1U);
                 if (st->reroll.load() && ordinal % 2 == 0) {
@@ -251,6 +270,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 return "#";
             }
             case 'L':
+                st->status_reads.fetch_add(1);
                 return st->goto_in_progress() ? "1#" : "0#";
             case 'M':
                 st->goto_stopped.store(true);
@@ -330,12 +350,12 @@ void use_fast_guide_rate(alpacacore::TelescopeDriver& driver) {
     driver.set_guide_rate(alpacacore::GuideRate{15.0 / 3600.0, 15.0 / 3600.0});
 }
 
-alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
+alpacacore::vendor::synscan::ConnectionInfo endpoint(int port, int response_timeout_ms = 1000) {
     alpacacore::vendor::synscan::ConnectionInfo info;
     info.type = alpacacore::vendor::synscan::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = port;
-    info.response_timeout_ms = 1000;
+    info.response_timeout_ms = response_timeout_ms;
     return info;
 }
 
@@ -410,10 +430,11 @@ struct ScopedJoin {
     }
 };
 
-std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock) {
+std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock,
+                                                         int response_timeout_ms = 1000) {
     return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
-        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+        0, endpoint(port, response_timeout_ms), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt,
+        std::nullopt, std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
 }
 
 // The getters serve the polled frame (decision 0010), so a case that reads the RA at a chosen sawtooth phase takes
@@ -1573,6 +1594,43 @@ TEST_CASE("SynScan GOTO landing - the hunt reads past a held status tick once it
     CHECK(h.st->position_reads.load() > before);
 }
 
+// The hunt waits for a probe inside its exchanges with mutex_ released (decision 0016 point 2), so a getter that takes
+// mutex_ is not held up by it. Each getter runs on its own thread: with the lock held across the wait the thread
+// blocks until the wait bound (1.5 s) or a clock step ends it, and the case still ends.
+TEST_CASE("SynScan GOTO landing - getters stay in budget while the hunt waits on a held status tick",
+          "[synscan][telescope][goto-landing]") {
+    HuntBehindHeldTick h;
+    const std::vector<std::pair<const char*, std::function<void()>>> getters = {
+        {"Tracking", [&] { (void)h.driver->get_tracking(); }},
+        {"GuideRate", [&] { (void)h.driver->get_guide_rate(); }},
+        {"AtPark", [&] { (void)h.driver->get_at_park(); }},
+        {"IsPulseGuiding", [&] { (void)h.driver->get_is_pulse_guiding(); }},
+        {"RightAscension", [&] { (void)h.driver->get_right_ascension(); }},
+    };
+    for (const auto& [name, read] : getters) {
+        CAPTURE(name);
+        std::atomic<bool> done{false};
+        const auto started = Clock::now();
+        std::thread caller([&] {
+            try {
+                read();
+            } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): an answer too
+            }
+            done = true;
+        });
+        while (!done.load() && Clock::now() - started < std::chrono::milliseconds(500)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const bool in_budget = done.load();
+        while (!done.load()) {
+            h.clock.advance(kVirtualStep);  // lets a mutated driver's wait end so the case can finish
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        caller.join();
+        CHECK(in_budget);
+    }
+}
+
 TEST_CASE("SynScan GOTO landing - a new slew while the hunt waits on a held status tick starts at once (#1247)",
           "[synscan][telescope][goto-landing]") {
     HuntBehindHeldTick h;
@@ -1633,7 +1691,10 @@ double true_ra_error_arcsec(LandingOffsetHandset& st, double target_hours) {
     return std::abs(ra_counts_since(st, target)) / kCountsPerArcsec;
 }
 
+// The paused status poll waits its period on the clock for good, so a waiter alone does not say the pulse's stop
+// timer has parked, and a clock advanced before it has would end the pulse late: give the timer's thread real time.
 void wait_pulse_done(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const auto deadline = Clock::now() + kRealLimit;
     while (driver.get_is_pulse_guiding() && Clock::now() < deadline) {
         // The flag also clears by a clock read once the pulse's completion delay has passed, with no task parked.
@@ -1941,7 +2002,7 @@ TEST_CASE("SynScan GOTO landing - the hunt waits for a poll tick that is inside 
 namespace {
 
 // Virtual time one slew_to_coordinates takes, stepped to completion. With `poll_in_flight` a poll tick is parked
-// between its sample and its publish for the whole slew, so poll_sampling_ stays set at every tick hunt.
+// between its sample and its publish for the whole slew, so probe_sampling_ stays set at every tick hunt.
 std::chrono::nanoseconds virtual_slew_duration(bool poll_in_flight) {
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<LandingOffsetHandset>();
@@ -2003,4 +2064,118 @@ TEST_CASE("SynScan GOTO landing - the tick hunt waits out a poll tick in flight 
     // Each hunt waits kPollSampleWaitBound (1500 ms) for the parked tick; the wait is virtual time, so it shows in
     // the clock. A wait on the steady clock would add no virtual time (and 1.5 s of real time).
     CHECK(held - baseline >= std::chrono::milliseconds(1400));
+}
+
+// The landing hunt inside its first precise read, the reply held on the handset: the hunt owns the line (its
+// HuntHold is taken) and the wrapper mutex is busy, with the status poll paused so only a test-driven probe samples.
+// The handset holds the hunt's first read (hold_e_after_goto).
+struct HuntOnTheLine {
+    alpacacore::test::FakeTaskClock clock;
+    std::shared_ptr<LandingOffsetHandset> st = std::make_shared<LandingOffsetHandset>();
+    alpacacore::test::FakeMountServer server{responder(st)};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    std::thread probe;
+    std::atomic<bool> probe_done{false};
+
+    HuntOnTheLine() {
+        st->attach(clock);
+        st->sawtooth_epoch.store(st->now().time_since_epoch().count());
+        st->sawtooth.store(true);
+        st->hold_e.store(true);
+        st->hold_e_after_goto.store(true);
+        REQUIRE(server.ok());
+        driver = make_driver(server.port(), clock, 10000);  // longer than the 6 s the handset may hold the reply
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+        const auto deadline = Clock::now() + kRealLimit;
+        while (!st->e_held.load() && Clock::now() < deadline) {
+            step_virtual(clock);
+        }
+        REQUIRE(st->e_held.load());
+    }
+
+    // One full tick on its own thread; it parks on the hold until the hunt ends, the bound runs out or a disconnect.
+    void start_probe() {
+        const std::size_t parked = clock.waiter_count();  // the paused poll thread waits its period on the clock
+        probe = std::thread([this] {
+            alpacacore::vendor::synscan::poll_status_now_for_testing(*driver);
+            probe_done = true;
+        });
+        REQUIRE(clock.wait_for_waiters(parked + 1, std::chrono::seconds(2)));  // the probe, parked on the hold
+    }
+
+    ~HuntOnTheLine() {
+        st->hold_e.store(false);
+        if (probe.joinable()) {
+            release_until(clock, probe_done);
+            probe.join();
+        }
+        run_virtual(clock, [this] { driver->set_connected(false); });
+    }
+};
+
+TEST_CASE("SynScan GOTO landing - a status tick waits out the hunt and makes no exchange while it holds the line",
+          "[synscan][telescope][goto-landing]") {
+    HuntOnTheLine h;
+    const int reads_e = h.st->position_reads.load();
+    const int reads_l = h.st->status_reads.load();
+    h.start_probe();  // a probe that sampled instead would queue on the wrapper mutex, not park on the clock
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(h.st->position_reads.load() == reads_e);
+    CHECK(h.st->status_reads.load() == reads_l);
+    CHECK_FALSE(h.probe_done.load());
+    // The hunt ends within its 3.4 s budget, inside the probe's 4.9 s bound: the tick then runs.
+    h.st->hold_e.store(false);
+    const auto deadline = Clock::now() + kRealLimit;
+    while (!h.probe_done.load() && Clock::now() < deadline) {
+        step_virtual(h.clock);
+    }
+    CHECK(h.probe_done.load());
+    CHECK(h.st->status_reads.load() > reads_l);
+}
+
+TEST_CASE("SynScan GOTO landing - a status tick held past its bound does not renew the served frame",
+          "[synscan][telescope][goto-landing]") {
+    HuntOnTheLine h;
+    // The DeviceState TimeStamp is when the poll measured: an old frame served again as new would reset its age.
+    const auto frame_age = [&] {
+        const auto stamp = alpacacore::test::parse_timestamp(alpacacore::test::time_stamp_of(*h.driver));
+        return std::chrono::duration<double>(std::chrono::system_clock::now() - stamp).count();
+    };
+    const double age_before = frame_age();  // the paused poll has served the connect frame since
+    h.start_probe();
+    h.clock.advance(std::chrono::seconds(5));  // past the 4.9 s bound, inside the handset's 1 s real timeout
+    const auto deadline = Clock::now() + std::chrono::seconds(2);
+    while (!h.probe_done.load() && Clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(h.probe_done.load());
+    CHECK(frame_age() > age_before + 4.5);
+}
+
+TEST_CASE("SynScan GOTO landing - set_connected(false) ends a tick waiting on the hunt's hold at once",
+          "[synscan][telescope][goto-landing]") {
+    HuntOnTheLine h;
+    // The module's own poll thread takes the tick, so the disconnect has to join it.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*h.driver, false);
+    h.clock.advance(std::chrono::seconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the woken poll thread parks on the hold
+    REQUIRE(h.st->e_held.load());  // the hunt's read is still unanswered, so its hold is still taken
+    std::atomic<bool> disconnected{false};
+    std::thread closer([&] {
+        h.driver->set_connected(false);
+        disconnected = true;
+    });
+    // The clock stays put: the probe's 4.9 s wait is virtual, so only the disconnect can end it. The handset
+    // answers the hunt's held read now, so the hunt ends too; the probe's wake-up is the disconnect's own.
+    h.st->hold_e.store(false);
+    const auto deadline = Clock::now() + std::chrono::seconds(4);
+    while (!disconnected.load() && Clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    const bool in_budget = disconnected.load();
+    release_until(h.clock, disconnected);
+    closer.join();
+    CHECK(in_budget);
 }

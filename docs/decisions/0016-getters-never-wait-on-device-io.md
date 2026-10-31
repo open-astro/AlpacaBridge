@@ -62,7 +62,7 @@ Symbol: `transition_mutex_`
 | QHY focuser |  | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted |  | served from `PolledState` |
 | Sky-Watcher telescope |  | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted |  | `util::LockGate` drops `mutex_` per exchange |
 | SVBONY camera |  | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | partial | #1842 | `mutex_` held across the SDK connect |
-| SynScan telescope | `mutex_` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | partial | #1828 | `mutex_` held across the connect handshake |
+| SynScan telescope |  | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted |  | the wrapper's lock is the I/O lock; served from `PolledState` |
 | ToupTek camera |  | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted |  |  |
 | ToupTek filter wheel |  | `AlpacaCore/src/vendors/touptek/touptek_filterwheel_driver.cpp` | adopted |  |  |
 | ToupTek focuser |  | `AlpacaCore/src/vendors/touptek/touptek_focuser_driver.cpp` | adopted |  |  |
@@ -93,7 +93,7 @@ Symbol: `transition_mutex_`
 
 - Reviewers check each driver PR against the Rules above. A driver that still holds `mutex_` across device I/O is a defect with its own issue, not an exception.
 - Each slice is one driver family. A getter that must reach the device (a live read) still takes the I/O lock and waits; the rule covers members that need no device access.
-- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (SynScan #1828, iOptron #1829, the cameras #1841 to #1845, and others).
+- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (iOptron #1829, the cameras #1841 to #1845, and others).
 
 ## How to reverse
 
