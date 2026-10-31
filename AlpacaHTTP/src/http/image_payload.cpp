@@ -15,10 +15,17 @@
 #include <alpacacore/util/image_validation.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <future>
 #include <limits>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace alpacahttp {
@@ -347,6 +354,112 @@ ImagePayload build(const alpacacore::ImageArray& image, std::string_view accept_
         payload.body = build_image_array_payload(image, 2, call);
     }
     return payload;
+}
+
+namespace {
+
+std::atomic<std::uint64_t> g_epoch{0};
+
+// A finished build, shared by every request that joined it.
+struct SharedBuild {
+    std::string content_type;
+    std::string body;           // encoded with the builder's transaction ids
+    std::size_t json_head_len;  // JSON only: length of the builder's success_head()
+    bool imagebytes;
+};
+
+struct InFlight {
+    std::shared_future<std::shared_ptr<const SharedBuild>> result;
+    int joined = 0;  // guarded by g_inflight_mutex
+};
+
+using BuildKey = std::tuple<const void*, bool, std::uint64_t>;
+
+std::mutex g_inflight_mutex;
+std::map<BuildKey, std::shared_ptr<InFlight>> g_inflight;
+// One image build at a time. A 4 GB Pi holds one frame, its transposed copy and
+// the encoded body (about 1.3 GB for a 6000x4000 colour JSON frame) but not two.
+std::mutex g_build_mutex;
+
+void write_uint32_le(std::string& out, std::size_t offset, std::uint32_t value) {
+    for (unsigned i = 0; i < 4; ++i) {
+        out[offset + i] = static_cast<char>((value >> (8 * i)) & 0xFF);
+    }
+}
+
+// The builder's body with this request's transaction ids.
+ImagePayload materialize(const SharedBuild& build, const DeviceCall& call) {
+    ImagePayload payload;
+    payload.content_type = build.content_type;
+    if (build.imagebytes) {
+        payload.body = build.body;
+        write_uint32_le(payload.body, 8, call.client_tx_id());
+        write_uint32_le(payload.body, 12, call.server_tx_id());
+    } else {
+        const std::string head = call.success_head();
+        payload.body.reserve(head.size() + build.body.size() - build.json_head_len);
+        payload.body.append(head);
+        payload.body.append(build.body, build.json_head_len, std::string::npos);
+    }
+    return payload;
+}
+
+}  // namespace
+
+ImageBuildEpoch::ImageBuildEpoch() { g_epoch.fetch_add(1); }
+ImageBuildEpoch::~ImageBuildEpoch() { g_epoch.fetch_add(1); }
+
+ImagePayload build_shared(const void* device, const std::function<alpacacore::ImageArray()>& fetch,
+                          std::string_view accept_header, const DeviceCall& call) {
+    const bool imagebytes = accepts_imagebytes(accept_header);
+    const BuildKey key{device, imagebytes, g_epoch.load()};
+
+    std::shared_ptr<InFlight> entry;
+    std::promise<std::shared_ptr<const SharedBuild>> promise;
+    bool joined_existing = false;
+    {
+        std::lock_guard<std::mutex> lock(g_inflight_mutex);
+        auto it = g_inflight.find(key);
+        if (it != g_inflight.end()) {
+            entry = it->second;
+            ++entry->joined;
+            joined_existing = true;
+        } else {
+            entry = std::make_shared<InFlight>();
+            entry->result = promise.get_future().share();
+            g_inflight.emplace(key, entry);
+        }
+    }
+    if (joined_existing) {
+        return materialize(*entry->result.get(), call);  // rethrows the builder's failure
+    }
+
+    // Removes the entry so later GETs build afresh; returns how many GETs joined it.
+    const auto retire = [&] {
+        std::lock_guard<std::mutex> lock(g_inflight_mutex);
+        g_inflight.erase(key);
+        return entry->joined;
+    };
+    SharedBuild build;
+    try {
+        std::lock_guard<std::mutex> build_lock(g_build_mutex);
+        const alpacacore::ImageArray image = fetch();
+        ImagePayload payload = alpacahttp::build(image, accept_header, call);
+        build.content_type = std::move(payload.content_type);
+        build.body = std::move(payload.body);
+    } catch (...) {
+        retire();
+        promise.set_exception(std::current_exception());
+        throw;
+    }
+    build.imagebytes = imagebytes;
+    build.json_head_len = call.success_head().size();
+    if (retire() == 0) {
+        return ImagePayload{std::move(build.content_type), std::move(build.body)};
+    }
+    const auto shared = std::make_shared<const SharedBuild>(std::move(build));
+    promise.set_value(shared);
+    return materialize(*shared, call);
 }
 
 }  // namespace alpacahttp

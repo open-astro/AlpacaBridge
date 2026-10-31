@@ -1325,6 +1325,118 @@ int main() {
     }
 
     {
+        // case: parallel imagearray GETs for one exposure build once and a new exposure is a new frame (#1716)
+        constexpr int kCameraNumber = 8979;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        camera->set_connected(true);
+        EXPECT(registry.register_device(camera));
+        camera->image_array_delay = std::chrono::milliseconds(300);
+
+        const auto get_image = [&](const std::string& accept, std::uint32_t client_tx, std::uint32_t server_tx) {
+            alpacahttp::Request request;
+            std::string raw = "GET /api/v1/camera/" + std::to_string(kCameraNumber) +
+                              "/imagearray?ClientTransactionID=" + std::to_string(client_tx) +
+                              " HTTP/1.1\r\nHost: localhost\r\nAccept: " + accept + "\r\n\r\n";
+            EXPECT(request.parse(raw));
+            return router.route(request, server_tx);
+        };
+        const auto put_camera = [&](const std::string& method, const std::string& body) {
+            return route_request(router, "PUT", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/" + method, body);
+        };
+        const auto frame = [](std::int32_t first) {
+            alpacacore::ImageArray image;
+            image.width = 2;
+            image.height = 2;
+            image.rank = 2;
+            image.data = {first, first + 1, first + 2, first + 3};
+            return image;
+        };
+        constexpr int kThreads = 6;
+        const auto run_parallel = [&](const std::string& accept) {
+            std::vector<alpacahttp::Response> responses(kThreads);
+            std::atomic<bool> go{false};
+            std::vector<std::thread> threads;
+            for (int i = 0; i < kThreads; ++i) {
+                threads.emplace_back([&, i] {
+                    while (!go.load()) {
+                        std::this_thread::yield();
+                    }
+                    responses[i] = get_image(accept, 100 + i, 200 + i);
+                });
+            }
+            go = true;
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            return responses;
+        };
+
+        // JSON: one getter call, every response is what a lone request with the same ids gets.
+        camera->set_image_array(frame(10));
+        camera->image_getter_calls = 0;
+        const auto json_responses = run_parallel("application/json");
+        EXPECT(camera->image_getter_calls == 1);
+        camera->image_array_delay = std::chrono::milliseconds(0);
+        for (int i = 0; i < kThreads; ++i) {
+            const auto alone = get_image("application/json", 100 + i, 200 + i);
+            EXPECT(json_responses[i].status_code() == 200);
+            EXPECT(json_responses[i].body() == alone.body());
+            EXPECT(json_responses[i].get_header("Content-Length") == std::to_string(alone.body().size()));
+            EXPECT(json_responses[i].get_header("Content-Type") == "application/json");
+        }
+        EXPECT(json_responses[0].body() ==
+               "{\"ClientTransactionID\":100,\"ServerTransactionID\":200,\"ErrorNumber\":0,\"ErrorMessage\":\"\","
+               "\"Type\":2,\"Rank\":2,\"Value\":[[10,12],[11,13]]}");
+
+        // ImageBytes: the same, ids at bytes 8 and 12.
+        camera->image_array_delay = std::chrono::milliseconds(300);
+        camera->image_getter_calls = 0;
+        const auto bytes_responses = run_parallel("application/imagebytes");
+        EXPECT(camera->image_getter_calls == 1);
+        camera->image_array_delay = std::chrono::milliseconds(0);
+        for (int i = 0; i < kThreads; ++i) {
+            const auto alone = get_image("application/imagebytes", 100 + i, 200 + i);
+            EXPECT(bytes_responses[i].get_header("Content-Type") == "application/imagebytes");
+            EXPECT(bytes_responses[i].body() == alone.body());
+        }
+
+        // A new exposure is a new frame, also when requests overlap a StartExposure.
+        camera->set_image_array(frame(50));
+        EXPECT(put_camera("startexposure", "Duration=1&Light=true").status_code() == 200);
+        const auto fresh = get_image("application/json", 1, 2);
+        EXPECT(nlohmann::json::parse(fresh.body()).at("Value") == nlohmann::json::parse("[[50,52],[51,53]]"));
+        camera->set_image_array(frame(70));
+        camera->image_array_delay = std::chrono::milliseconds(300);
+        std::thread old_frame_reader([&] {
+            const auto old_frame = get_image("application/json", 3, 4);
+            EXPECT(nlohmann::json::parse(old_frame.body()).at("Value") == nlohmann::json::parse("[[70,72],[71,73]]"));
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        camera->set_image_array(frame(90));
+        EXPECT(put_camera("abortexposure", "").status_code() == 200);
+        const auto after_abort = get_image("application/json", 5, 6);
+        EXPECT(nlohmann::json::parse(after_abort.body()).at("Value") == nlohmann::json::parse("[[90,92],[91,93]]"));
+        old_frame_reader.join();
+
+        // Error paths are unchanged: every parallel request reports the driver's error with its own ids.
+        camera->image_array_delay = std::chrono::milliseconds(100);
+        camera->set_image_array_error(
+            alpacacore::AlpacaException("No image ready", alpacacore::AlpacaError::InvalidOperation));
+        camera->image_getter_calls = 0;
+        const auto error_responses = run_parallel("application/json");
+        EXPECT(camera->image_getter_calls == 1);
+        for (int i = 0; i < kThreads; ++i) {
+            const auto body = nlohmann::json::parse(error_responses[i].body());
+            EXPECT(body.at("ErrorNumber") == alpacacore::AlpacaError::InvalidOperation);
+            EXPECT(body.at("ErrorMessage") == "No image ready");
+            EXPECT(body.at("ClientTransactionID") == 100 + i);
+            EXPECT(body.at("ServerTransactionID") == 200 + i);
+        }
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
         // case: ImageBytes preserves metadata, ordering, and element bytes
         constexpr int kCameraNumber = 8980;
         auto& registry = alpacacore::management::DeviceRegistry::instance();
