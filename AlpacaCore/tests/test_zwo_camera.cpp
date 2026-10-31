@@ -14,6 +14,7 @@
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <limits>
@@ -26,6 +27,7 @@
 #include "driver_rig.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_sdk.h"
+#include "getter_stall_probe.h"
 
 namespace {
 
@@ -313,4 +315,46 @@ TEST_CASE("ZWO Camera Driver - ElectronsPerADU and FullWellCapacity are not impl
         CHECK(s.name != "FullWellCapacity");
     }
     driver->set_connected(false);
+}
+
+// Decision 0016 rules 1 and 4: Name and the other identity getters need no device access, so a connect that
+// holds the SDK open must not park them. The open is held on a latch; the getters run on the test thread.
+// Falsified by: zwo_camera_driver.cpp set_connected(true) holding mutex_ across open_camera() (get_name() then
+// waits until the latch is released and the timed call below fails its budget).
+TEST_CASE("ZWO Camera Driver - Name and identity getters answer while a connect holds the SDK open",
+          "[zwo][camera][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    std::atomic<bool> open_entered{false};
+    std::atomic<bool> release_open{false};
+    std::atomic<bool> info_read_during_open{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call == "get_camera_info_by_id" && open_entered.load() && !release_open.load()) {
+            info_read_during_open = true;
+        }
+        if (call != "open_camera") return;
+        open_entered = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!release_open.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+
+    std::thread connector([&] { camera->set_connected(true); });
+    REQUIRE(wait_for_flag(open_entered));
+
+    CHECK(timed([&] { (void)camera->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)camera->get_unique_id(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)camera->get_sensor_name(); }) < kGetterBudget);
+    CHECK(timed([&] { CHECK_FALSE(camera->get_connected()); }) < kGetterBudget);
+    CHECK_FALSE(info_read_during_open.load());  // the name getter does not reach the SDK behind the open
+    CHECK_FALSE(release_open.load());           // the open is still held, so the timings above are not vacuous
+
+    release_open = true;
+    connector.join();
+    CHECK(camera->get_connected());
+    CHECK(camera->get_name() == sdk.camera.name);
+    camera->set_connected(false);
 }
