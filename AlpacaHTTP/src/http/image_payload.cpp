@@ -363,7 +363,7 @@ std::atomic<std::uint64_t> g_epoch{0};
 // A finished build, shared by every request that joined it.
 struct SharedBuild {
     std::string content_type;
-    std::string body;           // encoded with the builder's transaction ids
+    std::string body;               // encoded with the builder's transaction ids
     std::size_t json_head_len = 0;  // JSON only: length of the builder's success_head()
     bool imagebytes = false;
 };
