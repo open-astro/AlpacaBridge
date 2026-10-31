@@ -429,7 +429,7 @@ TEST_CASE("ZWO shared open table - A loss closes the id only after the unseriali
     CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
     // ... but the handle stays open under the transfer, and the id cannot be reopened until it is closed.
     CHECK(units.closes.load() == 0);
-    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::DriverException);
+    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::InvalidOperation);
     CHECK(units.opens.load() == 1);
 
     download.release = true;
@@ -451,12 +451,35 @@ TEST_CASE("ZWO shared open table - The last close waits for a running unserialis
 
     table.close(3, y.link);
     CHECK(units.closes.load() == 0);
-    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::DriverException);
+    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::InvalidOperation);
 
     download.release = true;
     download.thread.join();
     CHECK(units.closes.load() == 1);
     CHECK(table.open_count(3) == 0);
+}
+
+// Falsified by: checked_entry() accepting link 0 (or a retired entry): the check must refuse both.
+TEST_CASE("ZWO shared open table - A link 0 caller is refused on an entry retired under an unserialised call",
+          "[zwo][link]") {
+    CountingUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    HeldDownload download(table, 3, y.link);
+    REQUIRE(wait_until([&] { return download.inside.load(); }));
+    // A loss code on another call retires the entry; the close waits for the download.
+    CHECK(error_of([&] {
+              table.with_link(3, y.link, [&] {
+                  table.call(3, [] { throw AlpacaException("ASI_ERROR_CAMERA_REMOVED", AlpacaError::NotConnected); });
+              });
+          }) == AlpacaError::NotConnected);
+
+    bool ran = false;
+    CHECK(error_of([&] { table.with_link(3, 0, [&] { table.call(3, [&] { ran = true; }); }); }) ==
+          AlpacaError::NotConnected);
+    CHECK(error_of([&] { table.with_link(3, 0, [&] { table.call_unserialised(3, [&] { ran = true; }); }); }) ==
+          AlpacaError::NotConnected);
+    CHECK_FALSE(ran);
 }
 
 // Falsified by: call_unserialised() not retiring the entry on a loss code from its own body.

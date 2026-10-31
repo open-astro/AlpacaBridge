@@ -41,14 +41,14 @@ namespace alpacacore::vendor::zwo {
  * entry (the old handle is closed best effort at once, decision 0009 rule 3) and opens afresh;
  * any other read failure fails that open and keeps the entry. A per-device call runs only under
  * the caller's link for that id (with_link() on the calling thread): no link is a
- * DriverException, a retired link is NotConnected, both refused before the SDK is touched, and
+ * DriverException, a retired link (or link 0) is NotConnected, both refused before the SDK is touched, and
  * a loss code from the call retires the entry.
  *
  * call_unserialised() is the one per-device call that must not hold the mutex (a blocking bulk
  * download): it checks the link in one hold, runs with no lock, and counts as in flight. A loss
  * retires the entry at once for every later caller, but the dead handle is closed only when the
  * last in-flight call returns, so a close never lands under a running transfer; a reopen of that
- * id meanwhile is refused (DriverException) until the close happened.
+ * id meanwhile is refused (InvalidOperation) until the close happened.
  *
  * Residual: a held unit with no serial cannot be proven after a replug. open() shares it;
  * open_candidate() skips it.
@@ -219,7 +219,7 @@ private:
                                   AlpacaError::DriverException);
         }
         const auto it = entries_.find(id);
-        if (it == entries_.end() || it->second.link != *expected) {
+        if (*expected == 0 || it == entries_.end() || it->second.retired || it->second.link != *expected) {
             throw AlpacaException("stale link for id " + std::to_string(id), AlpacaError::NotConnected);
         }
         return it;
@@ -300,7 +300,7 @@ private:
 
     [[noreturn]] static void throw_still_closing(int id) {
         throw AlpacaException("id " + std::to_string(id) + " is still closing after a loss; try again",
-                              AlpacaError::DriverException);
+                              AlpacaError::InvalidOperation);
     }
 
     void close_best_effort(int id) {
