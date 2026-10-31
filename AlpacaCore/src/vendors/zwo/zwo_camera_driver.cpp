@@ -200,8 +200,8 @@ public:
             // A preloaded name stands when the SDK cannot answer by id.
             ZWOCameraInfo info = camera_info_;
             bool info_valid = camera_info_valid_;
-            lock.unlock();
             connect_in_flight_.store(true);
+            lock.unlock();
             struct ClearInFlight {
                 std::atomic<bool>& flag;
                 ~ClearInFlight() { flag.store(false); }

@@ -75,7 +75,7 @@ Symbol: `transition_mutex_`
 | WeeWX observing conditions |  | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted |  |  |
 | ZWO ASIAIR Plus switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp` | adopted |  |  |
 | ZWO ASIAIR switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp` | adopted |  |  |
-| ZWO camera |  | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | partial | #1843 | `mutex_` held across the SDK connect |
+| ZWO camera |  | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | adopted |  |  |
 | ZWO filter wheel |  | `AlpacaCore/src/vendors/zwo/zwo_filterwheel_driver.cpp` | adopted |  |  |
 | ZWO focuser |  | `AlpacaCore/src/vendors/zwo/zwo_focuser_driver.cpp` | adopted |  |  |
 | ZWO rotator |  | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted |  |  |
