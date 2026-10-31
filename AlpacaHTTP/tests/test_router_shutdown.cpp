@@ -94,7 +94,8 @@ void check_finished_threads_reaped() {
         EXPECT(route_post(*router, "/management/v1/restart").status_code() == 200);
         ++posts;
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    } while (posts < 3 || (router->delayed_thread_count_for_test() != 1 && std::chrono::steady_clock::now() < deadline));
+    } while (posts < 3 ||
+             (router->delayed_thread_count_for_test() != 1 && std::chrono::steady_clock::now() < deadline));
     EXPECT(*count >= 3);
     EXPECT(router->delayed_thread_count_for_test() == 1);
 }
