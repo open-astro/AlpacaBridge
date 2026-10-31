@@ -675,12 +675,16 @@ TEST_CASE("Gemini Flat Panel Slots - a cable pulled during a cover move loses th
     REQUIRE(slot_wait_until([&] { return !driver->get_connected(); }, milliseconds(5000)));
     CHECK(std::chrono::steady_clock::now() - pulled < std::chrono::seconds(5));  // well inside the 30 s cover wait
     require_lost(*driver, old_pts);
+    // Decision 0009 rule 5: the loss reason is kept while the link stays lost.
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
     require_alpaca_error([&] { driver->open_cover(); }, kNotConnected);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
     require_alpaca_error([&] { driver->halt_cover(); }, kNotConnected);
 
     // Disconnect after the loss joins the failed body and closes nothing twice.
     REQUIRE_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
 
     // The reconnect clears the body's kept failure: the cover reads its live state.
     port.replug(replugged);
