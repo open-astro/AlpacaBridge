@@ -93,7 +93,7 @@ Symbol: `StateSnapshot`
 | Sky-Watcher telescope | `StateSnapshot` | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #1011 | 100 ms; Sky-Watcher adoption above |
 | Celestron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337 | 1 s; Celestron telescope adoption above |
 | Bisque telescope | `StateSnapshot` | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | 1 s; Bisque telescope adoption above |
-| SynScan telescope | `StateSnapshot` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247 | 1 s; [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
+| SynScan telescope | `PolledState` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247, #1761 | 1 s; [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
 | Gemini focuser | `PolledState` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229, #1643 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
 | QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
 | Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
