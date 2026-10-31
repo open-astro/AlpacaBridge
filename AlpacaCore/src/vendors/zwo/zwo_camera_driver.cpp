@@ -214,6 +214,12 @@ public:
             open_link_.store(opened.link);
             // Guard the ENTIRE remaining init: an open left unreleased on a throw is held for ever
             // (driver-lifecycle.instructions.md connect rule, same shape as the EAF/EFW/CAA siblings).
+            std::unordered_map<ZWOControlType, ZWOControlCaps> caps;
+            ZWOImageType image_type{};
+            int max_width = 0;
+            int max_height = 0;
+            int roi_width = 0;
+            int roi_height = 0;
             try {
                 sdk_.with_link(resolved_id, opened.link, [&] {
                     ZWOCameraInfo fresh;
@@ -221,43 +227,42 @@ public:
                         info = std::move(fresh);
                         info_valid = true;
                     }
-                    std::unordered_map<ZWOControlType, ZWOControlCaps> caps;
                     for (const auto& cap : dev_.get_control_caps(resolved_id)) {
                         caps[cap.type] = cap;
                     }
                     apply_usb_bandwidth(resolved_id, caps, info.name);
-                    const ZWOImageType image_type = select_default_image_type(info, info_valid);
+                    image_type = select_default_image_type(info, info_valid);
 
-                    const int max_width = info_valid ? info.max_width : 0;
-                    const int max_height = info_valid ? info.max_height : 0;
-                    const int roi_width = max_width - (max_width % 8);
-                    const int roi_height = max_height - (max_height % 2);
+                    max_width = info_valid ? info.max_width : 0;
+                    max_height = info_valid ? info.max_height : 0;
+                    roi_width = max_width - (max_width % 8);
+                    roi_height = max_height - (max_height % 2);
 
                     if (roi_width > 0 && roi_height > 0) {
                         dev_.set_roi_format(resolved_id, roi_width, roi_height, 1, image_type);
                         dev_.set_start_pos(resolved_id, 0, 0);
                     }
-
-                    // The serial was read at the open. Some cameras have none: non-fatal, connect with an
-                    // empty serial (same policy as the EAF/EFW/CAA siblings).
-                    lock.lock();
-                    camera_id_ = resolved_id;
-                    camera_info_ = info;
-                    camera_info_valid_ = info_valid;
-                    control_caps_ = std::move(caps);
-                    image_type_ = image_type;
-                    bin_x_ = 1;
-                    bin_y_ = 1;
-                    start_x_ = 0;
-                    start_y_ = 0;
-                    num_x_ = max_width;
-                    num_y_ = max_height;
-                    roi_width_effective_ = roi_width;
-                    roi_height_effective_ = roi_height;
-                    roi_crop_x_ = 0;
-                    roi_crop_y_ = 0;
-                    serial_number_ = opened.serial;
                 });
+                // Published after with_link returns, so mutex_ is never taken under the SDK lock.
+                // The serial was read at the open. Some cameras have none: non-fatal, connect with an
+                // empty serial (same policy as the EAF/EFW/CAA siblings).
+                lock.lock();
+                camera_id_ = resolved_id;
+                camera_info_ = info;
+                camera_info_valid_ = info_valid;
+                control_caps_ = std::move(caps);
+                image_type_ = image_type;
+                bin_x_ = 1;
+                bin_y_ = 1;
+                start_x_ = 0;
+                start_y_ = 0;
+                num_x_ = max_width;
+                num_y_ = max_height;
+                roi_width_effective_ = roi_width;
+                roi_height_effective_ = roi_height;
+                roi_crop_x_ = 0;
+                roi_crop_y_ = 0;
+                serial_number_ = opened.serial;
             } catch (...) {
                 if (lock.owns_lock()) {
                     lock.unlock();
@@ -1301,6 +1306,9 @@ private:
         } else {
             std::optional<Result> result;
             sdk_.with_link(camera_id, open_link_.load(), [&] { result.emplace(fn()); });
+            if (!result) {
+                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+            }
             return std::move(*result);
         }
     }
@@ -1689,16 +1697,23 @@ private:
         return camera.camera_id;
     }
 
+    // The SDK read runs with mutex_ released: under LockedZWOSDK the decorator lock is taken before mutex_ on the
+    // connect path, so holding mutex_ across the read would invert the order.
     void preload_camera_info_locked() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_) {
-            return;
+        std::optional<int> camera_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (camera_info_valid_) {
+                return;
+            }
+            camera_id = camera_id_;
         }
 
         try {
-            if (camera_id_.has_value()) {
+            if (camera_id.has_value()) {
                 ZWOCameraInfo info;
-                if (sdk_.get_camera_info_by_id(camera_id_.value(), info)) {
+                if (sdk_.get_camera_info_by_id(camera_id.value(), info)) {
+                    std::lock_guard<std::mutex> lock(mutex_);
                     camera_info_ = info;
                     camera_info_valid_ = true;
                 }
