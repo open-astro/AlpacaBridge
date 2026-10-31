@@ -51,7 +51,10 @@ void ensure_flatpanel_connected(const std::atomic<bool>& connected, const Gemini
 }
 
 // A port that died during the post-handshake state seed fails the connect:
-// the wrapper has already released it, so Connected must not go true.
+// the wrapper has already released it, so Connected must not go true. The
+// disconnect() here also clears the wrapper's fault text, so get_link_fault()
+// stays empty: a connect that never completed is not a lost session, and the
+// reason reaches the client in this connect's NotConnected error instead.
 void fail_connect_if_link_lost(GeminiFlatPanelProtocolWrapper& protocol, std::mutex& firmware_mutex,
                                std::string& firmware) {
     if (protocol.link_alive()) {
@@ -159,6 +162,10 @@ public:
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown_locked().
         if (connected && consume_pending_disconnect(live)) {
             return;
         }
@@ -551,6 +558,10 @@ public:
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown_locked().
         if (connected && consume_pending_disconnect(live)) {
             return;
         }
