@@ -131,9 +131,7 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
             // Round up so a sub-millisecond remainder still waits.
             const auto wait_ms = std::min<std::chrono::milliseconds::rep>(
                 std::chrono::ceil<std::chrono::milliseconds>(left).count(), std::numeric_limits<int>::max());
-            struct pollfd wait_fd {};
-            wait_fd.fd = handle;
-            wait_fd.events = POLLOUT;
+            pollfd wait_fd = {handle, POLLOUT, 0};
             const int ready = poll(&wait_fd, 1, static_cast<int>(wait_ms));
             if (ready < 0 && errno != EINTR) {
                 return false;
