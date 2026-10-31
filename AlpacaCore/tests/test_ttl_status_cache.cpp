@@ -19,6 +19,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
 #include "getter_stall_probe.h"
 
 namespace {
@@ -86,4 +87,35 @@ TEST_CASE("TtlStatusCache - fault() is empty after reset() and after a good refi
     REQUIRE_FALSE(cache.fault().empty());
     CHECK(cache.get([] { return 5; }) == 5);
     CHECK(cache.fault().empty());
+}
+
+// Decision 0009 rule 2: the latch is stamped on the cache's clock when it latches, and fault_stale() turns true once
+// it has stood for the bound with no good refill.
+// Falsified by: ttl_status_cache.h:103 get() calling the unstamped note_failure() (fault_stale() never turns true).
+TEST_CASE("TtlStatusCache - fault_stale() turns true once the latched fault has stood for the bound",
+          "[util][ttl-cache]") {
+    alpacacore::test::FakeTaskClock clock;
+    TtlStatusCache<int> cache("Dev", 1s, 3, "Device", clock);
+    fail_refills(cache, 2);
+    clock.advance(60s);  // failures below the threshold start no stamp
+    CHECK_FALSE(cache.fault_stale());
+
+    fail_refills(cache, 1);  // latches now
+    REQUIRE_FALSE(cache.fault().empty());
+    clock.advance(alpacacore::util::kLinkStalenessBound - 1ms);
+    fail_refills(cache, 1);  // a later failure does not move the stamp
+    CHECK_FALSE(cache.fault_stale());
+    clock.advance(1ms);
+    CHECK(cache.fault_stale());
+    CHECK(cache.fault_stale(alpacacore::util::kLinkStalenessBound));
+
+    CHECK(cache.get([] { return 5; }) == 5);  // a good refill clears the latch and its stamp
+    CHECK_FALSE(cache.fault_stale());
+
+    clock.advance(2s);  // past the TTL so the next reads refill
+    fail_refills(cache, 3);
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    REQUIRE(cache.fault_stale());
+    cache.reset();
+    CHECK_FALSE(cache.fault_stale());
 }
