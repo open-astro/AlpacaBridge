@@ -142,30 +142,24 @@ TEST_CASE("GPhoto Camera Driver - Value range validation and ASCOM error codes",
 TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    // Properties this vendor never supports (no offset register, no fast readout)
-    // throw NotImplemented regardless of connection state -- distinct from the
-    // NotConnected-gated properties above. The cooler members are not in this
-    // group: while disconnected they throw NotConnected first (driver-lifecycle.instructions.md "ASCOM contract
-    // precedence"); the connected NotImplemented is pinned in test_gphoto_fake_sdk.cpp.
-    require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->set_offset(0); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->get_offset_min(); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->get_offsets(); }, alpacacore::AlpacaError::PropertyNotImplemented);
-
-    // Review PR #485: ASCOM's Gain interface has three mutually exclusive
-    // modes (Value/Index/Not Implemented) -- this driver is "Gain Index"
-    // (Gain/Gains work, see the connected test below), so GainMin/GainMax
-    // must throw PropertyNotImplemented unconditionally, same as get_offsets
-    // above. Un-tested, this fix regresses silently: only a hardware
-    // ConformU run would catch GainMin/GainMax coming back readable again.
-    require_alpaca_error([&]() { driver->get_gain_max(); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->get_gain_min(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    // Properties this vendor never supports (no offset register, no fast readout, no sub-exposure, no gain range)
+    // throw NotConnected while disconnected: the connection check comes before the capability answer (AGENTS.md
+    // "ASCOM contract precedence"). The connected NotImplemented is pinned in test_gphoto_fake_sdk.cpp.
+    namespace AlpacaError = alpacacore::AlpacaError;
+    require_alpaca_error([&]() { driver->get_offset(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_offset(0); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offset_max(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offset_min(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offsets(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_gain_max(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_gain_min(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_sub_exposure_duration(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_sub_exposure_duration(0.0); }, AlpacaError::NotConnected);
 
     require_alpaca_error([&]() { driver->get_set_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_set_ccd_temperature(0.0); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->get_fast_readout(); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->set_fast_readout(true); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->get_fast_readout(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_fast_readout(true); }, alpacacore::AlpacaError::NotConnected);
 
     // Sensor geometry (Bayer phase) is unknown until a real exposure has been
     // decoded, independent of connection state -- InvalidOperation, not

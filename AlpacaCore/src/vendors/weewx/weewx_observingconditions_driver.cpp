@@ -446,6 +446,7 @@ public:
     }
 
     double get_cloud_cover() const override {
+        require_connected();
         throw AlpacaException("CloudCover not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -462,10 +463,12 @@ public:
     }
 
     double get_rain_rate() const override {
+        require_connected();
         throw AlpacaException("RainRate not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     double get_sky_brightness() const override {
+        require_connected();
         throw AlpacaException("SkyBrightness not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -478,6 +481,7 @@ public:
     }
 
     double get_star_fwhm() const override {
+        require_connected();
         throw AlpacaException("StarFWHM not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -486,10 +490,12 @@ public:
     }
 
     double get_wind_direction() const override {
+        require_connected();
         throw AlpacaException("WindDirection not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     double get_wind_gust() const override {
+        require_connected();
         throw AlpacaException("WindGust not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -539,6 +545,7 @@ public:
         if (!is_ascom_sensor_name(key)) {
             throw AlpacaException("Unknown sensor property", AlpacaError::InvalidValue);
         }
+        require_connected();
         // supported_properties_ is mutated by the poll thread under data_mutex_;
         // every read must hold the same lock.
         std::lock_guard<std::mutex> lock(data_mutex_);
@@ -570,6 +577,13 @@ public:
     }
 
 private:
+    // NotConnected before a NotImplemented answer (ASCOM contract precedence).
+    void require_connected() const {
+        if (!get_connected()) {
+            throw AlpacaException("Device not connected", AlpacaError::NotConnected);
+        }
+    }
+
     double get_value_or_nan(double SensorSnapshot::*member, std::string_view property) const {
         if (!get_connected()) {
             throw AlpacaException("Device not connected", AlpacaError::NotConnected);

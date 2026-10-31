@@ -61,7 +61,7 @@ TEST_CASE("SVBONY Camera Driver - Not connected throws", "[svbony][camera][unit]
     CHECK_THROWS_AS(driver->set_gain(100), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->get_offset(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->start_exposure(1.0, true), alpacacore::AlpacaException);
-    require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_THROWS_AS(driver->abort_exposure(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->pulse_guide(0, 100), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
@@ -111,7 +111,7 @@ TEST_CASE("SVBONY Camera Driver - ASCOM Error Codes", "[svbony][camera][unit]") 
     require_alpaca_error([&]() { driver->set_gain(100); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->start_exposure(1.0, true); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->abort_exposure(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_array(); }, alpacacore::AlpacaError::NotConnected);
@@ -140,6 +140,8 @@ TEST_CASE("SVBONY Camera Driver - connects over an injected SDK", "[svbony][came
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(fake.open_count() == 1);
+    // Connected, StopExposure answers MethodNotImplemented (disconnected: NotConnected).
+    require_alpaca_error([&] { driver->stop_exposure(); }, alpacacore::AlpacaError::MethodNotImplemented);
     CHECK(driver->get_device_firmware().value_or("") == "fake-firmware");
     CHECK(driver->get_camera_x_size() == 16);
     CHECK(driver->get_camera_y_size() == 8);

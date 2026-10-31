@@ -611,6 +611,7 @@ public:
     }
 
     std::vector<std::string> get_gains() const override {
+        ensure_connected();
         throw AlpacaException("Gain descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -755,6 +756,7 @@ public:
     }
 
     std::vector<std::string> get_offsets() const override {
+        ensure_connected();
         throw AlpacaException("Offset descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -885,10 +887,12 @@ public:
     void set_start_y(int start_y) override { set_start_pos_locked(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
     void set_sub_exposure_duration(double) override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
@@ -1282,6 +1286,7 @@ public:
     }
 
     void stop_exposure() override {
+        ensure_connected();
         throw AlpacaException("SVBONY SDK cannot stop an exposure while preserving its acquired image",
                               AlpacaError::MethodNotImplemented);
     }

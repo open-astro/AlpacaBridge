@@ -528,6 +528,7 @@ public:
     }
 
     int get_bayer_offset_x() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
@@ -535,6 +536,7 @@ public:
         return bayer_offsets(camera_info_.bayer).first;
     }
     int get_bayer_offset_y() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
@@ -657,9 +659,11 @@ public:
     double get_exposure_resolution() const override { return 0.000001; }
 
     bool get_fast_readout() const override {
+        ensure_connected();
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
     void set_fast_readout(bool) override {
+        ensure_connected();
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
 
@@ -711,11 +715,13 @@ public:
         return static_cast<int>(caps_.gain_min);
     }
     std::vector<std::string> get_gains() const override {
+        ensure_connected();
         throw AlpacaException("Gain descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
     bool get_has_shutter() const override { return false; }
     double get_heat_sink_temperature() const override {
+        ensure_connected();
         throw AlpacaException("Heat sink temperature not supported", AlpacaError::NotImplemented);
     }
 
@@ -827,6 +833,7 @@ public:
         return static_cast<int>(caps_.offset_min);
     }
     std::vector<std::string> get_offsets() const override {
+        ensure_connected();
         throw AlpacaException("Offset descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -906,9 +913,11 @@ public:
     void set_start_y(int start_y) override { set_start_pos_common(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
     void set_sub_exposure_duration(double) override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 

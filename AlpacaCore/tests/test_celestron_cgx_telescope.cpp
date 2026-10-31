@@ -1252,10 +1252,10 @@ TEST_CASE("Celestron CGX USB Telescope Driver - unsupported methods use ASCOM er
     CHECK_FALSE(driver->get_can_sync_alt_az());
     CHECK_FALSE(driver->get_can_set_park());
     require_alpaca_error([&] { driver->slew_to_coordinates(2.0, 15.0); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&] { driver->slew_to_alt_az_async(90.0, 45.0); },
-                         alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->sync_to_alt_az(90.0, 45.0); }, alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::MethodNotImplemented);
+    // Disconnected, the connection check comes first (#1919).
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(90.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_alt_az(90.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 #ifndef _WIN32
@@ -1272,6 +1272,11 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor co
 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    // Connected, the unsupported members answer MethodNotImplemented (disconnected: NotConnected, above).
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(90.0, 45.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(90.0, 45.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::MethodNotImplemented);
     CHECK(driver->get_site_elevation() == 0.0);
     CHECK(driver->get_aperture_diameter() == 0.2);
     CHECK(std::abs(driver->get_aperture_area() - std::numbers::pi * 0.01) < 1e-12);

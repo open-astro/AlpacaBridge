@@ -707,6 +707,7 @@ public:
     }
     
     double get_declination_rate() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         // iOptron doesn't support getting Dec rate directly
         // Return 0 (not available)
@@ -715,6 +716,8 @@ public:
     
     void set_declination_rate(double rate) override {
         (void)rate;  // Unused - not supported
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw AlpacaException(
             "Declination rate is not implemented by this mount",
             AlpacaError::PropertyNotImplemented
@@ -819,6 +822,7 @@ public:
     }
 
     double get_right_ascension_rate() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         // ASCOM RightAscensionRate is an OFFSET from sidereal tracking, in
         // seconds of RA per sidereal second — NOT the absolute tracking rate in
@@ -829,6 +833,8 @@ public:
     
     void set_right_ascension_rate(double rate) override {
         (void)rate;  // Unused - not supported
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw AlpacaException(
             "Right ascension rate is not implemented by this mount",
             AlpacaError::PropertyNotImplemented
@@ -903,10 +909,14 @@ public:
 
     // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     void set_does_refraction(bool) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -926,6 +936,8 @@ public:
     
     void set_side_of_pier(int side) override {
         (void)side;  // Unused - not supported
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw AlpacaException(
             "Setting pier side not supported by iOptron mount",
             AlpacaError::PropertyNotImplemented
@@ -1709,6 +1721,8 @@ public:
     void sync_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw AlpacaException(
             "Alt/Az sync not supported by iOptron driver",
             AlpacaError::MethodNotImplemented

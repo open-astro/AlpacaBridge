@@ -296,8 +296,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_switch_value(0)", [&] { (void)s.get_switch_value(0); }});
             // Write probe on the id the registry entry names (never scanned from CanWrite, which throws
             // NotConnected on most switches while disconnected and used to drop the probe silently).
-            // iOptron's iMate switch 0 is a read-only pass-through that throws NotImplemented before the
-            // connection check (driver-lifecycle.instructions.md), which is why the id is named per entry.
+            // The id is named per entry: a writable one, so the probe reaches the connection check on every driver.
             const int writable = entry.switch_writable_id;
             p.push_back({"set_switch(writable id)", [&s, writable] { s.set_switch(writable, false); }});
             break;
@@ -364,6 +363,148 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             break;
     }
     return p;
+}
+
+// Members a driver may not implement (capability off, vendor protocol without the command). While disconnected
+// each must answer NotConnected, never NotImplemented: the connection check comes first, then the capability
+// check (AGENTS.md "ASCOM contract precedence"). A probe that returns, or throws InvalidValue, is a static read
+// or an argument check and passes. 0x402/0x40B reads while disconnected are a separate defect (not probed here).
+std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& entry) {
+    std::vector<Probe> p;
+    switch (entry.type) {
+        case DeviceType::Telescope: {
+            auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(d);
+            p.push_back({"set_declination_rate", [&] { t.set_declination_rate(0.0); }});
+            p.push_back({"set_right_ascension_rate", [&] { t.set_right_ascension_rate(0.0); }});
+            p.push_back({"set_side_of_pier", [&] { t.set_side_of_pier(0); }});
+            p.push_back({"get_does_refraction", [&] { (void)t.get_does_refraction(); }});
+            p.push_back({"set_does_refraction", [&] { t.set_does_refraction(false); }});
+            p.push_back({"get_guide_rate", [&] { (void)t.get_guide_rate(); }});
+            p.push_back({"set_guide_rate", [&] { t.set_guide_rate(alpacacore::GuideRate{}); }});
+            p.push_back({"set_tracking_rate", [&] { t.set_tracking_rate(0); }});
+            p.push_back({"find_home", [&] { t.find_home(); }});
+            p.push_back({"park", [&] { t.park(); }});
+            p.push_back({"unpark", [&] { t.unpark(); }});
+            p.push_back({"set_tracking", [&] { t.set_tracking(false); }});
+            p.push_back({"sync_to_coordinates", [&] { t.sync_to_coordinates(1.0, 1.0); }});
+            p.push_back({"sync_to_target", [&] { t.sync_to_target(); }});
+            p.push_back({"slew_to_coordinates_async", [&] { t.slew_to_coordinates_async(1.0, 1.0); }});
+            p.push_back({"slew_to_target_async", [&] { t.slew_to_target_async(); }});
+            p.push_back({"pulse_guide", [&] { t.pulse_guide(0, 0); }});
+            p.push_back({"set_park", [&] { t.set_park(); }});
+            p.push_back({"slew_to_target", [&] { t.slew_to_target(); }});
+            p.push_back({"slew_to_alt_az", [&] { t.slew_to_alt_az(1.0, 1.0); }});
+            p.push_back({"slew_to_alt_az_async", [&] { t.slew_to_alt_az_async(1.0, 1.0); }});
+            p.push_back({"sync_to_alt_az", [&] { t.sync_to_alt_az(1.0, 1.0); }});
+            for (int axis = 0; axis <= 2; ++axis) {
+                p.push_back({"move_axis(" + std::to_string(axis) + ")", [&t, axis] { t.move_axis(axis, 0.0); }});
+            }
+            break;
+        }
+        case DeviceType::Camera: {
+            auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
+            p.push_back({"get_bayer_offset_x", [&] { (void)c.get_bayer_offset_x(); }});
+            p.push_back({"get_bayer_offset_y", [&] { (void)c.get_bayer_offset_y(); }});
+            p.push_back({"get_exposure_max", [&] { (void)c.get_exposure_max(); }});
+            p.push_back({"get_exposure_min", [&] { (void)c.get_exposure_min(); }});
+            p.push_back({"get_gain_max", [&] { (void)c.get_gain_max(); }});
+            p.push_back({"get_gain_min", [&] { (void)c.get_gain_min(); }});
+            p.push_back({"get_offset_max", [&] { (void)c.get_offset_max(); }});
+            p.push_back({"get_offset_min", [&] { (void)c.get_offset_min(); }});
+            p.push_back({"get_fast_readout", [&] { (void)c.get_fast_readout(); }});
+            p.push_back({"set_fast_readout", [&] { c.set_fast_readout(false); }});
+            p.push_back({"get_gains", [&] { (void)c.get_gains(); }});
+            p.push_back({"get_offsets", [&] { (void)c.get_offsets(); }});
+            p.push_back({"get_heat_sink_temperature", [&] { (void)c.get_heat_sink_temperature(); }});
+            p.push_back({"get_sub_exposure_duration", [&] { (void)c.get_sub_exposure_duration(); }});
+            p.push_back({"set_sub_exposure_duration", [&] { c.set_sub_exposure_duration(0.0); }});
+            p.push_back({"pulse_guide", [&] { c.pulse_guide(0, 0); }});
+            p.push_back({"stop_exposure", [&] { c.stop_exposure(); }});
+            p.push_back({"get_electrons_per_adu", [&] { (void)c.get_electrons_per_adu(); }});
+            p.push_back({"get_full_well_capacity", [&] { (void)c.get_full_well_capacity(); }});
+            p.push_back({"get_readout_mode", [&] { (void)c.get_readout_mode(); }});
+            p.push_back({"set_readout_mode", [&] { c.set_readout_mode(0); }});
+            p.push_back({"get_readout_modes", [&] { (void)c.get_readout_modes(); }});
+            p.push_back({"get_offset", [&] { (void)c.get_offset(); }});
+            p.push_back({"set_offset", [&] { c.set_offset(0); }});
+            p.push_back({"set_gain", [&] { c.set_gain(0); }});
+            break;
+        }
+        case DeviceType::Switch: {
+            // Id 0 and the entry's writable id: a read-only port or a switch without async control must not
+            // answer NotImplemented before the connection check (iOptron, ToupTek StellaVita).
+            auto& s = dynamic_cast<alpacacore::SwitchDriver&>(d);
+            for (const int id : {0, entry.switch_writable_id}) {
+                const std::string at = "(" + std::to_string(id) + ")";
+                p.push_back({"set_switch" + at, [&s, id] { s.set_switch(id, false); }});
+                p.push_back({"set_async" + at, [&s, id] { s.set_async(id, false); }});
+                p.push_back({"set_switch_value" + at, [&s, id] { s.set_switch_value(id, 0.0); }});
+                p.push_back({"set_async_value" + at, [&s, id] { s.set_async_value(id, 0.0); }});
+            }
+            break;
+        }
+        case DeviceType::Focuser: {
+            auto& f = dynamic_cast<alpacacore::FocuserDriver&>(d);
+            p.push_back({"get_step_size", [&] { (void)f.get_step_size(); }});
+            p.push_back({"get_temp_comp", [&] { (void)f.get_temp_comp(); }});
+            p.push_back({"set_temp_comp", [&] { f.set_temp_comp(false); }});
+            p.push_back({"get_temperature", [&] { (void)f.get_temperature(); }});
+            break;
+        }
+        case DeviceType::FilterWheel: {
+            auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(d);
+            p.push_back({"get_focus_offsets", [&] { (void)f.get_focus_offsets(); }});
+            p.push_back({"set_focus_offsets", [&] { f.set_focus_offsets({}); }});
+            p.push_back({"get_names", [&] { (void)f.get_names(); }});
+            p.push_back({"set_names", [&] { f.set_names({}); }});
+            break;
+        }
+        case DeviceType::Rotator: {
+            auto& r = dynamic_cast<alpacacore::RotatorDriver&>(d);
+            p.push_back({"get_mechanical_position", [&] { (void)r.get_mechanical_position(); }});
+            p.push_back({"get_target_position", [&] { (void)r.get_target_position(); }});
+            p.push_back({"set_target_position", [&] { r.set_target_position(0.0); }});
+            p.push_back({"get_reverse", [&] { (void)r.get_reverse(); }});
+            p.push_back({"set_reverse", [&] { r.set_reverse(false); }});
+            p.push_back({"move_absolute", [&] { r.move_absolute(0.0); }});
+            p.push_back({"move_mechanical", [&] { r.move_mechanical(0.0); }});
+            p.push_back({"sync", [&] { r.sync(0.0); }});
+            break;
+        }
+        case DeviceType::CoverCalibrator: {
+            auto& c = dynamic_cast<alpacacore::CoverCalibratorDriver&>(d);
+            p.push_back({"open_cover", [&] { c.open_cover(); }});
+            p.push_back({"close_cover", [&] { c.close_cover(); }});
+            p.push_back({"halt_cover", [&] { c.halt_cover(); }});
+            break;
+        }
+        case DeviceType::ObservingConditions: {
+            auto& o = dynamic_cast<alpacacore::ObservingConditionsDriver&>(d);
+            p.push_back({"get_cloud_cover", [&] { (void)o.get_cloud_cover(); }});
+            p.push_back({"get_rain_rate", [&] { (void)o.get_rain_rate(); }});
+            p.push_back({"get_sky_brightness", [&] { (void)o.get_sky_brightness(); }});
+            p.push_back({"get_sky_quality", [&] { (void)o.get_sky_quality(); }});
+            p.push_back({"get_sky_temperature", [&] { (void)o.get_sky_temperature(); }});
+            p.push_back({"get_star_fwhm", [&] { (void)o.get_star_fwhm(); }});
+            p.push_back({"get_wind_direction", [&] { (void)o.get_wind_direction(); }});
+            p.push_back({"get_wind_gust", [&] { (void)o.get_wind_gust(); }});
+            p.push_back({"get_wind_speed", [&] { (void)o.get_wind_speed(); }});
+            p.push_back({"get_sensor_description(CloudCover)", [&] { (void)o.get_sensor_description("CloudCover"); }});
+            break;
+        }
+        default:
+            break;
+    }
+    return p;
+}
+
+// Entries whose driver files belong to other tickets: the NotImplemented-while-disconnected defect is known and
+// fixed there. Each is skipped until upstream #1919 closes; remove the entry when its driver is fixed.
+bool not_implemented_pending(const ContractEntry& e) {
+    static const std::set<std::string> pending = {
+        "zwo_camera",       "zwo_telescope",     "skywatcher_telescope",
+        "bisque_telescope", "synscan_telescope", "gemini_covercalibrator"};  // open_cover, close_cover, halt_cover
+    return pending.count(e.id) == 1;
 }
 
 // Static capability getters: readable while disconnected (they must not throw).
@@ -466,6 +607,13 @@ bool has_can_subject(const ContractEntry& e) {
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
+    }
+    // Not-implemented members: NotConnected first, never NotImplemented (pending entries wait on upstream #1919).
+    if (!not_implemented_pending(e)) {
+        for (const auto& [name, fn] : not_implemented_probes(*d, e)) {
+            INFO(e.id << " " << name << " must not answer NotImplemented while disconnected");
+            CHECK(thrown_code(fn) != err::NotImplemented);
+        }
     }
     if (e.type == DeviceType::Switch) {
         auto& s = dynamic_cast<alpacacore::SwitchDriver&>(*d);

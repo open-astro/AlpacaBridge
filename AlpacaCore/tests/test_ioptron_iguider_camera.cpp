@@ -295,13 +295,15 @@ TEST_CASE("iOptron iGuider Camera Driver - a latched link fault surfaces before 
 
 TEST_CASE("iOptron iGuider Camera Driver - Unsupported methods", "[ioptron][iguider][camera][unit]") {
     auto disconnected = disconnected_camera();
-    // Static capabilities: refused whatever the connection.
-    require_alpaca_error([&] { disconnected->pulse_guide(0, 100); }, AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { disconnected->stop_exposure(); }, AlpacaError::MethodNotImplemented);
+    // Disconnected, the connection check comes first (#1919); connected, the capability answer follows.
+    require_alpaca_error([&] { disconnected->pulse_guide(0, 100); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { disconnected->stop_exposure(); }, AlpacaError::NotConnected);
 
     Rig rig;
     auto& c = *rig.camera;
     c.set_connected(true);
+    require_alpaca_error([&] { c.pulse_guide(0, 100); }, AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { c.stop_exposure(); }, AlpacaError::MethodNotImplemented);
     const int pni = AlpacaError::PropertyNotImplemented;
     require_alpaca_error([&] { (void)c.get_ccd_temperature(); }, pni);
     require_alpaca_error([&] { (void)c.get_heat_sink_temperature(); }, pni);
