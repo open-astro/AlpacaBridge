@@ -5323,7 +5323,7 @@ private:
         // needed to detect.
         //
         // NOT const, and re-seeded after the attempt-0 recovery below: that
-        // recovery is itself a motion command (its own ++motion_generation_,
+        // recovery is itself a motion command (its own generation bump,
         // and start_speed_motion_locked() bumps it again), so leaving the
         // entry value in place made attempt 1's first sleep_unlocked() read
         // its OWN restart as somebody else's supersession and return. The
