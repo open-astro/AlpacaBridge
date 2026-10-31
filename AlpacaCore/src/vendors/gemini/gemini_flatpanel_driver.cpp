@@ -128,6 +128,9 @@ public:
     // Both reads are lock-free.
     bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
 
+    // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
+    std::string get_link_fault() const override { return protocol_.link_fault(); }
+
     void connect() override { start_connection_task(true); }
 
     void disconnect() override {
@@ -522,6 +525,9 @@ public:
 
     // Connected follows the serial link, as in the Lite driver (decision 0009 rule 2).
     bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
+
+    // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
+    std::string get_link_fault() const override { return protocol_.link_fault(); }
 
     void connect() override { start_connection_task(true); }
 

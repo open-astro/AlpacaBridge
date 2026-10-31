@@ -621,11 +621,16 @@ TEST_CASE("Gemini Flat Panel Lite - a cable pulled during a command loses the li
     caller.join();
     CHECK(code.load() == kNotConnected);
     require_lost(*driver, old_pts);
+    // Decision 0009 rule 5: the loss reason is kept while the link stays lost.
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    require_alpaca_error([&] { driver->calibrator_on(40); }, kNotConnected);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
 
     // Nothing reopens it on its own; a client Connect over the lost link does.
     port.replug(replugged);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
     driver->calibrator_on(30);
     CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
     CHECK(replugged.count(">L#") == 1);
@@ -645,7 +650,9 @@ TEST_CASE("Gemini Flat Panel Lite - a write to a pulled adapter loses the link a
     panel.unplug();  // idle: the next command's write is what meets the dead port
     require_alpaca_error([&] { driver->calibrator_on(40); }, kNotConnected);
     require_lost(*driver, old_pts);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
     REQUIRE_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
 }
 
 TEST_CASE("Gemini Flat Panel Slots - a cable pulled during a cover move loses the link and a reconnect starts clean",

@@ -213,6 +213,14 @@ public:
      */
     bool link_alive() const noexcept;
 
+    /**
+     * @brief Why the link was lost ("Serial link lost (errno N)"), or empty. Kept after
+     * the loss for the driver's get_link_fault() (decision 0009 rule 5); cleared by the
+     * next successful connect() and by disconnect(). Takes only a small text mutex that
+     * no serial exchange holds, so it never waits on the wire.
+     */
+    std::string link_fault() const;
+
     // --- Query commands ---
 
     /** @brief Get whether the light is on. Command >S# */
