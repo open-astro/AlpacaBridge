@@ -2038,8 +2038,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             sync_epoch = slew_error_epoch_;
         }
-        // Caller holds target_write_mutex_ (a newer GOTO holds it from its first wire write until
-        // it clears goto_setup_pending_ after MS acceptance).
+        // Caller holds target_write_mutex_: a newer GOTO holds it across each MS attempt and clears
+        // goto_setup_pending_ on acceptance under it, so the check and MS acceptance cannot interleave.
         auto require_ownership = [&]() {
             std::lock_guard<std::mutex> lock(mutex_);
             if (slew_error_epoch_ != sync_epoch && !goto_setup_pending_) {
