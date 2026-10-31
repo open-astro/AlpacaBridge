@@ -93,7 +93,9 @@ void check_finished_threads_reaped() {
     do {
         EXPECT(route_post(*router, "/management/v1/restart").status_code() == 200);
         ++posts;
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        while (*count < posts && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
     } while (posts < 3 ||
              (router->delayed_thread_count_for_test() != 1 && std::chrono::steady_clock::now() < deadline));
     EXPECT(*count >= 3);
@@ -109,7 +111,10 @@ void check_second_request_dropped() {
     router->set_shutdown_callback([shutdowns] { ++*shutdowns; });
     EXPECT(route_post(*router, "/management/v1/restart").status_code() == 200);
     EXPECT(route_post(*router, "/management/v1/shutdown").status_code() == 200);
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (*restarts < 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     EXPECT(*restarts == 1);
     EXPECT(*shutdowns == 0);
 }

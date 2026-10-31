@@ -166,7 +166,7 @@ std::uint16_t wait_for_bound_port(alpacahttp::Server& server, int budget_ms) {
     return port;
 }
 
-// Wait for a management restart's detached thread to make its last write to
+// Wait for a management restart's delayed thread to make its last write to
 // the server. A new listener answering proves start_async() ran, not that the
 // thread has finished: stop() racing its tail can read is_running() true, and
 // the Server can leave scope while that thread still writes its members.
@@ -1102,7 +1102,7 @@ int main() {
                 EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
                 ::close(fd);
 
-                // The restart runs on a detached thread 100 ms after the
+                // The restart runs on the Router's delayed thread 100 ms after the
                 // response, and is_running() stays true for the whole of it
                 // (#713), so it cannot tell the old generation from the new
                 // one: a client connecting too early lands in a listener
@@ -1404,7 +1404,7 @@ int main() {
 
     // open-astro#713: is_running() stays true for the WHOLE of a restart.
     // handle_restart_request() runs stop() then start_async() on the
-    // endpoint's detached thread, and stop() clears running_ FIRST and only
+    // Router's delayed thread, and stop() clears running_ FIRST and only
     // then joins the reactor, the RTC probe, the workers and the server
     // thread -- a window of many milliseconds in which is_running() read
     // false. The example embedder's wait loop (`while (g_running &&
@@ -1519,7 +1519,7 @@ int main() {
     // keeps that race from aborting). With no callback installed the handler
     // keeps calling stop() itself; that path is not under test here.
     {
-        // Shared with the callback by value: the endpoint's detached thread
+        // Shared with the callback by value: the Router's delayed thread
         // may still be inside notify_all() when this block closes, so the
         // state must outlive the block.
         struct ShutdownCbState {
@@ -1567,7 +1567,7 @@ int main() {
             EXPECT(r.find("Shutdown initiated") != std::string::npos);
             ::close(fd);
 
-            // The callback runs on the endpoint's detached thread 100 ms
+            // The callback runs on the Router's delayed thread 100 ms
             // after the response.
             {
                 std::unique_lock<std::mutex> lock(cb_state->mutex);
@@ -2038,7 +2038,7 @@ int main() {
     {
         // Two threads calling stop() on the SAME running Server, which a
         // shipped server can reach, not a contrived one: PUT
-        // /management/v1/restart spawns a detached thread whose
+        // /management/v1/restart spawns the Router's delayed thread whose
         // handle_restart_request() stops and restarts the server, and an
         // embedder that also calls stop() from its own thread (its main loop
         // after SIGTERM, or the shutdown endpoint with no callback installed)
