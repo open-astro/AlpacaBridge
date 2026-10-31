@@ -114,7 +114,7 @@ void flatpanel_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
     // Deliberately no figure for that drain rate. This TEST_CASE builds the
     // *Pro* model, and send_command_locked() skips its kCommandDelayMs
     // settle entirely when config_.model == FlatPanelModel::Pro
-    // (gemini_flatpanel_protocol_wrapper.cpp:853) -- that fixed 50 ms cost
+    // (gemini_flatpanel_protocol_wrapper.cpp:874) -- that fixed 50 ms cost
     // is a Lite/Rev2 property, and this file storms neither. On the Pro path
     // what remains is the fake's reply latency plus read_response()'s
     // kReadCharDelayMs (10 ms) poll granularity, which is a property of the

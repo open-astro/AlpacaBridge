@@ -506,7 +506,7 @@ TEST_CASE("Gemini Flat Panel Driver - connected, MaxBrightness is 255 and Bright
 
 // A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
 // errno at once, not a read timeout after serial_timeout_s.
-// Falsified by: gemini_flatpanel_protocol_wrapper.cpp:829 read_response() sending ReadOutcome::LinkDead to the timeout
+// Falsified by: gemini_flatpanel_protocol_wrapper.cpp:842 read_response() sending ReadOutcome::LinkDead to the timeout
 // branch (the message reads "Read timeout" and the call takes the full serial_timeout_s).
 TEST_CASE("Gemini flat panel protocol wrapper - a hangup before the reply throws serial link lost with the errno",
           "[gemini][flatpanel][unit][link-dead]") {
