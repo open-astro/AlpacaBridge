@@ -216,13 +216,17 @@ TEST_CASE("Altair Camera Driver - Unsupported members", "[altair][camera][unit]"
     auto fake = make_fake_with_178m();
     auto driver = alpacacore::vendor::altair::create_altair_camera(0, 0, fake);
 
+    // Disconnected, the connection check comes first (#1919).
+    require_alpaca_error([&]() { driver->get_sub_exposure_duration(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_sub_exposure_duration(1.0); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offsets(); }, AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
     // Never implemented, whatever the hardware.
     require_alpaca_error([&]() { driver->get_sub_exposure_duration(); }, AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->set_sub_exposure_duration(1.0); }, AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->get_offsets(); }, AlpacaError::PropertyNotImplemented);
-
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
     // Mono sensor: no Bayer offsets.
     require_alpaca_error([&]() { driver->get_bayer_offset_x(); }, AlpacaError::PropertyNotImplemented);
     // Uncooled: every CoolerOn and CoolerPower access is not implemented.

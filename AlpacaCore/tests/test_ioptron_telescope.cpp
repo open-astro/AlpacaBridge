@@ -1381,10 +1381,11 @@ TEST_CASE("iOptron Telescope Driver spec audit - DoesRefraction is not implement
     conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
     conn.port_path = "/dev/null";
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
-    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
-    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write. While
+    // disconnected the connection check comes first (#1919).
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("iOptron Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",

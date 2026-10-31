@@ -195,17 +195,13 @@ TEST_CASE("OnStep Telescope Driver - State machine", "[onstep][telescope][unit]"
 TEST_CASE("OnStep Telescope Driver - Unsupported methods", "[onstep][telescope][unit]") {
     auto driver = make_driver(0);
 
-    // Guide rate and pier side are fixed/read-only on this driver; the
-    // setters must report PropertyNotImplemented, not a generic driver error
-    // or a silent no-op (ConformU distinguishes "not implemented" from
-    // "driver error").
-    require_alpaca_error([&]() { driver->set_guide_rate({0.001, 0.001}); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->set_right_ascension_rate(1.0); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->sync_to_alt_az(45.0, 90.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    // Guide rate and pier side are fixed/read-only on this driver. While disconnected the connection
+    // check comes first (#1919), not a generic driver error or a silent no-op.
+    require_alpaca_error([&]() { driver->set_guide_rate({0.001, 0.001}); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_right_ascension_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_alt_az(45.0, 90.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_tracking_rate(1); }, alpacacore::AlpacaError::PropertyNotImplemented);
 }
 

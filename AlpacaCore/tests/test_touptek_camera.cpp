@@ -186,12 +186,12 @@ TEST_CASE("ToupTek Camera Driver - Offset (black level)", "[touptek][camera][uni
     // Operational reads require a connection first, so disconnected they report
     // NotConnected (not a generic DriverException); the connected value range is
     // checked below over FakeToupTekSDK. Named offset descriptions are never implemented
-    // (integer OffsetMin/OffsetMax mode), regardless of hardware.
+    // (integer OffsetMin/OffsetMax mode), regardless of hardware; disconnected, NotConnected comes first (#1919).
     require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_offset(0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offset_min(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->get_offsets(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->get_offsets(); }, alpacacore::AlpacaError::NotConnected);
 
     // Connected over the fake: the value round-trips through the black-level
     // register and out-of-range values are rejected.

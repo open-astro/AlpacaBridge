@@ -296,8 +296,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_switch_value(0)", [&] { (void)s.get_switch_value(0); }});
             // Write probe on the id the registry entry names (never scanned from CanWrite, which throws
             // NotConnected on most switches while disconnected and used to drop the probe silently).
-            // iOptron's iMate switch 0 is a read-only pass-through that throws NotImplemented before the
-            // connection check (driver-lifecycle.instructions.md), which is why the id is named per entry.
+            // The id is named per entry: a writable one, so the probe reaches the connection check on every driver.
             const int writable = entry.switch_writable_id;
             p.push_back({"set_switch(writable id)", [&s, writable] { s.set_switch(writable, false); }});
             break;
