@@ -456,3 +456,29 @@ TEST_CASE("PolledState - a failed poll's verdict from before a reset does not la
     CHECK_FALSE(state.link_lost());
     CHECK(lost_calls.load() == 0);
 }
+
+// Falsified by: polled_state.h:lose_link() delete the latch_lost() call.
+TEST_CASE("PolledState - lose_link sets lost at once and the poll ends and calls on_lost once",
+          "[polled_state][unit]") {
+    Rig rig;
+    REQUIRE(rig.state->start());
+    REQUIRE(rig.clock.wait_for_waiters(1, kBound));
+    // The probe finds the transport gone: one failure, far below the threshold and the staleness bound.
+    rig.during = [&rig] { rig.state->lose_link(); };
+    rig.fail = true;
+    rig.clock.advance(kPeriod);
+    REQUIRE(rig.clock.wait_for_woken_settled(kBound));
+    CHECK(rig.state->link_lost());
+    CHECK(rig.lost_calls.load() == 1);
+    CHECK(rig.clock.waiter_count() == 0);  // the poll ended: no autonomous reconnect
+    try {
+        (void)rig.state->served();
+        FAIL("expected a throw");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::NotConnected);
+    }
+    rig.during = nullptr;
+    rig.state->stop_and_join();
+    rig.state->reset();
+    CHECK_FALSE(rig.state->link_lost());
+}

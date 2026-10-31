@@ -63,7 +63,12 @@ public:
           protocol_(),
           state_(
               clock_, state_poll_generation_, {kStatePollPeriod, kFaultThreshold, 2 * kStatePollPeriod, "Gemini"},
-              [this] { return probe(); }, [this] { protocol_.disconnect(); }) {}
+              [this] { return probe(); },
+              // A port the wrapper saw gone is already released, and its disconnect() would clear the loss
+              // reason that get_link_fault() keeps until the client's Connect or Disconnect (decision 0009 rule 5).
+              [this] {
+                  if (protocol_.link_alive()) protocol_.disconnect();
+              }) {}
 
     ~GeminiFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -125,10 +130,10 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    // Lock-free. A poll that has gone unanswered for util::kLinkStalenessBound
-    // latches the loss in state_ (decision 0009), and Connected reads false
-    // without a reconnect.
-    bool get_connected() const override { return connected_.load() && !state_.link_lost(); }
+    // Lock-free. A pulled cable (the wrapper saw the port gone) or a poll that
+    // has gone unanswered for util::kLinkStalenessBound loses the link
+    // (decision 0009 rule 2), and Connected reads false without a reconnect.
+    bool get_connected() const override { return connected_.load() && link_up(); }
 
     void connect() override {
         start_connection_task(true);
@@ -173,7 +178,7 @@ public:
         // against a lost link reconnects instead of taking the idempotency
         // return. The disconnect gate takes the raw connected_, so
         // Connected=false still tears down a lost link (decision 0009).
-        const bool live = connected_.load() && !state_.link_lost();
+        const bool live = connected_.load() && link_up();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
@@ -221,10 +226,19 @@ public:
             // reply gets one retry. A connect whose retry also publishes
             // nothing fails: Connected true means the getters have a frame to
             // serve (decisions 0010 and 0016).
+            // A port that died during this seed (the firmware query, the first
+            // frame or its optional temperature read) fails the connect too,
+            // with no frame published (probe() throws on a released port): the
+            // wrapper has released it, so Connected must not go true. The
+            // disconnect() below also clears the wrapper's loss reason: a
+            // connect that never completed is not a lost session, and the
+            // reason reaches the client in this error.
             state_.reset();
             temperature_retry_at_.reset();
             poll_cancelled_.store(false);
-            if (!state_.start()) {
+            const bool started = state_.start();
+            const bool lost = !protocol_.link_alive();
+            if (!started) {
                 state_.stop_and_join();
                 state_.reset();
                 {
@@ -232,6 +246,9 @@ public:
                     firmware_.clear();
                 }
                 protocol_.disconnect();
+                if (lost) {
+                    throw AlpacaException("Gemini focuser link lost during connect", AlpacaError::NotConnected);
+                }
                 throw AlpacaException("Gemini focuser did not answer the first state poll",
                                       AlpacaError::DriverException);
             }
@@ -262,6 +279,8 @@ public:
         // lock this thread holds (transition_mutex_, firmware_mutex_).
         state_.stop_and_join();
         state_.reset();
+        // After a lost link the wrapper has already released the port; this
+        // close is a no-op and clears the kept loss reason.
         protocol_.disconnect();
     }
 
@@ -380,9 +399,13 @@ private:
         std::optional<double> temperature;  // empty: the probe did not answer
     };
 
-    // The single fault text (decision 0009, point 5): the latched poll fault,
-    // kept after the link is lost so the management listing says why.
+    // The single fault text (decision 0009, point 5): the reason a pulled
+    // cable lost the link, else the latched poll fault; both are kept after
+    // the link is lost so the management listing says why. The wrapper's text
+    // comes first: the polls that fail after the loss must not replace it.
+    // Neither read waits on the wire.
     std::string get_link_fault() const override {
+        if (auto lost = protocol_.link_fault(); !lost.empty()) return lost;
         auto fault = state_.fault();
         if (!fault.empty()) return fault;
         return state_.link_lost() ? "no answer to the state poll" : std::string();
@@ -403,6 +426,25 @@ private:
     // failed read leaves it empty (the getter reports it) without costing
     // Position and IsMoving, and is not retried for kTemperatureRetry.
     StateFrame probe() {
+        try {
+            StateFrame frame = measure();
+            // The optional temperature read swallows its own failure, so a hangup there returns normally. The
+            // wrapper has released the port: throw so the frame is not published and the catch below ends the poll
+            // in this cycle, not on the next tick.
+            if (!protocol_.link_alive()) {
+                throw AlpacaException("Gemini focuser link lost during the poll", AlpacaError::NotConnected);
+            }
+            return frame;
+        } catch (...) {
+            // Positive evidence (the wrapper saw the port gone, on this
+            // exchange, the optional temperature read or an earlier one): the poll's loss latch is set at
+            // once, so the poll ends after this cycle (decision 0009 rule 2a).
+            if (!protocol_.link_alive()) state_.lose_link();
+            throw;
+        }
+    }
+
+    StateFrame measure() {
         StateFrame frame;
         // A disconnect waits for one exchange, not three: once it has started, the partial frame is
         // returned (published, then dropped by the state_.reset() after the join).
@@ -425,11 +467,14 @@ private:
         return frame;
     }
 
+    // True while the wrapper holds the port and the poll has not declared the link lost.
+    bool link_up() const { return protocol_.link_alive() && !state_.link_lost(); }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
-        if (state_.link_lost()) {
+        if (!link_up()) {
             throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
                                   AlpacaError::NotConnected);
         }

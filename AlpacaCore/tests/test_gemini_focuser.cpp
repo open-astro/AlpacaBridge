@@ -328,7 +328,7 @@ TEST_CASE("Gemini protocol wrapper - a late reply to the previous command is dis
 
 // A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
 // errno at once, not a read timeout after serial_timeout_s.
-// Falsified by: gemini_protocol_wrapper.cpp:767 read_response() sending ReadOutcome::LinkDead to the timeout branch
+// Falsified by: gemini_protocol_wrapper.cpp:788 read_response() sending ReadOutcome::LinkDead to the timeout branch
 // (the message reads "Read timeout" and the call takes the full serial_timeout_s).
 TEST_CASE("Gemini protocol wrapper - a hangup before the reply throws serial link lost with the errno",
           "[gemini][focuser][unit][link-dead]") {

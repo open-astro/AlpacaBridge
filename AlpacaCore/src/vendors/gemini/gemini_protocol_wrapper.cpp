@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
@@ -355,6 +356,8 @@ public:
         }
 
         connected_ = true;
+        link_lost_.store(false);
+        set_fault("");
         ALPACA_LOG_INFO("Gemini", "Connected, firmware version: " + std::to_string(firmware));
         return firmware;
     }
@@ -362,11 +365,19 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+        set_fault("");
     }
 
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
+    }
+
+    bool link_alive() const noexcept { return !link_lost_.load(); }
+
+    std::string link_fault() const {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        return fault_;
     }
 
     int get_position() {
@@ -674,6 +685,26 @@ private:
         close_serial();
     }
 
+    void set_fault(const std::string& text) {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        fault_ = text;
+    }
+
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
+    // closed): decision 0009 rule 2 loses the link at once. Release the port so a replugged focuser can be reopened,
+    // latch link_lost_ for the driver's Connected getter and fail with NotConnected. During connect() nothing is
+    // latched: the handshake retries and connect() closes the port itself.
+    [[noreturn]] void fail_link_locked(const std::string& reason) {
+        if (connected_) {
+            ALPACA_LOG_ERROR("Gemini",
+                             "Focuser link lost on " + config_.serial_port + ": " + reason + " (port released)");
+            set_fault(reason);
+            link_lost_.store(true);
+            disconnect_locked();
+        }
+        throw AlpacaException(reason, AlpacaError::NotConnected);
+    }
+
     void close_serial() {
 #ifdef _WIN32
         if (serial_handle_ != INVALID_HANDLE_VALUE) {
@@ -702,7 +733,11 @@ private:
         }
 #else
         if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
-            throw AlpacaException("Write failed: " + util::errno_string(errno), AlpacaError::DriverException);
+            const int err = errno;
+            if (err == EIO || err == ENXIO || err == ENODEV) {
+                fail_link_locked("Serial link lost (errno " + std::to_string(err) + ")");
+            }
+            throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
 #endif
     }
@@ -751,8 +786,7 @@ private:
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("Response too long", AlpacaError::DriverException);
             case util::ReadOutcome::LinkDead:
-                throw AlpacaException("Serial link lost (errno " + std::to_string(r.err) + ")",
-                                      AlpacaError::DriverException);
+                fail_link_locked("Serial link lost (errno " + std::to_string(r.err) + ")");
             default:
                 throw AlpacaException("Read timeout", AlpacaError::DriverException);
         }
@@ -789,6 +823,11 @@ private:
     mutable std::mutex mutex_;
     ConnectionConfig config_;
     bool connected_ = false;
+    std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect
+    // The loss reason for get_link_fault(); its own mutex, never held across an exchange, so a getter cannot wait on
+    // the wire while mutex_ is held by one.
+    mutable std::mutex fault_mutex_;
+    std::string fault_;
 
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
@@ -815,6 +854,10 @@ void GeminiProtocolWrapper::disconnect() {
 bool GeminiProtocolWrapper::is_connected() const {
     return impl_->is_connected();
 }
+
+bool GeminiProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
+
+std::string GeminiProtocolWrapper::link_fault() const { return impl_->link_fault(); }
 
 int GeminiProtocolWrapper::get_position() {
     return impl_->get_position();
