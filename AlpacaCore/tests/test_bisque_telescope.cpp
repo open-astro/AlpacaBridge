@@ -1323,8 +1323,8 @@ TEST_CASE("Bisque Telescope Driver - SiderealTime follows the clock to under a s
 namespace {
 constexpr double kSydneyLongitude = 151.215297;
 double lst_at_millis(int64_t millis) {
-    return alpacacore::util::local_sidereal_hours(std::chrono::system_clock::time_point(std::chrono::milliseconds(millis)),
-                                                  kSydneyLongitude);
+    return alpacacore::util::local_sidereal_hours(
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(millis)), kSydneyLongitude);
 }
 double hours_apart(double a, double b) {
     const double d = std::fmod(std::abs(a - b), 24.0);
@@ -1370,8 +1370,9 @@ TEST_CASE("Bisque DestinationSideOfPier - the meridian follows the remote clock"
     ClockedBisque rig;
     rig.driver->set_site_longitude(kSydneyLongitude);
     // Remote clock 12 h ahead of the host: its LST is about 12 h from the host's.
-    const auto host_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto host_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     const int64_t remote = host_ms + 12LL * 3600 * 1000;
     rig.mount.utc_millis = remote;
     REQUIRE(poll_now(*rig.driver));
