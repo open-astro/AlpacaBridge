@@ -704,6 +704,28 @@ TEST_CASE("ToupTek Camera Driver - A camera without a TEC refuses cooler on", "[
     driver->set_connected(false);
 }
 
+TEST_CASE("ToupTek Camera Driver - A camera without a cooler raises NotImplemented for CoolerOn and CoolerPower",
+          "[touptek][camera][unit]") {
+    // Falsified by: get_cooler_on answering false, set_cooler_on(false) returning quietly, get_cooler_power
+    // answering 0.0, or any of them reading or writing a TEC register of a camera without a cooler.
+    auto fake = fake_with_one_camera();
+    fake.cameras[0].supports_cooler = false;
+    fake.cameras[0].supports_tec_onoff = false;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    const int not_implemented = alpacacore::AlpacaError::NotImplemented;
+    CHECK_FALSE(driver->get_can_get_cooler_power());
+    require_alpaca_error([&] { (void)driver->get_cooler_on(); }, not_implemented);
+    require_alpaca_error([&] { driver->set_cooler_on(true); }, not_implemented);
+    require_alpaca_error([&] { driver->set_cooler_on(false); }, not_implemented);
+    require_alpaca_error([&] { (void)driver->get_cooler_power(); }, not_implemented);
+    CHECK(fake.call_count("get_tec_enable") == 0);
+    CHECK(fake.call_count("put_tec_enable") == 0);
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("ToupTek Camera Driver - Range and thermal members throw NotConnected while disconnected",
           "[touptek][camera][unit]") {
     // Falsified by: any of these answering a value, or another code, without a handle (ensure_connected()
