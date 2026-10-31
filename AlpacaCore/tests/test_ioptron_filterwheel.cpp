@@ -211,7 +211,8 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a connected port refuses a second 
 // --- Position served through util::TtlStatusCache (issue #1072) ---
 //
 // The fake answers the iEFW handshake (model 99 = iEFW-15, 5 slots) and :WP#, so every Position read
-// that reaches the wire is counted in fake.count(":WP#"). The cache TTL is 100 ms; kPastTtl clears it.
+// that reaches the wire is counted in fake.count(":WP#"). The cache TTL is 100 ms; wheel.clock.advance(kPastTtl) clears
+// it on the fake clock (decision 0005 rule 2).
 
 namespace {
 
@@ -219,12 +220,13 @@ using namespace std::chrono_literals;
 constexpr auto kPastTtl = 150ms;
 
 struct ConnectedIefw {
+    alpacacore::test::FakeTaskClock clock;  // first: it outlives the driver
     alpacacore::test::FakeIoptronIeaf fake;
     std::unique_ptr<alpacacore::FilterWheelDriver> driver;
 
     ConnectedIefw() {
         fake.set_model(99);
-        driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path());
+        driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path(), "iefw15", clock);
         driver->set_connected(true);
     }
     ~ConnectedIefw() {
@@ -251,7 +253,7 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - two Position reads inside the TTL 
 
     wheel.fake.set_wheel_slot(1);  // changes behind the driver's back: the frame still stands
     CHECK(wheel.driver->get_position() == 3);
-    std::this_thread::sleep_for(kPastTtl);
+    wheel.clock.advance(kPastTtl);
     CHECK(wheel.driver->get_position() == 1);
     CHECK(wheel.fake.count(":WP#") == before + 2);
 }
@@ -309,7 +311,7 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - failed Position reads are not serv
     ConnectedIefw wheel;
     wheel.fake.set_wheel_slot(3);
     CHECK(wheel.driver->get_position() == 3);
-    std::this_thread::sleep_for(kPastTtl);
+    wheel.clock.advance(kPastTtl);
 
     wheel.fake.fail_wheel_position(true);
     for (int i = 0; i < 2; ++i) {  // below the threshold the raw failure comes through, not the latch
@@ -420,7 +422,7 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - concurrent set_position calls leav
     int position = -1;
     for (int i = 0; i < 20 && position < 0; ++i) {
         position = wheel.driver->get_position();
-        std::this_thread::sleep_for(kPastTtl);
+        wheel.clock.advance(kPastTtl);
     }
     CHECK(position == wheel.fake.wheel_slot());
 }
