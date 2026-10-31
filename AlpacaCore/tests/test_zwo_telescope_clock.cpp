@@ -601,4 +601,21 @@ TEST_CASE("ZWO telescope clock - Unpark reports Slewing for the 2 s forced windo
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
+// Operation slot, pulse family: the body waits a pulse step as one clock wait that a cancel wakes, not as 100 ms
+// chunks. One advance over the whole step therefore ends the step and the body reconciles against the mount.
+// Falsified by: run_pulse_task() waiting the pulse in 100 ms clock_.wait_for chunks (pulse_cv_), so one advance
+// wakes one chunk and the reconciliation read (":GD") does not follow.
+TEST_CASE("ZWO telescope clock - a pulse step is one clock wait, so one advance ends it",
+          "[zwo][telescope][unit][clock][operation-slot]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 1000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    const int positions = rig.mount.count(":GD");
+    rig.wait_for_blocked_caller();  // the pulse body, besides the poll loop
+    rig.advance(1000ms);
+    // Real-time bound on a wire event (the reconciliation read), not a driver timer.
+    CHECK(rig.mount.wait_for_count(":GD", positions + 1, 500ms));
+}
+
 #endif  // !_WIN32

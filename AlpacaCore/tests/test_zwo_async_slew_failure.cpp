@@ -1068,4 +1068,53 @@ TEST_CASE("ZWO async - redundant Connected=true preserves a stored slew failure"
     driver->set_connected(false);
 }
 
+// Operation slot, GOTO family: a new GOTO replaces the previous body without waiting for it. The previous body sits
+// in a mount transaction that has not been answered; the HTTP thread must not wait for that answer.
+// Falsified by: zwo_telescope_driver.cpp slew_to_target_async() joining the previous goto_thread_ before the new
+// start (the join-then-spawn), so the second call returns only after the held ":Sr" is answered or times out.
+TEST_CASE("ZWO async - a second GOTO returns while the first body is blocked in a mount transaction",
+          "[zwo][telescope][async][operation-slot]") {
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    mount.hold_reply(":Sr");
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
+
+    auto second = std::async(std::launch::async, [&] { driver->slew_to_coordinates_async(6.5, 30.0); });
+    // Real-time bound on a thread handoff, not a driver timer: the join-then-spawn waits for the 5 s link timeout.
+    const bool returned = second.wait_for(std::chrono::milliseconds(1000)) == std::future_status::ready;
+    mount.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the held reply
+    second.wait();
+    CHECK(returned);
+
+    // The replaced body ends without sending a target or recording a failure; only the second GOTO reaches ":MS".
+    REQUIRE(mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    CHECK(wait_until([&] { return read_slewing(*driver) == SlewingRead::True; }, 5000));
+    CHECK(mount.count(":MS") == 1);
+    CHECK(read_slewing(*driver) != SlewingRead::Threw);
+    driver->set_connected(false);
+}
+
+// Decision "disconnect sends no :Q#": Connected=false leaves an accepted GOTO running on the mount. A PIN: it passes
+// on the thread-based code and must keep passing on the slot-based teardown.
+// Falsified by: the disconnect teardown calling protocol_.abort_motion() (a ":Q" on Connected=false).
+TEST_CASE("ZWO async - Disconnect during a slew sends no stop and leaves the mount slewing (PIN)",
+          "[zwo][telescope][async][operation-slot]") {
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
+    REQUIRE(mount.slewing());
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(count_exact(mount, ":Q") == 0);
+    CHECK(mount.slewing());
+}
+
 #endif  // _WIN32
