@@ -261,6 +261,15 @@ namespace {
 struct FakeThermalSdk final : alpacacore::vendor::playerone::PlayerOneThermalSdk {
     std::atomic<int> reads{0};
     std::atomic<bool> fail_reads{false};
+    // Test hooks: a slow connect handshake, a slow heater read or write, and whether the camera was closed while
+    // one was in the SDK.
+    std::atomic<int> init_delay_ms{0};
+    std::atomic<int> read_delay_ms{0};
+    std::atomic<int> write_delay_ms{0};
+    std::atomic<bool> read_started{false};
+    std::atomic<bool> write_started{false};
+    std::atomic<int> busy{0};
+    std::atomic<bool> closed_while_busy{false};
     int heater{40};
     int fan{70};
 
@@ -272,8 +281,16 @@ struct FakeThermalSdk final : alpacacore::vendor::playerone::PlayerOneThermalSdk
         return {info};
     }
     void open_camera(int) override {}
-    void init_camera(int) override {}
-    void close_camera(int) override {}
+    void init_camera(int) override {
+        if (init_delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(init_delay_ms.load()));
+        }
+    }
+    void close_camera(int) override {
+        if (busy > 0) {
+            closed_while_busy = true;
+        }
+    }
     alpacacore::vendor::playerone::PlayerOneConfigCaps probe_config_caps(int) override {
         alpacacore::vendor::playerone::PlayerOneConfigCaps caps;
         caps.has_heater_power = true;
@@ -284,22 +301,45 @@ struct FakeThermalSdk final : alpacacore::vendor::playerone::PlayerOneThermalSdk
         caps.fan_power_max = 100;
         return caps;
     }
-    int get_heater_power_percent(int) override {
+    int get_heater_power_percent(int id) override {
+        require_camera(id);
         ++reads;
+        ++busy;
+        read_started = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(read_delay_ms.load()));
+        --busy;
         if (fail_reads) {
             throw alpacacore::AlpacaException("usb gone", alpacacore::AlpacaError::DriverException);
         }
         return heater;
     }
-    int get_fan_power_percent(int) override {
+    int get_fan_power_percent(int id) override {
+        require_camera(id);
         ++reads;
         if (fail_reads) {
             throw alpacacore::AlpacaException("usb gone", alpacacore::AlpacaError::DriverException);
         }
         return fan;
     }
-    void set_heater_power_percent(int, int percent) override { heater = percent; }
-    void set_fan_power_percent(int, int percent) override { fan = percent; }
+    void set_heater_power_percent(int id, int percent) override {
+        require_camera(id);
+        ++busy;
+        write_started = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(write_delay_ms.load()));
+        heater = percent;
+        --busy;
+    }
+    void set_fan_power_percent(int id, int percent) override {
+        require_camera(id);
+        fan = percent;
+    }
+
+    // Like the SDK, an id that is not the open camera (a closed driver passes -1) fails as a link error.
+    static void require_camera(int id) {
+        if (id != 7) {
+            throw alpacacore::AlpacaException("invalid camera id", alpacacore::AlpacaError::DriverException);
+        }
+    }
 };
 
 void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
@@ -383,4 +423,111 @@ TEST_CASE("Player One Switch Driver - a dead link is not served from the cache",
 
     sdk.fail_reads = false;
     CHECK(driver->get_switch_value(0) == 40.0);
+}
+
+TEST_CASE("Player One Switch Driver - no-I/O getters do not wait behind the connect handshake",
+          "[playerone][switch][unit]") {
+    FakeThermalSdk sdk;
+    sdk.init_delay_ms = 300;
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    std::thread connect([&] { driver->set_connected(true); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // connect is inside init_camera
+
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
+    CHECK_FALSE(driver->get_unique_id().empty());
+    CHECK(driver->get_max_switch() == 2);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_THROWS_AS(driver->get_switch_name(5), alpacacore::AlpacaException);
+    CHECK(Clock::now() - start < std::chrono::milliseconds(20));
+
+    connect.join();
+    CHECK(driver->get_connected());
+}
+
+// A disconnect waits for the exchange in flight and never closes the camera under it (the I/O lock).
+TEST_CASE("Player One Switch Driver - a disconnect waits for the exchange in flight instead of closing under it",
+          "[playerone][switch][unit]") {
+    FakeThermalSdk sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    driver->set_connected(true);
+
+    std::thread worker;
+    SECTION("a status read") {
+        sdk.read_delay_ms = 100;
+        worker = std::thread([&] {
+            try {
+                (void)driver->get_switch_value(0);
+            } catch (const alpacacore::AlpacaException&) {
+            }
+        });
+        while (!sdk.read_started) {
+            std::this_thread::yield();
+        }
+    }
+    SECTION("a write") {
+        sdk.write_delay_ms = 100;
+        worker = std::thread([&] {
+            try {
+                driver->set_switch_value(0, 20.0);
+            } catch (const alpacacore::AlpacaException&) {
+            }
+        });
+        while (!sdk.write_started) {
+            std::this_thread::yield();
+        }
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    worker.join();
+    CHECK_FALSE(sdk.closed_while_busy.load());
+    CHECK_FALSE(driver->get_connected());
+}
+
+// A disconnect that wins the I/O lock while status reads queue behind a write is not a link failure: every reader
+// gets NotConnected, none the "communications compromised" fault that three counted failures would latch.
+TEST_CASE("Player One Switch Driver - a disconnect during queued status reads is not a link failure",
+          "[playerone][switch][unit]") {
+    FakeThermalSdk sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    driver->set_connected(true);
+
+    sdk.write_delay_ms = 200;
+    std::thread writer([&] {
+        try {
+            driver->set_switch_value(0, 20.0);
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    });
+    while (!sdk.write_started) {
+        std::this_thread::yield();
+    }
+
+    constexpr int kReaders = 8;
+    std::atomic<int> not_connected{0};
+    std::atomic<int> other{0};
+    std::vector<std::thread> readers;
+    for (int i = 0; i < kReaders; ++i) {
+        readers.emplace_back([&] {
+            try {
+                (void)driver->get_switch_value(0);
+                ++other;
+            } catch (const alpacacore::AlpacaException& e) {
+                (e.error_code() == alpacacore::AlpacaError::NotConnected ? not_connected : other)++;
+            } catch (const std::exception&) {
+                ++other;
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // every reader is parked on the write
+    driver->set_connected(false);
+    writer.join();
+    for (auto& reader : readers) {
+        reader.join();
+    }
+
+    CHECK(other.load() == 0);
+    CHECK(not_connected.load() == kReaders);
 }
