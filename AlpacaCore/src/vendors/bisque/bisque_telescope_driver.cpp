@@ -529,8 +529,7 @@ public:
     int get_destination_side_of_pier(double ra, double dec) const override {
         detail::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_);
+        double lst_hours = util::local_sidereal_hours(remote_utc_locked(), site_longitude_);
         double hour_angle = util::shortest_ra_delta_hours(lst_hours, ra);
         // Positive HA → west of meridian → pier east (0).
         return util::pier_side_for_hour_angle(hour_angle);
@@ -562,7 +561,7 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_);
+        return util::local_sidereal_hours(remote_utc_locked(), site_longitude_);
     }
 
     double get_site_elevation() const override {
@@ -657,19 +656,7 @@ public:
 
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto frame = served_frame_locked();
-        if (const auto anchor = frame.value.utc.current(frame.value.utc_sampled_at)) {
-            const auto elapsed = clock_.now() - frame.value.utc_sampled_at;
-            // Remote input can be near system_clock's limit; UtcOffset assumes ordinary dates.
-            if (anchor->time_since_epoch().count() > 0 &&
-                elapsed > std::chrono::system_clock::time_point::max() - *anchor) {
-                throw AlpacaException("TheSkyX UTCDate exceeds the supported time range", AlpacaError::DriverException);
-            }
-            return *anchor + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
-        }
-        throw AlpacaException(
-            frame.value.utc_error.empty() ? "TheSkyX UTCDate has not been established" : frame.value.utc_error,
-            frame.value.utc_error_code);
+        return remote_utc_locked();
     }
 
     void set_utc_date(std::chrono::system_clock::time_point /*utc*/) override {
@@ -1169,6 +1156,23 @@ private:
     }
 
     // ── Snapshot-served state (decision 0010, Bisque adoption) ──────────────
+
+    // The TheSkyX computer's UTC now, from the polled frame. UTCDate, SiderealTime and DestinationSideOfPier share it.
+    std::chrono::system_clock::time_point remote_utc_locked() const {
+        const auto frame = served_frame_locked();
+        if (const auto anchor = frame.value.utc.current(frame.value.utc_sampled_at)) {
+            const auto elapsed = clock_.now() - frame.value.utc_sampled_at;
+            // Remote input can be near system_clock's limit; UtcOffset assumes ordinary dates.
+            if (anchor->time_since_epoch().count() > 0 &&
+                elapsed > std::chrono::system_clock::time_point::max() - *anchor) {
+                throw AlpacaException("TheSkyX UTCDate exceeds the supported time range", AlpacaError::DriverException);
+            }
+            return *anchor + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+        }
+        throw AlpacaException(
+            frame.value.utc_error.empty() ? "TheSkyX UTCDate has not been established" : frame.value.utc_error,
+            frame.value.utc_error_code);
+    }
 
     // The frame a getter serves, or the refusal that applies: a lost link (NotConnected), a latched fault
     // (DriverException "communications compromised", Connected stays true, decision 0009 point 1), no frame yet.
