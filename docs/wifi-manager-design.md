@@ -49,8 +49,8 @@ allowing (only) for user `alpacabridge`:
 - `org.freedesktop.NetworkManager.network-control`
 - `org.freedesktop.NetworkManager.enable-disable-wifi`
 - `org.freedesktop.NetworkManager.wifi.share.protected`
-  (shared-mode/hotspot activation checks these in addition to
-  network-control; without them ActivateConnection on the AP profile fails
+  (shared-mode/hotspot activation checks this in addition to
+  network-control; without it ActivateConnection on the AP profile fails
   with "Not authorized to share connections via wifi")
 
 No other hardening relaxation on the unit is needed. State-changing wifi

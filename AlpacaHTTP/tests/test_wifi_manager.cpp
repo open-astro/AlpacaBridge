@@ -506,13 +506,15 @@ int main() {
 
     {
         // case: set_ap refuses an empty passphrase unless a secured hotspot profile exists (#1715)
-        for (const bool has_open_profile : {false, true}) {
+        // {open profile, enabled}: no profile refuses even a disabled hotspot; an open one refuses to start.
+        for (const auto& [has_open_profile, enabled] :
+             {std::pair{false, true}, std::pair{false, false}, std::pair{true, true}}) {
             FakeWifiProfileBackend backend;
             if (has_open_profile) backend.connections.emplace_back("/saved/ap", saved_profile("Hotspot", "ap"));
             WifiManager manager("unused", backend);
             std::string message;
             try {
-                manager.set_ap("Hotspot", "", "bg", 0, true);
+                manager.set_ap("Hotspot", "", "bg", 0, enabled);
             } catch (const WifiError& e) {
                 message = e.what();
             }
@@ -531,6 +533,21 @@ int main() {
         std::string message;
         try {
             manager.set_ap("Hotspot", "", "bg", 0, true);
+        } catch (const WifiError& e) {
+            message = e.what();
+        }
+        EXPECT(message.find("Passphrase") == std::string::npos);
+        EXPECT(message.find("injected") != std::string::npos);
+    }
+
+    {
+        // case: set_ap lets an empty passphrase turn off an open hotspot profile (#1715)
+        FakeWifiProfileBackend backend;
+        backend.connections.emplace_back("/saved/ap", saved_profile("Hotspot", "ap"));
+        WifiManager manager("unused", backend);
+        std::string message;
+        try {
+            manager.set_ap("Hotspot", "", "bg", 0, false);
         } catch (const WifiError& e) {
             message = e.what();
         }

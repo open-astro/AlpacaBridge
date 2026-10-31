@@ -175,9 +175,11 @@ public:
     //       "Band":"bg"|"a","Channel":u32,
     //       "Autoconnect":bool,"Active":bool,"Ip4Address":str}
     nlohmann::json get_ap();
-    // set: creates or updates the AP profile (id kApProfileId). Empty
-    // passphrase keeps the existing secret; band "a"/"bg"; channel 0 lets NM
-    // pick. enabled maps to autoconnect + immediate activate/deactivate.
+    // set: creates or updates the AP profile (id kApProfileId). An empty
+    // passphrase keeps the stored secret on a secured profile; otherwise it is
+    // refused, except to turn an existing open profile off (#1715). band
+    // "a"/"bg"; channel 0 lets NM pick. enabled maps to autoconnect +
+    // immediate activate/deactivate.
     nlohmann::json set_ap(const std::string& ssid, const std::string& passphrase, const std::string& band,
                           std::uint32_t channel, bool enabled);
 

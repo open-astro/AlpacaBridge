@@ -158,10 +158,6 @@ void throw_bus(const char* what, int r, const sd_bus_error* err = nullptr) {
 // Defined with the other nl80211 helpers below.
 std::uint32_t nl80211_iftype(const std::string& ifname);
 
-// Which wifi device handles client (infrastructure) operations and which
-// hosts the hotspot. On single-radio boards both name the same device; on
-// boards with a dedicated AP-type virtual interface (OPi 4 Pro ap0, ASIAIR
-// uap0) they differ.
 // The hotspot profile among the saved wifi connections: prefer the well-known
 // id (kApProfileId, created by the OpenAstro imagers), falling back to the
 // first ap-mode profile so a renamed hotspot is still manageable. Used by
@@ -181,6 +177,10 @@ std::pair<std::string, nlohmann::json> pick_ap_profile(const std::vector<WifiPro
     return fallback;
 }
 
+// Which wifi device handles client (infrastructure) operations and which
+// hosts the hotspot. On single-radio boards both name the same device; on
+// boards with a dedicated AP-type virtual interface (OPi 4 Pro ap0, ASIAIR
+// uap0) they differ.
 }  // namespace
 
 struct WifiManager::BusHandle final : WifiProfileBackend {
@@ -1314,10 +1314,11 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
     }
     std::lock_guard<std::mutex> lock(mutex_);
     // An empty passphrase keeps the stored secret only on a secured profile;
-    // otherwise it would create or keep an open, NAT-sharing hotspot (#1715).
+    // otherwise it would create or start an open, NAT-sharing hotspot (#1715).
+    // Turning an existing open hotspot off stays allowed.
     if (passphrase.empty()) {
-        const auto secured = pick_ap_profile(profile_backend_locked().wifi_connections()).second;
-        if (!secured.contains("802-11-wireless-security")) {
+        const auto [profile_path, profile] = pick_ap_profile(profile_backend_locked().wifi_connections());
+        if (!profile.contains("802-11-wireless-security") && (enabled || profile_path.empty())) {
             throw WifiError("Passphrase must be 8-63 characters for a hotspot without a stored passphrase");
         }
     }

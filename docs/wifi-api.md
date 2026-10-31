@@ -147,10 +147,13 @@ DHCP on the fleet-wide subnet `172.24.1.0/24`; the portal is always at
   set the country first or send `"Band": "bg"`. `Channel: 0` lets
   NetworkManager pick.
 - A new hotspot, or one whose profile has no security (an open hotspot from an
-  earlier release), requires a passphrase of 8–63 chars; an empty one is refused.
+  earlier release), requires a passphrase of 8–63 chars; an empty one is refused,
+  except with `Enabled: false` on an existing profile, which turns it off.
   An empty `Passphrase` keeps the stored secret only on a secured profile.
-- Upgrade note: a device with an open hotspot from an earlier release can no
-  longer activate it. Send `PUT` with a passphrase.
+- Upgrade note: on a device with an open hotspot from an earlier release, the
+  API can no longer start it, but NetworkManager still starts it at boot while
+  its autoconnect is on. Send `PUT` with a passphrase, or with `Enabled: false`
+  to turn it off.
 - `SsidHex` may be supplied instead of `Ssid` with the same encoding and
   precedence rules as `PUT /profiles`. This lets clients preserve a configured
   SSID while changing other AP settings.
