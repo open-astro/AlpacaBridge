@@ -78,6 +78,7 @@ struct Handset {
     std::atomic<bool> w_entered{false};
     std::atomic<bool> w_silent{false};  // the handset ignores `w` (site) entirely
     std::atomic<int> w_count{0};
+    std::atomic<FakeTaskClock*> w_advances{nullptr};  // `w` moves this clock 3 s on, as a slow site read does
     std::atomic<bool> w_site{false};  // `w` answers a site (33d51'24" S, 151d12'54" E) instead of an unparseable '#'
     std::atomic<uint32_t> ra_counts{0x5CECE2};  // the position `e` answers (24-bit); a GOTO (`r`) lands on its aim
     std::atomic<uint32_t> dec_counts{0xD001B9};
@@ -123,6 +124,7 @@ std::string reply(Handset& st, const std::string& chunk) {
             return "#";
         case 'w':
             st.w_count.fetch_add(1);
+            if (FakeTaskClock* c = st.w_advances.load()) c->advance(std::chrono::seconds(3));
             if (st.w_silent.load()) {
                 st.w_entered.store(true);
                 return "";
@@ -546,9 +548,10 @@ TEST_CASE("SynScan snapshot - an unread site refuses SiteLatitude and SiteLongit
 
 TEST_CASE("SynScan snapshot - a connect whose site read failed sends no second w in the same connect",
           "[synscan][telescope][snapshot]") {
-    FakeTaskClock clock;  // not advanced: the retry delay has not passed when the seed probe runs
+    FakeTaskClock clock;
     auto st = std::make_shared<Handset>();
     st->w_silent = true;
+    st->w_advances = &clock;  // the failed `w` itself takes longer than the retry delay
     alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
     REQUIRE(server.ok());
     auto driver = connected_driver_without_site(server, clock, 300);

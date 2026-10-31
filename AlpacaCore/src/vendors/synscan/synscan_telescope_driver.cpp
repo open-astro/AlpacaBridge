@@ -2100,9 +2100,6 @@ private:
             sync_mount_time(lock);
         }
         ensure_utc_cached(lock);
-        // Stamped like a poll's site read, so a failed `w` here is retried after kSiteInfoRetryDelay, not by the
-        // seed probe in this same connect.
-        last_site_info_attempt_ = clock_.now();
         try {
             LocationInfo info = without_lock(lock, [&protocol] { return protocol.get_location(); });
             site_latitude_cached_ = info.latitude_degrees;
@@ -2111,6 +2108,9 @@ private:
         } catch (...) {
             ALPACA_LOG_DEBUG("SynScan", "Handset site read failed at connect; a later site read retries it");
         }
+        // Stamped after the `w` returns, so a failed read is retried kSiteInfoRetryDelay later, not by the seed
+        // probe in this same connect, however long the read took to time out.
+        last_site_info_attempt_ = clock_.now();
         lock.unlock();  // the poll slot starts without mutex_ held (AsyncOperation rule 10)
 
         // The first probe is the seed: it publishes a frame even when the handset answers the echo but not `L`/`e`
