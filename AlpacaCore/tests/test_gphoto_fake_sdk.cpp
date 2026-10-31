@@ -2177,6 +2177,33 @@ TEST_CASE("GPhoto camera fake - MLU read finding the camera gone from the USB bu
     CHECK(fake.close_count == fake.open_count);
 }
 
+// Connected, a camera without offset, fast readout, sub-exposure or a gain range answers NotImplemented (Gain Index
+// mode: GainMin/GainMax PropertyNotImplemented, review PR #485); disconnected, NotConnected comes first.
+TEST_CASE("GPhoto camera fake - connected unsupported members raise NotImplemented",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    namespace AlpacaError = alpacacore::AlpacaError;
+    require_alpaca_error([&] { (void)driver->get_offset(); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->set_offset(0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { (void)driver->get_offset_max(); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { (void)driver->get_offset_min(); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { (void)driver->get_offsets(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_gain_max(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_gain_min(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_fast_readout(); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->set_fast_readout(true); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { (void)driver->get_sub_exposure_duration(); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(0.0); }, AlpacaError::NotImplemented);
+    driver->set_connected(false);
+}
+
 // Issue #1277: libgphoto2 reports neither e-/ADU nor a full well, so both raise PropertyNotImplemented once connected
 // (NotConnected first while disconnected), never the old 1.0 / 0.0 sentinels.
 TEST_CASE("GPhoto camera fake - ElectronsPerADU and FullWellCapacity raise PropertyNotImplemented",

@@ -167,9 +167,10 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Unsupported methods", "[touptek][s
     auto driver =
         alpacacore::vendor::touptek::create_touptek_switch(0, alpacacore::vendor::touptek::default_stellavita_config());
 
-    // Asynchronous mutation is not implemented for any port (CanAsync == false).
-    require_alpaca_error([&]() { driver->set_async(0, true); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->set_async_value(0, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+    // Asynchronous mutation is not implemented for any port (CanAsync == false); disconnected, the
+    // connection check comes first (#1919).
+    require_alpaca_error([&]() { driver->set_async(0, true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_async_value(0, 1.0); }, alpacacore::AlpacaError::NotConnected);
 
     // Action/Command methods are unsupported on this device.
     require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);

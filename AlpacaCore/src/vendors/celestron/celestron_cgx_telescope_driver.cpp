@@ -1433,13 +1433,19 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
         throw;
     }
 }
-void CelestronCgxTelescopeDriver::set_park() { not_implemented("SetPark"); }
+void CelestronCgxTelescopeDriver::set_park() {
+    require_connected();
+    not_implemented("SetPark");
+}
 void CelestronCgxTelescopeDriver::slew_to_coordinates(double, double) {
     require_connected();
     not_implemented("SlewToCoordinates");
 }
 void CelestronCgxTelescopeDriver::slew_to_coordinates_async(double ra, double dec) { start_slew_operation(ra, dec); }
-void CelestronCgxTelescopeDriver::slew_to_target() { not_implemented("SlewToTarget"); }
+void CelestronCgxTelescopeDriver::slew_to_target() {
+    require_connected();
+    not_implemented("SlewToTarget");
+}
 void CelestronCgxTelescopeDriver::slew_to_target_async() {
     require_connected();
     double ra;
@@ -1579,6 +1585,7 @@ bool CelestronCgxTelescopeDriver::get_can_move_axis(int axis) const {
 }
 void CelestronCgxTelescopeDriver::move_axis(int axis, double) {
     if (axis < 0 || axis > 2) throw AlpacaException("Axis must be 0, 1 or 2", AlpacaError::InvalidValue);
+    require_connected();
     not_implemented("MoveAxis");
 }
 std::pair<double, double> CelestronCgxTelescopeDriver::get_axis_rate_range(int axis) const {
@@ -1661,9 +1668,18 @@ void CelestronCgxTelescopeDriver::run_stop_operation(util::OperationContext& con
         throw;  // AsyncOperation retains this for Slewing / AtPark.
     }
 }
-void CelestronCgxTelescopeDriver::slew_to_alt_az(double, double) { not_implemented("SlewToAltAz"); }
-void CelestronCgxTelescopeDriver::slew_to_alt_az_async(double, double) { not_implemented("SlewToAltAzAsync"); }
-void CelestronCgxTelescopeDriver::sync_to_alt_az(double, double) { not_implemented("SyncToAltAz"); }
+void CelestronCgxTelescopeDriver::slew_to_alt_az(double, double) {
+    require_connected();
+    not_implemented("SlewToAltAz");
+}
+void CelestronCgxTelescopeDriver::slew_to_alt_az_async(double, double) {
+    require_connected();
+    not_implemented("SlewToAltAzAsync");
+}
+void CelestronCgxTelescopeDriver::sync_to_alt_az(double, double) {
+    require_connected();
+    not_implemented("SyncToAltAz");
+}
 
 void CelestronCgxTelescopeDriver::stop_motion_worker_checked() {
     // Serialize check + dispatch with the explicit-stop ownership publication.

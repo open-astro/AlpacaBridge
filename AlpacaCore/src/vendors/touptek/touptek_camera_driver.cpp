@@ -404,6 +404,7 @@ public:
     }
 
     int get_bayer_offset_x() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
@@ -411,6 +412,7 @@ public:
         return bayer_offsets(camera_info_.bayer).first;
     }
     int get_bayer_offset_y() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
@@ -554,9 +556,11 @@ public:
     double get_exposure_resolution() const override { return 0.000001; }
 
     bool get_fast_readout() const override {
+        ensure_connected();
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
     void set_fast_readout(bool) override {
+        ensure_connected();
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
 
@@ -606,6 +610,7 @@ public:
         return static_cast<int>(with_handle([&](HToupcam h) { return sdk.get_gain_range(h).min; }));
     }
     std::vector<std::string> get_gains() const override {
+        ensure_connected();
         throw AlpacaException("Gain descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -733,6 +738,7 @@ public:
         return 0;  // TOUPCAM_BLACKLEVEL_MIN
     }
     std::vector<std::string> get_offsets() const override {
+        ensure_connected();
         // Integer offset mode (OffsetMin/OffsetMax), so the named-offsets list is
         // deliberately not implemented, matching the other camera drivers.
         throw AlpacaException("Offset descriptions not supported",
@@ -924,9 +930,11 @@ public:
     void set_start_y(int start_y) override { set_start_pos_locked(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
     void set_sub_exposure_duration(double) override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 

@@ -37,6 +37,36 @@ namespace {
 // Maximum brightness per the vendor app's >B<value># range (observed as
 // >B255# for full brightness during the ON toggle).
 constexpr int kMaxBrightness = 255;
+
+// NotConnected while disconnected and once the wrapper has seen the port gone
+// (decision 0009 rule 3); lock-free, so a getter never waits on the wire.
+void ensure_flatpanel_connected(const std::atomic<bool>& connected, const GeminiFlatPanelProtocolWrapper& protocol) {
+    if (!connected.load()) {
+        throw AlpacaException("Gemini flat panel not connected", AlpacaError::NotConnected);
+    }
+    if (!protocol.link_alive()) {
+        throw AlpacaException("Gemini flat panel link lost; Connect again once the panel is back",
+                              AlpacaError::NotConnected);
+    }
+}
+
+// A port that died during the post-handshake state seed fails the connect:
+// the wrapper has already released it, so Connected must not go true. The
+// disconnect() here also clears the wrapper's fault text, so get_link_fault()
+// stays empty: a connect that never completed is not a lost session, and the
+// reason reaches the client in this connect's NotConnected error instead.
+void fail_connect_if_link_lost(GeminiFlatPanelProtocolWrapper& protocol, std::mutex& firmware_mutex,
+                               std::string& firmware) {
+    if (protocol.link_alive()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(firmware_mutex);
+        firmware.clear();
+    }
+    protocol.disconnect();
+    throw AlpacaException("Gemini flat panel link lost during connect", AlpacaError::NotConnected);
+}
 }  // namespace
 
 class GeminiFlatPanelDriver : public CoverCalibratorDriver, protected alpacacore::AsyncConnectable {
@@ -96,7 +126,13 @@ public:
     // CoverCalibratorDriver base's get_device_state()).
     int get_interface_version() const override { return 2; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (decision 0009 rule 2): once an exchange
+    // has seen the port gone the wrapper latches the loss and releases the port.
+    // Both reads are lock-free.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
+
+    // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
+    std::string get_link_fault() const override { return protocol_.link_fault(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -115,21 +151,32 @@ public:
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        const bool live = connected_.load() && protocol_.link_alive();
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
-        // newer pending disconnect by staying down.
+        // newer pending disconnect by staying down. The disconnect gate reads
+        // the raw flag, so a lost link still runs the teardown; the connect
+        // gate reads the link-aware value, so Connect over a lost link
+        // reconnects (decision 0009 rule 4).
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown_locked().
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            if (connected_.load()) {
+                teardown_locked();  // a lost link: drop it before reconnecting
+            }
             // Resolve an auto-detect request here (on the background connection
             // thread), not at registration. A local copy keeps config_ as the
             // durable intent so a later reconnect resolves the port again, remembered port first (robust to the
@@ -191,33 +238,12 @@ public:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Flat panel state seed failed: " + std::string(e.what()));
             }
+            fail_connect_if_link_lost(protocol_, firmware_mutex_, firmware_);
 
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Flat panel connected");
         } else {
-            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
-            // throwing close must not leave the driver reporting connected on
-            // a closed port. disconnect() cannot throw today; the order is
-            // the contract, not the current wrapper's behaviour.
-            // The cached firmware goes first, so the store(false) is never
-            // observable beside a stale firmware string.
-            {
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_.clear();
-            }
-            connected_.store(false);
-            {
-                // Published state is cleared first, under the short state
-                // lock; the I/O lock then covers the close, so it waits only
-                // for an exchange already on the wire.
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                commanded_brightness_ = 0;
-                calibrator_engaged_ = false;
-            }
-            {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                protocol_.disconnect();
-            }
+            teardown_locked();
             ALPACA_LOG_INFO("Gemini", "Flat panel disconnected");
         }
     }
@@ -351,10 +377,33 @@ public:
     // getters, and a single-lock vendor override is explicitly disallowed.
 
 private:
-    void ensure_connected() const {
-        if (!connected_.load()) {
-            throw AlpacaException("Gemini flat panel not connected", AlpacaError::NotConnected);
+    void ensure_connected() const { ensure_flatpanel_connected(connected_, protocol_); }
+
+    // Disconnect body shared by the explicit disconnect and the reconnect over
+    // a lost link. Caller holds transition_mutex_.
+    void teardown_locked() {
+        // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
+        // throwing close must not leave the driver reporting connected on
+        // a closed port. disconnect() cannot throw today; the order is
+        // the contract, not the current wrapper's behaviour.
+        // The cached firmware goes first, so the store(false) is never
+        // observable beside a stale firmware string.
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
         }
+        connected_.store(false);
+        {
+            // Published state is cleared first, under the short state
+            // lock; the I/O lock then covers the close, so it waits only
+            // for an exchange already on the wire. After a lost link the
+            // wrapper has already released the port and the close is a no-op.
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            commanded_brightness_ = 0;
+            calibrator_engaged_ = false;
+        }
+        std::lock_guard<std::mutex> io(io_mutex_);
+        protocol_.disconnect();
     }
 
     void publish_calibrator(int brightness, bool engaged) {
@@ -481,7 +530,11 @@ public:
     // all implemented (DeviceState via the CoverCalibratorDriver base).
     int get_interface_version() const override { return 2; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link, as in the Lite driver (decision 0009 rule 2).
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
+
+    // Decision 0009 rule 5: the loss reason, kept after the link is lost; never waits on the wire.
+    std::string get_link_fault() const override { return protocol_.link_fault(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -499,17 +552,27 @@ public:
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        // Same gates as the Lite driver: raw flag for disconnect, link-aware
+        // value for connect.
+        const bool live = connected_.load() && protocol_.link_alive();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown_locked().
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            if (connected_.load()) {
+                teardown_locked();  // a lost link: join the bodies and drop it before reconnecting
+            }
             FlatPanelConnectionConfig effective = config_;
             bool auto_detected = false;
             if (effective.serial_port.empty() && effective.auto_detect_index >= 0) {
@@ -580,27 +643,12 @@ public:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Flat panel v2 state seed failed: " + std::string(e.what()));
             }
+            fail_connect_if_link_lost(protocol_, firmware_mutex_, firmware_);
 
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 connected");
         } else {
-            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
-            // throwing close must not leave the driver reporting connected on
-            // a closed port. disconnect() cannot throw today; the order is
-            // the contract, not the current wrapper's behaviour.
-            // The cached firmware goes first, so the store(false) is never
-            // observable beside a stale firmware string.
-            {
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_.clear();
-            }
-            connected_.store(false);
-            // Cancel and join the bodies before the port closes: new commands
-            // already throw NotConnected, queued light commands are dropped,
-            // and a cover body mid-transaction finishes it (bounded by the
-            // wire timeout) rather than meeting a closed port.
-            stop_background_operations();
-            protocol_.disconnect();
+            teardown_locked();
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 disconnected");
         }
     }
@@ -752,6 +800,9 @@ public:
                     return CoverState::Error;
             }
         } catch (const std::exception& e) {
+            // A read that found the port gone has lost the link: NotConnected,
+            // not Unknown (decision 0009 rule 3).
+            ensure_connected();
             ALPACA_LOG_WARN("Gemini", "Flat panel v2 cover status read failed: " + std::string(e.what()));
         }
         return CoverState::Unknown;
@@ -826,10 +877,30 @@ public:
     // applies here.
 
 private:
-    void ensure_connected() const {
-        if (!connected_.load()) {
-            throw AlpacaException("Gemini flat panel not connected", AlpacaError::NotConnected);
+    void ensure_connected() const { ensure_flatpanel_connected(connected_, protocol_); }
+
+    // Disconnect body shared by the explicit disconnect and the reconnect over
+    // a lost link. Caller holds transition_mutex_.
+    void teardown_locked() {
+        // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
+        // throwing close must not leave the driver reporting connected on
+        // a closed port. disconnect() cannot throw today; the order is
+        // the contract, not the current wrapper's behaviour.
+        // The cached firmware goes first, so the store(false) is never
+        // observable beside a stale firmware string.
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
         }
+        connected_.store(false);
+        // Cancel and join the bodies before the port closes: new commands
+        // already throw NotConnected, queued light commands are dropped,
+        // and a cover body mid-transaction finishes it (bounded by the
+        // wire timeout) rather than meeting a closed port. After a lost link
+        // a body on the wire has already failed with NotConnected, and the
+        // wrapper has released the port, so the close is a no-op.
+        stop_background_operations();
+        protocol_.disconnect();
     }
 
     // The cover and calibrator background bodies run in operation slots

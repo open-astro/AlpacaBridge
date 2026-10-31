@@ -30,6 +30,7 @@
 #include <string>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_mount.h"
 
@@ -40,6 +41,7 @@ using alpacacore::AlpacaException;
 using alpacacore::TelescopeDriver;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZwoMount;
+using alpacacore::test::require_alpaca_error;
 using namespace std::chrono_literals;
 
 constexpr auto kReal = 5s;  // real-time bound on a rendezvous, never a driver timer
@@ -403,6 +405,66 @@ TEST_CASE("ZWO a new GOTO during Sync settling keeps its own target across a ret
         }
     }
     CHECK(rig.mount.count(":CM") == 1);
+}
+
+TEST_CASE("ZWO an older Sync never aborts a GOTO accepted while it settled",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its first ":Q" and waits out the 200 ms settle
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();  // the GOTO is accepted: it owns the motion now
+    const int stops_before = rig.mount.count(":Q");
+    rig.advance_until([&] { return ready(sync); }, 200ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    CHECK(rig.mount.count(":Q") == stops_before);  // the older Sync stopped nothing
+    CHECK(rig.mount.count(":SMMC") == 1);          // nor retried its sync over the GOTO
+    CHECK(rig.mount.count(":CM") == 0);
+    CHECK(rig.driver->get_slewing());  // the GOTO still runs
+    require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("ZWO an older Sync sends no last-resort :CM once a newer GOTO is accepted",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();
+    rig.advance(200ms);
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 2, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its last-resort ":Q" and waits out the 300 ms settle
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();  // the GOTO is accepted: it owns the motion now
+    rig.advance(300ms);
+    REQUIRE(ready(sync, kReal));
+    CHECK(rig.mount.count(":Sr06:00:00") == 0);  // the GOTO's target registers stay its own
+    CHECK(rig.mount.count(":CM") == 0);
+    CHECK(rig.driver->get_slewing());  // the GOTO still runs
+    require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("ZWO SyncToCoordinates sends its own pair, not a target set earlier",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->set_target_right_ascension(3.0);
+    rig.driver->set_target_declination(10.0);
+    rig.driver->sync_to_coordinates(6.0, -15.0);
+    bool saw_pair = false;
+    for (const auto& command : rig.mount.commands()) {
+        if (command.starts_with(":SMMC")) {
+            CHECK(command.starts_with(":SMMC06:00:00&-15"));
+            saw_pair = true;
+        }
+    }
+    CHECK(saw_pair);
 }
 
 TEST_CASE("ZWO telescope clock - FindHome publishes completion only when the forced slew window ends",

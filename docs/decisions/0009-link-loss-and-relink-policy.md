@@ -68,7 +68,8 @@ Symbol: `kLinkStalenessBound`
 | --- | --- | --- | --- | --- | --- |
 | Sky-Watcher (serial, UDP) |  | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #970 | Decision applied |
 | WandererAstro (cover, filter wheel, box, rotator) |  | — | planned | — | Stream latch; `Connected` stays true |
-| Gemini PDH, flat panel |  | — | planned | — | Polled latch; `Connected` stays true |
+| Gemini PDH |  | — | planned | — | Polled latch; `Connected` stays true |
+| Gemini flat panel | `link_alive` | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted | #1723 | A hangup on a read or `EIO`/`ENXIO`/`ENODEV` on a write is a lost link at once (`Connected` false, operations `NotConnected`, `DeviceState` empty, port released); no latch or staleness bound (request/response, no poll); no `LinkLostStamp` (no #521 consumer); `get_link_fault()` keeps the loss reason until the next Connect or Disconnect |
 | Gemini focuser | `PolledState` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229, #1643 | Applied with the state snapshot (#1643): three failed polls latch a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, operations `NotConnected`, `DeviceState` empty, transport released); no `LinkLostStamp` (no #521 consumer) |
 | Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320, #1643 | Applied with the state snapshot (#1643): three failed polls latch a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, operations `NotConnected`, `DeviceState` empty, transport released); no `LinkLostStamp` (no #521 consumer) |
 | iOptron mount, iEAF, iEFW, iMate |  | — | planned | — | `device_faulted_`; `Connected` stays true |
