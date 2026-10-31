@@ -16,6 +16,8 @@
 #include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -46,7 +48,7 @@ std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_n
  * @brief Every attached ZWO camera for a dew heater's camera picker: SDK slot,
  * model, serial, and whether it has an anti-dew heater.
  *
- * Opens each camera through the ref-counted SDK wrapper (a camera already open
+ * Opens each camera through the shared open table (a camera already open
  * in this process stays open) because ASIGetControlCaps and
  * ASIGetSerialNumber need an open camera.
  */
@@ -57,7 +59,8 @@ std::vector<util::ThermalCameraCandidate> list_zwo_dew_heater_cameras();
  *        test can count device reads without hardware (open-astro#294).
  *
  * Production uses the ZWOSDKWrapper singleton. Not a general SDK seam: it
- * lists only what this driver calls.
+ * lists only what this driver calls. Opens are shared with the camera driver
+ * through SharedOpenTable (issue #1667).
  */
 class ZWODewHeaterSdk {
 public:
@@ -69,9 +72,13 @@ public:
         return enumerate_cameras();
     }
     virtual bool get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) = 0;
-    virtual void open_camera(int camera_id) = 0;
-    virtual void init_camera(int camera_id) = 0;
-    virtual void close_camera(int camera_id) = 0;
+    /// Opens and initialises the camera, or shares a held open of the same unit; the link names this holder's open.
+    virtual SharedOpenTable::Opened open_camera_link(int camera_id) = 0;
+    /// Drops this holder's open; a retired link is a no-op.
+    virtual void close_camera_link(int camera_id, std::uint64_t link) = 0;
+    /// Runs @p fn with @p link as this thread's link for @p camera_id. The caps, value and serial calls below run
+    /// only inside it; a camera the camera driver lost since is NotConnected before the SDK is touched.
+    virtual void with_link(int camera_id, std::uint64_t link, const std::function<void()>& fn) = 0;
     virtual std::vector<ZWOControlCaps> get_control_caps(int camera_id) = 0;
     virtual bool get_control_value(int camera_id, ZWOControlType type, long& value, bool& is_auto) = 0;
     virtual void set_control_value(int camera_id, ZWOControlType type, long value, bool is_auto) = 0;
@@ -79,6 +86,37 @@ public:
 
 protected:
     ~ZWODewHeaterSdk() = default;
+};
+
+/**
+ * @brief The dew heater seam over a ZWOSDK. Production wraps the ZWOSDKWrapper singleton; a test wraps the fake the
+ * camera driver also uses, so both reach the camera through one SharedOpenTable (issue #1667).
+ */
+class ZWOSdkDewHeaterSdk final : public ZWODewHeaterSdk {
+public:
+    explicit ZWOSdkDewHeaterSdk(ZWOSDK& sdk) : sdk_(sdk) {}
+    std::vector<ZWOCameraInfo> enumerate_cameras() override { return sdk_.enumerate_cameras(); }
+    std::vector<ZWOCameraInfo> enumerate_cameras_reporting_unreadable(
+        std::vector<ZwoUnreadableSlot>* unreadable) override {
+        return sdk_.enumerate_cameras(unreadable);
+    }
+    bool get_camera_info_by_id(int id, ZWOCameraInfo& info) override { return sdk_.get_camera_info_by_id(id, info); }
+    SharedOpenTable::Opened open_camera_link(int id) override { return sdk_.open_camera_link(id); }
+    void close_camera_link(int id, std::uint64_t link) override { sdk_.close_camera_link(id, link); }
+    void with_link(int id, std::uint64_t link, const std::function<void()>& fn) override {
+        sdk_.with_link(id, link, fn);
+    }
+    std::vector<ZWOControlCaps> get_control_caps(int id) override { return sdk_.get_control_caps(id); }
+    bool get_control_value(int id, ZWOControlType type, long& value, bool& is_auto) override {
+        return sdk_.get_control_value(id, type, value, is_auto);
+    }
+    void set_control_value(int id, ZWOControlType type, long value, bool is_auto) override {
+        sdk_.set_control_value(id, type, value, is_auto);
+    }
+    std::string get_serial_number(int id) override { return sdk_.get_serial_number(id); }
+
+private:
+    ZWOSDK& sdk_;
 };
 
 /// Test overload: the driver keeps a reference, `sdk` must outlive it.

@@ -319,7 +319,7 @@ TEST_CASE("ZWO Camera Driver - ElectronsPerADU and FullWellCapacity are not impl
 
 // Decision 0016 rules 1 and 4: Name and the other identity getters need no device access, so a connect that
 // holds the SDK open must not park them. The open is held on a latch; the getters run on the test thread.
-// Falsified by: zwo_camera_driver.cpp set_connected(true) holding mutex_ across open_camera() (get_name() then
+// Falsified by: zwo_camera_driver.cpp set_connected(true) holding mutex_ across open_camera_link() (get_name() then
 // waits until the latch is released and the timed call below fails its budget).
 TEST_CASE("ZWO Camera Driver - Name and identity getters answer while a connect holds the SDK open",
           "[zwo][camera][unit][getter-stall]") {

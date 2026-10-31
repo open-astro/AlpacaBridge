@@ -338,3 +338,198 @@ TEST_CASE("ZWO shared open table - A failed open leaves no entry behind", "[zwo]
     CHECK(table.open_count(3) == 1);
     CHECK(call_reaches(table, 3, y.link));
 }
+
+// ---- call_unserialised(): the blocking download (issue #1667) ----
+
+namespace {
+
+// Counts under atomics: the table calls these from several threads.
+struct CountingUnits {
+    std::atomic<int> opens{0};
+    std::atomic<int> closes{0};
+
+    SharedOpenTable::Ops ops() {
+        SharedOpenTable::Ops ops;
+        ops.real_open = [this](int) { ++opens; };
+        ops.real_close = [this](int) { ++closes; };
+        ops.read_serial = [](int) -> std::string { return "ZWO-SN-1"; };
+        return ops;
+    }
+};
+
+bool wait_until(const std::function<bool()>& done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!done() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return done();
+}
+
+// A holder's blocking call: runs call_unserialised() on its own thread until released.
+struct HeldDownload {
+    std::atomic<bool> inside{false};
+    std::atomic<bool> release{false};
+    std::atomic<int> code{-1};
+    std::thread thread;
+
+    HeldDownload(SharedOpenTable& table, int id, std::uint64_t link, int outcome_code = 0) {
+        thread = std::thread([this, &table, id, link, outcome_code] {
+            code = error_of([&] {
+                table.with_link(id, link, [&] {
+                    table.call_unserialised(id, [&] {
+                        inside = true;
+                        wait_until([&] { return release.load(); });
+                        if (outcome_code != 0) throw AlpacaException("ASIGetDataAfterExp failed", outcome_code);
+                    });
+                });
+            });
+        });
+    }
+    ~HeldDownload() {
+        release = true;
+        if (thread.joinable()) thread.join();
+    }
+};
+
+}  // namespace
+
+// Falsified by: call_unserialised() holding the table mutex across the body (every other call queues behind a
+// multi-second download, the reason ASIGetDataAfterExp is exempt from the wrapper lock).
+TEST_CASE("ZWO shared open table - An unserialised call holds no lock while it runs", "[zwo][link]") {
+    CountingUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    const auto other = table.open(4);
+
+    HeldDownload download(table, 3, y.link);
+    REQUIRE(wait_until([&] { return download.inside.load(); }));
+
+    CHECK(error_of([&] { table.call_unserialised(4, [] {}); }) == AlpacaError::DriverException);
+    CHECK(call_reaches(table, 4, other.link));
+    CHECK(table.open(5).link != 0);
+    CHECK(download.code.load() == -1);  // still running
+}
+
+// Falsified by: retire() closing the id under a running unserialised call (the dead handle is closed while a
+// transfer reads it), or a reopen of the id before that close happened.
+TEST_CASE("ZWO shared open table - A loss closes the id only after the unserialised call returns", "[zwo][link]") {
+    CountingUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    HeldDownload download(table, 3, y.link);
+    REQUIRE(wait_until([&] { return download.inside.load(); }));
+
+    // Another call on the same open meets the removal code while the download runs.
+    CHECK(error_of([&] {
+              table.with_link(3, y.link, [&] {
+                  table.call(3, [] { throw AlpacaException("ASI_ERROR_CAMERA_REMOVED", AlpacaError::NotConnected); });
+              });
+          }) == AlpacaError::NotConnected);
+
+    // Retired at once for every later caller ...
+    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+    // ... but the handle stays open under the transfer, and the id cannot be reopened until it is closed.
+    CHECK(units.closes.load() == 0);
+    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::InvalidOperation);
+    CHECK(units.opens.load() == 1);
+
+    download.release = true;
+    download.thread.join();
+    CHECK(units.closes.load() == 1);  // the last call out closed it
+    const auto fresh = table.open(3);
+    CHECK(fresh.link != y.link);
+    CHECK(units.opens.load() == 2);
+    CHECK(call_reaches(table, 3, fresh.link));
+}
+
+// Falsified by: close() of the last holder really closing under a running unserialised call.
+TEST_CASE("ZWO shared open table - The last close waits for a running unserialised call", "[zwo][link]") {
+    CountingUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    HeldDownload download(table, 3, y.link);
+    REQUIRE(wait_until([&] { return download.inside.load(); }));
+
+    table.close(3, y.link);
+    CHECK(units.closes.load() == 0);
+    CHECK(error_of([&] { (void)table.open(3); }) == AlpacaError::InvalidOperation);
+
+    download.release = true;
+    download.thread.join();
+    CHECK(units.closes.load() == 1);
+    CHECK(table.open_count(3) == 0);
+}
+
+// Falsified by: checked_entry() accepting link 0 (or a retired entry): the check must refuse both.
+TEST_CASE("ZWO shared open table - A link 0 caller is refused on an entry retired under an unserialised call",
+          "[zwo][link]") {
+    CountingUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    HeldDownload download(table, 3, y.link);
+    REQUIRE(wait_until([&] { return download.inside.load(); }));
+    // A loss code on another call retires the entry; the close waits for the download.
+    CHECK(error_of([&] {
+              table.with_link(3, y.link, [&] {
+                  table.call(3, [] { throw AlpacaException("ASI_ERROR_CAMERA_REMOVED", AlpacaError::NotConnected); });
+              });
+          }) == AlpacaError::NotConnected);
+
+    bool ran = false;
+    CHECK(error_of([&] { table.with_link(3, 0, [&] { table.call(3, [&] { ran = true; }); }); }) ==
+          AlpacaError::NotConnected);
+    CHECK(error_of([&] { table.with_link(3, 0, [&] { table.call_unserialised(3, [&] { ran = true; }); }); }) ==
+          AlpacaError::NotConnected);
+    CHECK_FALSE(ran);
+}
+
+// Falsified by: call_unserialised() not retiring the entry on a loss code from its own body.
+TEST_CASE("ZWO shared open table - A loss code from the unserialised body retires the open", "[zwo][link]") {
+    CountingUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    {
+        HeldDownload download(table, 3, y.link, AlpacaError::NotConnected);
+        REQUIRE(wait_until([&] { return download.inside.load(); }));
+        download.release = true;
+        download.thread.join();
+        CHECK(download.code.load() == AlpacaError::NotConnected);
+    }
+    CHECK(units.closes.load() == 1);
+    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+    CHECK(error_of([&] { table.close(3, y.link); }) == 0);  // a stale close is a no-op
+    CHECK(units.closes.load() == 1);
+}
+
+// Falsified by: a failure that is not a loss (a timeout, a short read) retiring the open.
+TEST_CASE("ZWO shared open table - Another error from the unserialised body keeps the open", "[zwo][link]") {
+    CountingUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    {
+        HeldDownload download(table, 3, y.link, AlpacaError::DriverException);
+        REQUIRE(wait_until([&] { return download.inside.load(); }));
+        download.release = true;
+        download.thread.join();
+        CHECK(download.code.load() == AlpacaError::DriverException);
+    }
+    CHECK(units.closes.load() == 0);
+    CHECK(call_reaches(table, 3, y.link));
+}
+
+// Falsified by: close() erasing the entry only after real_close() succeeded (a close that fails on a removed unit
+// leaves a held entry, so the next open shares it and never runs the real open, which includes ASIInitCamera).
+TEST_CASE("ZWO shared open table - A close that throws still drops the entry", "[zwo][link]") {
+    RawUnits units;
+    units.serial_at = {{3, "EAF-SN-1"}};
+    SharedOpenTable table(units.ops());
+
+    const auto y = table.open(3);
+    units.close_fails = true;  // the unit was pulled: the close reports it
+    CHECK(error_of([&] { table.close(3, y.link); }) == AlpacaError::NotConnected);
+    CHECK(table.open_count(3) == 0);
+    units.close_fails = false;
+
+    const auto again = table.open(3);
+    CHECK(again.link != y.link);
+    CHECK(units.opens == 2);  // really opened (and, for a camera, initialised) again
+}

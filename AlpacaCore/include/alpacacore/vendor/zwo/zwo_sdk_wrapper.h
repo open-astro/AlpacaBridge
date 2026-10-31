@@ -12,9 +12,11 @@
 
 #pragma once
 
+#include <alpacacore/vendor/zwo/shared_open_table.h>
 #include <alpacacore/vendor/zwo/zwo_camera_identity.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -87,6 +89,14 @@ struct ZWOStartPos {
     int start_y{};
 };
 
+/**
+ * @brief Abstract ZWO camera SDK surface used by the camera driver and the dew heater switch.
+ *
+ * Opens are shared through SharedOpenTable (issue #1667, as the EAF since issue #1500): an open
+ * returns a link, and every per-device method below runs only inside with_link() for that id and
+ * link. A removal code from one retires the open, so the next call on it, from any holder, is
+ * NotConnected before the SDK is touched. Enumeration, info and the SDK version need no link.
+ */
 class ZWOSDK {
 public:
     virtual std::vector<ZWOCameraInfo> enumerate_cameras(std::vector<ZwoUnreadableSlot>* unreadable = nullptr) = 0;
@@ -95,9 +105,13 @@ public:
     virtual bool get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) = 0;
     virtual bool get_camera_info_by_index(int camera_index, ZWOCameraInfo& info) = 0;
 
-    virtual void open_camera(int camera_id) = 0;
-    virtual void init_camera(int camera_id) = 0;
-    virtual void close_camera(int camera_id) = 0;
+    /// Opens and initialises the camera, or shares a held open of the same unit (same serial); returns the link
+    /// and the serial read at the open ("" for a camera that reports none).
+    virtual SharedOpenTable::Opened open_camera_link(int camera_id) = 0;
+    /// Drops this holder's open; the last one closes the camera. A retired link is a no-op.
+    virtual void close_camera_link(int camera_id, std::uint64_t link) = 0;
+    /// Runs @p fn with @p link as this thread's link for @p camera_id; the wrapper takes no lock across @p fn.
+    virtual void with_link(int camera_id, std::uint64_t link, const std::function<void()>& fn) = 0;
 
     virtual std::vector<ZWOControlCaps> get_control_caps(int camera_id) = 0;
     virtual bool get_control_value(int camera_id, ZWOControlType type, long& value, bool& is_auto) = 0;
@@ -131,9 +145,9 @@ public:
     /// Readable cameras only; each carries its SDK slot in `slot_index`.
     std::vector<ZWOCameraInfo> enumerate_cameras(std::vector<ZwoUnreadableSlot>* unreadable = nullptr) override;
     /// Every connected camera with its serial. ASIGetSerialNumber needs an
-    /// open camera, so each one is opened through the ref-counted
-    /// open_camera()/close_camera() pair (a camera already open in this
-    /// process stays open). A failed serial read leaves the serial empty.
+    /// open camera, so each one is opened through the shared open table
+    /// (a camera already open in this process stays open; a held id whose
+    /// serial changed is retired and reopened). A failed open leaves the serial empty.
     /// With `only_model_name` (already trimmed) set, only cameras of that
     /// model are opened; the others are listed with an empty serial.
     /// `index` is the SDK slot. A slot the SDK cannot read is skipped and, when
@@ -143,9 +157,9 @@ public:
     bool get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) override;
     bool get_camera_info_by_index(int camera_index, ZWOCameraInfo& info) override;
 
-    void open_camera(int camera_id) override;
-    void init_camera(int camera_id) override;
-    void close_camera(int camera_id) override;
+    SharedOpenTable::Opened open_camera_link(int camera_id) override;
+    void close_camera_link(int camera_id, std::uint64_t link) override;
+    void with_link(int camera_id, std::uint64_t link, const std::function<void()>& fn) override;
 
     std::vector<ZWOControlCaps> get_control_caps(int camera_id) override;
     bool get_control_value(int camera_id, ZWOControlType type, long& value, bool& is_auto) override;
