@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacahttp/request.h>
+#include <alpacahttp/util/url_decode.h>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -175,23 +176,7 @@ void Request::parse_query_string() {
     query_params_.clear();
     query_params_lower_.clear();
 
-    auto url_decode = [](const std::string& value) -> std::string {
-        std::string result;
-        result.reserve(value.size());
-        for (std::size_t i = 0; i < value.size(); ++i) {
-            if (value[i] == '%' && i + 2 < value.size()) {
-                std::string hex = value.substr(i + 1, 2);
-                char decoded = static_cast<char>(std::strtol(hex.c_str(), nullptr, 16));
-                result.push_back(decoded);
-                i += 2;
-            } else if (value[i] == '+') {
-                result.push_back(' ');
-            } else {
-                result.push_back(value[i]);
-            }
-        }
-        return result;
-    };
+    using util::url_decode;
 
     std::istringstream iss(query_string_);
     std::string pair;
