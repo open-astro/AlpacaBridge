@@ -80,7 +80,7 @@ public:
 
     // Test-only: true from the moment a management restart claims the server
     // until handle_restart_request() has made its last write to it, so a test
-    // can wait for the detached restart thread before stop() or destruction.
+    // can wait for the Router's delayed restart thread before stop() or destruction.
     bool restart_in_progress_for_test() const { return restart_requested_; }
 
     // The port actually bound, read back from the listening socket via
