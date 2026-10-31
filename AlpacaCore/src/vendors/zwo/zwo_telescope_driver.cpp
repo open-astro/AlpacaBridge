@@ -1987,7 +1987,6 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
-        // sync_to_target() handles ensure_not_parked and reset_position_offsets.
         util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         check_connected();
         {
@@ -1997,7 +1996,8 @@ public:
             target_ra_set_ = true;
             target_dec_set_ = true;
         }
-        sync_to_target();
+        // Sync the caller's own pair; a concurrent target setter must not replace it.
+        sync_to_pair(ra, dec, "SyncToCoordinates");
     }
 
     void sync_to_target() override {
@@ -2016,6 +2016,13 @@ public:
         }
 
         util::validate_ra_dec(target_ra, target_dec, "SyncToTarget");
+        sync_to_pair(target_ra, target_dec, "SyncToTarget");
+    }
+
+    // sync_to_target() handles ensure_not_parked and reset_position_offsets.
+    void sync_to_pair(double target_ra, double target_dec, const char* operation) {
+        check_connected();
+        ensure_not_parked(operation);
         // A pending setup/retry must not consume the target registers replaced by Sync.
         // This clears setup ownership/errors, not an accepted physical slew; moving-response recovery below stops it.
         cancel_and_join_goto_thread();
@@ -2023,8 +2030,24 @@ public:
 
         auto& protocol = protocol_;
 
+        // Every newer initiator (GOTO, Sync, abort, park) bumps slew_error_epoch_. Once it has
+        // moved, a newer command owns the motion and this older Sync must not stop it.
+        uint64_t sync_epoch = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sync_epoch = slew_error_epoch_;
+        }
+        // Caller holds target_write_mutex_ (a newer GOTO takes it before its first wire write).
+        auto require_ownership = [&]() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (slew_error_epoch_ != sync_epoch) {
+                throw AlpacaException("Sync superseded by a newer motion command", AlpacaError::InvalidOperation);
+            }
+        };
+
         auto attempt_sync = [&]() {
             std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+            require_ownership();
             try {
                 protocol.sync_target_equatorial(target_ra, target_dec);
                 return true;
@@ -2046,7 +2069,11 @@ public:
         // :SMMC can fail with e4 (equipment moving) if the mount is still settling
         // from a prior slew.  Wait for motion to stop and retry.
         if (!attempt_sync()) {
-            protocol.abort_motion();
+            {
+                std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+                require_ownership();
+                protocol.abort_motion();
+            }
             for (int retry = 0; retry < 5; ++retry) {
                 clock_.sleep_for(std::chrono::milliseconds(200));
                 try {
@@ -2058,9 +2085,14 @@ public:
             }
             if (!attempt_sync()) {
                 // Last resort: abort again and try the set-target + :CM path.
-                protocol.abort_motion();
+                {
+                    std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+                    require_ownership();
+                    protocol.abort_motion();
+                }
                 clock_.sleep_for(std::chrono::milliseconds(300));
                 std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+                require_ownership();
                 protocol.set_target_ra(target_ra);
                 protocol.set_target_dec(target_dec);
                 protocol.sync_target();

@@ -429,6 +429,23 @@ TEST_CASE("ZWO an older Sync never aborts a GOTO accepted while it settled",
     CHECK(rig.driver->get_slewing());  // the GOTO still runs
 }
 
+TEST_CASE("ZWO SyncToCoordinates sends its own pair, not a target set earlier",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->set_target_right_ascension(3.0);
+    rig.driver->set_target_declination(10.0);
+    rig.driver->sync_to_coordinates(6.0, -15.0);
+    bool saw_pair = false;
+    for (const auto& command : rig.mount.commands()) {
+        if (command.starts_with(":SMMC")) {
+            CHECK(command.starts_with(":SMMC06:00:00&-15"));
+            saw_pair = true;
+        }
+    }
+    CHECK(saw_pair);
+}
+
 TEST_CASE("ZWO telescope clock - FindHome publishes completion only when the forced slew window ends",
           "[zwo][telescope][unit][clock]") {
     const auto duration = GENERATE(0ms, 6000ms);

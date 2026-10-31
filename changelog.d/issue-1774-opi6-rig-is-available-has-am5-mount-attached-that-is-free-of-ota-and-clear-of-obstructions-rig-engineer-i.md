@@ -1,0 +1,3 @@
+### Fixed
+
+- **ZWO AM mount Sync races**, ZWO driver, issue #1774. `SyncToCoordinates` now syncs its own validated pair instead of re-reading the target registers, so a concurrent target setter cannot replace it (`ZWO SyncToCoordinates sends its own pair, not a target set earlier` in `AlpacaCore/tests/test_zwo_telescope_clock.cpp`). An older Sync no longer aborts a GOTO accepted while it waited out an equipment-moving reply: before each stop, retry and last-resort `:CM` it checks the slew epoch and throws `InvalidOperation` when a newer command owns the motion (`ZWO an older Sync never aborts a GOTO accepted while it settled`).
