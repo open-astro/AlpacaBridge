@@ -1,0 +1,3 @@
+### Changed
+
+- **ToupTek camera thermal poll and pulse-guide timer**, ToupTek camera driver, issue #1418. The thermal poller and the pulse-guide timer now run in `util::AsyncOperation` slots instead of raw `std::thread` members, so a new PulseGuide supersedes the running timer without waiting for it and the old timer cannot end the new pulse. Disconnect still stops the poller before the SDK handle closes, and a reconnect restarts it. Covered by `AlpacaCore/tests/test_touptek_camera.cpp` ("a superseded pulse timer leaves the new pulse running", "the thermal poll stops on disconnect and restarts on reconnect", "disconnect during a pulse guide", "thermal reads racing a disconnect"). The exposure thread is unchanged; decision 0006 lists ToupTek as `partial`.

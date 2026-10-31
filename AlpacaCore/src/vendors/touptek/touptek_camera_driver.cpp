@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/last_exposure.h>
@@ -108,7 +109,7 @@ public:
         shutdown_connection();
         stop_exposure_thread();
         stop_thermal_poller();
-        stop_pulse_guide_thread();
+        pulse_slot_.cancel_all_and_join();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -165,8 +166,7 @@ public:
         // and the handle (the identity stays for the getters).
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         // exposure_lifecycle_mutex_ also serialises the thermal poller's
-        // spawn (connect path, below) against its join (disconnect path), so
-        // the std::thread object is never assigned and joined concurrently.
+        // start (connect path, below) against its stop (disconnect path).
         // Taken in both directions, after transition_mutex_ and before mutex_
         // (documented lock order).
         std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
@@ -181,8 +181,8 @@ public:
             // (it would block on this mutex, then fail NotConnected after we
             // null the handle). Lock order: exposure_lifecycle_mutex_ -> mutex_.
             stop_exposure_thread();
-            // The poller takes mutex_ on every tick, so join it out here too --
-            // before mutex_ is taken and the handle closed.
+            // The poller takes mutex_ on every tick, so stop and join its slot
+            // out here too -- before mutex_ is taken and the handle closed.
             stop_thermal_poller();
         }
         // Base gates BEFORE the idempotency check: a connect must honor a newer
@@ -348,7 +348,7 @@ public:
                 stream_clean_ = true;
                 connected_.store(true);
             }
-            // Spawned with mutex_ released (never joined here -- see the top of
+            // Started with mutex_ released (never joined here -- see the top of
             // this function); its first tick primes the caches before the
             // client's first DeviceState poll.
             start_thermal_poller();
@@ -959,32 +959,34 @@ public:
         case 3: dir = ToupGuideDirection::West;  break;
         }
         auto& sdk = sdk_;
-        // Serialise pulse guides against each other (M18): two concurrent
-        // calls would otherwise both run stop_pulse_guide_thread's join and
-        // race the thread-assignment below (double-join / join-vs-operator= is
-        // UB on std::thread). Held across the SDK write + timer restart so a
-        // superseding pulse replaces the previous one atomically. Lock order:
-        // pulse_guide_lifecycle_mutex_ -> mutex_ (via with_handle); the timer
-        // thread never takes it, so the join below can't deadlock.
+        // Serialise pulse guides against each other (M18): the SDK writes and
+        // the slot starts of two concurrent calls stay in the same order.
+        // Lock order: pulse_guide_lifecycle_mutex_ -> mutex_ (via with_handle);
+        // the timer body never takes it.
         std::lock_guard<std::mutex> pg_lifecycle_lock(pulse_guide_lifecycle_mutex_);
         with_handle([&](HToupcam h) { sdk.pulse_guide(h, dir, static_cast<unsigned>(duration)); });
-        // Cancel + join any prior timer (fast — the cancel wakes it), then start a
-        // fresh joinable one. On cancel the old timer leaves pulse_guiding_ alone so
-        // there's no flicker when one pulse immediately supersedes another.
-        stop_pulse_guide_thread();
+        // The new pulse supersedes the running timer, never joins it. Bumping the
+        // generation under pulse_guide_mutex_ together with the flag means the
+        // old body, which ends the pulse only under that mutex and only while
+        // still current, can no longer clear this pulse's flag; there is no
+        // flicker when one pulse immediately supersedes another.
         {
             std::lock_guard<std::mutex> plock(pulse_guide_mutex_);
-            pulse_guide_cancel_ = false;
+            pulse_generation_.bump();
+            pulse_guiding_.store(true);
         }
-        pulse_guiding_.store(true);
-        pulse_guide_thread_ = std::thread([this, duration]() {
-            std::unique_lock<std::mutex> plock(pulse_guide_mutex_);
-            const bool cancelled = clock_.wait_for(plock, pulse_guide_cv_, std::chrono::milliseconds(duration),
-                                                   [this] { return pulse_guide_cancel_; });
-            if (!cancelled) {
-                pulse_guiding_.store(false);  // natural completion
-            }
-        });
+        try {
+            pulse_slot_.start([this, duration](util::OperationContext& ctx) {
+                if (!ctx.wait_for(std::chrono::milliseconds(duration))) return;  // superseded or cancelled
+                std::lock_guard<std::mutex> plock(pulse_guide_mutex_);
+                if (ctx.stop_reason() == util::StopReason::None) {
+                    pulse_guiding_.store(false);  // natural completion
+                }
+            });
+        } catch (...) {
+            pulse_guiding_.store(false);  // no timer will end the pulse
+            throw;
+        }
     }
 
     // --- Background thermal poller ---------------------------------------
@@ -1024,39 +1026,23 @@ public:
         tec_cache_valid_ = true;
     }
 
-    // Caller guarantees no poller thread is live (set_connected joins it first).
+    // Called without mutex_ held (decision 0006 rule 4).
     void start_thermal_poller() {
-        if (thermal_thread_.joinable()) return;  // defensive: never join under mutex_
-        {
-            std::lock_guard<std::mutex> tlock(thermal_mutex_);
-            thermal_stop_ = false;
-        }
-        thermal_thread_ = std::thread([this] { thermal_poll_loop(); });
+        thermal_slot_.start([this](util::OperationContext& ctx) { thermal_poll_loop(ctx); });
     }
 
-    void stop_thermal_poller() {
-        {
-            std::lock_guard<std::mutex> tlock(thermal_mutex_);
-            thermal_stop_ = true;
-        }
-        thermal_cv_.notify_all();
-        if (thermal_thread_.joinable()) thermal_thread_.join();
-    }
+    // Cancels and joins the poller; called without mutex_ held.
+    void stop_thermal_poller() { thermal_slot_.cancel_all_and_join(); }
 
-    void thermal_poll_loop() {
+    void thermal_poll_loop(util::OperationContext& ctx) {
         auto& sdk = sdk_;
         bool first = true;
         for (;;) {
-            {
-                std::unique_lock<std::mutex> tlock(thermal_mutex_);
-                // First tick runs immediately (primes the cache); later ticks
-                // wait out the interval unless stopped.
-                if (!first) {
-                    clock_.wait_for(tlock, thermal_cv_, kThermalPollInterval, [this] { return thermal_stop_; });
-                }
-                first = false;
-                if (thermal_stop_) return;
-            }
+            // First tick runs immediately (primes the cache); later ticks
+            // wait out the interval unless stopped.
+            if (!first && !ctx.wait_for(kThermalPollInterval)) return;
+            first = false;
+            if (ctx.stop_reason() != util::StopReason::None) return;
             // Never touch the SDK while a frame is integrating (see
             // cache_fresh_locked); the cache just ages until it ends.
             if (exposure_active_.load()) continue;
@@ -1074,17 +1060,6 @@ public:
                 // the cache ages out.
                 ALPACA_LOG_DEBUG(branding_.label, "Thermal poll failed: " + std::string(e.what()));
             }
-        }
-    }
-
-    void stop_pulse_guide_thread() {
-        {
-            std::lock_guard<std::mutex> plock(pulse_guide_mutex_);
-            pulse_guide_cancel_ = true;
-        }
-        pulse_guide_cv_.notify_all();
-        if (pulse_guide_thread_.joinable()) {
-            pulse_guide_thread_.join();
         }
     }
 
@@ -1578,26 +1553,19 @@ private:
     mutable bool temperature_cache_valid_{false};
     mutable util::TaskClock::clock::time_point tec_cache_time_{};
     mutable bool tec_cache_valid_{false};
-    // Poller lifecycle: member thread + stop flag/cv so disconnect and the
-    // destructor can wake and join it (never detached).
-    std::thread thermal_thread_;
-    std::mutex thermal_mutex_;
-    std::condition_variable thermal_cv_;
-    bool thermal_stop_{false};
+    // Poller lifecycle: one periodic body in a slot (decision 0006); disconnect
+    // and the destructor cancel and join it.
+    util::OperationGeneration thermal_generation_;
+    util::AsyncOperation thermal_slot_{"touptek-thermal", thermal_generation_, clock_};
 
     mutable std::atomic<bool> pulse_guiding_;
-    // Joinable timer that clears pulse_guiding_ after the pulse duration. Kept as a
-    // member (not detached) with a cancel flag + cv so the destructor can wake and
-    // join it — a detached thread writing pulse_guiding_ after destruction is UB.
-    std::thread pulse_guide_thread_;
+    // Guards the end of a pulse against a superseding pulse (see pulse_guide).
     std::mutex pulse_guide_mutex_;
-    std::condition_variable pulse_guide_cv_;
-    bool pulse_guide_cancel_{false};
-    // Serialises the pulse-guide timer's lifecycle: concurrent pulse_guide
-    // calls would double-join pulse_guide_thread_ / race its assignment (UB
-    // on std::thread; M18). The destructor's stop_pulse_guide_thread runs
-    // after shutdown, when no client call can be in flight, so it does not
-    // take it (same exemption as exposure_lifecycle_mutex_).
+    util::OperationGeneration pulse_generation_;
+    // The timer body that clears pulse_guiding_ after the pulse duration; the
+    // destructor cancels and joins it.
+    util::AsyncOperation pulse_slot_{"touptek-pulse", pulse_generation_, clock_};
+    // Serialises pulse_guide calls (SDK write plus timer start).
     std::mutex pulse_guide_lifecycle_mutex_;
 
     static void on_event_static(unsigned /*event*/, void* /*ctx*/) {
