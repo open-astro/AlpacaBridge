@@ -405,6 +405,30 @@ TEST_CASE("ZWO a new GOTO during Sync settling keeps its own target across a ret
     CHECK(rig.mount.count(":CM") == 1);
 }
 
+TEST_CASE("ZWO an older Sync never aborts a GOTO accepted while it settled",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its first ":Q" and waits out the 200 ms settle
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();  // the GOTO is accepted: it owns the motion now
+    const int stops_before = rig.mount.count(":Q");
+    rig.advance_until([&] { return ready(sync); }, 200ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    try {
+        sync.get();
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::InvalidOperation);
+    }
+    CHECK(rig.mount.count(":Q") == stops_before);  // the older Sync stopped nothing
+    CHECK(rig.mount.count(":CM") == 0);
+    CHECK(rig.driver->get_slewing());  // the GOTO still runs
+}
+
 TEST_CASE("ZWO telescope clock - FindHome publishes completion only when the forced slew window ends",
           "[zwo][telescope][unit][clock]") {
     const auto duration = GENERATE(0ms, 6000ms);
