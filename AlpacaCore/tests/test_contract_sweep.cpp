@@ -383,6 +383,13 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
             p.push_back({"set_guide_rate", [&] { t.set_guide_rate(alpacacore::GuideRate{}); }});
             p.push_back({"set_tracking_rate", [&] { t.set_tracking_rate(0); }});
             p.push_back({"find_home", [&] { t.find_home(); }});
+            p.push_back({"park", [&] { t.park(); }});
+            p.push_back({"unpark", [&] { t.unpark(); }});
+            p.push_back({"set_tracking", [&] { t.set_tracking(false); }});
+            p.push_back({"sync_to_coordinates", [&] { t.sync_to_coordinates(1.0, 1.0); }});
+            p.push_back({"sync_to_target", [&] { t.sync_to_target(); }});
+            p.push_back({"slew_to_coordinates_async", [&] { t.slew_to_coordinates_async(1.0, 1.0); }});
+            p.push_back({"slew_to_target_async", [&] { t.slew_to_target_async(); }});
             p.push_back({"pulse_guide", [&] { t.pulse_guide(0, 0); }});
             p.push_back({"set_park", [&] { t.set_park(); }});
             p.push_back({"slew_to_target", [&] { t.slew_to_target(); }});
@@ -413,6 +420,14 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
             p.push_back({"set_sub_exposure_duration", [&] { c.set_sub_exposure_duration(0.0); }});
             p.push_back({"pulse_guide", [&] { c.pulse_guide(0, 0); }});
             p.push_back({"stop_exposure", [&] { c.stop_exposure(); }});
+            p.push_back({"get_electrons_per_adu", [&] { (void)c.get_electrons_per_adu(); }});
+            p.push_back({"get_full_well_capacity", [&] { (void)c.get_full_well_capacity(); }});
+            p.push_back({"get_readout_mode", [&] { (void)c.get_readout_mode(); }});
+            p.push_back({"set_readout_mode", [&] { c.set_readout_mode(0); }});
+            p.push_back({"get_readout_modes", [&] { (void)c.get_readout_modes(); }});
+            p.push_back({"get_offset", [&] { (void)c.get_offset(); }});
+            p.push_back({"set_offset", [&] { c.set_offset(0); }});
+            p.push_back({"set_gain", [&] { c.set_gain(0); }});
             break;
         }
         case DeviceType::Switch: {
@@ -426,6 +441,34 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
                 p.push_back({"set_switch_value" + at, [&s, id] { s.set_switch_value(id, 0.0); }});
                 p.push_back({"set_async_value" + at, [&s, id] { s.set_async_value(id, 0.0); }});
             }
+            break;
+        }
+        case DeviceType::Focuser: {
+            auto& f = dynamic_cast<alpacacore::FocuserDriver&>(d);
+            p.push_back({"get_step_size", [&] { (void)f.get_step_size(); }});
+            p.push_back({"get_temp_comp", [&] { (void)f.get_temp_comp(); }});
+            p.push_back({"set_temp_comp", [&] { f.set_temp_comp(false); }});
+            p.push_back({"get_temperature", [&] { (void)f.get_temperature(); }});
+            break;
+        }
+        case DeviceType::FilterWheel: {
+            auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(d);
+            p.push_back({"get_focus_offsets", [&] { (void)f.get_focus_offsets(); }});
+            p.push_back({"set_focus_offsets", [&] { f.set_focus_offsets({}); }});
+            p.push_back({"get_names", [&] { (void)f.get_names(); }});
+            p.push_back({"set_names", [&] { f.set_names({}); }});
+            break;
+        }
+        case DeviceType::Rotator: {
+            auto& r = dynamic_cast<alpacacore::RotatorDriver&>(d);
+            p.push_back({"get_mechanical_position", [&] { (void)r.get_mechanical_position(); }});
+            p.push_back({"get_target_position", [&] { (void)r.get_target_position(); }});
+            p.push_back({"set_target_position", [&] { r.set_target_position(0.0); }});
+            p.push_back({"get_reverse", [&] { (void)r.get_reverse(); }});
+            p.push_back({"set_reverse", [&] { r.set_reverse(false); }});
+            p.push_back({"move_absolute", [&] { r.move_absolute(0.0); }});
+            p.push_back({"move_mechanical", [&] { r.move_mechanical(0.0); }});
+            p.push_back({"sync", [&] { r.sync(0.0); }});
             break;
         }
         case DeviceType::CoverCalibrator: {

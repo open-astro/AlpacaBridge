@@ -1900,6 +1900,23 @@ TEST_CASE("OnStep Telescope Driver - Park during a MoveAxis stops the move and p
     driver->set_connected(false);
 }
 
+// Connected, the settings OnStep does not offer keep their capability answers (disconnected: NotConnected, above).
+TEST_CASE("OnStep Telescope Driver - connected unsupported setters keep their NotImplemented answers",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    namespace AlpacaError = alpacacore::AlpacaError;
+    require_alpaca_error([&]() { driver->set_guide_rate({0.001, 0.001}); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->set_side_of_pier(0); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->set_declination_rate(1.0); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->set_right_ascension_rate(1.0); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->sync_to_alt_az(45.0, 90.0); }, AlpacaError::MethodNotImplemented);
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep Telescope Driver - Park is retried while the mount reports it still in motion",
           "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ParkHomeFake>();

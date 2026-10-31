@@ -194,6 +194,22 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Unsupported methods", "[ioptro
     require_alpaca_error([&]() { driver->command_string("test", false); }, alpacacore::AlpacaError::NotImplemented);
 }
 
+// Connected, the read-only DC3 port rejects writes and no port has async control: NotImplemented (disconnected,
+// NotConnected comes first: the case above).
+TEST_CASE("iOptron iMate PowerBox Switch Driver - connected read-only and async writes are NotImplemented",
+          "[ioptron][switch][unit]") {
+    alpacacore::test::FakeIoptronGpio gpio;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(
+        0, alpacacore::vendor::ioptron::default_imate_powerbox_config(), gpio);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&]() { driver->set_switch(0, false); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_switch_value(0, 0.0); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_async(1, true); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_async_value(1, 1.0); }, alpacacore::AlpacaError::NotImplemented);
+    driver->set_connected(false);
+}
+
 // 9. Constructor rejects an empty port configuration.
 TEST_CASE("iOptron iMate PowerBox Switch Driver - Constructor rejects empty config", "[ioptron][switch][unit]") {
     alpacacore::vendor::ioptron::IoptronSwitchConfig empty_cfg;

@@ -140,6 +140,8 @@ TEST_CASE("SVBONY Camera Driver - connects over an injected SDK", "[svbony][came
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(fake.open_count() == 1);
+    // Connected, StopExposure answers MethodNotImplemented (disconnected: NotConnected).
+    require_alpaca_error([&] { driver->stop_exposure(); }, alpacacore::AlpacaError::MethodNotImplemented);
     CHECK(driver->get_device_firmware().value_or("") == "fake-firmware");
     CHECK(driver->get_camera_x_size() == 16);
     CHECK(driver->get_camera_y_size() == 8);
