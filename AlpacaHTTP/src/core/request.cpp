@@ -76,6 +76,9 @@ bool Request::parse(std::string_view raw_request) {
             line.pop_back();
         }
 
+        if (!header_line_ok(line)) {
+            return false;
+        }
         auto colon_pos = line.find(':');
         if (colon_pos != std::string::npos) {
             std::string key = line.substr(0, colon_pos);
@@ -129,10 +132,27 @@ bool Request::parse(std::string_view raw_request) {
         }
         body_.resize(content_length);
         iss.read(&body_[0], static_cast<std::streamsize>(content_length));
-        body_.resize(static_cast<std::size_t>(std::max<std::streamsize>(iss.gcount(), 0)));
+        // A short body means the framing is wrong: refuse it (400 + close)
+        // rather than route a truncated request.
+        if (static_cast<unsigned long>(std::max<std::streamsize>(iss.gcount(), 0)) != content_length) {
+            return false;
+        }
     }
 
     return true;
+}
+
+bool Request::header_line_ok(std::string_view line) {
+    if (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
+        return false;
+    }
+    // A bare CR or LF splits lines differently in the server and the parser.
+    if (line.find_first_of("\r\n") != std::string_view::npos) {
+        return false;
+    }
+    auto colon_pos = line.find(':');
+    return colon_pos == std::string_view::npos || colon_pos == 0 ||
+           (line[colon_pos - 1] != ' ' && line[colon_pos - 1] != '\t');
 }
 
 HttpMethod Request::parse_method(std::string_view method_str) {
