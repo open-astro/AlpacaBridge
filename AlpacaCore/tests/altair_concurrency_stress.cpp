@@ -61,8 +61,10 @@ TEST_CASE("Altair camera - concurrent connect/disconnect/operate stress", "[alta
     // landing while a previous iteration's exposure is still running hits the
     // driver's "no settings change during an exposure" guard, which is the
     // ASCOM contract working (same reasoning as the ToupTek camera case).
+    // NotImplemented: the uncooled camera raises it from CoolerOn once connected.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
-                                            alpacacore::AlpacaError::InvalidOperation};
+                                            alpacacore::AlpacaError::InvalidOperation,
+                                            alpacacore::AlpacaError::NotImplemented};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& cam = static_cast<alpacacore::CameraDriver&>(d);
         guard([&] { static_cast<void>(cam.get_camera_state()); });
