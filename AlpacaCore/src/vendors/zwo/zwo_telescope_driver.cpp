@@ -224,21 +224,17 @@ public:
                 ALPACA_LOG_WARN("ZWO", "Error while disconnecting ZWO mount driver: " + std::string(e.what()));
             }
         }
-        // Join EVERY background body before members are destroyed: the
-        // GOTO body, the async disconnect teardown (which itself
-        // joins the poll/pulse threads), and — if we were never connected or
-        // a teardown never ran — the poll/pulse threads directly. The GOTO
-        // slot's reapers (disconnect, connect, here) all hold set_connected_mutex_.
-        {
-            std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
-            fence_goto();
-            goto_slot_.cancel_all_and_join();
-        }
-        if (disconnect_thread_.joinable()) {
-            disconnect_thread_.join();
-        }
-        stop_poll_thread();
+        // Join EVERY background body before members are destroyed, under
+        // set_connected_mutex_ like the other reapers (failure 0011): the GOTO
+        // body (fenced first), the last disconnect teardown (which itself joins
+        // the pulse drain and the poll), and -- if we were never connected or a
+        // teardown never ran -- the pulse drain and the poll directly.
+        std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
+        fence_goto();
+        goto_slot_.cancel_all_and_join();
+        teardown_slot_.cancel_all_and_join();
         stop_pulse_drain();
+        stop_poll_thread();
     }
 
     int get_device_number() const override {
@@ -311,13 +307,13 @@ public:
         }
 
         // Serialize whole set_connected bodies (sync PUT, async-task tail,
-        // Connected=true refresh). The poll/pulse/teardown thread members
-        // below are joined, re-assigned and flag-gated here; two overlapping
+        // Connected=true refresh). The poll, pulse, GOTO and teardown slots
+        // below are started, reaped and flag-gated here; two overlapping
         // bodies (e.g. the async connect task's start_poll_thread racing a
-        // sync disconnect teardown's stop_poll_thread) would join/assign the
-        // same std::thread from two threads and re-clear poll_stop_ under the
-        // other side's join — UB and a permanent wedge (found by the
-        // [stress] telescope suite). No worker-thread body takes this mutex.
+        // sync disconnect teardown's stop_poll_thread) would reap the same
+        // slot from two threads and re-clear poll_stop_ under the other
+        // side's join -- a permanent wedge (found by the [stress] telescope
+        // suite; failure 0011). No body takes this mutex.
         std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
 
         if (!connected) {
@@ -340,14 +336,14 @@ public:
             fence_goto();
             goto_slot_.cancel_all_and_join();
 
-            // Joinable member thread, NOT detached: the destructor (and the
-            // next connect) joins it, so the teardown can never touch a
-            // destroyed driver (C2). Reap a finished teardown from a previous
-            // disconnect before reusing the member.
-            if (disconnect_thread_.joinable()) {
-                disconnect_thread_.join();
-            }
-            disconnect_thread_ = std::thread([this]() {
+            // The teardown runs in its own slot, never detached: the destructor
+            // (and the next connect) reaps it, so it can never touch a destroyed
+            // driver (C2). Reap the previous teardown first, so two never run
+            // at once. A disconnect sends no stop: an accepted GOTO keeps
+            // running after Connected=false.
+            teardown_slot_.cancel_all_and_join();
+            // The body ignores its stop reason: the wipe and the close always run.
+            teardown_slot_.start([this](util::OperationContext&) {
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     manual_axis_slewing_[0] = false;
@@ -388,9 +384,7 @@ public:
         // state wipe / protocol disconnect cannot interleave with this
         // connect (the teardown takes mutex_ too, but only join gives a
         // strict ordering).
-        if (disconnect_thread_.joinable()) {
-            disconnect_thread_.join();
-        }
+        teardown_slot_.cancel_all_and_join();
 
         // set_connected_mutex_ is this driver's transition lock and the protocol wrapper's own mutex is
         // its I/O lock: the handshake below runs under them and never under mutex_, which each step
@@ -1811,6 +1805,11 @@ public:
                 poll_pause_.store(false);
                 throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
             }
+            // The claim comes before the flags (decision 0006 rule 3); a superseded body waiting at the send
+            // gate wakes and leaves.
+            claim = goto_generation_.bump();
+            goto_claim_ = claim;
+            goto_send_cv_.notify_all();
             setup_was_pending = goto_setup_pending_;
             goto_was_active = goto_active_;
             force_until_before = slew_force_until_;
@@ -1831,10 +1830,6 @@ public:
             cached_equatorial_.reset();
             cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
             write_frame_locked();
-            claim = goto_generation_.bump();
-            goto_claim_ = claim;
-            // A superseded body waiting at the send gate wakes and leaves.
-            goto_send_cv_.notify_all();
         }
 
         // The slot starts the new body without waiting for the one it replaces (decision 0006 rule 2).
@@ -1875,11 +1870,11 @@ public:
             goto_setup_pending_ = false;
             poll_pause_.store(false);
         };
-        // open-astro#575: a stopped body (a fence, a newer GOTO, a lost link) is not a failure.
+        // open-astro#575: a stopped body (a fence, a newer GOTO, a lost link, Connected=false) is not a failure.
         auto fail = [&](const std::string& what) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (goto_claim_ == claim && ctx.stop_reason() == util::StopReason::None) {
+                if (goto_claim_ == claim && ctx.stop_reason() == util::StopReason::None && connected_.load()) {
                     last_slew_error_ = "SlewToTargetAsync failed: " + what;
                     goto_setup_pending_ = false;
                     poll_pause_.store(false);
@@ -2959,6 +2954,9 @@ public:
     void set_goto_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         goto_slot_.set_spawn_for_testing(std::move(spawn));
     }
+    void set_teardown_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        teardown_slot_.set_spawn_for_testing(std::move(spawn));
+    }
     void set_goto_send_hook_for_testing(std::function<void(std::string_view)> hook) {
         goto_send_hook_ = std::move(hook);
     }
@@ -3061,14 +3059,11 @@ private:
     mutable std::mutex pulse_mutex_;
     std::deque<PulseTask> pulse_queue_;
     bool pulse_drain_active_ = false;  // pulse_mutex_: a drain body runs and will take a queued task
-    // Async teardown spawned by set_connected(false) — a joinable member so
-    // the destructor can join it (a detached thread touching `this` is a
-    // use-after-free if the driver dies mid-teardown; driver-lifecycle.instructions.md rule).
-    std::thread disconnect_thread_;
-    // Serializes set_connected() bodies (sync PUT / async task / refresh) so
-    // poll_operation_ start/join, pulse_thread_/disconnect_thread_ join+assign and their
-    // stop flags can never interleave between two bodies. Taken after the
-    // base pending-disconnect gates; never taken by any worker-thread body.
+    // Serializes set_connected() bodies (sync PUT / async task / refresh) and
+    // the destructor's reaps, so the poll, pulse, GOTO and teardown slots'
+    // start/reap and their stop flags can never interleave between two
+    // bodies. Taken after the base pending-disconnect gates; never taken by
+    // any body.
     std::mutex set_connected_mutex_;
     std::chrono::steady_clock::time_point pulse_queue_end_;
     mutable bool parked_cached_;
@@ -3096,9 +3091,12 @@ private:
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
     util::OperationGeneration goto_generation_;
     util::OperationGeneration pulse_generation_;
-    // Declared last, so they are destroyed (and join) before any member their bodies touch.
+    util::OperationGeneration teardown_generation_;
+    // Declared last, so they are destroyed (and join) before any member their bodies touch; the teardown slot
+    // first, because its body joins the pulse slot.
     mutable util::AsyncOperation goto_slot_{"ZWO SlewToTargetAsync", goto_generation_, clock_};
     mutable util::AsyncOperation pulse_slot_{"ZWO PulseGuide", pulse_generation_, clock_};
+    util::AsyncOperation teardown_slot_{"ZWO disconnect", teardown_generation_, clock_};
 };
 
 std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(const TelescopeDriver& driver) {
@@ -3109,6 +3107,12 @@ std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(cons
 void set_goto_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
         zwo->set_goto_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
+        zwo->set_teardown_spawn_for_testing(std::move(spawn));
     }
 }
 

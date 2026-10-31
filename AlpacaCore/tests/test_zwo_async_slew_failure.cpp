@@ -23,6 +23,7 @@
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -1368,6 +1369,110 @@ TEST_CASE("ZWO async - a GOTO fenced while its :MS is answered e3 sends no stop 
     CHECK(jog_count(mount) == 1);
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
     driver->set_connected(false);
+}
+
+// Blocker 3: a Connected=false while the previous teardown still runs reaps it before it starts the next one, so two
+// teardowns never run at once, and a repeated Connected=false never throws.
+// Falsified by: zwo_telescope_driver.cpp set_connected(): starting the teardown without
+// teardown_slot_.cancel_all_and_join() first, so a second teardown starts while the first still runs.
+TEST_CASE("ZWO async - a repeated Connected=false waits for the running teardown and never throws",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    std::atomic<int> spawns{0};
+    Rig rig;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_teardown_spawn_for_testing(*driver, [&](std::function<void()> body) {
+        const int n = ++spawns;
+        return std::thread([&latch, n, body = std::move(body)] {
+            if (n == 1) latch.block();
+            body();
+        });
+    });
+    rig.connect();
+
+    REQUIRE_NOTHROW(driver->set_connected(false));
+    REQUIRE(latch.wait_entered());  // the first teardown is held before its body
+    auto second = std::async(std::launch::async, [&] { driver->set_connected(false); });
+    const bool returned_while_running = second.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+    const int spawns_while_running = spawns.load();
+    latch.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the latch
+    REQUIRE_NOTHROW(second.get());
+    CHECK_FALSE(returned_while_running);
+    CHECK(spawns_while_running == 1);
+    CHECK(spawns.load() == 2);
+    CHECK_FALSE(driver->get_connected());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_connected(false);
+}
+
+// Round 2 finding 4, on the slot design: AbortSlew fences the held GOTO and Connected=false fences and reaps it, in
+// either order. Neither waits past one exchange, nothing the GOTO would send follows either call, and a reconnect
+// finds the slots empty. It can pass by accident and never fails by accident; under ThreadSanitizer
+// (sanitizers-tsan, [stress-guard]) it also checks the reapers.
+// Falsified by: zwo_telescope_driver.cpp abort_slew(): reaping the GOTO slot itself (goto_slot_.cancel_all_and_join()
+// after fence_goto(), a reaper outside set_connected_mutex_ that races disconnect's reap, failure 0011).
+TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO target write",
+          "[zwo][telescope][async][operation-slot][stress-guard]") {
+    const bool abort_first = GENERATE(true, false);
+    CAPTURE(abort_first);
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    mount.hold_reply(":Sr");
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
+    const std::function<void()> abort = [&] {
+        try {
+            driver->abort_slew();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // NotConnected once the disconnect won the race.
+        }
+    };
+    const std::function<void()> disconnect = [&] { driver->set_connected(false); };
+    auto first = std::async(std::launch::async, abort_first ? abort : disconnect);
+    auto second = std::async(std::launch::async, abort_first ? disconnect : abort);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // real time: both calls reach their fences
+    mount.release();  // before any REQUIRE can unwind, so the futures' destructors never wait on the held reply
+    const bool first_returned = first.wait_for(kInitiatorBudget) == std::future_status::ready;
+    const bool second_returned = second.wait_for(kInitiatorBudget) == std::future_status::ready;
+    first.wait();
+    second.wait();
+    CHECK(first_returned);
+    CHECK(second_returned);
+    const int setup_at_return = setup_count(mount);
+    CHECK(setup_sent_after_return(mount, setup_at_return) == 0);
+    CHECK(mount.count(":Sd") == 0);
+    CHECK(mount.count(":MS") == 0);
+    CHECK_FALSE(driver->get_connected());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_connected(false);
+}
+
+// The destructor with live bodies: a GOTO held on ":Sr", a pulse drain waiting for the same link and the poll. The
+// destructor disconnects (cancelling the held read), fences and reaps the GOTO, then reaps the teardown, the pulse
+// drain and the poll, without waiting out the link timeout. Under ThreadSanitizer ([stress-guard]) it also checks
+// that no body outlives the members it touches.
+// Falsified by: zwo_telescope_driver.cpp set_connected(): Connected=false without protocol_.cancel_pending_io(), so
+// the fence waits for the held ":Sr" until the 5 s link timeout.
+TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and the poll live",
+          "[zwo][telescope][async][operation-slot][stress-guard]") {
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    rig.connect();
+
+    mount.hold_reply(":Sr");
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 3000));  // the drain queues behind the held exchange
+    auto destroy = std::async(std::launch::async, [&] { rig.driver.reset(); });
+    const bool destroyed = destroy.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    mount.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the held reply
+    destroy.wait();
+    CHECK(destroyed);
+    CHECK(mount.count(":Sd") == 0);
+    CHECK(mount.count(":MS") == 0);
 }
 
 #endif  // _WIN32

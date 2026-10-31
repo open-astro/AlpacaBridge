@@ -31,6 +31,9 @@ std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(cons
 /// Test-only: replaces the GOTO slot's thread factory (call before the first slew), so a test can refuse a start.
 void set_goto_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test-only: replaces the disconnect teardown slot's thread factory (call before the first Connected=false).
+void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test-only: called with the frame prefix (":Sr", ":MS", ...) after a GOTO wire call is counted at the send gate and
 /// before it is sent (call before the first slew).
 void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
