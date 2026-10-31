@@ -731,10 +731,10 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect serializes with the s
 }
 
 #ifndef _WIN32
-// Issue #1457: a stop retry reconnects under the driver mutex_. Since #1456
-// the reconnect's port claim waits out another device's probe (up to 20 s per
-// attempt), so the retry must not wait there, or every getter that takes
-// mutex_ blocks behind it.
+// Issue #1457: a stop retry reconnects the port. Since #1456 the reconnect's
+// port claim waits out another device's probe (up to 20 s per attempt), so the
+// retry must not wait there; since #1759 it also runs with mutex_ free, so no
+// getter that takes mutex_ waits behind it.
 TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for another device's probe",
           "[celestron][cgx][telescope][integration][issue1457]") {
     namespace util = alpacacore::util;
@@ -807,7 +807,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a tracking rollback does not wai
     REQUIRE_FALSE(util::is_serial_port_in_use(path));
 
     // Another device's probe holds the node for 5 s while a second tracking
-    // write fails and its rollback reconnects under mutex_.
+    // write fails and its rollback reconnects.
     auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
     REQUIRE(probe);
     auto release = std::async(std::launch::async, [&probe] {
