@@ -1,0 +1,3 @@
+### Fixed
+
+- **ZWO camera `Name` and identity getters during Connect**, ZWO camera driver, issue #1843. Connect no longer holds the driver `mutex_` across the SDK open and init handshake, so `Name`, `UniqueID` and `SensorName` answer while the camera opens instead of waiting for it; the camera state is published under the lock at the end of the connect, and the name refresh skips the SDK while a connect is in flight. Covered by `ZWO Camera Driver - Name and identity getters answer while a connect holds the SDK open` in `AlpacaCore/tests/test_zwo_camera.cpp`, which holds `open_camera` on a latch and asserts the getters return within 20 ms; per [decision 0016](docs/decisions/0016-getters-never-wait-on-device-io.md).
