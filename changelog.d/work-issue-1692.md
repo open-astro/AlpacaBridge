@@ -1,0 +1,3 @@
+### Fixed
+
+- **HTTP request framing**, AlpacaHTTP, issue #1692. A header name with whitespace before the colon (`Content-Length : 31`, `Transfer-Encoding : chunked`, any other header, RFC 7230 section 3.2.4), a header line that starts with whitespace, or a bare CR or LF in the request line or a header line now gets a 400 and the connection is closed. Before, the server read no body while the parser honoured the length, so a body arriving in a later packet was read as the next request on the connection. `Request::parse` also refuses a body shorter than `Content-Length` instead of routing a truncated request. Both read paths share one header-line rule, `Request::header_line_ok`. Covered by `AlpacaHTTP/tests/test_server_socket.cpp` and `AlpacaHTTP/tests/test_routing.cpp`.
