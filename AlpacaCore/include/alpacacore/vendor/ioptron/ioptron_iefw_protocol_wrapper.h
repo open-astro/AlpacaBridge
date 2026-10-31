@@ -105,6 +105,21 @@ public:
 
     bool is_connected() const;
 
+    /**
+     * @brief False once an exchange has seen the port gone (a hangup, or
+     * EIO/ENXIO/ENODEV on a write); the port is then already released
+     * (decision 0009 rule 2). Cleared by the next successful connect(). Lock-free.
+     */
+    bool link_alive() const noexcept;
+
+    /**
+     * @brief Why the link was lost ("iEFW serial link lost (errno N)"), or empty. Kept after
+     * the loss for the driver's get_link_fault() (decision 0009 rule 5); cleared by the
+     * next successful connect() and by disconnect(). Takes only a small text mutex that
+     * no serial exchange holds, so it never waits on the wire.
+     */
+    std::string link_fault() const;
+
     /** @brief Firmware string from :FW1# (12 characters). */
     std::string get_firmware();
 

@@ -92,6 +92,13 @@ public:
     /// silent on) is held for @p delay. A connect waiting on that reply stays open that long; used by the contract
     /// sweep to make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+    /// One shot, then spent: the reply to the next command starting with @p prefix is held for @p delay, the
+    /// commands before it are answered at once. For a reply in the middle of a connect (:FW1#, :WF00#).
+    void hold_reply_to(const std::string& prefix, std::chrono::milliseconds delay) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hold_prefix_ = prefix;
+        hold_prefix_ms_ = static_cast<int>(delay.count());
+    }
     /// The slot :WP# reports once the wheel has settled.
     int wheel_slot() const { return wheel_slot_.load(); }
     void set_wheel_slot(int slot) { wheel_slot_.store(slot); }
@@ -135,14 +142,20 @@ private:
     }
 
     void handle(const std::string& cmd) {
+        int prefix_hold_ms = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             commands_.push_back(cmd);
+            if (!hold_prefix_.empty() && cmd.rfind(hold_prefix_, 0) == 0) {
+                prefix_hold_ms = hold_prefix_ms_;
+                hold_prefix_.clear();
+            }
         }
         if (silent_.load()) return;
         char reply[40] = {};
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+        if (prefix_hold_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(prefix_hold_ms));
         if (cmd == ":DeviceInfo#") {
             std::snprintf(reply, sizeof(reply), "%+06d%02d%04d#", position_.load(), model_.load(), 100);
         } else if (cmd == ":FI#") {
@@ -194,6 +207,8 @@ private:
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
+    std::string hold_prefix_;  // hold_reply_to(); guarded by mutex_
+    int hold_prefix_ms_ = 0;
 
     std::atomic<int> position_{1000};
     std::atomic<int> model_{2};
