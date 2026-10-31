@@ -222,6 +222,7 @@ public:
 
     void set_async(int id, bool /*state*/) override {
         validate_id(id);
+        ensure_connected();
         ensure_writable(id);
         throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
     }
@@ -234,7 +235,6 @@ public:
 
     void set_switch_value(int id, double value) override {
         validate_id(id);
-        ensure_writable(id);
         // std::lround on NaN/Inf is undefined behaviour; reject non-finite
         // values from the HTTP API as InvalidValue first.
         if (!std::isfinite(value)) {
@@ -247,12 +247,14 @@ public:
                                   AlpacaError::InvalidValue);
         }
         ensure_connected();
+        ensure_writable(id);
         wrapper_.set_value(static_cast<std::size_t>(id), static_cast<int>(rounded));
         save_port_state(id, static_cast<int>(rounded));
     }
 
     void set_async_value(int id, double /*value*/) override {
         validate_id(id);
+        ensure_connected();
         ensure_writable(id);
         throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
     }
@@ -325,8 +327,7 @@ private:
     }
 
     // Read-only ports (the always-on pass-through) reject writes with a
-    // not-implemented error per the ASCOM Switch spec, independent of the
-    // connection state.
+    // not-implemented error per the ASCOM Switch spec, after the connection check.
     void ensure_writable(int id) const {
         if (!config_.ports[static_cast<std::size_t>(id)].writable) {
             throw AlpacaException("Switch " + std::to_string(id) + " is read-only", AlpacaError::NotImplemented);

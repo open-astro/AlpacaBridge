@@ -11,11 +11,15 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 #include <alpacacore/version.h>
+#include <unistd.h>
 
+#include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -502,7 +506,7 @@ TEST_CASE("Gemini Flat Panel Driver - connected, MaxBrightness is 255 and Bright
 
 // A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
 // errno at once, not a read timeout after serial_timeout_s.
-// Falsified by: gemini_flatpanel_protocol_wrapper.cpp:823 read_response() sending ReadOutcome::LinkDead to the timeout
+// Falsified by: gemini_flatpanel_protocol_wrapper.cpp:842 read_response() sending ReadOutcome::LinkDead to the timeout
 // branch (the message reads "Read timeout" and the call takes the full serial_timeout_s).
 TEST_CASE("Gemini flat panel protocol wrapper - a hangup before the reply throws serial link lost with the errno",
           "[gemini][flatpanel][unit][link-dead]") {
@@ -532,4 +536,232 @@ TEST_CASE("Gemini flat panel protocol wrapper - a hangup before the reply throws
         wrapper.disconnect();
     } catch (...) {
     }
+}
+
+// ---------------------------------------------------------------------------
+// Decision 0009 rule 2 (issue #1723): a pulled adapter loses the link at once.
+// Connected reads false, every member throws NotConnected, DeviceState is
+// empty, the port is released, and only a client Connect reopens it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A by-id style symlink the driver is configured with, so a replugged panel (a
+// new fake on a new pty) comes back under the same name, as a by-id path does.
+// The driver never holds the raw /dev/pts/N, which devpts reissues once freed.
+struct ReplugPort {
+    std::filesystem::path path;
+    explicit ReplugPort(const FakeGeminiFlatPanel& panel) {
+        static std::atomic<int> serial{0};
+        path = std::filesystem::temp_directory_path() /
+               ("alpacacore-gemini-panel-" + std::to_string(::getpid()) + "-" + std::to_string(serial.fetch_add(1)));
+        std::filesystem::create_symlink(panel.slave_path(), path);
+    }
+    void replug(const FakeGeminiFlatPanel& panel) {
+        std::filesystem::remove(path);
+        std::filesystem::create_symlink(panel.slave_path(), path);
+    }
+    ~ReplugPort() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+    ReplugPort(const ReplugPort&) = delete;
+    ReplugPort& operator=(const ReplugPort&) = delete;
+};
+
+// The AlpacaException code fn threw, or 0. Safe on a non-test thread.
+int alpaca_code_of(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        return ex.error_code();
+    } catch (...) {
+        return -1;
+    }
+    return 0;
+}
+
+constexpr int kNotConnected = static_cast<int>(alpacacore::AlpacaError::NotConnected);
+
+// The members a lost link refuses, Lite and Rev2/Pro alike.
+void require_lost(alpacacore::CoverCalibratorDriver& driver, const std::string& old_pts) {
+    CHECK_FALSE(driver.get_connected());
+    CHECK(driver.get_device_state().empty());
+    require_alpaca_error([&] { (void)driver.get_brightness(); }, kNotConnected);
+    require_alpaca_error([&] { (void)driver.get_calibrator_state(); }, kNotConnected);
+    require_alpaca_error([&] { (void)driver.get_cover_state(); }, kNotConnected);
+    require_alpaca_error([&] { driver.calibrator_on(10); }, kNotConnected);
+    require_alpaca_error([&] { driver.calibrator_off(); }, kNotConnected);
+    // The wrapper released the port: no claim is left on the dead node.
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(old_pts));
+}
+
+}  // namespace
+
+TEST_CASE("Gemini Flat Panel Lite - a cable pulled during a command loses the link at once and Connect reopens",
+          "[gemini][flatpanel][unit][fake][link-lost]") {
+    FakeGeminiFlatPanel panel;
+    FakeGeminiFlatPanel replugged;
+    ReplugPort port(panel);
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, port.path.string(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string old_pts = panel.slave_path();
+    REQUIRE(alpacacore::util::is_serial_port_in_use(old_pts));
+
+    panel.set_reply_delay(">L#", milliseconds(300));  // the panel sits on the >L# reply while the cable is pulled
+    std::atomic<int> code{0};
+    std::jthread caller([&] { code.store(alpaca_code_of([&] { driver->calibrator_on(40); })); });
+    REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+    const auto pulled = std::chrono::steady_clock::now();
+    panel.unplug();
+    // Real time: the wait is for the driver's read to see the hangup on the wire.
+    REQUIRE(slot_wait_until([&] { return !driver->get_connected(); }, milliseconds(5000)));
+    CHECK(std::chrono::steady_clock::now() - pulled < std::chrono::seconds(5));  // one exchange timeout
+    caller.join();
+    CHECK(code.load() == kNotConnected);
+    require_lost(*driver, old_pts);
+    // Decision 0009 rule 5: the loss reason is kept while the link stays lost.
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    require_alpaca_error([&] { driver->calibrator_on(40); }, kNotConnected);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+
+    // Nothing reopens it on its own; a client Connect over the lost link does.
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->calibrator_on(30);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+    CHECK(replugged.count(">L#") == 1);
+    REQUIRE_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Gemini Flat Panel Lite - a write to a pulled adapter loses the link at once",
+          "[gemini][flatpanel][unit][fake][link-lost]") {
+    FakeGeminiFlatPanel panel;
+    ReplugPort port(panel);
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, port.path.string(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string old_pts = panel.slave_path();
+
+    panel.unplug();  // idle: the next command's write is what meets the dead port
+    require_alpaca_error([&] { driver->calibrator_on(40); }, kNotConnected);
+    require_lost(*driver, old_pts);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    REQUIRE_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a cable pulled during a cover move loses the link and a reconnect starts clean",
+          "[gemini][flatpanel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // before the driver, which waits on it
+    FakeGeminiFlatPanel panel;
+    FakeGeminiFlatPanel replugged;
+    ReplugPort port(panel);
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, port.path.string(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string old_pts = panel.slave_path();
+
+    panel.set_reply_delay(">O#", milliseconds(300));  // the cover is travelling when the cable is pulled
+    driver->open_cover();
+    REQUIRE(slot_wait_until([&] { return panel.count(">O#") == 1; }, milliseconds(1000)));
+    const auto pulled = std::chrono::steady_clock::now();
+    panel.unplug();
+    // Real time: the cover body's read sees the hangup on the wire.
+    REQUIRE(slot_wait_until([&] { return !driver->get_connected(); }, milliseconds(5000)));
+    CHECK(std::chrono::steady_clock::now() - pulled < std::chrono::seconds(5));  // well inside the 30 s cover wait
+    require_lost(*driver, old_pts);
+    // Decision 0009 rule 5: the loss reason is kept while the link stays lost.
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    require_alpaca_error([&] { driver->open_cover(); }, kNotConnected);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    require_alpaca_error([&] { driver->halt_cover(); }, kNotConnected);
+
+    // Disconnect after the loss joins the failed body and closes nothing twice.
+    REQUIRE_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // a Disconnect clears the reason
+
+    // The reconnect clears the body's kept failure: the cover reads its live state.
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_cover_state() == CoverState::Closed);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Off);
+    REQUIRE_NOTHROW(driver->set_connected(false));
+}
+
+TEST_CASE("Gemini Flat Panel Slots - an idle CoverState read that finds the cable gone throws NotConnected",
+          "[gemini][flatpanel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // before the driver, which waits on it
+    FakeGeminiFlatPanel panel;
+    ReplugPort port(panel);
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, port.path.string(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    clock.advance(milliseconds(1100));  // the cached status is stale: the next CoverState read goes to the wire
+    panel.unplug();
+    require_alpaca_error([&] { (void)driver->get_cover_state(); }, kNotConnected);
+    CHECK_FALSE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->set_connected(false));
+}
+
+TEST_CASE("Gemini Flat Panel Lite - a cable pulled during the connect state seed fails the Connect",
+          "[gemini][flatpanel][unit][fake][link-lost]") {
+    FakeGeminiFlatPanel panel;
+    ReplugPort port(panel);
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, port.path.string(), 9600);
+
+    panel.set_reply_delay(">S#", milliseconds(300));  // the seed's first read sits on the reply while the cable goes
+    std::atomic<int> code{0};
+    std::jthread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    REQUIRE(slot_wait_until([&] { return panel.count(">S#") == 1; }, milliseconds(2000)));
+    panel.unplug();
+    connecting.join();
+    CHECK(code.load() == kNotConnected);
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a cable pulled during the connect state seed fails the Connect",
+          "[gemini][flatpanel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // before the driver, which waits on it
+    FakeGeminiFlatPanel panel;
+    ReplugPort port(panel);
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, port.path.string(), 9600, clock);
+
+    panel.set_reply_delay(">S#", milliseconds(300));  // the seed's first read sits on the reply while the cable goes
+    std::atomic<int> code{0};
+    std::jthread connecting([&] { code.store(alpaca_code_of([&] { driver->set_connected(true); })); });
+    REQUIRE(slot_wait_until([&] { return panel.count(">S#") == 1; }, milliseconds(2000)));
+    panel.unplug();
+    connecting.join();
+    CHECK(code.load() == kNotConnected);
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a Connect over a lost link reopens without a Disconnect first",
+          "[gemini][flatpanel][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // before the driver, which waits on it
+    FakeGeminiFlatPanel panel;
+    FakeGeminiFlatPanel replugged;
+    ReplugPort port(panel);
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, port.path.string(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    panel.unplug();
+    require_alpaca_error([&] { driver->calibrator_on(10); }, kNotConnected);  // the write meets the dead port
+    REQUIRE_FALSE(driver->get_connected());
+
+    // No Disconnect: a Connect while the raw flag is still set must not be taken as already connected.
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_cover_state() == CoverState::Closed);
+    REQUIRE_NOTHROW(driver->set_connected(false));
 }

@@ -754,9 +754,11 @@ public:
     double get_exposure_resolution() const override { return 0.001; }
 
     bool get_fast_readout() const override {
+        ensure_connected();
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
     void set_fast_readout(bool) override {
+        ensure_connected();
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
 
@@ -819,10 +821,12 @@ public:
     // not a continuous register, so this driver is in "Gain Index" mode --
     // unlike the other vendors here, which expose a true min/max range.
     int get_gain_max() const override {
+        ensure_connected();
         throw AlpacaException("Gain range not supported; use Gains", AlpacaError::PropertyNotImplemented);
     }
 
     int get_gain_min() const override {
+        ensure_connected();
         throw AlpacaException("Gain range not supported; use Gains", AlpacaError::PropertyNotImplemented);
     }
 
@@ -892,11 +896,24 @@ public:
     }
     void set_num_y(int num_y) override { set_roi_dimension_locked(&num_y_, num_y); }
 
-    int get_offset() const override { throw AlpacaException("Offset not supported", AlpacaError::NotImplemented); }
-    void set_offset(int) override { throw AlpacaException("Offset not supported", AlpacaError::NotImplemented); }
-    int get_offset_max() const override { throw AlpacaException("Offset not supported", AlpacaError::NotImplemented); }
-    int get_offset_min() const override { throw AlpacaException("Offset not supported", AlpacaError::NotImplemented); }
+    int get_offset() const override {
+        ensure_connected();
+        throw AlpacaException("Offset not supported", AlpacaError::NotImplemented);
+    }
+    void set_offset(int) override {
+        ensure_connected();
+        throw AlpacaException("Offset not supported", AlpacaError::NotImplemented);
+    }
+    int get_offset_max() const override {
+        ensure_connected();
+        throw AlpacaException("Offset not supported", AlpacaError::NotImplemented);
+    }
+    int get_offset_min() const override {
+        ensure_connected();
+        throw AlpacaException("Offset not supported", AlpacaError::NotImplemented);
+    }
     std::vector<std::string> get_offsets() const override {
+        ensure_connected();
         throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -966,9 +983,11 @@ public:
     void set_start_y(int start_y) override { set_roi_dimension_locked(&start_y_, start_y); }
 
     double get_sub_exposure_duration() const override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
     void set_sub_exposure_duration(double) override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 

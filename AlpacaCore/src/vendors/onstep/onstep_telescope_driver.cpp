@@ -894,6 +894,7 @@ public:
 
     void set_declination_rate(double rate) override {
         (void)rate;
+        check_connected_lock_free();
         throw AlpacaException("Declination rate not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -945,6 +946,7 @@ public:
 
     void set_guide_rate(const GuideRate& rate) override {
         (void)rate;
+        check_connected_lock_free();
         throw AlpacaException("Guide rate is fixed by OnStep firmware", AlpacaError::PropertyNotImplemented);
     }
 
@@ -962,6 +964,7 @@ public:
 
     void set_right_ascension_rate(double rate) override {
         (void)rate;
+        check_connected_lock_free();
         throw AlpacaException("Right ascension rate not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -994,6 +997,7 @@ public:
 
     void set_side_of_pier(int side) override {
         (void)side;
+        check_connected_lock_free();
         throw AlpacaException("Pier side is not settable", AlpacaError::PropertyNotImplemented);
     }
 
@@ -1706,6 +1710,7 @@ public:
     void sync_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
+        check_connected_lock_free();
         throw AlpacaException("SyncToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 

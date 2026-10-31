@@ -90,6 +90,21 @@ TEST_CASE("FakeTouptekPowerboxSDK - set_value enforces the real wrapper's rules"
     CHECK(fake.get_value(0) == 0);
 }
 
+// Connected, async switch control and a write to a read-only port answer NotImplemented (disconnected, NotConnected
+// comes first: test_touptek_switch.cpp).
+TEST_CASE("ToupTek StellaVita Switch Driver - connected async and read-only writes are NotImplemented",
+          "[touptek][switch][unit][fake-sdk]") {
+    const auto cfg = mixed_config();
+    FakeTouptekPowerboxSDK fake(cfg.ports);
+    auto driver = touptek::create_touptek_switch(0, cfg, fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(error_code([&] { driver->set_async(0, true); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(error_code([&] { driver->set_async_value(0, 1.0); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(error_code([&] { driver->set_switch(3, true); }) == alpacacore::AlpacaError::NotImplemented);
+    driver->set_connected(false);
+}
+
 // Falsified by: fake_touptek_powerbox_sdk.h open() ignoring fail_open (the connect succeeds).
 TEST_CASE("FakeTouptekPowerboxSDK - fail_open refuses the connect and counts the attempt",
           "[touptek][switch][unit][fake-sdk]") {

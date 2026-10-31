@@ -283,7 +283,7 @@ notes carry only the pin map and per-board deltas.
   flag, never the wrapper's `is_open()`. A new GPIO power-port driver implements all of it.
 - **Never power-cycle on disconnect**: `close()` releases the lines without driving a
   boolean line low; a PWM port first stops its worker and drives a defined steady
-  level (duty > 0 ⇒ high). Users who want a port off must set it off in the client
+  level (duty > 0 ⇒ high); a port the worker never drove is left alone. Users who want a port off must set it off in the client
   before disconnecting. Do NOT add a drive-low-on-close path without making it opt-in
   config — it would silently flip the policy for everyone who upgrades. Documented
   user-facing in [`AlpacaCore/PowerPorts.md`](../../AlpacaCore/PowerPorts.md).
@@ -304,9 +304,9 @@ notes carry only the pin map and per-board deltas.
   against the stock firmware's actual value or on real hardware — never re-derived
   from bench psychoacoustics: ASIAIR Pro/CM4 1 kHz, ASIAIR Plus RK3568 50 Hz, iMate
   50 Hz, StellaVita 100 Hz.
-- **Read-only pass-through ports** (e.g. iMate DC3): writes throw `NotImplemented`
-  *before* the connection check, so the static capability holds while disconnected
-  and is unit-testable without hardware.
+- **Read-only pass-through ports** (e.g. iMate DC3): writes check the connection first
+  (a disconnected write answers `NotConnected`), then throw `NotImplemented`; the
+  capability is unit-tested on a connected fake.
 
 ### Platform 7 InterfaceVersion + DeviceState
 

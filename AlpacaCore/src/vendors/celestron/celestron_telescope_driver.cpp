@@ -574,6 +574,7 @@ public:
 
     void set_declination_rate(double rate) override {
         (void)rate;
+        ensure_connected();
         throw AlpacaException("Declination rate not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -631,6 +632,7 @@ public:
 
     GuideRate get_guide_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         if (!has_autoguider_port_) {
             throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
         }
@@ -639,14 +641,14 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        if (!has_autoguider_port_) {
-            throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
-        }
         if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
             throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> transition(transition_mutex_);
         check_connected();
+        if (!has_autoguider_port_) {
+            throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
+        }
         double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
         double dec_percent = (rate.dec / kSiderealDegPerSec) * 100.0;
         auto& protocol = CelestronProtocolWrapper::instance();
@@ -686,6 +688,7 @@ public:
 
     void set_right_ascension_rate(double rate) override {
         (void)rate;
+        ensure_connected();
         throw AlpacaException("Right ascension rate not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -706,6 +709,7 @@ public:
 
     void set_side_of_pier(int side) override {
         (void)side;
+        ensure_connected();
         throw AlpacaException("Pier side not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -728,10 +732,12 @@ public:
 
     // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
+        ensure_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     void set_does_refraction(bool) override {
+        ensure_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -863,6 +869,7 @@ public:
 
     void set_tracking_rate(int rate) override {
         (void)rate;
+        ensure_connected();
         throw AlpacaException("Tracking rates not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -1445,10 +1452,6 @@ public:
             throw AlpacaException("PulseGuide direction must be 0-3 and duration 0-25500 ms",
                                   AlpacaError::InvalidValue);
         }
-        if (!has_autoguider_port_) {
-            throw AlpacaException("PulseGuide not supported — no autoguider port detected",
-                                  AlpacaError::MethodNotImplemented);
-        }
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         auto& protocol = CelestronProtocolWrapper::instance();
 
@@ -1459,6 +1462,10 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
+            if (!has_autoguider_port_) {
+                throw AlpacaException("PulseGuide not supported — no autoguider port detected",
+                                      AlpacaError::MethodNotImplemented);
+            }
             check_not_parked_locked("PulseGuide");
 
             switch (direction) {
@@ -2176,18 +2183,21 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
+        ensure_connected();
         throw AlpacaException("SlewToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
+        ensure_connected();
         throw AlpacaException("SlewToAltAzAsync not supported", AlpacaError::MethodNotImplemented);
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
+        ensure_connected();
         throw AlpacaException("SyncToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
@@ -2438,6 +2448,12 @@ private:
         if (!connected_ || link_lost_.load()) {
             throw AlpacaException("Not connected to Celestron mount", AlpacaError::NotConnected);
         }
+    }
+
+    // NotConnected before a NotImplemented answer (ASCOM contract precedence).
+    void ensure_connected() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
     }
 
     // ── Background bodies (async slew / park, pulse-guide chunk chain) ──

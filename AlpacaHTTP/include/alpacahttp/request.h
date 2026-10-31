@@ -43,6 +43,12 @@ public:
     // Parse HTTP request from raw data
     bool parse(std::string_view raw_request);
 
+    // False for a header line whose name has whitespace before the colon or
+    // that starts with whitespace (RFC 7230 sections 3.2.4 and 3.2.6), or that
+    // holds a bare CR or LF (RFC 9112 section 2.2). Shared
+    // by parse and the server's framing scan so both read the same names.
+    static bool header_line_ok(std::string_view line);
+
     // Getters
     HttpMethod method() const { return method_; }
     const std::string& path() const { return path_; }
