@@ -2100,6 +2100,9 @@ private:
             sync_mount_time(lock);
         }
         ensure_utc_cached(lock);
+        // Stamped like a poll's site read, so a failed `w` here is retried after kSiteInfoRetryDelay, not by the
+        // seed probe in this same connect.
+        last_site_info_attempt_ = clock_.now();
         try {
             LocationInfo info = without_lock(lock, [&protocol] { return protocol.get_location(); });
             site_latitude_cached_ = info.latitude_degrees;
@@ -2900,11 +2903,9 @@ private:
     template <typename Lost>
     void publish_measurement_released(std::unique_lock<std::mutex>& lock, const Lost& lost) const {
         std::optional<RawSample> raw;
-        std::string failure;
         try {
             raw = without_lock(lock, [this] { return sample_raw(use_precise_commands_, true); });
-        } catch (const std::exception& e) {
-            failure = e.what();
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unset raw logs and clears below
         }
         if (lost()) {
             return;
@@ -2920,7 +2921,9 @@ private:
                 frame.equatorial_known = false;
                 frame.altaz_known = false;
             });
-            ALPACA_LOG_WARN("SynScan", "Position read failed at the end of a motion: " + failure);
+            // Fixed text: the exchange error can carry handset reply bytes (CWE-117).
+            ALPACA_LOG_WARN("SynScan",
+                            "Position read failed at the end of a motion; position unknown until the next poll");
         }
     }
 

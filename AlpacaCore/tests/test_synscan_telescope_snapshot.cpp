@@ -544,6 +544,19 @@ TEST_CASE("SynScan snapshot - an unread site refuses SiteLatitude and SiteLongit
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan snapshot - a connect whose site read failed sends no second w in the same connect",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;  // not advanced: the retry delay has not passed when the seed probe runs
+    auto st = std::make_shared<Handset>();
+    st->w_silent = true;
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver_without_site(server, clock, 300);
+    REQUIRE(driver->get_connected());
+    CHECK(st->w_count.load() == 1);  // a second `w` would cost the connect one more response timeout
+    driver->set_connected(false);
+}
+
 bool site_served(const alpacacore::TelescopeDriver& driver) {
     try {
         (void)driver.get_site_latitude();
