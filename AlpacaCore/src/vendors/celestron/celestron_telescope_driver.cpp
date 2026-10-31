@@ -2959,7 +2959,7 @@ private:
         SamplePlan home_plan;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_ || link_lost() || stopped()) {
+            if (!connected_ || link_lost_.load() || stopped()) {
                 return false;
             }
             check_home = homing_;
@@ -3000,7 +3000,7 @@ private:
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_ || link_lost() || stopped()) {
+            if (!connected_ || link_lost_.load() || stopped()) {
                 return false;
             }
             plan = sample_plan_locked(tick % kSlowPollEvery == 0);
