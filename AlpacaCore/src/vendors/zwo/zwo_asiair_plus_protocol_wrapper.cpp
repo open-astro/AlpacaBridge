@@ -161,7 +161,9 @@ public:
         // (c) idles cheaply when the duty is 0 or 100. The thread will
         // briefly contend on mutex_ to issue each ioctl — the constructor
         // exits this critical section before the thread can acquire it,
-        // so there's no startup deadlock. Boolean ports get no thread;
+        // so there's no startup deadlock. A worker writes nothing until the
+        // port's first set_value() (decision 0021 rule 1): the cached 100 is
+        // for reporting only. Boolean ports get no thread;
         // their writes still go through apply_port_locked() synchronously
         // from set_value().
         for (std::size_t i = 0; i < ports_.size(); ++i) {
@@ -169,6 +171,7 @@ public:
                 continue;
             }
             port_states_[i]->stop_pwm.store(false);
+            port_states_[i]->armed.store(false);
             port_states_[i]->pwm_thread =
                 std::thread(&Impl::pwm_loop, this, i);
         }
@@ -210,7 +213,8 @@ public:
             // duty 0 OFF) before the fd goes. Boolean ports already hold
             // their commanded level. Raw polarity is inverted: 0 = ON.
             for (std::size_t i = 0; i < ports_.size(); ++i) {
-                if (!ports_[i].pwm_enabled) {
+                // A port no client armed was never written; settling it would drive the cached 100 (decision 0021).
+                if (!ports_[i].pwm_enabled || !port_states_[i]->armed.exchange(false)) {
                     continue;
                 }
                 gpio_level_t lvl{};
@@ -220,6 +224,10 @@ public:
                     const int err = errno;
                     ALPACA_LOG_WARN(kLogCategory, "ASIAIR Plus: failed to settle PWM port " + std::to_string(i) +
                                                       " before close: " + util::errno_string(err));
+                } else {
+                    // The line now holds the steady level, not the duty. The next open() writes nothing
+                    // (decision 0021 rule 1), so the cache must report what the line holds.
+                    port_states_[i]->value.store(lvl.level == 0 ? 100 : 0);
                 }
             }
             ::close(fd_);
@@ -277,6 +285,7 @@ public:
                 }
             }
             port_states_[index]->value.store(value, std::memory_order_release);
+            port_states_[index]->armed.store(true, std::memory_order_release);
             return;
         }
 
@@ -303,6 +312,11 @@ private:
         // Stop signal for the PWM worker thread. Set by close()/destructor;
         // checked by pwm_loop() at every iteration.
         std::atomic<bool> stop_pwm{false};
+
+        // True once a set_value() has chosen this PWM port's duty since the
+        // connect. Until then the worker idles and writes nothing, so a
+        // connect never drives the port to the cached value.
+        std::atomic<bool> armed{false};
 
         // The PWM worker thread. Joinable only while the port is connected
         // AND the port is pwm_enabled. Boolean ports never start one.
@@ -368,6 +382,10 @@ private:
         };
 
         while (!state.stop_pwm.load(std::memory_order_acquire)) {
+            if (!state.armed.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                continue;
+            }
             int duty = state.value.load(std::memory_order_acquire);
             if (duty < 0) duty = 0;
             if (duty > 100) duty = 100;
