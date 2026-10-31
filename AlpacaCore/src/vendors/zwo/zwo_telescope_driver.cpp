@@ -202,9 +202,6 @@ public:
           manual_axis_tracking_restore_({std::nullopt, std::nullopt}),
           slew_force_until_(std::chrono::steady_clock::time_point{}),
           pulse_guiding_end_(std::chrono::steady_clock::time_point{}),
-          pulse_generation_(0),
-          pulse_thread_stop_(false),
-          pulse_cancel_(false),
           pulse_queue_end_(std::chrono::steady_clock::time_point{}),
           parked_cached_(false),
           park_command_active_(false),
@@ -241,7 +238,7 @@ public:
             disconnect_thread_.join();
         }
         stop_poll_thread();
-        stop_pulse_thread();
+        stop_pulse_drain();
     }
 
     int get_device_number() const override {
@@ -336,9 +333,6 @@ public:
                 ++utc_session_;
             }
             poll_stop_.store(true);
-            pulse_thread_stop_.store(true);
-            pulse_cancel_.store(true);
-            pulse_cv_.notify_all();
             protocol_.cancel_pending_io();
             // open-astro#720: fence before teardown, so a pending GOTO setup
             // cannot send ":MS" after Connected=false returns. Disconnect is a
@@ -380,7 +374,7 @@ public:
                     clear_last_slew_error_locked();
                 }
                 stop_poll_thread();
-                stop_pulse_thread();
+                stop_pulse_drain();
                 try {
                     protocol_.disconnect();
                 } catch (const std::exception& e) {
@@ -437,10 +431,10 @@ public:
                 tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             poll_pause_.store(false);
+            // A drain still running keeps its current task; the next pulse starts a new drain.
             pulse_queue_.clear();
             pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-            pulse_thread_stop_.store(false);
-            pulse_cancel_.store(false);
+            pulse_drain_active_ = false;
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
@@ -464,7 +458,6 @@ public:
             target_dec_degrees_ = 0.0;
             target_ra_set_ = false;
             target_dec_set_ = false;
-            pulse_generation_.store(0);
         };
         auto apply_or_load_site_info = [&]() {
             // Held across the whole send and read-back, so a setter's write lands before or after this
@@ -599,13 +592,12 @@ public:
             }
             refresh_cached_values();
             start_poll_thread();
-            start_pulse_thread();
             return;
         }
 
         if (connected) {
             stop_poll_thread();
-            stop_pulse_thread();
+            stop_pulse_drain();
             fence_goto();
             goto_slot_.cancel_all_and_join();
             reset_session_state_for_connect();
@@ -700,7 +692,6 @@ public:
                     throw AlpacaException("ZWO mount transport lost during connect", AlpacaError::DriverException);
                 caches_ready_.store(true);
                 start_poll_thread();
-                start_pulse_thread();
                 return;
             } catch (...) {
                 connected_.store(false);
@@ -716,7 +707,7 @@ public:
                 }
                 protocol.cancel_pending_io();
                 stop_poll_thread();
-                stop_pulse_thread();
+                stop_pulse_drain();
                 protocol.disconnect();
                 throw;
             }
@@ -1675,7 +1666,6 @@ public:
             ? (direction == 1 ? -expected_deg : expected_deg)
             : 0.0;
 
-        pulse_cancel_.store(false);
         PulseTask task;
         task.direction = direction;
         task.duration_ms = effective_duration;
@@ -1683,8 +1673,8 @@ public:
         task.guide_rate_deg_per_sec = 0.0;
         task.expected_ra_hours = expected_hours;
         task.expected_dec_degrees = expected_dec;
-        task.generation = pulse_generation_.load();
 
+        bool start_drain = false;
         {
             // Match the connect reset's pulse -> state order (#714); state remains the leaf.
             std::lock_guard<std::mutex> lock(pulse_mutex_);
@@ -1698,8 +1688,24 @@ public:
             pulse_guiding_end_ = pulse_queue_end_ + kPulseGuideHold;
             pulse_queue_.push_back(task);
             snapshot_.write([](PolledFrame&) {});
+            // A drain that is running takes the task; only the caller that finds none starts one.
+            start_drain = !pulse_drain_active_;
+            pulse_drain_active_ = true;
         }
-        pulse_cv_.notify_one();
+        if (!start_drain) return;
+        try {
+            pulse_slot_.start([this](util::OperationContext& ctx) { drain_pulses(ctx); });
+        } catch (...) {
+            // No drain runs, so nobody would send what is queued (decision 0006 "Thread refusal").
+            {
+                std::lock_guard<std::mutex> lock(pulse_mutex_);
+                pulse_queue_.clear();
+                pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+                pulse_drain_active_ = false;
+            }
+            if (!connected_.load()) throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
+            throw;
+        }
     }
 
     void set_park() override {
@@ -2364,22 +2370,18 @@ private:
     }
 
     void reset_position_offsets() {
-        // Signal cancellation first so the pulse thread's reconciliation read
-        // (which runs outside mutex_) can exit early, avoiding lock contention.
-        pulse_cancel_.store(true);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ra_offset_hours_ = 0.0;
-            dec_offset_deg_ = 0.0;
-            pulse_generation_.fetch_add(1);
-            pulse_guiding_end_ = clock_.now();
-            snapshot_.write([](PolledFrame&) {});
-        }
-        {
-            std::lock_guard<std::mutex> lock(pulse_mutex_);
-            pulse_queue_.clear();
-            pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-        }
+        // One section: a pulse queued after it starts a drain this cancel cannot reach, and the cancelled drain's
+        // reconciliation, which re-checks its stop reason under mutex_, cannot write offsets after they are zeroed.
+        std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
+        pulse_queue_.clear();
+        pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+        pulse_drain_active_ = false;
+        pulse_slot_.cancel();
+        ra_offset_hours_ = 0.0;
+        dec_offset_deg_ = 0.0;
+        pulse_guiding_end_ = clock_.now();
+        snapshot_.write([](PolledFrame&) {});
     }
 
     void ensure_not_parked(const char* operation) const {
@@ -2525,17 +2527,12 @@ private:
         link_lost_at_.note(now);
         snapshot_.reset();
         poll_stop_.store(true);
-        pulse_cancel_.store(true);
-        pulse_thread_stop_.store(true);
-        // cancel() never blocks on a body, so it may run under mutex_ (decision 0006).
+        // cancel() never blocks on a body, so it may run under mutex_ (decision 0006), in the section that drops the
+        // link and so before any newer connect. The connect or teardown that follows clears the pulse queue.
+        pulse_slot_.cancel();
         goto_slot_.cancel();
         protocol_.cancel_pending_io();
-        lock.unlock();  // The state lock is a leaf; wake the motion workers outside it.
-        {
-            // Pair with each wait's predicate check before notifying, without changing a newer connect's flags.
-            std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
-            pulse_cv_.notify_all();
-        }
+        lock.unlock();
         // A GOTO body waiting at the send gate re-reads connected_ and leaves.
         goto_send_cv_.notify_all();
     }
@@ -2784,10 +2781,30 @@ private:
         double guide_rate_deg_per_sec = 0.0;
         double expected_ra_hours = 0.0;
         double expected_dec_degrees = 0.0;
-        uint64_t generation = 0;
     };
 
-    void run_pulse_task(const PulseTask& task) {
+    // The pulse drain body: sends the queued pulses in order. pulse_guide() starts it when it finds no drain running
+    // (pulse_drain_active_); the drain clears that flag in the section where it finds the queue empty. A cancelled
+    // drain (reset_position_offsets(), link loss, disconnect) or a superseded one leaves the queue and the flag to
+    // whoever stopped or replaced it.
+    void drain_pulses(util::OperationContext& ctx) {
+        while (true) {
+            PulseTask task;
+            {
+                std::lock_guard<std::mutex> lock(pulse_mutex_);
+                if (ctx.stop_reason() != util::StopReason::None) return;
+                if (pulse_queue_.empty()) {
+                    pulse_drain_active_ = false;
+                    return;
+                }
+                task = pulse_queue_.front();
+                pulse_queue_.pop_front();
+            }
+            run_pulse_task(task, ctx);
+        }
+    }
+
+    void run_pulse_task(const PulseTask& task, util::OperationContext& ctx) {
         auto& protocol = protocol_;
 
         {
@@ -2805,24 +2822,20 @@ private:
                 " duration_ms=" + std::to_string(task.duration_ms));
 
         int remaining_ms = task.duration_ms;
-        while (remaining_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
+        while (remaining_ms > 0) {
             const int step = std::min(remaining_ms, 3000);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_.load()) return;
+            }
             try {
                 protocol.pulse_guide(task.direction, step);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "PulseGuide command failed: " + std::string(e.what()));
                 break;
             }
-
-            int wait_ms = step;
-            while (wait_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
-                const int sleep_ms = std::min(wait_ms, 100);
-                std::unique_lock<std::mutex> lock(pulse_mutex_);
-                clock_.wait_for(lock, pulse_cv_, std::chrono::milliseconds(sleep_ms),
-                                [this] { return pulse_thread_stop_.load() || pulse_cancel_.load(); });
-                wait_ms -= sleep_ms;
-            }
-
+            // One clock wait per step; a cancel wakes it at once.
+            if (!ctx.wait_for(std::chrono::milliseconds(step))) return;
             remaining_ms -= step;
         }
 
@@ -2830,15 +2843,15 @@ private:
         // The mount may or may not update its reported coordinates during pulse
         // guiding; reconciling here prevents double-counting (offset + actual
         // movement) without losing the prediction when coordinates don't update.
-        if (!pulse_cancel_.load() && task.generation == pulse_generation_.load()) {
+        if (ctx.stop_reason() == util::StopReason::None) {
             const auto token = snapshot_.begin_poll();
             try {
                 // Best-effort reconciliation must not hold up the next queued pulse for a full link timeout.
                 const EquatorialCoordinates eq = protocol.get_current_equatorial(250);
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_.load() || pulse_cancel_.load() || task.generation != pulse_generation_.load() ||
+                if (!connected_.load() || ctx.stop_reason() != util::StopReason::None ||
                     token != snapshot_.begin_poll())
-                    return;  // IsPulseGuiding uses the published deadline, not this worker's hold loop.
+                    return;  // IsPulseGuiding uses the published deadline, not this body's hold.
                 if (cached_equatorial_.has_value()) {
                     // Compute the expected final position from the pre-pulse base + offset.
                     double target_ra = std::fmod(cached_equatorial_->ra_hours + ra_offset_hours_, 24.0);
@@ -2861,68 +2874,22 @@ private:
         // pulsed simultaneously (e.g. East + North), skipping the hold
         // between tasks prevents the total time from exceeding ConformU's
         // 6-second IsPulseGuiding timeout.
+        bool more_queued = false;
         {
-            bool more_queued = false;
-            {
-                std::lock_guard<std::mutex> lock(pulse_mutex_);
-                more_queued = !pulse_queue_.empty();
-            }
-            if (!more_queued) {
-                int hold_ms = static_cast<int>(kPulseGuideHold.count());
-                while (hold_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
-                    const int sleep_ms = std::min(hold_ms, 100);
-                    std::unique_lock<std::mutex> lock(pulse_mutex_);
-                    clock_.wait_for(lock, pulse_cv_, std::chrono::milliseconds(sleep_ms),
-                                    [this] { return pulse_thread_stop_.load() || pulse_cancel_.load(); });
-                    hold_ms -= sleep_ms;
-                }
-            }
+            std::lock_guard<std::mutex> lock(pulse_mutex_);
+            more_queued = !pulse_queue_.empty();
         }
+        if (!more_queued) static_cast<void>(ctx.wait_for(kPulseGuideHold));
     }
 
-    void start_pulse_thread() {
+    // Stops the pulse drain and drops what it had queued. The pulse slot's reapers are the disconnect teardown,
+    // connect (after it reaped the teardown) and the destructor, never two at once.
+    void stop_pulse_drain() {
+        pulse_slot_.cancel_all_and_join();
         std::lock_guard<std::mutex> lock(pulse_mutex_);
-        if (pulse_thread_.joinable()) {
-            return;
-        }
-        pulse_thread_stop_.store(false);
-        pulse_cancel_.store(false);
-        pulse_thread_ = std::thread([this]() {
-            while (true) {
-                PulseTask task;
-                {
-                    std::unique_lock<std::mutex> lock(pulse_mutex_);
-                    pulse_cv_.wait(lock, [&]() {
-                        return pulse_thread_stop_.load() || !pulse_queue_.empty();
-                    });
-                    if (pulse_thread_stop_.load()) {
-                        break;
-                    }
-                    task = pulse_queue_.front();
-                    pulse_queue_.pop_front();
-                }
-                run_pulse_task(task);
-            }
-        });
-    }
-
-    void stop_pulse_thread() {
-        {
-            std::lock_guard<std::mutex> lock(pulse_mutex_);
-            pulse_thread_stop_.store(true);
-            pulse_cancel_.store(true);
-        }
-        pulse_cv_.notify_all();
-        if (pulse_thread_.joinable()) {
-            pulse_thread_.join();
-        }
-        {
-            std::lock_guard<std::mutex> lock(pulse_mutex_);
-            pulse_queue_.clear();
-            pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-            pulse_thread_stop_.store(false);
-            pulse_cancel_.store(false);
-        }
+        pulse_queue_.clear();
+        pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+        pulse_drain_active_ = false;
     }
 
     // open-astro#575: every clear of the stored slew failure (new initiator,
@@ -3091,13 +3058,9 @@ private:
     // command owns the mount (sync_to_pair()).
     uint64_t slew_error_epoch_ = 0;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
-    std::atomic<uint64_t> pulse_generation_;
     mutable std::mutex pulse_mutex_;
-    mutable std::condition_variable pulse_cv_;
     std::deque<PulseTask> pulse_queue_;
-    std::thread pulse_thread_;
-    mutable std::atomic<bool> pulse_thread_stop_;
-    mutable std::atomic<bool> pulse_cancel_;
+    bool pulse_drain_active_ = false;  // pulse_mutex_: a drain body runs and will take a queued task
     // Async teardown spawned by set_connected(false) — a joinable member so
     // the destructor can join it (a detached thread touching `this` is a
     // use-after-free if the driver dies mid-teardown; driver-lifecycle.instructions.md rule).
@@ -3132,8 +3095,10 @@ private:
     std::mutex initiator_mutex_;
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
     util::OperationGeneration goto_generation_;
-    // Declared last, so it is destroyed (and joins) before any member its body touches.
+    util::OperationGeneration pulse_generation_;
+    // Declared last, so they are destroyed (and join) before any member their bodies touch.
     mutable util::AsyncOperation goto_slot_{"ZWO SlewToTargetAsync", goto_generation_, clock_};
+    mutable util::AsyncOperation pulse_slot_{"ZWO PulseGuide", pulse_generation_, clock_};
 };
 
 std::optional<std::chrono::system_clock::time_point> utc_anchor_for_testing(const TelescopeDriver& driver) {

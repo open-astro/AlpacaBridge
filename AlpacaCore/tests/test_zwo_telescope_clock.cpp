@@ -163,8 +163,8 @@ TEST_CASE("ZWO telescope clock - IsPulseGuiding holds for the pulse plus 500 ms 
     rig.advance(1ms);
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
     CHECK(rig.mount.count(":GD") == positions);  // the poll stayed paused until the pulse ended
-    // The worker's last two pulse steps; the second ends in the reconciliation read (":GD") before the worker
-    // registers its hold step, so both advances settle.
+    // The pulse body's reconciliation read ran when its one 250 ms step wait ended; the poll resumes at its next
+    // 50 ms check after the pulse end and reads the position (":GD").
     rig.advance(100ms);
     rig.advance(100ms);
     CHECK(rig.mount.wait_for_count(":GD", positions + 1, kReal));
@@ -696,6 +696,25 @@ TEST_CASE("ZWO telescope clock - a pulse queued after a slew superseded the prev
     // Virtual time only: the superseded body wakes and the new pulse is drained.
     rig.advance_until([&] { return rig.mount.count(":Mg") >= 2; }, 100ms, 10s);
     CHECK(rig.mount.wait_for_count(":Mg", 2, kReal));
+}
+
+// Round 2 finding 3: the flag that says a pulse drain runs is cleared on disconnect and on connect, so a pulse after
+// a reconnect starts a new drain and reaches the mount.
+// Falsified by: zwo_telescope_driver.cpp stop_pulse_drain() and the connect reset (reset_session_state_for_connect)
+// both keeping pulse_drain_active_ (the two clears removed together), so the pulse after the reconnect waits for a
+// drain that no longer runs and no ":Mg" is sent.
+TEST_CASE("ZWO telescope clock - a pulse after a reconnect reaches the mount",
+          "[zwo][telescope][unit][clock][operation-slot]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 3000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    rig.driver->set_connected(false);  // the teardown runs on: the pulse body is still being stopped
+    require_alpaca_error([&] { rig.driver->pulse_guide(2, 500); }, AlpacaError::NotConnected);
+    rig.connect();
+    const int pulses = rig.mount.count(":Mg");
+    rig.driver->pulse_guide(2, 500);
+    CHECK(rig.mount.wait_for_count(":Mg", pulses + 1, kReal));
 }
 
 #endif  // !_WIN32
