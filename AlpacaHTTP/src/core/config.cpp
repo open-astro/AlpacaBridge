@@ -133,6 +133,21 @@ bool parse_size_value(const std::string& value, std::size_t& result) {
     }
 }
 
+// logging.max_file_size_mb: a negative or unparsable value is rejected so the
+// caller keeps its current value; it never turns the cap off (0 does).
+bool parse_log_max_file_size_mb(const std::string& value, int& result) {
+    try {
+        const int parsed = std::stoi(value);
+        if (parsed < 0) {
+            return false;
+        }
+        result = parsed;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 }  // namespace
 
 std::vector<std::string> split_host_list(std::string_view value) {
@@ -246,6 +261,11 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                     log_retention_days_ = parsed;
                 } catch (...) {
                     // Keep default
+                }
+            } else if (key == "max_file_size_mb") {
+                int parsed = 0;
+                if (parse_log_max_file_size_mb(value, parsed)) {
+                    log_max_file_size_mb_ = parsed;
                 }
             }
         } else if (current_section == "server") {
@@ -462,6 +482,14 @@ void Config::apply_environment_overrides() {
             log_retention_days_ = parsed;
         } catch (...) {
             // Keep value from yaml/default
+        }
+    }
+
+    const char* max_size_env = std::getenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB");
+    if (max_size_env) {
+        int parsed = 0;
+        if (parse_log_max_file_size_mb(max_size_env, parsed)) {
+            log_max_file_size_mb_ = parsed;
         }
     }
 }

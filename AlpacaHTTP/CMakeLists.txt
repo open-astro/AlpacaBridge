@@ -484,6 +484,9 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_executable(test_log_text tests/test_log_text.cpp)
     target_link_libraries(test_log_text alpacahttp)
     add_test(NAME test_log_text COMMAND test_log_text)
+    add_executable(test_log_size_cap tests/test_log_size_cap.cpp)
+    target_link_libraries(test_log_size_cap alpacahttp)
+    add_test(NAME test_log_size_cap COMMAND test_log_size_cap)
 
     # open-astro#1333: log level of the router's line for a driver exception.
     # Own working directory, like test_routing: constructing a Router reads
