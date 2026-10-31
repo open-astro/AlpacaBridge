@@ -1110,6 +1110,67 @@ TEST_CASE("SkyWatcher async - an RA duty stop during a Dec pulse's dispatch stop
     driver->set_connected(false);
 }
 
+// #1706 review: the post-slew rate check's recovery stops and restarts RA only. An async slew's
+// landing hold does not end on a bump, so a Dec pulse sent into the hold dispatches before the
+// restore and, while Dec reports running (hold_running), is still in its stop-wait when the check
+// stops RA. A 1 deg slew lands with no refining goto, so the hold follows the landing waits.
+// Falsified by: skywatcher_telescope_driver.cpp:5415 a bare ++motion_generation_ in place of
+// bump_motion_generation_locked(kAxisRa).
+TEST_CASE(
+    "SkyWatcher async - the post-slew rate check's RA restart during a Dec pulse's dispatch stop-wait does not drop "
+    "the pulse (#1706)",
+    "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    REQUIRE(mount.axis_running(1));
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    std::atomic<bool> condemned{false};
+    std::atomic<int> dec_starts_at_warn{-1};
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("Post-slew tracking restart") != std::string_view::npos && !condemned.load()) {
+                dec_starts_at_warn.store(mount.start_count(2));  // the fake's own mutex, not the driver's
+                condemned.store(true);
+            }
+        });
+    mount.restart_tracking_at_wrong_rate(1, 1);  // the restore's ":J" latches at 2x, so the check stops RA
+
+    driver->slew_to_coordinates_async(driver->get_right_ascension(), driver->get_declination() - 1.0);
+    REQUIRE(run_clock_until(clock, [&] { return mount.axis_in_goto(2); }, std::chrono::milliseconds(5000)));
+    REQUIRE(run_clock_until(
+        clock, [&] { return !mount.axis_in_goto(1) && !mount.axis_in_goto(2); }, std::chrono::milliseconds(20000)));
+    const int ra_starts = mount.start_count(1);
+    REQUIRE(advance_through(clock, std::chrono::milliseconds(500), std::chrono::milliseconds(10)));
+    REQUIRE(mount.start_count(1) == ra_starts);  // in the hold: no refining goto, tracking not restarted yet
+    REQUIRE_FALSE(mount.axis_running(1));
+    const int dec_starts = mount.start_count(2);
+
+    mount.hold_running(2, true);
+    driver->pulse_guide(0, 500);
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the hold and the Dec stop-wait
+    REQUIRE(run_clock_until(clock, [&] { return condemned.load(); }, std::chrono::milliseconds(10000)));
+    CHECK(dec_starts_at_warn.load() == dec_starts);  // still waiting when the check stopped RA
+    mount.hold_running(2, false);
+    CHECK(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
+    REQUIRE(run_clock_until(
+        clock, [&] { return !driver->get_is_pulse_guiding() && !driver->get_slewing(); },
+        std::chrono::milliseconds(10000)));
+    clock.advance(std::chrono::milliseconds(2000));
+    clock.wait_for_woken_settled(kRendezvous);
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK(mount.axis_running(1));  // the check restarted tracking
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 // The same-axis no-op: reaping the Dec pulse here would leave Dec turning,
 // because MoveAxis(Dec, 0) with no manual motion commands nothing.
 TEST_CASE("SkyWatcher async - MoveAxis(Dec, 0) with no manual motion leaves a running Dec pulse to end itself (#630)",
