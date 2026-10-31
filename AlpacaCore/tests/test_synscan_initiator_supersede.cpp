@@ -65,6 +65,14 @@ struct FakeSynScanState {
     // true: every slewing query, a held one too, is answered with garbage
     std::atomic<bool> fail_l{false};
     std::atomic<int> model{50};  // the handset's model id ('m'): 50 is equatorial, 5 an AZ-EQ mount
+    std::atomic<int> gate_t_ms{0};  // >0: the next tracking-mode read is held this long before it is answered
+    std::atomic<Clock::rep> gate_t_entered{0};
+    std::atomic<int> gate_s_ms{0};  // >0: the next sync command is held this long before it is answered
+    std::atomic<Clock::rep> gate_s_entered{0};
+    std::atomic<int> gate_w_ms{0};  // >0: the next site write is held this long before it is answered
+    std::atomic<Clock::rep> gate_w_entered{0};
+    std::atomic<int> gate_h_ms{0};  // >0: the next time write is held this long before it is answered
+    std::atomic<Clock::rep> gate_h_entered{0};
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -89,7 +97,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'e' || chunk[0] == 'r' || chunk[0] == 'R' ||
-            chunk[0] == 'T') {
+            chunk[0] == 'T' || chunk[0] == 't' || chunk[0] == 's') {
             st->record(chunk);
         }
         switch (chunk[0]) {
@@ -133,14 +141,38 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 return "#";
             case 'm':
                 return std::string(1, static_cast<char>(st->model.load())) + "#";
-            case 't':  // tracking mode read: sidereal tracking on
+            case 't': {  // tracking mode read: sidereal tracking on
+                const int hold = st->gate_t_ms.exchange(0);
+                if (hold > 0) {
+                    st->gate_t_entered.store(Clock::now().time_since_epoch().count());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                }
                 return std::string(1, '\x01') + "#";
+            }
+            case 's':  // sync to coordinates
+            case 'S': {
+                const int hold = st->gate_s_ms.exchange(0);
+                if (hold > 0) {
+                    st->gate_s_entered.store(Clock::now().time_since_epoch().count());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                }
+                return "#";
+            }
             case 'h':  // handset time, 8 binary bytes: 12:00:00 on 1 Jan 2026, UTC (a short answer times out)
                 return std::string("\x0c\x00\x00\x01\x01\x1a\x00\x00", 8) + "#";
             case 'w':
                 return std::string(8, '\0') + "#";
             case 'W':
+            case 'H': {  // site and time writes
+                auto& gate_ms = chunk[0] == 'W' ? st->gate_w_ms : st->gate_h_ms;
+                auto& gate_entered = chunk[0] == 'W' ? st->gate_w_entered : st->gate_h_entered;
+                const int hold = gate_ms.exchange(0);
+                if (hold > 0) {
+                    gate_entered.store(Clock::now().time_since_epoch().count());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                }
                 return "#";
+            }
             default:
                 return "0#";
         }
@@ -450,6 +482,99 @@ TEST_CASE("SynScan initiator supersede - a failed AbortSlew during a Park ends t
     // A Park that starts clears the stored AbortSlew error at once; Park during a park returns doing nothing.
     rig.driver->park();
     CHECK(error_of([&] { (void)rig.driver->get_slewing(); }).second.rfind("AbortSlew stop failed: ", 0) != 0);
+}
+
+// PulseGuide's mode read and its rate command are one wire turn (decision 0006, "Claim"): a Tracking write that
+// arrives while the mode read is in flight queues behind the pulse, so its `T` lands after the rate `P` and the pulse
+// end restores the mode the pulse used. A pulse that gave its turn up after the read would let the write's `T` go out
+// between the read and the rate.
+TEST_CASE(
+    "SynScan initiator supersede - PulseGuide sends its rate command before a Tracking write queued during its mode "
+    "read",
+    "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.st->gate_t_ms.store(600);
+    std::thread pulse([&] { rig.driver->pulse_guide(2, 600000); });  // west: the RA axis reads the tracking mode
+    REQUIRE(wait_until([&] { return rig.st->gate_t_entered.load() != 0; }, 5000));
+    std::thread tracking([&] { rig.driver->set_tracking(false); });
+    // The write takes its ticket well inside the 600 ms the `t` reply is held; tickets are served in order, so a
+    // pulse that left the turn after its read would queue its rate command behind the write.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    pulse.join();
+    tracking.join();
+    int first_rate = -1;
+    int first_tracking_write = -1;
+    {
+        std::lock_guard<std::mutex> lock(rig.st->command_mutex);
+        for (std::size_t i = 0; i < rig.st->commands.size(); ++i) {
+            const char head = rig.st->commands[i][0];
+            if (head == 'P' && first_rate < 0) first_rate = static_cast<int>(i);
+            if (head == 'T' && first_tracking_write < 0) first_tracking_write = static_cast<int>(i);
+        }
+    }
+    REQUIRE(first_rate >= 0);
+    REQUIRE(first_tracking_write >= 0);
+    CHECK(first_rate < first_tracking_write);
+}
+
+// SyncToCoordinates is an initiator: it holds initiator_mutex_, so a Park cannot claim and publish Slewing between its
+// checks and its write (decision 0016 point 6). The sync's `s` is held; Park, called meanwhile, waits for it.
+TEST_CASE("SynScan initiator supersede - Park waits for a SyncToCoordinates whose exchange is held",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.driver->set_park();  // so Park needs no handset read of its own
+    rig.st->gate_s_ms.store(1500);
+    std::thread sync([&] { rig.driver->sync_to_coordinates(5.5, 20.0); });
+    REQUIRE(wait_until([&] { return rig.st->gate_s_entered.load() != 0; }, 5000));
+    std::atomic<bool> park_returned{false};
+    std::thread park([&] {
+        rig.driver->park();
+        park_returned = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    CHECK_FALSE(park_returned.load());
+    CHECK_FALSE(rig.driver->get_slewing());
+    sync.join();
+    park.join();
+    CHECK(rig.driver->get_slewing());  // the Park ran after the sync
+}
+
+// SiteLatitude and SiteLongitude each write both coordinates in one `W`, the other one taken from the cache. The two
+// writes are serialised across that read, the `W` and the publish (config_write_mutex_), so a SiteLongitude write that
+// arrives while a SiteLatitude `W` is held sends after it and keeps the new latitude.
+TEST_CASE("SynScan initiator supersede - concurrent SiteLatitude and SiteLongitude writes keep both values",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.st->gate_w_ms.store(800);
+    std::thread lat([&] { rig.driver->set_site_latitude(-33.856784); });
+    REQUIRE(wait_until([&] { return rig.st->gate_w_entered.load() != 0; }, 5000));
+    std::thread lon([&] { rig.driver->set_site_longitude(151.215297); });
+    lat.join();
+    lon.join();
+    CHECK(rig.driver->get_site_latitude() == Catch::Approx(-33.856784).margin(0.01));
+    CHECK(rig.driver->get_site_longitude() == Catch::Approx(151.215297).margin(0.01));
+}
+
+// A disconnect while a UTCDate `H` write is held ends the session the write was for: the write reports NotConnected,
+// as the site writes do, instead of reporting success and publishing its offset into the torn-down session.
+TEST_CASE("SynScan initiator supersede - a UTCDate write cut by a disconnect reports NotConnected",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*rig.driver, true);  // a prompt teardown
+    rig.st->gate_h_ms.store(800);
+    std::atomic<int> write_error{-1};
+    std::thread write([&] {
+        try {
+            rig.driver->set_utc_date(std::chrono::system_clock::now());
+            write_error = 0;
+        } catch (const alpacacore::AlpacaException& ex) {
+            write_error = ex.error_code();
+        }
+    });
+    REQUIRE(wait_until([&] { return rig.st->gate_h_entered.load() != 0; }, 5000));
+    rig.driver->set_connected(false);
+    write.join();
+    CHECK(write_error.load() == alpacacore::AlpacaError::NotConnected);
 }
 
 #endif  // _WIN32

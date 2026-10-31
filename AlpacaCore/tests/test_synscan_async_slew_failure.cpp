@@ -1023,8 +1023,11 @@ TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    // Nothing is parked on the clock yet, so the pulse task below is the first thread at the hook.
-    REQUIRE(clock.waiter_count() == 0);
+    // Only the status poll is parked on the clock: it registered before the hook is set and its own generation
+    // never moves during the case, so it stays blocked past the hook and the pulse task below is the first thread
+    // at the hook.
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::milliseconds(5000)));
+    REQUIRE(clock.waiter_count() == 1);
     clock.set_before_block([&](const std::function<bool()>& pred) {
         if (fired.fetch_add(1) == 0) {
             at_window.store(true);
