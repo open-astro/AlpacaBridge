@@ -39,51 +39,48 @@
 
 namespace {
 
-using alpacacore::test::connect_and_park;
 using alpacacore::test::require_alpaca_error;
 using alpacacore::test::tick;
 
 using alpacacore::test::FakeHidState;
 using alpacacore::test::FakeHidTransport;
 
-std::unique_ptr<alpacacore::FocuserDriver> make_fake_focuser(const std::shared_ptr<FakeHidState>& state,
-                                                             alpacacore::test::FakeTaskClock& clock) {
-    return alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-fake",
-                                                                   std::make_unique<FakeHidTransport>(state), clock);
-}
-
 // Longer than the poll period (100 ms) so one advance() is one tick.
 constexpr auto kTick = std::chrono::milliseconds(150);
 constexpr auto kBound = std::chrono::milliseconds(5000);
 
-// A connected driver on a virtual clock. The poll body parks on the clock after
-// Connect returns; not a REQUIRE, so a case fails on the behaviour it pins.
-std::unique_ptr<alpacacore::FocuserDriver> connected_focuser(const std::shared_ptr<FakeHidState>& state,
-                                                             alpacacore::test::FakeTaskClock& clock) {
-    auto driver = make_fake_focuser(state, clock);
-    (void)connect_and_park(*driver, clock, std::chrono::milliseconds(2000));
-    return driver;
-}
+struct AstroasisFake {
+    std::shared_ptr<FakeHidState> state = std::make_shared<FakeHidState>();
+};
+
+// The driver on a FakeHidTransport and a fake clock, not yet connected.
+struct AstroasisRig : alpacacore::test::PolledRig<AstroasisFake, alpacacore::FocuserDriver> {
+    AstroasisRig()
+        : PolledRig({kTick, kBound}, [](AstroasisFake& fake, alpacacore::test::FakeTaskClock& clock) {
+              return alpacacore::vendor::astroasis::create_astroasis_focuser(
+                  0, "/dev/hidraw-fake", std::make_unique<FakeHidTransport>(fake.state), clock);
+          }) {}
+};
 
 }  // namespace
 
 // Falsified by: astroasis_focuser_driver.cpp:read_status() getter reads the device again (a poll-less cache refill).
 TEST_CASE("Astroasis Focuser Driver - getters between poll ticks cause no device calls",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    CHECK(driver->get_position() == 1234);
-    CHECK_FALSE(driver->get_is_moving());
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    CHECK(rig.driver().get_position() == 1234);
+    CHECK_FALSE(rig.driver().get_is_moving());
     const int after_connect = state->transactions();
 
     // A client that polls slower than the old 100 ms cache lifetime: real time
-    // passes, the virtual clock does not, so no tick runs.
+    // passes, the fake clock does not, so no tick runs.
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     for (int i = 0; i < 50; ++i) {
-        (void)driver->get_position();
-        (void)driver->get_is_moving();
-        (void)driver->get_temperature();
+        (void)rig.driver().get_position();
+        (void)rig.driver().get_is_moving();
+        (void)rig.driver().get_temperature();
     }
     CHECK(state->transactions() == after_connect);
 
@@ -92,72 +89,64 @@ TEST_CASE("Astroasis Focuser Driver - getters between poll ticks cause no device
         std::lock_guard<std::mutex> lock(state->mutex);
         state->position = 4321;
     }
-    CHECK(driver->get_position() == 1234);  // unchanged until the tick
-    tick(clock, kTick, kBound);
-    CHECK(driver->get_position() == 4321);
+    CHECK(rig.driver().get_position() == 1234);  // unchanged until the tick
+    rig.tick();
+    CHECK(rig.driver().get_position() == 4321);
     CHECK(state->transactions() == after_connect + 1);
-
-    driver->set_connected(false);
 }
 
 // Falsified by: polled_state.h:102 start() delete the first poll_once() at connect.
 TEST_CASE("Astroasis Focuser Driver - DeviceState reads the device not at all",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    REQUIRE(driver->get_connected());
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    REQUIRE(rig.driver().get_connected());
     const int after_connect = state->transactions();
     CHECK(state->status_reads >= 1);  // the first frame was taken during connect
 
-    const auto device_state = driver->get_device_state();
+    const auto device_state = rig.driver().get_device_state();
     CHECK_FALSE(device_state.empty());
     CHECK(state->transactions() == after_connect);
-
-    driver->set_connected(false);
 }
 
 TEST_CASE("Astroasis Focuser Driver - static members never touch the device", "[astroasis][focuser][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
     const int after_connect = state->transactions();
 
     for (int i = 0; i < 5; ++i) {
-        CHECK(driver->get_max_step() == 50000);
-        CHECK(driver->get_max_increment() == 50000);
+        CHECK(rig.driver().get_max_step() == 50000);
+        CHECK(rig.driver().get_max_increment() == 50000);
     }
     CHECK(state->transactions() == after_connect);
-
-    driver->set_connected(false);
 }
 
 // Falsified by: astroasis_focuser_driver.cpp:move():324 delete the state_.write() after move_to.
 TEST_CASE("Astroasis Focuser Driver - Move and Halt write through to the frame",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
     state->move_reports_moving = false;  // the device's own answer would say "not moving"
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
+    (void)rig.connect();
 
-    CHECK_FALSE(driver->get_is_moving());
+    CHECK_FALSE(rig.driver().get_is_moving());
     const int reads_before = state->status_reads;
-    driver->move(2000);
-    CHECK(driver->get_is_moving());  // before any poll ran
+    rig.driver().move(2000);
+    CHECK(rig.driver().get_is_moving());  // before any poll ran
     CHECK(state->status_reads == reads_before);
-    driver->halt();
-    CHECK_FALSE(driver->get_is_moving());
-    driver->move(3000);
-    CHECK(driver->get_is_moving());
-    driver->halt();
-    CHECK_FALSE(driver->get_is_moving());
+    rig.driver().halt();
+    CHECK_FALSE(rig.driver().get_is_moving());
+    rig.driver().move(3000);
+    CHECK(rig.driver().get_is_moving());
+    rig.driver().halt();
+    CHECK_FALSE(rig.driver().get_is_moving());
     CHECK(state->status_reads == reads_before);
 
     // The poll that follows measures the device again.
-    tick(clock, kTick, kBound);
+    rig.tick();
     CHECK(state->status_reads == reads_before + 1);
-
-    driver->set_connected(false);
 }
 
 // Runs `act` (a Move or Halt) with its exchange held open and a poll queued behind it, then releases both.
@@ -195,23 +184,23 @@ void act_during_poll(const std::shared_ptr<FakeHidState>& state, alpacacore::tes
 // of an empty frame write (the position reads 2000 after the failed move).
 TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a failed move",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    REQUIRE(driver->get_position() == 1234);
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    REQUIRE(rig.driver().get_position() == 1234);
 
     state->fail_move = true;  // the device moves, the reply is lost
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->position = 5555;
     }
-    act_during_poll(state, clock, 0x36, [&] { CHECK_THROWS_AS(driver->move(2000), alpacacore::AlpacaException); });
-    const int overlapped = driver->get_position();
+    act_during_poll(state, rig.clock(), 0x36,
+                    [&] { CHECK_THROWS_AS(rig.driver().move(2000), alpacacore::AlpacaException); });
+    const int overlapped = rig.driver().get_position();
     CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
-    tick(clock, kTick, kBound);
-    CHECK(driver->get_position() == 5555);  // the next poll measured the device
-    CHECK(driver->get_is_moving());
-    driver->set_connected(false);
+    rig.tick();
+    CHECK(rig.driver().get_position() == 5555);  // the next poll measured the device
+    CHECK(rig.driver().get_is_moving());
 }
 
 // Same as the move twin: the overlapped poll's frame is real data, so 1234 or 5555 are both right.
@@ -219,75 +208,71 @@ TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a 
 // an empty frame write (the position reads 0 after the failed halt).
 TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a failed halt",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    driver->move(2000);
-    REQUIRE(driver->get_is_moving());
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    rig.driver().move(2000);
+    REQUIRE(rig.driver().get_is_moving());
 
     state->fail_halt = true;  // the device stops, the reply is lost
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->position = 5555;
     }
-    act_during_poll(state, clock, 0x37, [&] { CHECK_THROWS_AS(driver->halt(), alpacacore::AlpacaException); });
-    const int overlapped = driver->get_position();
+    act_during_poll(state, rig.clock(), 0x37,
+                    [&] { CHECK_THROWS_AS(rig.driver().halt(), alpacacore::AlpacaException); });
+    const int overlapped = rig.driver().get_position();
     CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
-    tick(clock, kTick, kBound);
-    CHECK(driver->get_position() == 5555);
-    CHECK_FALSE(driver->get_is_moving());  // the next poll measured the stop
-    driver->set_connected(false);
+    rig.tick();
+    CHECK(rig.driver().get_position() == 5555);
+    CHECK_FALSE(rig.driver().get_is_moving());  // the next poll measured the stop
 }
 
 // Falsified by: polled_state.h:201 poll_once() take begin_poll() after the device read instead of
 // before.
 TEST_CASE("Astroasis Focuser Driver - a poll that overlaps a write drops its frame",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
     state->move_reports_moving = false;
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    REQUIRE_FALSE(driver->get_is_moving());
+    (void)rig.connect();
+    REQUIRE_FALSE(rig.driver().get_is_moving());
 
     // The Move's write lands before the queued poll reads the device, which
     // still answers "not moving".
-    act_during_poll(state, clock, 0x36, [&] { driver->move(2000); });
+    act_during_poll(state, rig.clock(), 0x36, [&] { rig.driver().move(2000); });
 
     // The poll's frame (moving=false) was dropped; the write-through stands.
-    CHECK(driver->get_is_moving());
-    tick(clock, kTick, kBound);
-    CHECK_FALSE(driver->get_is_moving());  // the next poll publishes normally
-
-    driver->set_connected(false);
+    CHECK(rig.driver().get_is_moving());
+    rig.tick();
+    CHECK_FALSE(rig.driver().get_is_moving());  // the next poll publishes normally
 }
 
 // Falsified by: astroasis_focuser_driver.cpp:set_connected() delete protocol_.disconnect() in the MaxStep catch at
 // connect.
 TEST_CASE("Astroasis Focuser Driver - failed MaxStep read at connect closes the handle", "[astroasis][focuser][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = make_fake_focuser(state, clock);
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
     state->fail_config = true;
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
-    CHECK_FALSE(driver->get_connected());
+    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(rig.driver().get_connected());
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         CHECK(state->closes >= 1);
         state->fail_config = false;
     }
-    driver->set_connected(true);
-    CHECK(driver->get_connected());
-    CHECK(driver->get_max_step() == 50000);
-    driver->set_connected(false);
+    rig.driver().set_connected(true);
+    CHECK(rig.driver().get_connected());
+    CHECK(rig.driver().get_max_step() == 50000);
 }
 
 // Falsified by: astroasis_focuser_driver.cpp:39 kFaultThreshold raised from 3 to 100 (the link never latches).
 TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link latches",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    REQUIRE(driver->get_position() == 1234);
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    REQUIRE(rig.driver().get_position() == 1234);
 
     {
         std::lock_guard<std::mutex> lock(state->mutex);
@@ -297,22 +282,22 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
     // Below the threshold the last good frame is still served (decision 0010:
     // stale is never a refusal); a failed poll publishes nothing.
     for (int i = 0; i < 2; ++i) {
-        tick(clock, kTick, kBound);
-        CHECK(driver->get_position() == 1234);
+        rig.tick();
+        CHECK(rig.driver().get_position() == 1234);
     }
-    CHECK(driver->get_link_fault().empty());
+    CHECK(rig.driver().get_link_fault().empty());
     // The third failed poll latches: DriverException naming the link, Connected untouched.
-    tick(clock, kTick, kBound);
+    rig.tick();
     try {
-        (void)driver->get_position();
+        (void)rig.driver().get_position();
         FAIL("expected a throw");
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
-    CHECK(driver->get_connected());
-    CHECK(driver->get_max_step() == 50000);  // static metadata keeps answering
-    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK(rig.driver().get_connected());
+    CHECK(rig.driver().get_max_step() == 50000);  // static metadata keeps answering
+    CHECK_FALSE(rig.driver().get_link_fault().empty());
 
     // The device answers again but no poll has run: Move is refused by the
     // latch (nothing reaches the device), Halt is never refused.
@@ -325,22 +310,20 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
         halts_before = state->halts;
     }
     try {
-        driver->move(2000);
+        rig.driver().move(2000);
         FAIL("expected a throw");
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
-    CHECK_NOTHROW(driver->halt());
+    CHECK_NOTHROW(rig.driver().halt());
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         CHECK(state->moves == moves_before);
         CHECK(state->halts == halts_before + 1);
     }
-    tick(clock, kTick, kBound);
-    CHECK(driver->get_position() == 9999);  // recovers with no reconnect
-    CHECK(driver->get_link_fault().empty());
-
-    driver->set_connected(false);
+    rig.tick();
+    CHECK(rig.driver().get_position() == 9999);  // recovers with no reconnect
+    CHECK(rig.driver().get_link_fault().empty());
 }
 
 // Falsified by: astroasis_protocol_wrapper.cpp send_command() drop the link_lost_ latch on a failed hid write;
@@ -348,78 +331,77 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
 // astroasis_focuser_driver.cpp get_link_fault() move the HID transport check after state_.fault().
 TEST_CASE("Astroasis Focuser Driver - a removed transport drops Connected at once, not after the staleness bound",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    REQUIRE(driver->get_connected());
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    REQUIRE(rig.driver().get_connected());
 
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->removed = true;
     }
     // One failed poll, far short of the 3-failure fault latch and the 30 s bound.
-    tick(clock, kTick, kBound);
-    CHECK_FALSE(driver->get_connected());
-    CHECK(driver->get_link_fault() == "HID transport error");
-    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    rig.tick();
+    CHECK_FALSE(rig.driver().get_connected());
+    CHECK(rig.driver().get_link_fault() == "HID transport error");
+    require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
 
     // The next poll releases the transport instead of writing to the removed node again.
-    tick(clock, kTick, kBound);
+    rig.tick();
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         CHECK(state->closes >= 1);
     }
     // Further failed polls latch the poll fault, which must not replace the transport text (decision 0009, point 5).
-    tick(clock, kTick, kBound);
-    tick(clock, kTick, kBound);
-    tick(clock, kTick, kBound);
-    CHECK(driver->get_link_fault() == "HID transport error");
+    rig.tick();
+    rig.tick();
+    rig.tick();
+    CHECK(rig.driver().get_link_fault() == "HID transport error");
 
     // Connected=true over the dead link reconnects instead of taking the idempotency return.
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->removed = false;
     }
-    driver->set_connected(true);
-    CHECK(driver->get_connected());
-    CHECK(driver->get_position() == 1234);
-    driver->set_connected(false);
+    rig.driver().set_connected(true);
+    CHECK(rig.driver().get_connected());
+    CHECK(rig.driver().get_position() == 1234);
 }
 
 // Falsified by: polled_state.h:206 latch_lost() (note_failure() calls it, :253) drop the
 // lost_.exchange(true) latch past kLinkStalenessBound.
 TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound drops Connected",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    REQUIRE(driver->get_position() == 1234);
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    REQUIRE(rig.driver().get_position() == 1234);
 
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->dead = true;
     }
-    tick(clock, kTick, kBound);
-    CHECK(driver->get_position() == 1234);  // stale, still served
-    CHECK(driver->get_connected());
+    rig.tick();
+    CHECK(rig.driver().get_position() == 1234);  // stale, still served
+    CHECK(rig.driver().get_connected());
 
-    clock.advance(std::chrono::seconds(31));
-    REQUIRE(clock.wait_for_woken_settled(kBound));
-    CHECK_FALSE(driver->get_connected());
-    CHECK_THROWS_AS(driver->get_position(), alpacacore::AlpacaException);
+    rig.clock().advance(std::chrono::seconds(31));
+    REQUIRE(rig.clock().wait_for_woken_settled(kBound));
+    CHECK_FALSE(rig.driver().get_connected());
+    CHECK_THROWS_AS(rig.driver().get_position(), alpacacore::AlpacaException);
     try {
-        (void)driver->get_is_moving();
+        (void)rig.driver().get_is_moving();
         FAIL("expected a throw");
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
     }
-    CHECK(driver->get_device_state().empty());
-    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK(rig.driver().get_device_state().empty());
+    CHECK_FALSE(rig.driver().get_link_fault().empty());
     const auto deadline = std::chrono::steady_clock::now() + kBound;
-    while (clock.waiter_count() != 0 && std::chrono::steady_clock::now() < deadline) {
+    while (rig.clock().waiter_count() != 0 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    CHECK(clock.waiter_count() == 0);  // the poll ended with the loss
+    CHECK(rig.clock().waiter_count() == 0);  // the poll ended with the loss
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         CHECK(state->closes >= 1);  // the transport was released
@@ -431,22 +413,20 @@ TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound dro
         state->dead = false;
         state->position = 777;
     }
-    driver->set_connected(true);
-    CHECK(driver->get_connected());
-    CHECK(driver->get_position() == 777);
-    CHECK(driver->get_link_fault().empty());
-
-    driver->set_connected(false);
+    rig.driver().set_connected(true);
+    CHECK(rig.driver().get_connected());
+    CHECK(rig.driver().get_position() == 777);
+    CHECK(rig.driver().get_link_fault().empty());
 }
 
 // Falsified by: astroasis_focuser_driver.cpp:308 move() replace served_frame() with a throw_if_faulted()-only gate
 // (a Move against a frame older than the staleness bound reaches the wire).
 TEST_CASE("Astroasis Focuser Driver - a Move against a frame older than the staleness bound is refused",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    REQUIRE(driver->get_position() == 1234);
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    REQUIRE(rig.driver().get_position() == 1234);
 
     // Park the poll inside its status exchange, so it cannot latch the loss
     // itself, and let the held frame age past util::kLinkStalenessBound (30 s).
@@ -455,12 +435,12 @@ TEST_CASE("Astroasis Focuser Driver - a Move against a frame older than the stal
         state->gate_cmd = 0x32;
         state->gate_entered = false;
     }
-    clock.advance(kTick);
+    rig.clock().advance(kTick);
     {
         std::unique_lock<std::mutex> lock(state->mutex);
         REQUIRE(state->cv.wait_for(lock, kBound, [&] { return state->gate_entered; }));
     }
-    clock.advance(std::chrono::seconds(31));
+    rig.clock().advance(std::chrono::seconds(31));
 
     // The Move runs on its own thread: with the gate removed it would reach
     // the wire and wait behind the held exchange.
@@ -468,7 +448,7 @@ TEST_CASE("Astroasis Focuser Driver - a Move against a frame older than the stal
     int code = 0;
     std::thread mover([&] {
         try {
-            driver->move(2000);
+            rig.driver().move(2000);
         } catch (const alpacacore::AlpacaException& ex) {
             code = ex.error_code();
         }
@@ -490,21 +470,18 @@ TEST_CASE("Astroasis Focuser Driver - a Move against a frame older than the stal
         std::lock_guard<std::mutex> lock(state->mutex);
         CHECK(state->moves == 0);  // no move command was sent
     }
-    CHECK_FALSE(driver->get_connected());  // the refused Move latched the loss
-
-    driver->set_connected(false);
+    CHECK_FALSE(rig.driver().get_connected());  // the refused Move latched the loss
 }
 
 // Falsified by: astroasis_focuser_driver.cpp:device_state_age() delete the override (the stamp is the request time).
 TEST_CASE("Astroasis Focuser Driver - DeviceState TimeStamp is when the frame was measured",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
+    AstroasisRig rig;
+    (void)rig.connect();
 
-    clock.advance(std::chrono::milliseconds(90));  // under the 100 ms period: no poll, the frame ages
+    rig.clock().advance(std::chrono::milliseconds(90));  // under the 100 ms period: no poll, the frame ages
     std::string stamp;
-    for (const auto& entry : driver->get_device_state()) {
+    for (const auto& entry : rig.driver().get_device_state()) {
         if (entry.name == "TimeStamp") stamp = std::get<std::string>(entry.value);
     }
     const auto taken = std::chrono::system_clock::now();
@@ -521,21 +498,19 @@ TEST_CASE("Astroasis Focuser Driver - DeviceState TimeStamp is when the frame wa
     INFO("TimeStamp is " << behind.count() << " ms behind now");
     CHECK(behind >= std::chrono::milliseconds(60));  // the 90 ms frame age; a request-time stamp is ~0
     CHECK(behind < std::chrono::milliseconds(5000));
-
-    driver->set_connected(false);
 }
 
 // Falsified by: astroasis_focuser_driver.cpp:set_connected():210 delete state_.stop_and_join() on disconnect.
 TEST_CASE("Astroasis Focuser Driver - disconnect stops the poll", "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    driver->set_connected(false);
-    CHECK(clock.waiter_count() == 0);
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    rig.driver().set_connected(false);
+    CHECK(rig.clock().waiter_count() == 0);
     const int reads = state->status_reads;
-    clock.advance(kTick);
+    rig.clock().advance(kTick);
     CHECK(state->status_reads == reads);
-    CHECK_THROWS_AS(driver->get_position(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(rig.driver().get_position(), alpacacore::AlpacaException);
 }
 
 TEST_CASE("Astroasis Focuser Driver - Defaults", "[astroasis][focuser][unit]") {
@@ -701,38 +676,34 @@ TEST_CASE("Astroasis Focuser Driver - by-path factory builds the hidapi transpor
 // first state poll was lost succeeds with no frame).
 TEST_CASE("Astroasis Focuser Driver - a getter after a successful connect never throws DriverException",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
     state->fail_status = true;
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = make_fake_focuser(state, clock);
     // Both first polls are lost: the connect is refused, so no getter can run on a
     // session without a frame, and the refused connect leaves nothing behind.
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
-    CHECK_FALSE(driver->get_connected());
+    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(rig.driver().get_connected());
     CHECK(state->closes == 1);  // the refused connect released the transport
     state->fail_status = false;
     // The port was released: a connect with replies back succeeds and serves a frame.
-    REQUIRE_NOTHROW(driver->set_connected(true));
-    CHECK_NOTHROW(driver->get_position());
-    CHECK_NOTHROW(driver->get_is_moving());
-    driver->set_connected(false);
+    REQUIRE_NOTHROW(rig.driver().set_connected(true));
+    CHECK_NOTHROW(rig.driver().get_position());
+    CHECK_NOTHROW(rig.driver().get_is_moving());
 }
 
 // Falsified by: astroasis_protocol_wrapper.cpp:send_command() drop the link_lost_ latch on a failed hid read.
 TEST_CASE("Astroasis Focuser Driver - a failed HID read drops Connected at once while writes succeed",
           "[astroasis][focuser][snapshot][unit]") {
-    auto state = std::make_shared<FakeHidState>();
-    alpacacore::test::FakeTaskClock clock;
-    auto driver = connected_focuser(state, clock);
-    REQUIRE(driver->get_connected());
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    (void)rig.connect();
+    REQUIRE(rig.driver().get_connected());
 
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->read_fails = true;
     }
-    tick(clock, kTick, kBound);
-    CHECK_FALSE(driver->get_connected());
-    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
-
-    driver->set_connected(false);
+    rig.tick();
+    CHECK_FALSE(rig.driver().get_connected());
+    require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
 }

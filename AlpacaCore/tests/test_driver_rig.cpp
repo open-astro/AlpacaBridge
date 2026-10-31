@@ -115,8 +115,10 @@ private:
 // The smallest AlpacaDriver whose Connect starts a poll body that parks on the clock, as a real driver's does.
 class PollingStub : public alpacacore::AlpacaDriver {
 public:
-    PollingStub(FakeTaskClock& clock, bool polls) : clock_(clock), polls_(polls) {}
+    PollingStub(FakeTaskClock& clock, bool polls, std::atomic<bool>* disconnected = nullptr)
+        : clock_(clock), polls_(polls), disconnected_(disconnected) {}
     void set_connected(bool connected) override {
+        if (!connected && disconnected_) disconnected_->store(true);
         if (connected && polls_ && !poller_) {
             poller_ = std::make_unique<ToyPoller>(clock_, std::chrono::seconds(1));
         }
@@ -143,6 +145,7 @@ protected:
 private:
     FakeTaskClock& clock_;
     bool polls_;
+    std::atomic<bool>* disconnected_;
     bool connected_ = false;
     std::unique_ptr<ToyPoller> poller_;
 };
@@ -184,4 +187,79 @@ TEST_CASE("driver_rig - connect_and_park returns false when the poll never parks
     PollingStub driver(clock, false);
     CHECK_FALSE(connect_and_park(driver, clock, std::chrono::milliseconds(50)));
     CHECK(driver.get_connected());
+}
+
+namespace {
+
+struct StubFake {
+    int tag = 7;
+};
+
+using StubRig = PolledRig<StubFake, PollingStub>;
+constexpr RigTiming kRigTiming{std::chrono::seconds(1), std::chrono::seconds(5)};
+
+}  // namespace
+
+// Falsified by: PolledRig::connect() not waiting for the waiter (the CHECK on waiter_count() fails) or not calling
+// set_connected(true).
+TEST_CASE("driver_rig - PolledRig connect returns true and the poll is parked", "[driver_rig]") {
+    StubRig rig(kRigTiming, [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, true); });
+    CHECK_FALSE(rig.driver().get_connected());
+    CHECK(rig.connect());
+    CHECK(rig.driver().get_connected());
+    CHECK(rig.clock().waiter_count() == 1);
+}
+
+// Falsified by: PolledRig::connect() always returning true.
+TEST_CASE("driver_rig - PolledRig connect returns false when the poll never parks", "[driver_rig]") {
+    StubRig rig({std::chrono::seconds(1), std::chrono::milliseconds(50)},
+                [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, false); });
+    CHECK_FALSE(rig.connect());
+}
+
+// Falsified by: PolledRig::tick(n) ticking once.
+TEST_CASE("driver_rig - PolledRig tick(3) makes three laps", "[driver_rig]") {
+    StubRig rig(kRigTiming, [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, true); });
+    REQUIRE(rig.connect());
+    const auto before = rig.clock().now();
+    rig.tick(3);
+    CHECK(rig.clock().now() - before == 3 * kRigTiming.period);
+    CHECK(rig.clock().waiter_count() == 1);
+}
+
+// Falsified by: PolledRig::expect_error() swapping code and fn or dropping the code check.
+TEST_CASE("driver_rig - PolledRig expect_error accepts the expected code", "[driver_rig]") {
+    StubRig rig(kRigTiming, [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, false); });
+    rig.expect_error(AlpacaError::NotConnected, [] { throw AlpacaException("x", AlpacaError::NotConnected); });
+}
+
+// Falsified by: PolledRig::expect_error() not comparing the code.
+TEST_CASE("driver_rig - PolledRig expect_error fails on the wrong code", "[driver_rig][!shouldfail]") {
+    StubRig rig(kRigTiming, [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, false); });
+    rig.expect_error(AlpacaError::NotConnected, [] { throw AlpacaException("x", AlpacaError::InvalidValue); });
+}
+
+// Falsified by: ~PolledRig() without the set_connected(false).
+TEST_CASE("driver_rig - PolledRig destructor disconnects a connected driver", "[driver_rig]") {
+    std::atomic<bool> disconnected{false};
+    {
+        StubRig rig(kRigTiming,
+                    [&](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, true, &disconnected); });
+        REQUIRE(rig.connect());
+        CHECK_FALSE(disconnected.load());
+    }
+    CHECK(disconnected.load());
+}
+
+// Falsified by: PolledRig calling the factory with a copy of the fake or clock.
+TEST_CASE("driver_rig - PolledRig hands the factory its own fake and clock", "[driver_rig]") {
+    StubFake* seen_fake = nullptr;
+    FakeTaskClock* seen_clock = nullptr;
+    StubRig rig(kRigTiming, [&](StubFake& f, FakeTaskClock& c) {
+        seen_fake = &f;
+        seen_clock = &c;
+        return std::make_unique<PollingStub>(c, false);
+    });
+    CHECK(seen_fake == &rig.fake());
+    CHECK(seen_clock == &rig.clock());
 }
