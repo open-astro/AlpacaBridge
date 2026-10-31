@@ -766,6 +766,11 @@ int main() {
         };
         const std::string chunked = "5\r\nhello\r\n0\r\n\r\n";
         const std::string trailers[] = {body, chunked, chunked, chunked, chunked};
+        // The exact reason pins each case to the read_request() check that
+        // refuses it: Request::parse refusing the same line, or the trailer
+        // read as a second request, also ends in a 400 and a close.
+        const std::string reasons[] = {"Invalid header name", "Invalid header name", "Invalid header name",
+                                       "Invalid request line", "Invalid header name"};
         for (int i = 0; i < 5; ++i) {
             int fd = connect_local(port);
             EXPECT(fd >= 0);
@@ -775,6 +780,7 @@ int main() {
             send_all(fd, trailers[i]);
             std::string r = read_one_response(fd, carry);
             EXPECT(r.rfind("HTTP/1.1 400 ", 0) == 0);
+            EXPECT(r.substr(r.find("\r\n\r\n") + 4) == reasons[i]);
             EXPECT(peer_closed(fd, 2000));
             ::close(fd);
         }
