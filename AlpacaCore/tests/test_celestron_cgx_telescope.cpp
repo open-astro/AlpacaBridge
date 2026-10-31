@@ -555,9 +555,9 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop initiators return before ve
         const auto progress_early = progress.wait_for(100ms);
         auto tracking = std::async(std::launch::async, [&] { return driver->get_tracking(); });
         const auto tracking_early = tracking.wait_for(100ms);
-        // Tracking reads must wait through the complete ACK pair, rather than
-        // see stale true or a normal-dispatch "unknown" failure. Inspect the
-        // pending completion state during the scripted post-ACK deceleration.
+        // Tracking reads return during the ACK pair (decision 0016) with the
+        // state from before the stop, never a normal-dispatch "unknown" failure.
+        // Inspect the pending completion state during the scripted post-ACK deceleration.
         mount.release_reply_tail();
         const bool pending_during_ack = progress.get();
         const bool slewing = driver->get_slewing();
@@ -582,7 +582,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop initiators return before ve
         const bool no_encoder_reads =
             mount.count_command(0x10, 0x01) == ra_reads && mount.count_command(0x11, 0x01) == dec_reads;
         CHECK_NOTHROW(initiator.get());
-        CHECK(tracking_early == std::future_status::timeout);
+        CHECK(tracking_early == std::future_status::ready);
         CHECK_FALSE(tracking.get());
         REQUIRE(verifying);
         CHECK(returned == std::future_status::ready);
