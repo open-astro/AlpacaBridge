@@ -618,4 +618,22 @@ TEST_CASE("ZWO telescope clock - a pulse step is one clock wait, so one advance 
     CHECK(rig.mount.wait_for_count(":GD", positions + 1, 500ms));
 }
 
+// PIN (passes on the current code; must keep passing once the pulse body moves to an operation slot): an accepted
+// PulseGuide is never dropped because a slew superseded the pulse before it. Pulse, slew mid-step, pulse again:
+// the second pulse still reaches the mount.
+// Falsified by: pulse_guide() leaving a pulse queued behind a superseded drain body that never sends it.
+TEST_CASE("ZWO telescope clock - a pulse queued after a slew superseded the previous pulse is still sent (PIN)",
+          "[zwo][telescope][unit][clock][operation-slot]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 3000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    rig.driver->slew_to_coordinates_async(6.0, 30.0);  // mid-step: supersedes the pulse and clears its queue
+    CHECK(rig.mount.wait_for_count(":MS", 1, kReal));  // the slew reached the mount
+    rig.driver->pulse_guide(1, 500);
+    // Virtual time only: the superseded body wakes and the new pulse is drained.
+    rig.advance_until([&] { return rig.mount.count(":Mg") >= 2; }, 100ms, 10s);
+    CHECK(rig.mount.wait_for_count(":Mg", 2, kReal));
+}
+
 #endif  // !_WIN32
