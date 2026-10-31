@@ -407,9 +407,11 @@ TEST_CASE("ZWO dew heater switch over a fake SDK - destruction races an in-fligh
 // Telescope stress (audit follow-up, 3.0.1): the ZWO mount driver's worst
 // review findings were detached-thread lifecycle bugs — the GOTO setup
 // thread, the async disconnect teardown thread, and the poll/pulse threads
-// racing set_connected(false) and destruction. Those threads only exist on a
-// CONNECTED driver, so these tests connect through a FakeZwoMount (the
-// mount supplies the mandatory AM identity and valid telemetry).
+// racing set_connected(false) and destruction. Those bodies now run in
+// operation slots (goto_slot_, teardown_slot_, poll_operation_, pulse_slot_)
+// that only start on a CONNECTED driver, so these tests connect through a
+// FakeZwoMount (the mount supplies the mandatory AM identity and valid
+// telemetry).
 // The operate callback drives the exact newly-fixed paths: async GOTO and
 // pulse guiding racing disconnects.
 #ifndef _WIN32
@@ -474,8 +476,8 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
         guard([&] { static_cast<void>(scope.get_target_declination()); });
         guard([&] { static_cast<void>(scope.get_guide_rate()); });
         guard([&] { scope.set_utc_date(std::chrono::system_clock::now()); });
-        // The newly-fixed thread paths: async GOTO (goto_thread_) and pulse
-        // guiding (pulse thread queue) issued while other threads disconnect.
+        // The slot-run paths: async GOTO (goto_slot_) and pulse guiding
+        // (pulse_slot_ queue drain) issued while other threads disconnect.
         guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
         guard([&] { scope.sync_to_coordinates(6.0, 25.0); });
         guard([&] { scope.set_target_declination(30.0); });
@@ -577,9 +579,9 @@ TEST_CASE("ZWO mount - destruction mid-operation (GOTO/pulse threads live)", "[z
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.0, 20.0));
         REQUIRE_NOTHROW(driver->pulse_guide(0, 300));
         if ((i % 2) != 0) {
-            // Half the time the async teardown thread is also live at
-            // destruction — the destructor must join GOTO, teardown, poll and
-            // pulse threads, in that order, every time.
+            // Half the time the disconnect teardown body is also live at
+            // destruction — the destructor must reap the GOTO, teardown, pulse
+            // and poll slots, in that order, every time.
             driver->disconnect();
         }
         driver.reset();

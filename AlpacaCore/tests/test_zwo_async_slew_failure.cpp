@@ -1075,8 +1075,8 @@ TEST_CASE("ZWO async - redundant Connected=true preserves a stored slew failure"
 
 // Operation slot, GOTO family: a new GOTO replaces the previous body without waiting for it. The previous body sits
 // in a mount transaction that has not been answered; the HTTP thread must not wait for that answer.
-// Falsified by: zwo_telescope_driver.cpp slew_to_target_async() joining the previous goto_thread_ before the new
-// start (the join-then-spawn), so the second call returns only after the held ":Sr" is answered or times out.
+// Falsified by: zwo_telescope_driver.cpp slew_to_target_async() calling goto_slot_.cancel_all_and_join() before
+// goto_slot_.start(), so the second call returns only after the held ":Sr" is answered or times out.
 TEST_CASE("ZWO async - a second GOTO returns while the first body is blocked in a mount transaction",
           "[zwo][telescope][async][operation-slot]") {
     Rig rig(5000);
@@ -1089,7 +1089,7 @@ TEST_CASE("ZWO async - a second GOTO returns while the first body is blocked in 
     REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
 
     auto second = std::async(std::launch::async, [&] { driver->slew_to_coordinates_async(6.5, 30.0); });
-    // Real-time bound on a thread handoff, not a driver timer: the join-then-spawn waits for the 5 s link timeout.
+    // Real-time bound on a thread handoff, not a driver timer: a join before the start waits for the 5 s link timeout.
     const bool returned = second.wait_for(std::chrono::milliseconds(1000)) == std::future_status::ready;
     mount.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the held reply
     second.wait();
