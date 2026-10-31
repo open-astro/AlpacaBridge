@@ -1117,4 +1117,57 @@ TEST_CASE("ZWO async - Disconnect during a slew sends no stop and leaves the mou
     CHECK(mount.slewing());
 }
 
+// open-astro#720 through the send gate: Park or a jog that lands while the GOTO body waits for the mount's ":Sr" reply
+// waits for that one exchange, then sends its own command, and nothing the old body would send follows it. A PIN: the
+// join on the thread-based code gives the same order and the gate must keep it.
+// Falsified by: removing the goto_cancel_ check before set_target_dec (the fenced body sends ":Sd").
+TEST_CASE("ZWO async - Park or a jog during a held GOTO target write waits one exchange and sends after it (PIN)",
+          "[zwo][telescope][async][operation-slot]") {
+    const bool park = GENERATE(true, false);
+    CAPTURE(park);
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    const auto is_fence = [&](const std::string& command) {
+        return park ? command == ":hP" : (command.starts_with(":Me") || command.starts_with(":Mw"));
+    };
+    const auto fence_sent = [&] {
+        const auto all = mount.commands();
+        return std::any_of(all.begin(), all.end(), is_fence);
+    };
+
+    mount.hold_reply(":Sr");
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
+    auto fence = std::async(std::launch::async, [&] {
+        if (park) {
+            driver->park();
+        } else {
+            driver->move_axis(0, 1.0);
+        }
+    });
+    // The fencing command queues behind the exchange in flight and never reaches the mount before it ends.
+    const bool sent_while_held = wait_until(fence_sent, 200);
+    mount.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the held reply
+    const bool returned = fence.wait_for(kInitiatorBudget) == std::future_status::ready;
+    fence.wait();
+    CHECK_FALSE(sent_while_held);
+    CHECK(returned);
+    const int setup_at_return = setup_count(mount);
+    CHECK(setup_sent_after_return(mount, setup_at_return) == 0);
+
+    const auto all = mount.commands();
+    const auto fence_at = std::find_if(all.begin(), all.end(), is_fence);
+    REQUIRE(fence_at != all.end());
+    const auto sr_at =
+        std::find_if(all.begin(), all.end(), [](const std::string& command) { return command.starts_with(":Sr"); });
+    CHECK(sr_at < fence_at);
+    CHECK(mount.count(":Sd") == 0);
+    CHECK(mount.count(":MS") == 0);
+    if (!park) REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
