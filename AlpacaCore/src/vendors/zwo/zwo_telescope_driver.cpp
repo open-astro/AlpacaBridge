@@ -2802,8 +2802,11 @@ private:
     void run_pulse_task(const PulseTask& task, util::OperationContext& ctx) {
         auto& protocol = protocol_;
 
+        // A task popped before reset_position_offsets() cancelled the slot must not re-extend IsPulseGuiding or
+        // send its :Mg after the reset; both checks run under mutex_, which the cancel holds (0006 Rule 3).
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (ctx.stop_reason() != util::StopReason::None) return;
             const auto now = clock_.now();
             const auto end = now + std::chrono::milliseconds(task.duration_ms) + kPulseGuideHold;
             if (end > pulse_guiding_end_) {
@@ -2821,7 +2824,7 @@ private:
             const int step = std::min(remaining_ms, 3000);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_.load()) return;
+                if (!connected_.load() || ctx.stop_reason() != util::StopReason::None) return;
             }
             try {
                 protocol.pulse_guide(task.direction, step);
