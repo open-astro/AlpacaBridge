@@ -76,6 +76,7 @@ CI_APT_QUALIFIERS = "arch=arm64&distro=ubuntu-24.04"
 CONFORMU_DOC = ".claude/commands/conformu.md"
 CONFORMU_BUILD_RE = re.compile(r"`(\d+\.\d+\.\d+)\.\d+, Build time:")
 CONFORMU_BETA_URL = "download.ascom-standards.org/beta/"
+CONFORMU_RC_RE = re.compile(r"/releases/download/v\d+\.\d+\.\d+(-rc\.\d+)/")
 DETECTOR = {"name": "alpacabridge-dependency-snapshot", "version": "1",
             "url": "https://github.com/open-astro/AlpacaBridge/blob/main/scripts/dependency_snapshot.py"}
 # Packages the installed daemon needs that debian/control's Depends does not name, each with the
@@ -213,7 +214,8 @@ def parse_conformu(text: str) -> tuple[list[str], list[str]]:
     """Return (purls, errors) for the ConformU build /conformu pins.
 
     The version carries ``-beta`` only while the doc installs from the ASCOM beta download
-    (``CONFORMU_BETA_URL``); a pin on a GitHub release reports the bare version.
+    (``CONFORMU_BETA_URL``) and ``-rc.N`` while it installs a GitHub pre-release; a pin on a
+    final GitHub release reports the bare version.
     """
     builds = {m.group(0)[1:-len(", Build time:")]: m for m in CONFORMU_BUILD_RE.finditer(text)}
     if not builds:
@@ -224,7 +226,8 @@ def parse_conformu(text: str) -> tuple[list[str], list[str]]:
         return [], [f"{CONFORMU_DOC}: more than one pinned ConformU build ({', '.join(sorted(builds))}); "
                     "keep the '`X.Y.Z.N, Build time:`' form for the standard build only"]
     m = next(iter(builds.values()))
-    suffix = "-beta" if CONFORMU_BETA_URL in text else ""
+    rc = CONFORMU_RC_RE.search(text)  # the build line has no -rc.N: the release URL names it
+    suffix = "-beta" if CONFORMU_BETA_URL in text else rc.group(1) if rc else ""
     return [f"pkg:github/ASCOMInitiative/ConformU@{m.group(1)}{suffix}"], []
 
 
@@ -847,6 +850,9 @@ def self_test() -> int:
     # Still on the ASCOM beta download: a beta.
     beta = cu_doc.replace("github.com/ASCOMInitiative/ConformU/releases/download/v4.5.2/", "download.ascom-standards.org/beta/")
     assert parse_conformu(beta) == (["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"], [])
+    # A GitHub pre-release asset: the version carries its -rc.N.
+    rc_doc = cu_doc.replace("download/v4.5.2/", "download/v4.6.0-rc.1/").replace("4.5.2.56139", "4.6.0.56430")
+    assert parse_conformu(rc_doc) == (["pkg:github/ASCOMInitiative/ConformU@4.6.0-rc.1"], [])
     # Two different pinned builds: the doc is ambiguous, so it is an error, not the first one.
     cu, errs = parse_conformu("older `4.5.1.54507, Build time: Thu` here\n" + cu_doc)
     assert cu == [] and len(errs) == 1 and "4.5.1.54507" in errs[0] and "4.5.2.56139" in errs[0], errs
