@@ -901,11 +901,16 @@ constexpr int kRequestDeadlineSeconds = 120;
 
 // Upper bound on how long one response may take to send. SO_SNDTIMEO only
 // bounds a send that makes no progress, so a peer that never reads (or reads a
-// few bytes per interval) would otherwise pin a worker for good. Fixed, not a
-// config key: a 4 MiB ImageBytes frame needs seconds on the slowest link we
-// serve, so 120 s is generous, and the per-IP cap bounds how many a host can
-// stall. Past it the connection is closed.
+// few bytes per interval) would otherwise pin a worker for good. The bound is
+// kSendDeadlineSeconds or the body's size at kSendMinBytesPerSecond, whichever
+// is longer (util::send_budget): a full-frame image is far larger than any
+// fixed bound covers on a slow link (a 61 MP sensor is about 122 MB as
+// ImageBytes and 350 MB or more as ImageArray JSON, and a Pi hotspot or a
+// 2.4 GHz link delivers 1 to 3 MB/s), so a client that keeps reading at the
+// floor rate always gets the whole image. The per-IP cap bounds how many a
+// host can hold. Past the bound the connection is closed.
 constexpr int kSendDeadlineSeconds = 120;
+constexpr std::size_t kSendMinBytesPerSecond = std::size_t{64} * 1024;
 
 // How long a keep-alive connection may sit idle between requests before the
 // worker gives it up. Persistent connections matter for timing: ConformU's
@@ -953,7 +958,9 @@ void send_error(util::SocketHandle socket_fd, int status, const char* reason, co
     const std::string& response_body = error_response.body();
     util::socket_send_allv(socket_fd, response_headers.data(), response_headers.size(), response_body.data(),
                            response_body.size(),
-                           std::chrono::steady_clock::now() + std::chrono::seconds(kSendDeadlineSeconds),
+                           std::chrono::steady_clock::now() +
+                               util::send_budget(response_headers.size() + response_body.size(),
+                                                 std::chrono::seconds(kSendDeadlineSeconds), kSendMinBytesPerSecond),
                            std::chrono::seconds(kSocketTimeoutSeconds));
 }
 
@@ -1279,10 +1286,12 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
     // do not require a second full-sized HTTP response string.
     const std::string response_headers = response.to_header_string();
     const std::string& response_body = response.body();
+    const std::size_t response_bytes = response_headers.size() + response_body.size();
     const auto send_deadline =
         std::chrono::steady_clock::now() +
-        (send_deadline_.count() > 0 ? send_deadline_
-                                    : std::chrono::milliseconds(std::chrono::seconds(kSendDeadlineSeconds)));
+        (send_deadline_.count() > 0
+             ? util::send_budget(response_bytes, send_deadline_, send_min_bytes_per_second_)
+             : util::send_budget(response_bytes, std::chrono::seconds(kSendDeadlineSeconds), kSendMinBytesPerSecond));
     if (!util::socket_send_allv(conn.fd, response_headers.data(), response_headers.size(), response_body.data(),
                                 response_body.size(), send_deadline,
                                 send_stall_.count() > 0

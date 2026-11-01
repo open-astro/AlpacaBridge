@@ -27,6 +27,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -88,6 +89,21 @@ inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
     tv.tv_sec = seconds;
     tv.tv_usec = 0;
     return setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
+}
+
+// Time budget for sending `bytes`: `base`, or the time `bytes` take at
+// `min_bytes_per_second` when that is longer, so a large image download on a
+// slow link that keeps reading is never cut off by a fixed bound. A rate of 0
+// means no scaling (the budget is `base`).
+inline std::chrono::milliseconds send_budget(std::size_t bytes, std::chrono::milliseconds base,
+                                             std::size_t min_bytes_per_second) {
+    if (min_bytes_per_second == 0) {
+        return base;
+    }
+    // Round up; `bytes` is at most a few hundred MB, so bytes * 1000 cannot overflow 64 bits.
+    const auto scaled = static_cast<std::chrono::milliseconds::rep>(
+        (static_cast<std::uint64_t>(bytes) * 1000 + min_bytes_per_second - 1) / min_bytes_per_second);
+    return std::max(base, std::chrono::milliseconds(scaled));
 }
 
 // Send two buffers as one logical write without concatenating them. Keeping

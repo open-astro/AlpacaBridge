@@ -99,16 +99,21 @@ public:
     int listener_fd_for_test() const { return static_cast<int>(server_fd_.load()); }
 
 #ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
-    // Test-only: shorten the per-response send deadline (120 s), the send
-    // no-progress bound (30 s, when `stall` is above zero) and, when
-    // `send_buffer_bytes` is above zero, the SO_SNDBUF of each accepted
-    // socket, so a test can stall a send on a body that fits no buffer
-    // without waiting out the production bound. Set before start().
+    // Test-only: shorten the per-response send deadline (120 s, or the
+    // body's size at 64 KiB/s when longer), the send no-progress bound (30 s,
+    // when `stall` is above zero) and, when `send_buffer_bytes` is above zero,
+    // the SO_SNDBUF of each accepted socket, so a test can stall a send on a
+    // body that fits no buffer without waiting out the production bound.
+    // `min_bytes_per_second` scales `deadline` with the response size the way
+    // production does (util::send_budget); 0 keeps `deadline` fixed. Set
+    // before start().
     void set_send_limits_for_test(std::chrono::milliseconds deadline, int send_buffer_bytes,
-                                  std::chrono::milliseconds stall = std::chrono::milliseconds(0)) {
+                                  std::chrono::milliseconds stall = std::chrono::milliseconds(0),
+                                  std::size_t min_bytes_per_second = 0) {
         send_deadline_ = deadline;
         send_stall_ = stall;
         send_buffer_bytes_ = send_buffer_bytes;
+        send_min_bytes_per_second_ = min_bytes_per_second;
     }
 #endif
 
@@ -287,6 +292,9 @@ private:
     std::chrono::milliseconds send_deadline_{0};
     // Send no-progress override; zero means kSocketTimeoutSeconds.
     std::chrono::milliseconds send_stall_{0};
+    // Throughput floor that scales send_deadline_ with the response size
+    // when the test hook set one; zero keeps the override fixed.
+    std::size_t send_min_bytes_per_second_{0};
     int send_buffer_bytes_{0};
 
     void run_server();
