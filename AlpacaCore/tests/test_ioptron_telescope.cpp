@@ -13,6 +13,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -28,6 +29,8 @@
 #include <functional>
 #include <future>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -581,7 +584,9 @@ TEST_CASE("iOptron Telescope Driver - three consecutive failed reads latch the f
     CHECK(contains(sync_failure(*driver), kReadFailure));
     CHECK(contains(sync_failure(*driver), kReadFailure));  // the third in a row latches
 
-    // Latched: members that run the connection check refuse with the same message, even once the link answers.
+    // Latched: members that run the connection check refuse with the same message. The mount answers again here, but a
+    // write never probes, so the latch holds until a probing getter runs (at most one probe every 5 s,
+    // kFaultProbeInterval).
     mount.set_fail_reads(false);
     CHECK(contains(sync_failure(*driver), kLatched));
     CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
@@ -658,6 +663,567 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fa
     require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
 
     driver->set_connected(false);
+}
+
+// ── Decision 0009: a pulled cable loses the link at once (issue #1723) ───────
+//
+// The serial cases run on the pty fake (PtyIoptronMount) with a FakeTaskClock and no site or time sync on connect,
+// so the clock-sync body sends nothing and every driver wait is stepped by advance(). The fault cases run on the TCP
+// fake, whose hangups stay a DriverException for the latch.
+namespace {
+
+namespace io = alpacacore::vendor::ioptron;
+namespace AlpacaError = alpacacore::AlpacaError;
+using alpacacore::test::FakeTaskClock;
+using alpacacore::test::PtyIoptronMount;
+
+io::ConnectionInfo serial_endpoint(const std::string& path) {
+    io::ConnectionInfo info;
+    info.type = io::ConnectionType::Serial;
+    info.port_path = path;
+    return info;
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> link_driver(const io::ConnectionInfo& info, FakeTaskClock& clock) {
+    return io::create_ioptron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt,
+                                                  /*sync_time_on_connect=*/false, clock);
+}
+
+std::function<bool(const std::string&)> on_command(std::string prefix) {
+    return [prefix = std::move(prefix)](const std::string& cmd) { return cmd.rfind(prefix, 0) == 0; };
+}
+
+// Real-time bound for the fakes' I/O threads only; every driver wait runs on the fake clock.
+bool wait_until(const std::function<bool()>& done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return true;
+}
+
+// Decision 0009 rule 3, and rule 5 while the reason is kept.
+void require_lost(alpacacore::TelescopeDriver& driver, std::string_view reason) {
+    CHECK_FALSE(driver.get_connected());
+    CHECK(driver.get_device_state().empty());
+    CHECK_FALSE(io::iOptronProtocolWrapper::instance().is_connected());  // the port is released
+    require_alpaca_error([&] { (void)driver.get_right_ascension(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_slewing(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_at_park(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_tracking(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_is_pulse_guiding(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver.abort_slew(); }, AlpacaError::NotConnected);
+    CHECK(driver.get_supported_actions().empty());
+    CHECK_FALSE(driver.can_action("gps_status"));
+    CHECK(contains(driver.get_link_fault(), reason));
+}
+
+// Three forced position reads that fail latch the fault (#728) on the TCP fake.
+void latch_fault(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeIoptronMount& mount) {
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(contains(sync_failure(driver), kReadFailure));
+    }
+    REQUIRE(contains(sync_failure(driver), kLatched));
+}
+
+}  // namespace
+
+TEST_CASE("iOptron Link - a hangup on a command's reply read loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug_on(on_command(":GEP#"));
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 20.0); }, AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - EIO on a command write loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug();
+    require_alpaca_error([&] { driver->set_tracking(false); }, AlpacaError::NotConnected);
+    require_lost(*driver, "serial link lost (write)");
+}
+
+TEST_CASE("iOptron Link - EIO on a command write that waits for a reply loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    clock.advance(std::chrono::seconds(31));  // past the connect's cache grace: RightAscension reads on the wire
+    mount.unplug();
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, AlpacaError::NotConnected);
+    require_lost(*driver, "serial link lost (write)");
+}
+
+TEST_CASE("iOptron Link - a hangup in a Park's ack drain loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // :MP1# is a blind command: its ack is optional, but a hangup while waiting for it is not silence.
+    mount.unplug_on(on_command(":MP1#"));
+    require_alpaca_error([&] { driver->park(); }, AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - a hangup on the park position read after :MP1# loses the link in that Park",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount("0036");  // HAE29C: Park reads the park position for its finalizer
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug_on(on_command(":GPC#"));
+    require_alpaca_error([&] { driver->park(); }, AlpacaError::NotConnected);
+    CHECK(mount.model().count(":MP1#") == 1);
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - a hangup in the wedged-park finalizer loses the link instead of serving AtPark",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount("0036");  // HAE29C: Park arms the finalizer for a mount that stays "slewing"
+    mount.model().set_park_position_reply("00000000000000000#");
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->park());
+
+    // The park slew is over but the firmware still says slewing; the next status read (past the connect's 30 s
+    // cache grace) runs the finalizer, whose Alt/Az read meets the pull. The status read just before it must not be
+    // served as AtPark false.
+    mount.model().set_system_status(2);
+    clock.advance(std::chrono::seconds(31));
+    mount.unplug_on(on_command(":GAC#"));
+    require_alpaca_error([&] { (void)driver->get_at_park(); }, AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - a hangup on a client's Slewing poll loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    clock.advance(std::chrono::seconds(31));  // past the connect's cache grace: Slewing reads :GLS#
+    mount.unplug_on(on_command(":GLS#"));
+    require_alpaca_error([&] { (void)driver->get_slewing(); }, AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - a hangup on a site read with a cached site loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->get_site_latitude());
+
+    // Past the site cache's 60 s: a failed read would serve the cached site, but not after a pulled cable.
+    clock.advance(std::chrono::seconds(61));
+    mount.unplug_on(on_command(":GUT#"));
+    require_alpaca_error([&] { (void)driver->get_site_latitude(); }, AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - a hangup in AbortSlew, Unpark or an Alt/Az read loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    struct Pull {
+        const char* command;
+        std::function<void(alpacacore::TelescopeDriver&)> call;
+    };
+    const std::vector<Pull> pulls = {
+        {":Q#", [](alpacacore::TelescopeDriver& d) { d.abort_slew(); }},
+        {":MP0#", [](alpacacore::TelescopeDriver& d) { d.unpark(); }},
+        {":GAC#", [](alpacacore::TelescopeDriver& d) { (void)d.get_altitude(); }},
+    };
+    for (const auto& pull : pulls) {
+        INFO(pull.command);
+        FakeTaskClock clock;
+        PtyIoptronMount mount;
+        auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        clock.advance(std::chrono::seconds(31));  // past the connect's cache grace
+        mount.unplug_on(on_command(pull.command));
+        require_alpaca_error([&] { pull.call(*driver); }, AlpacaError::NotConnected);
+        REQUIRE(mount.unplugged());
+        require_lost(*driver, "serial link lost (hangup)");
+    }
+}
+
+TEST_CASE("iOptron Link - a pull mid-slew ends the slew body and loses the link",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug_on(on_command(":MS1#"));
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_until([&] { return !driver->get_connected(); }));
+    require_lost(*driver, "serial link lost (hangup)");
+    // The body ended on its own (no hang); Disconnect reaps it and the session ends cleanly.
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("iOptron Link - a pull during the GOTO settle read loses the link, not Slewing false",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;  // HAE16 (0012): Slewing re-measures the RA after a GOTO lands
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_until([&] { return mount.model().count(":MS1#") == 1; }));
+    mount.unplug_on(on_command(":GEP#"));
+    // Poll Slewing through the 5 s post-dispatch override, as a client does, until the landed GOTO is re-measured.
+    require_alpaca_error(
+        [&] {
+            const auto deadline = clock.now() + std::chrono::seconds(20);
+            while (driver->get_slewing() && clock.now() < deadline) {
+                clock.advance(std::chrono::milliseconds(100));
+            }
+        },
+        AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - a pull during a synchronous slew's settle reads fails the slew with NotConnected",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount("0025");  // HEM27: no settle trim, so the wait goes on to its position reads
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug_on(on_command(":GEP#"));
+    auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates(12.0, 20.0); });
+    // The wait sleeps on the fake clock on the slew's own thread: step it until the slew returns.
+    const auto real_bound = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (slew.wait_for(std::chrono::milliseconds(2)) != std::future_status::ready &&
+           std::chrono::steady_clock::now() < real_bound) {
+        clock.advance(std::chrono::milliseconds(100));
+    }
+    REQUIRE(slew.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    require_alpaca_error([&] { slew.get(); }, AlpacaError::NotConnected);
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - a hangup on a pulse-guide's ack drain loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug_on(on_command(":ZS"));
+    require_alpaca_error([&] { driver->pulse_guide(2, 500); }, AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    require_lost(*driver, "serial link lost (hangup)");
+}
+
+TEST_CASE("iOptron Link - a loss during Connect fails it with NotConnected and keeps no reason",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+
+    // The connect's position read logs and carries on when it fails; a hangup there must still fail the Connect.
+    mount.unplug_on(on_command(":GEP#"));
+    require_alpaca_error([&] { driver->set_connected(true); }, AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK_FALSE(io::iOptronProtocolWrapper::instance().is_connected());
+}
+
+TEST_CASE("iOptron Link - the loss reason stays until Disconnect", "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.unplug_on(on_command(":GEP#"));
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 20.0); }, AlpacaError::NotConnected);
+    clock.advance(std::chrono::seconds(60));
+    CHECK(contains(driver->get_link_fault(), "serial link lost (hangup)"));
+    driver->set_connected(false);  // the raw flag is still set: the teardown runs (#1289)
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+}
+
+TEST_CASE("iOptron Link - Connect over a lost link reopens without a Disconnect, and nothing relinks on its own",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    auto first = std::make_unique<PtyIoptronMount>();
+    alpacacore::test::ReplugPort port(*first);
+    auto driver = link_driver(serial_endpoint(port.path.string()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    first->unplug_on(on_command(":GEP#"));
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 20.0); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+
+    // The mount comes back on the same by-id name. Nothing reopens it until the client connects.
+    PtyIoptronMount second;
+    port.replug(second);
+    clock.advance(std::chrono::seconds(120));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(second.model().commands().empty());
+    CHECK(contains(driver->get_link_fault(), "serial link lost (hangup)"));
+
+    // Connect, with no Disconnect first: Connected stays false until the connect is complete (#910).
+    second.model().hold_next_reply(std::chrono::milliseconds(300));
+    driver->connect();
+    REQUIRE(second.model().wait_until_holding(std::chrono::seconds(5)));
+    CHECK_FALSE(driver->get_connected());
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }));
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(second.model().count(":GUT#") >= 1);  // the connect re-ran its reads on the new port
+    CHECK_NOTHROW(driver->sync_to_coordinates(12.0, 20.0));
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Link - a latched fault refuses reads and writes with Connected true",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    latch_fault(*driver, mount);
+
+    const auto sent = mount.commands().size();
+    const auto refused = [&](const std::function<void()>& call) {
+        require_alpaca_error(call, AlpacaError::DriverException);
+    };
+    // Reads.
+    refused([&] { (void)driver->get_right_ascension(); });
+    refused([&] { (void)driver->get_declination(); });
+    refused([&] { (void)driver->get_altitude(); });
+    refused([&] { (void)driver->get_azimuth(); });
+    refused([&] { (void)driver->get_at_park(); });
+    refused([&] { (void)driver->get_at_home(); });
+    refused([&] { (void)driver->get_slewing(); });
+    refused([&] { (void)driver->get_tracking(); });
+    refused([&] { (void)driver->get_tracking_rate(); });
+    refused([&] { (void)driver->get_side_of_pier(); });
+    refused([&] { (void)driver->get_sidereal_time(); });
+    refused([&] { (void)driver->get_site_latitude(); });
+    refused([&] { (void)driver->get_utc_date(); });
+    refused([&] { (void)driver->get_guide_rate(); });
+    refused([&] { (void)driver->get_is_pulse_guiding(); });
+    // Writes: slews, park, pulse, sync and the setters.
+    refused([&] { driver->slew_to_coordinates(12.0, 20.0); });
+    refused([&] { driver->slew_to_coordinates_async(12.0, 20.0); });
+    refused([&] { driver->slew_to_alt_az(45.0, 90.0); });
+    refused([&] { driver->slew_to_alt_az_async(45.0, 90.0); });
+    refused([&] { driver->slew_to_target_async(); });
+    refused([&] { driver->sync_to_coordinates(12.0, 20.0); });
+    refused([&] { driver->sync_to_target(); });
+    refused([&] { driver->park(); });
+    refused([&] { driver->unpark(); });
+    refused([&] { driver->set_park(); });
+    refused([&] { driver->find_home(); });
+    refused([&] { driver->pulse_guide(2, 500); });
+    refused([&] { driver->move_axis(0, 15.0 / 3600.0); });
+    refused([&] { driver->set_tracking(true); });
+    refused([&] { driver->set_tracking_rate(0); });
+    refused([&] { driver->set_guide_rate({0.002, 0.002}); });
+    refused([&] { driver->set_target_right_ascension(12.0); });
+    refused([&] { driver->set_target_declination(20.0); });
+    refused([&] { driver->set_site_latitude(40.0); });
+    refused([&] { driver->set_site_longitude(-75.0); });
+    refused([&] { driver->set_utc_date(std::chrono::system_clock::now()); });
+    CHECK(driver->get_connected());
+    CHECK(contains(driver->get_link_fault(), "Position"));
+    CHECK(mount.commands().size() == sent);  // nothing went to the mount
+}
+
+TEST_CASE("iOptron Link - a fault standing past the staleness bound loses the link",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    latch_fault(*driver, mount);
+
+    // Found by the next refused call: one second short of the bound it is still a fault.
+    clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::seconds(1));
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::DriverException);
+    CHECK(driver->get_connected());
+    clock.advance(std::chrono::seconds(1));
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    require_lost(*driver, "stood for 30 s");
+
+    // Connect over the lost link relinks over TCP too. A new fault that stands as long is not lost through the
+    // lock-free IsPulseGuiding (it would wait on the wire lock): that stays a DriverException with Connected true, and
+    // the next check_connected() call loses the link.
+    mount.set_fail_reads(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    latch_fault(*driver, mount);
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)driver->get_is_pulse_guiding(); }, AlpacaError::DriverException);
+    CHECK(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 1: the next good reply clears a latched fault. While latched, the position, Alt/Az and status
+// getters send one :GLS# probe per probe interval (5 s on the task clock) and refuse with nothing sent in between.
+TEST_CASE("iOptron Link - a latched fault clears on the next good probe reply",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    latch_fault(*driver, mount);
+    mount.set_fail_reads(false);  // the mount answers again
+
+    // Before the interval: refused, nothing sent.
+    const auto sent = mount.commands().size();
+    clock.advance(std::chrono::seconds(4));
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)driver->get_slewing(); }, AlpacaError::DriverException);
+    CHECK(mount.commands().size() == sent);
+
+    // At the interval the read probes, the good reply clears the latch and the read returns.
+    clock.advance(std::chrono::seconds(1));
+    const int status_reads = mount.count(":GLS#");
+    CHECK_NOTHROW(driver->get_right_ascension());
+    CHECK(mount.count(":GLS#") == status_reads + 1);  // the one probe
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->get_is_pulse_guiding());
+    CHECK(sync_failure(*driver).empty());  // writes go out again
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Link - a failed probe keeps the latch and failing probes lose the link at the bound",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    latch_fault(*driver, mount);  // reads keep failing
+
+    // RightAscension: inside the connect's 30 s cache grace its position read is served from the connect's cache, so
+    // only the failed probe itself can make the call throw; a probe whose failure were dropped would serve that value.
+    for (int probe = 1; probe <= 5; ++probe) {  // at 5, 10, 15, 20 and 25 s
+        clock.advance(std::chrono::seconds(5));
+        const int status_reads = mount.count(":GLS#");
+        require_alpaca_error([&] { (void)driver->get_right_ascension(); }, AlpacaError::DriverException);
+        CHECK(mount.count(":GLS#") == status_reads + 1);  // one probe
+        CHECK(driver->get_connected());
+        CHECK_FALSE(driver->get_link_fault().empty());
+        const auto sent = mount.commands().size();
+        require_alpaca_error([&] { (void)driver->get_altitude(); }, AlpacaError::DriverException);
+        CHECK(mount.commands().size() == sent);  // no second probe in the same interval
+    }
+    clock.advance(std::chrono::seconds(4));  // 29 s: still a fault
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::DriverException);
+    CHECK(driver->get_connected());
+    clock.advance(std::chrono::seconds(1));  // 30 s with no good reply: lost, even though a probe is due
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, AlpacaError::NotConnected);
+    require_lost(*driver, "stood for 30 s");
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Link - writes refuse a latched fault with nothing sent even when a probe is due",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = link_driver(loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    latch_fault(*driver, mount);
+    mount.set_fail_reads(false);  // the mount answers again, but no write may move it on a faulted link
+    clock.advance(std::chrono::seconds(10));
+
+    const auto sent = mount.commands().size();
+    const auto refused = [&](const std::function<void()>& call) {
+        require_alpaca_error(call, AlpacaError::DriverException);
+    };
+    refused([&] { driver->slew_to_coordinates_async(12.0, 20.0); });
+    refused([&] { driver->slew_to_alt_az_async(45.0, 90.0); });
+    refused([&] { driver->sync_to_coordinates(12.0, 20.0); });
+    refused([&] { driver->park(); });
+    refused([&] { driver->unpark(); });
+    refused([&] { driver->find_home(); });
+    refused([&] { driver->pulse_guide(2, 500); });
+    refused([&] { driver->move_axis(0, 15.0 / 3600.0); });
+    refused([&] { driver->set_tracking(true); });
+    refused([&] { driver->set_tracking_rate(0); });
+    refused([&] { driver->set_site_latitude(40.0); });
+    CHECK(mount.commands().size() == sent);
+    CHECK(driver->get_connected());
+
+    CHECK_NOTHROW(driver->get_tracking());  // a probe-eligible read clears it
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Link - a hangup during a latched-fault probe loses the link at once",
+          "[ioptron][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    PtyIoptronMount mount;
+    auto driver = link_driver(serial_endpoint(mount.slave_path()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    latch_fault(*driver, mount.model());
+
+    clock.advance(std::chrono::seconds(5));
+    mount.unplug_on(on_command(":GLS#"));
+    require_alpaca_error([&] { (void)driver->get_at_park(); }, AlpacaError::NotConnected);
+    REQUIRE(mount.unplugged());
+    require_lost(*driver, "serial link lost (hangup)");
 }
 
 #endif  // !_WIN32

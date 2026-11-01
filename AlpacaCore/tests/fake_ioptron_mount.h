@@ -22,17 +22,22 @@
 
 #ifndef _WIN32
 
+#include <poll.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "fake_mount_server.h"
+#include "fake_pty_write.h"
 
 namespace alpacacore::test {
 
@@ -66,6 +71,13 @@ public:
     void set_utc_reply(std::string reply) {
         std::lock_guard<std::mutex> lock(mutex_);
         utc_reply_ = std::move(reply);
+    }
+
+    /// Reply to the park position read (":GPC"), 8 Alt then 9 Az digits in 0.01 arcsec and '#'. Empty (the default)
+    /// keeps the "0#" the driver cannot parse, so a HAE29C Park arms no wedged-park finalizer.
+    void set_park_position_reply(std::string reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        park_position_reply_ = std::move(reply);
     }
 
     /// GPS digit of the ":GLS" reply (0 no or failed GPS module, 1 GPS works but no valid data, 2 valid GPS data)
@@ -108,6 +120,9 @@ public:
         }
         return n;
     }
+
+    /// The reply to one received chunk, recorded like a TCP one; PtyIoptronMount answers through it.
+    std::string respond_to(const std::string& chunk) { return respond(chunk); }
 
 private:
     // iOptron wire units: RA and Dec in 0.01 arcsec.
@@ -167,6 +182,10 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             return utc_reply_;
         }
+        if (cmd == ":GPC#") {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!park_position_reply_.empty()) return park_position_reply_;
+        }
         // The driver no longer reads :GAL / :GMT (#763). Keep these answers:
         // without them the old override failed its read and never sent :SAL /
         // :SMT, so the #763 case would pass with the fix reverted.
@@ -220,6 +239,7 @@ private:
     std::atomic<bool> holding_{false};
     mutable std::mutex mutex_;
     std::string utc_reply_ = "+00000000000000000#";
+    std::string park_position_reply_;
     std::vector<std::string> commands_;
     long long pending_ra_ = 0;
     long long pending_dec_ = 0;
@@ -228,6 +248,90 @@ private:
     std::atomic<bool> reject_goto_{false};
     std::atomic<bool> fail_reads_{false};
     FakeMountServer server_;
+};
+
+/// The same responder over a pty, for the serial transport: a USB cable can be pulled (issue #1723). Every
+/// '#'-terminated command goes through FakeIoptronMount::respond_to(), so the setters and commands() of model()
+/// apply; its TCP server stays idle.
+class PtyIoptronMount {
+public:
+    explicit PtyIoptronMount(std::string model_code = "0012")
+        : model_(std::move(model_code), /*landing_ra_error_arcsec=*/0.0), pty_("PtyIoptronMount") {
+        reader_ = std::thread([this] { run(); });
+    }
+    ~PtyIoptronMount() { stop_reader(); }
+    PtyIoptronMount(const PtyIoptronMount&) = delete;
+    PtyIoptronMount& operator=(const PtyIoptronMount&) = delete;
+
+    FakeIoptronMount& model() { return model_; }
+    std::string slave_path() const { return pty_.slave_path(); }
+
+    /// A USB unplug while the mount is idle: both pty ends close, so the driver's next write fails with EIO and its
+    /// next read hangs up. Not reversible.
+    void unplug() {
+        stop_reader();
+        unplugged_.store(true);  // before the close: whoever sees the hangup also sees unplugged()
+        pty_.sever();
+    }
+
+    /// A USB unplug in the middle of an exchange: the first command `when` accepts is recorded and left unanswered,
+    /// and both pty ends close, so the driver's read for its reply (or its ack drain) hangs up. Set it before the
+    /// exchange; `when` runs on the reader thread. Not reversible.
+    void unplug_on(std::function<bool(const std::string& cmd)> when) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        unplug_on_ = std::move(when);
+    }
+
+    bool unplugged() const { return unplugged_.load(); }
+
+private:
+    void stop_reader() {
+        stop_.store(true);
+        if (reader_.joinable()) reader_.join();
+    }
+
+    void run() {
+        std::string pending;
+        char buf[64];
+        while (!stop_.load()) {
+            struct pollfd pfd{};
+            pfd.fd = pty_.master_fd();
+            pfd.events = POLLIN;
+            if (::poll(&pfd, 1, 20) <= 0) continue;
+            const ssize_t n = ::read(pty_.master_fd(), buf, sizeof(buf));
+            if (n <= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));  // EIO: no slave open right now
+                continue;
+            }
+            for (ssize_t i = 0; i < n; ++i) {
+                pending += buf[i];
+                if (buf[i] != '#') continue;
+                const std::string cmd = pending;
+                pending.clear();
+                bool pull = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    pull = unplug_on_ && unplug_on_(cmd);
+                }
+                if (pull) {
+                    (void)model_.respond_to(cmd);  // recorded only; the reply never goes out
+                    unplugged_.store(true);        // before the close, as unplug()
+                    pty_.sever();
+                    return;
+                }
+                const std::string reply = model_.respond_to(cmd);
+                if (!reply.empty()) pty_write_bounded(pty_.master_fd(), reply, stop_);
+            }
+        }
+    }
+
+    FakeIoptronMount model_;
+    PtyPair pty_;
+    std::thread reader_;
+    std::atomic<bool> stop_{false};
+    std::atomic<bool> unplugged_{false};
+    mutable std::mutex mutex_;
+    std::function<bool(const std::string&)> unplug_on_;
 };
 
 }  // namespace alpacacore::test
