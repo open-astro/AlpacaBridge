@@ -140,11 +140,16 @@ TEST_CASE("ZWO Mount Telescope Driver - Disconnected Behavior", "[zwo][telescope
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Site Elevation Validation", "[zwo][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
     alpacacore::vendor::zwo::ConnectionInfo conn;
-    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
-    conn.port_path = "/dev/null";
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
 
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(3, conn);
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(3, conn, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));  // SiteElevation reads NotConnected until connected
 
     require_alpaca_error([&]() { driver->set_site_elevation(std::numeric_limits<double>::quiet_NaN()); },
                          alpacacore::AlpacaError::InvalidValue);
@@ -154,6 +159,7 @@ TEST_CASE("ZWO Mount Telescope Driver - Site Elevation Validation", "[zwo][teles
     REQUIRE_NOTHROW(driver->set_site_elevation(-300.0));
     REQUIRE_NOTHROW(driver->set_site_elevation(10000.0));
     ALPACA_REQUIRE_APPROX(driver->get_site_elevation(), 10000.0);
+    driver->set_connected(false);
 }
 
 // Falsified by: AlpacaCore/include/alpacacore/util/pointing.h validate_ra, validate_latitude: changing either message
@@ -964,21 +970,25 @@ TEST_CASE("ZWO Mount Telescope Driver spec audit - DoesRefraction is not impleme
 
 TEST_CASE("ZWO Mount Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
           "[zwo][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
     alpacacore::vendor::zwo::ConnectionInfo conn;
-    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
-    conn.port_path = "/dev/null";
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
     // ASCOM time-and-place FAQ (decision 0019): a site value never set reads as InvalidOperation, not 0 m.
     require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
     driver->set_site_elevation(42.0);
     CHECK(driver->get_site_elevation() == 42.0);
+    driver->set_connected(false);
 }
-
-#ifndef _WIN32
 
 // ITelescopeV4 SiteElevation lists NotConnectedException, like SiteLatitude and SiteLongitude; decision 0009 rule 3.
 // Falsified by: zwo_telescope_driver.cpp get_site_elevation() without check_connected_locked() (the read after the
-// set returns 42 m while disconnected).
+// set returns 42 m while disconnected), or with the never-set check ahead of it (the first read is InvalidOperation).
 TEST_CASE("ZWO Mount Telescope Driver - SiteElevation reads NotConnected while disconnected",
           "[zwo][telescope][unit][spec-audit]") {
     alpacacore::test::FakeTaskClock clock;
@@ -990,7 +1000,9 @@ TEST_CASE("ZWO Mount Telescope Driver - SiteElevation reads NotConnected while d
     conn.tcp_port = mount.port();
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
 
-    // A value set before the first connect is kept for it, but a read is NotConnected, not InvalidOperation.
+    // NotConnected comes before the never-set InvalidOperation of decision 0019.
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::NotConnected);
+    // A value set before the first connect is kept for it, but a read is NotConnected.
     driver->set_site_elevation(42.0);
     require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::NotConnected);
 
@@ -999,5 +1011,3 @@ TEST_CASE("ZWO Mount Telescope Driver - SiteElevation reads NotConnected while d
     driver->set_connected(false);
     require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::NotConnected);
 }
-
-#endif
