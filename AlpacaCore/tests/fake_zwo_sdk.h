@@ -61,6 +61,8 @@ public:
     std::function<void(const std::string&)> before_call;
     bool fail_open{false};
     bool fail_close{false};
+    // ASI_ERROR_CAMERA_REMOVED: every per-device call on the open camera throws NotConnected, as the wrapper maps it.
+    std::atomic<bool> removed{false};
     // The serial the one camera reports, read at every open (a different unit behind the same id changes it).
     std::string serial{"FAKE-ZWO-17"};
     bool stop_releases_download{true};
@@ -496,6 +498,9 @@ private:
         if (open_count_ <= 0) {
             throw AlpacaException("fake ZWO operation requires an open camera", AlpacaError::DriverException);
         }
+        if (removed) {
+            throw AlpacaException("fake ZWO camera removed", AlpacaError::NotConnected);
+        }
     }
 
     mutable std::mutex mutex_;
@@ -534,7 +539,10 @@ private:
 // open_delay_ms holds open_camera_link(), read_delay_ms a get_control_value() and write_delay_ms
 // a set_control_value() in flight (getters-never-wait tests). The *_entered flags and `busy`
 // are polled from another thread; close_camera_link() sets closed_while_busy when a delayed call is
-// still in flight.
+// still in flight. Opens and links go through a SharedOpenTable: the caps, value and serial calls are checked
+// against the caller's link before the fake is touched (DriverException outside with_link(), NotConnected on a
+// closed link). KNOWN PARITY GAPS: the call bodies run outside the table, so they are not serialised and a loss
+// code retires nothing (the shared-open cases wrap FakeZWOSDK in ZWOSdkDewHeaterSdk for that).
 class FakeDewHeaterSdk final : public vendor::zwo::ZWODewHeaterSdk {
 public:
     std::atomic<int> reads{0};
@@ -572,20 +580,21 @@ public:
         touch(id);
         return false;
     }
-    // No table behind this seam (the shared-open case wraps FakeZWOSDK in ZWOSdkDewHeaterSdk): a link is a counter and
-    // with_link() just runs the body; the serial is the one get_serial_number() reads.
     vendor::zwo::SharedOpenTable::Opened open_camera_link(int id) override {
         const InFlight in_flight(*this, open_delay_ms, open_entered);
         touch(id);
-        const auto it = serial_by_id.find(id);
-        return {next_link_++, it == serial_by_id.end() ? "FAKE1" : it->second};
+        return table_.open(id);
     }
-    void close_camera_link(int id, std::uint64_t) override {
+    void close_camera_link(int id, std::uint64_t link) override {
         if (busy.load() > 0) closed_while_busy = true;
         touch(id);
+        table_.close(id, link);
     }
-    void with_link(int, std::uint64_t, const std::function<void()>& fn) override { fn(); }
+    void with_link(int id, std::uint64_t link, const std::function<void()>& fn) override {
+        table_.with_link(id, link, fn);
+    }
     std::vector<vendor::zwo::ZWOControlCaps> get_control_caps(int id) override {
+        table_.call(id, [] {});
         touch(id);
         if (!heater_by_id.empty()) {
             const auto it = heater_by_id.find(id);
@@ -600,6 +609,7 @@ public:
         return {cap};
     }
     bool get_control_value(int id, vendor::zwo::ZWOControlType, long& value, bool& is_auto) override {
+        table_.call(id, [] {});
         const InFlight in_flight(*this, read_delay_ms, read_entered);
         touch(id);
         ++reads;
@@ -612,11 +622,13 @@ public:
         return true;
     }
     void set_control_value(int id, vendor::zwo::ZWOControlType, long value, bool) override {
+        table_.call(id, [] {});
         const InFlight in_flight(*this, write_delay_ms, write_entered);
         touch(id);
         heater = value;
     }
     std::string get_serial_number(int id) override {
+        table_.call(id, [] {});
         touch(id);
         ++serial_reads;
         const auto it = serial_by_id.find(id);
@@ -644,7 +656,14 @@ private:
 
     mutable std::mutex call_mutex_;
     std::set<int> touched_;
-    std::atomic<std::uint64_t> next_link_{1};
+    vendor::zwo::SharedOpenTable table_{vendor::zwo::SharedOpenTable::Ops{
+        [](int) {},
+        [](int) {},
+        [this](int id) {
+            const auto it = serial_by_id.find(id);
+            return it == serial_by_id.end() ? std::string("FAKE1") : it->second;
+        },
+    }};
 };
 
 }  // namespace alpacacore::test
