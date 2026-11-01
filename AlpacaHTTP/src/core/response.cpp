@@ -87,6 +87,9 @@ std::string Response::to_header_string() const {
 
     bool has_connection = false;
     bool has_content_length = false;
+    bool has_frame_options = false;
+    bool has_csp = false;
+    bool has_nosniff = false;
     for (const auto& [key, value] : headers_) {
         if (header_name_equals(key, "Connection")) {
             has_connection = true;
@@ -94,10 +97,32 @@ std::string Response::to_header_string() const {
         if (header_name_equals(key, "Content-Length")) {
             has_content_length = true;
         }
+        if (header_name_equals(key, "X-Frame-Options")) {
+            has_frame_options = true;
+        }
+        if (header_name_equals(key, "Content-Security-Policy")) {
+            has_csp = true;
+        }
+        if (header_name_equals(key, "X-Content-Type-Options")) {
+            has_nosniff = true;
+        }
         oss << key << ": " << value << "\r\n";
     }
     if (!has_connection) {
         oss << "Connection: close\r\n";
+    }
+    // Issue #1717: keep a page from being framed (clickjacking) and a body from
+    // being sniffed into another type. Defaulted here, like Connection, so
+    // every response gets them, including the ones send_error() builds. The
+    // CSP holds frame-ancestors only: the UI uses inline script and style.
+    if (!has_frame_options) {
+        oss << "X-Frame-Options: DENY\r\n";
+    }
+    if (!has_csp) {
+        oss << "Content-Security-Policy: frame-ancestors 'none'\r\n";
+    }
+    if (!has_nosniff) {
+        oss << "X-Content-Type-Options: nosniff\r\n";
     }
     // A response with no Content-Length is framed by connection close, which
     // cannot work on a persistent connection: the client would keep reading,
