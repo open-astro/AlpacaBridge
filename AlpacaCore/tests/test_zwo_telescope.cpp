@@ -1011,3 +1011,34 @@ TEST_CASE("ZWO Mount Telescope Driver - SiteElevation reads NotConnected while d
     driver->set_connected(false);
     require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::NotConnected);
 }
+
+// Decision 0009 rule 3: while the link is lost, operational getters and setters throw NotConnected; the elevation
+// setter now matches SiteLatitude and SiteLongitude (a write before the first connect is still kept for it).
+// Falsified by: zwo_telescope_driver.cpp set_site_elevation() without check_writable_state() (the write after the
+// TCP reset is accepted).
+TEST_CASE("ZWO Mount Telescope Driver - SiteElevation write and read are NotConnected after a lost link",
+          "[zwo][telescope][unit][spec-audit]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+    driver->set_site_elevation(42.0);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    REQUIRE(mount.drop_link());
+    REQUIRE(clock.wait_for_waiters(1, 5s));
+    clock.advance(250ms);  // the next poll meets the reset
+    REQUIRE(clock.wait_for_woken_settled(5s));
+    REQUIRE_FALSE(driver->get_connected());
+    require_alpaca_error([&] { driver->set_site_elevation(43.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);  // a write refused while lost is not applied by the reconnect
+    CHECK(driver->get_site_elevation() == 42.0);
+    driver->set_connected(false);
+}
