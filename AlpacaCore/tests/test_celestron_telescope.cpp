@@ -1941,20 +1941,20 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
     });
     // Each step waits for two waiters, the paused poller and the slew body: on the poller alone, a slew thread that
     // starts late finds the steps used up and sleeps on a clock nobody advances (#1949).
-    bool met = true;
     for (int i = 0; i < 400 && !done.load(); ++i) {  // past the forced-slewing window, to the first real read
         if (!clock.wait_for_waiters(2, std::chrono::seconds(5))) {
-            met = done.load();
             break;
         }
         clock.advance(std::chrono::milliseconds(250));
         clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
-    if (!met && !clock.drain_until([&] { return done.load(); }, std::chrono::seconds(1), std::chrono::seconds(10))) {
+    const bool finished = done.load();  // false: a rendezvous timed out or the 400 steps ran out with the slew pending
+    if (!finished &&
+        !clock.drain_until([&] { return done.load(); }, std::chrono::seconds(1), std::chrono::seconds(10))) {
         std::terminate();  // the slew thread is stuck off the clock: joining it would hang
     }
     slewer.join();
-    REQUIRE(met);  // the slew body reached the clock within 5 s of every step
+    REQUIRE(finished);  // the slew ended within the stepped window
     cel::set_slewing_read_hook_for_testing(*driver, nullptr);
     REQUIRE(aborted);
     CHECK_FALSE(driver->get_slewing());
