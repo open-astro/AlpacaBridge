@@ -5,3 +5,7 @@
 - **HTTP send-limit tests**, AlpacaHTTP, issue #1714. Count body bytes received with response headers in the send-deadline and stall cases; the successful scaled-deadline download now requires exactly Content-Length bytes, rejecting even a one-byte truncation.
 
 - **HTTP resource-budget documentation**, issue #1714. ADR 0007 now describes the size-scaled routed-response allowance, the fixed allowance for short transport errors, and the shared 30 s no-progress bound.
+
+- **HTTP send timeout retries**, AlpacaHTTP, issue #1714. Reject every nonempty send attempt once its response or no-progress deadline expires, including a writable retry after polling; interrupted polls keep the original no-progress deadline. Isolated socket-send regressions cover expired writable sockets, expired poll retries and repeated interruptions.
+
+- **Mutation evidence gate**, issue #1714. Accept production headers under `AlpacaHTTP/include/` as mutation targets, matching the HTTP send helper covered by the new socket-send tests.

@@ -441,6 +441,15 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_include_directories(test_server_socket PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test_server_socket COMMAND test_server_socket)
 
+    # Fault injection stays in this standalone helper test, away from the server.
+    add_executable(test_socket_send tests/test_socket_send.cpp)
+    target_include_directories(test_socket_send PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_options(test_socket_send PRIVATE "-Wl,--wrap=poll")
+    foreach(send_case expired retry interrupted)
+        add_test(NAME test_socket_send_${send_case} COMMAND test_socket_send ${send_case})
+        set_tests_properties(test_socket_send_${send_case} PROPERTIES TIMEOUT 5)
+    endforeach()
+
     # Unit tests for the join_or_abandon() fallback seam (issue #561).
     add_executable(test_thread_join tests/test_thread_join.cpp)
     target_link_libraries(test_thread_join alpacahttp)

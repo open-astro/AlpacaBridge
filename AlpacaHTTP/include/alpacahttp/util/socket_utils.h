@@ -98,21 +98,29 @@ inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
 // makes no progress, so a peer that drains a few bytes per interval would
 // otherwise hold the sender forever. The send never blocks in the kernel, so
 // SO_SNDTIMEO no longer applies; on a full buffer it waits with poll(POLLOUT)
-// for the shorter of the time left and `stall`, the no-progress bound. It
-// returns false when either runs out (errno ETIMEDOUT) so the caller closes
-// the connection. Progress restarts the `stall` wait.
+// until the earlier of the response and no-progress deadlines. It returns
+// false when either expires (errno ETIMEDOUT) so the caller closes the
+// connection. Only a positive write restarts the `stall` wait; EINTR does not.
 inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t first_length, const char* second,
                              std::size_t second_length, std::chrono::steady_clock::time_point deadline,
                              std::chrono::milliseconds stall) {
     std::array<iovec, 2> vectors{
         {{const_cast<char*>(first), first_length}, {const_cast<char*>(second), second_length}}};
     std::size_t index = 0;
+    auto progress_deadline = std::chrono::steady_clock::now() + stall;
     while (index < vectors.size()) {
         while (index < vectors.size() && vectors[index].iov_len == 0) {
             ++index;
         }
         if (index == vectors.size()) {
             return true;
+        }
+
+        const auto wait_deadline = std::min(deadline, progress_deadline);
+        const auto left = wait_deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) {
+            errno = ETIMEDOUT;
+            return false;
         }
 
         struct msghdr message {};
@@ -126,22 +134,21 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 return false;
             }
-            const auto left = deadline - std::chrono::steady_clock::now();
-            if (left <= std::chrono::steady_clock::duration::zero()) {
+            const auto poll_left = wait_deadline - std::chrono::steady_clock::now();
+            if (poll_left <= std::chrono::steady_clock::duration::zero()) {
                 errno = ETIMEDOUT;
                 return false;
             }
             // Round up so a sub-millisecond remainder still waits.
             const auto wait_ms = std::min<std::chrono::milliseconds::rep>(
-                std::min(std::chrono::ceil<std::chrono::milliseconds>(left), stall).count(),
-                std::numeric_limits<int>::max());
+                std::chrono::ceil<std::chrono::milliseconds>(poll_left).count(), std::numeric_limits<int>::max());
             pollfd wait_fd = {handle, POLLOUT, 0};
             const int ready = poll(&wait_fd, 1, static_cast<int>(wait_ms));
             if (ready < 0 && errno != EINTR) {
                 return false;
             }
-            if (ready == 0 && std::chrono::steady_clock::now() < deadline) {
-                errno = ETIMEDOUT;  // the peer made no progress for `stall`
+            if (ready == 0) {
+                errno = ETIMEDOUT;
                 return false;
             }
             continue;
@@ -150,6 +157,7 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
             return false;
         }
 
+        progress_deadline = std::chrono::steady_clock::now() + stall;
         std::size_t remaining = static_cast<std::size_t>(sent);
         while (remaining > 0 && index < vectors.size()) {
             auto& vector = vectors[index];
