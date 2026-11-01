@@ -122,7 +122,7 @@ public:
         shutdown_connection();
         if (link_.is_open()) {
             try {
-                set_connected(false);
+                apply_connected(false);  // non-virtual: no virtual dispatch during destruction
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Error during destruction: " + std::string(e.what()));
             }
@@ -186,7 +186,9 @@ public:
 
     bool get_connecting() const override { return connection_task_active(); }
 
-    void set_connected(bool connected) override {
+    void set_connected(bool connected) override { apply_connected(connected); }
+
+    void apply_connected(bool connected) {
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
