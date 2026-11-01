@@ -36,7 +36,7 @@ namespace alpacacore::vendor::zwo {
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id);
 
 // Test seam: sdk and clock are non-owning and must outlive the returned driver
-// and any in-flight ZWO SDK operation or pulse-guide turn-off thread started by it.
+// and any in-flight ZWO SDK operation started by it.
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id, ZWOSDK& sdk,
                                                 util::TaskClock& clock = util::default_task_clock());
 

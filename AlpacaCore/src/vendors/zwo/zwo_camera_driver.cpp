@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/last_exposure.h>
@@ -28,13 +29,14 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <optional>
-#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "zwo_fields.h"
 
@@ -108,7 +110,7 @@ public:
           pending_exposure_duration_(0.0),
           pending_exposure_start_(),
           acquisition_valid_(false),
-          pulse_guiding_(std::make_shared<std::atomic<bool>>(false)),
+          pulse_guiding_(false),
           pulse_guiding_end_(util::TaskClock::clock::time_point{}),
           dev_(*this) {
         preload_camera_info_locked();
@@ -125,6 +127,7 @@ public:
                 ALPACA_LOG_WARN("ZWO", "Error during destruction: " + std::string(e.what()));
             }
         }
+        stop_pulse_timer();  // a lost link skipped the Disconnect above
     }
 
     int get_device_number() const override { return device_number_; }
@@ -203,6 +206,7 @@ public:
             // A lost link reads as disconnected, so a Disconnect after a loss lands here and completes: it
             // clears the loss text (decision 0009 rule 5), and the next Connect releases what the loss left.
             if (!connected) {
+                stop_pulse_timer();  // the timer a loss cancelled
                 std::lock_guard<std::mutex> lost(lost_mutex_);
                 lost_reason_.clear();
             }
@@ -232,6 +236,7 @@ public:
                 ~ClearInFlight() { flag.store(false); }
             } clear_in_flight{connect_in_flight_};
 
+            stop_pulse_timer();  // before the open below, so no turn-off from the old link outlives it
             release_open();  // an open left from a lost link: the table retired it, so this only forgets it
             {
                 std::lock_guard<std::mutex> lost(lost_mutex_);
@@ -333,6 +338,8 @@ public:
         // Wait for a bulk read to finish before the close. SDK-backed getters
         // now fail on the empty camera_id_, while local cached getters can still take mutex_.
         lock.unlock();
+        // A pulse in flight ends now, its turn-off sent on the open the close below drops (decision 0006 rule 8).
+        stop_pulse_timer();
         if (close_id.has_value()) {
             try {
                 dev_.stop_exposure(close_id.value());
@@ -757,7 +764,7 @@ public:
     }
 
     bool get_is_pulse_guiding() const override {
-        if (!pulse_guiding_->load()) {
+        if (!pulse_guiding_.load()) {
             return false;
         }
         // Expiry check and clear under ONE mutex_ hold: an unlocked
@@ -766,7 +773,7 @@ public:
         // "not guiding" mid-pulse (PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
         if (clock_.now() >= pulse_guiding_end_) {
-            pulse_guiding_->store(false);
+            pulse_guiding_.store(false);
             return false;
         }
         return true;
@@ -977,41 +984,40 @@ public:
                 break;
         }
 
-        const int pulse_camera_id = with_camera([&](int id) {
-            dev_.pulse_guide_on(id, guide_direction);
-            return id;
-        });
-        // End timestamp BEFORE the flag: a reader that observes the flag as
-        // true must never see a stale end time from the previous pulse (or
-        // epoch), or the self-clearing getter would clear this pulse
-        // immediately. Pre-existing ordering, swept in the PR #119 round-2
-        // fix alongside the Player One instance.
+        // Serialises the SDK write and the timer start against the stop paths (stop_pulse_timer), so a pulse either
+        // lands before a Disconnect's join, which turns it off, or finds the camera closed.
+        std::lock_guard<std::mutex> pulse_lifecycle(pulse_lifecycle_mutex_);
         {
+            // The claim (decision 0006 rule 3): the SDK write, the generation bump and the flag under pulse_mutex_,
+            // which the timer body holds from taking a turn-off to sending it, so a turn-off due from the running
+            // body goes out before this pulse starts, or the body sees itself superseded and leaves it to the new one.
+            std::lock_guard<std::mutex> plock(pulse_mutex_);
+            std::uint64_t pulse_link = 0;
+            const int pulse_camera_id = with_camera([&](int id) {
+                dev_.pulse_guide_on(id, guide_direction);
+                pulse_link = open_link_.load();
+                return id;
+            });
+            const auto end = clock_.now() + std::chrono::milliseconds(duration);
+            pulse_generation_.bump();
+            pending_offs_.push_back({end, pulse_camera_id, pulse_link, guide_direction});
+            // End timestamp BEFORE the flag: a reader that observes the flag as
+            // true must never see a stale end time from the previous pulse (or
+            // epoch), or the self-clearing getter would clear this pulse
+            // immediately. Pre-existing ordering, swept in the PR #119 round-2
+            // fix alongside the Player One instance.
             std::lock_guard<std::mutex> lock(mutex_);
-            pulse_guiding_end_ = clock_.now() + std::chrono::milliseconds(duration);
-            pulse_guiding_->store(true);
+            pulse_guiding_end_ = end;
+            pulse_guiding_.store(true);
         }
-
-        // The detached turn-off thread captures NO object state — only the id
-        // snapshot, the SDK seam and the task clock (both outlive the driver,
-        // see zwo_camera_driver.h) — so it cannot dereference a destroyed driver if the
-        // object is torn down mid-pulse. A disconnect (or destruction) racing
-        // the sleep costs at most a rejected pulse_guide_off on a closed id.
-        // IsPulseGuiding self-clears from pulse_guiding_end_ in the getter,
-        // so the thread does not need to touch the flag either.
-        std::thread([sdk = &sdk_, clock = &clock_, pulse_camera_id, pulse_link = open_link_.load(), guide_direction,
-                     duration, flag = pulse_guiding_]() {
-            clock->sleep_for(std::chrono::milliseconds(duration));
-            try {
-                sdk->with_link(pulse_camera_id, pulse_link,
-                               [&] { sdk->pulse_guide_off(pulse_camera_id, guide_direction); });
-            } catch (const std::exception&) {
-            }
-            // Unconditional clear for fire-and-forget clients that never
-            // poll IsPulseGuiding; the shared_ptr keeps the flag alive even
-            // if the driver is destroyed mid-pulse (round 9).
-            flag->store(false);
-        }).detach();
+        // The new body supersedes the running one (decision 0006 rule 2) and takes over its pending turn-offs, so a
+        // pulse on another axis still ends at its own time.
+        try {
+            pulse_slot_.start([this](util::OperationContext& ctx) { run_pulse_timer(ctx); });
+        } catch (...) {
+            end_pulses(util::TaskClock::clock::time_point::max(), nullptr);  // no timer will end them
+            throw;
+        }
     }
 
     void start_exposure(double duration, bool light) override {
@@ -1310,13 +1316,86 @@ private:
     mutable bool exposure_failed_{false};
     mutable util::TaskClock::clock::time_point last_exposure_retry_{};
 
-    // shared_ptr so the detached pulse-off thread can co-own the flag and
-    // clear it unconditionally after the pulse WITHOUT capturing `this`
-    // (destructor-safe): a fire-and-forget client that never polls
-    // IsPulseGuiding must not leave the flag latched true (round 9). The
-    // timestamp getter still self-clears for readers in the interim.
-    std::shared_ptr<std::atomic<bool>> pulse_guiding_;
+    // Cleared by the timer after each turn-off, so a fire-and-forget client that never polls IsPulseGuiding does
+    // not leave it latched true (round 9); the getter also self-clears at pulse_guiding_end_.
+    mutable std::atomic<bool> pulse_guiding_;
     util::TaskClock::clock::time_point pulse_guiding_end_;
+    // A started pulse's turn-off: sent at `deadline` on the open it was started on, so it never reaches a camera
+    // reopened since (decision 0009 rule 3).
+    struct PendingOff {
+        util::TaskClock::clock::time_point deadline;
+        int camera_id;
+        std::uint64_t link;
+        ZWOGuideDirection direction;
+    };
+    // Serialises pulse_guide() with stop_pulse_timer(). Lock order: transition_mutex_, pulse_lifecycle_mutex_,
+    // pulse_mutex_, mutex_; the timer body takes pulse_mutex_ only.
+    std::mutex pulse_lifecycle_mutex_;
+    // The claim lock for pulse_slot_ (decision 0006 rule 3): guards pending_offs_, and pulse_guide() bumps
+    // pulse_generation_ under it.
+    std::mutex pulse_mutex_;
+    std::vector<PendingOff> pending_offs_;
+    util::OperationGeneration pulse_generation_;
+    // The pulse-guide timer body; Disconnect, Connect and the destructor cancel and join it (stop_pulse_timer), a
+    // link loss cancels it.
+    mutable util::AsyncOperation pulse_slot_{"zwo-camera-pulse", pulse_generation_, clock_};
+
+    // Sends each pulse's turn-off when it is due. Superseded, it returns and the new body takes over the list;
+    // cancelled, it ends every pending pulse now.
+    void run_pulse_timer(util::OperationContext& ctx) {
+        for (;;) {
+            util::TaskClock::clock::time_point next = util::TaskClock::clock::time_point::max();
+            {
+                std::lock_guard<std::mutex> plock(pulse_mutex_);
+                if (pending_offs_.empty()) {
+                    return;
+                }
+                for (const auto& off : pending_offs_) {
+                    next = std::min(next, off.deadline);
+                }
+            }
+            const auto now = clock_.now();
+            if (!ctx.wait_for(next > now ? next - now : util::TaskClock::clock::duration::zero())) {
+                end_pulses(util::TaskClock::clock::time_point::max(), &ctx);
+                return;
+            }
+            end_pulses(clock_.now(), &ctx);
+        }
+    }
+
+    // Sends the turn-off of every pending pulse due by `due_by`, on its own link, and clears the flag. From a body,
+    // only while the body is not superseded (decision 0006 rule 6). Takes pulse_mutex_ and no driver lock.
+    void end_pulses(util::TaskClock::clock::time_point due_by, const util::OperationContext* ctx) {
+        std::lock_guard<std::mutex> plock(pulse_mutex_);
+        if (ctx != nullptr && ctx->stop_reason() == util::StopReason::Superseded) {
+            return;
+        }
+        auto due = std::stable_partition(pending_offs_.begin(), pending_offs_.end(),
+                                         [&](const PendingOff& off) { return off.deadline > due_by; });
+        if (due == pending_offs_.end()) {
+            return;
+        }
+        std::vector<PendingOff> offs(std::make_move_iterator(due), std::make_move_iterator(pending_offs_.end()));
+        pending_offs_.erase(due, pending_offs_.end());
+        std::stable_sort(offs.begin(), offs.end(),
+                         [](const PendingOff& a, const PendingOff& b) { return a.deadline < b.deadline; });
+        for (const auto& off : offs) {
+            try {
+                // A stale link is refused by the table without touching the camera.
+                sdk_.with_link(off.camera_id, off.link, [&] { sdk_.pulse_guide_off(off.camera_id, off.direction); });
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("ZWO", "pulse guide off failed: " + printable(e.what()));
+            }
+        }
+        pulse_guiding_.store(false);
+    }
+
+    // Decision 0006 rule 8: cancels and joins the timer, which sends every pending turn-off first. Called without
+    // mutex_ held; Disconnect and Connect call it under transition_mutex_.
+    void stop_pulse_timer() {
+        std::lock_guard<std::mutex> pulse_lifecycle(pulse_lifecycle_mutex_);
+        pulse_slot_.cancel_all_and_join();
+    }
 
     void ensure_connected() const {
         if (!link_.is_open()) {
@@ -1365,6 +1444,9 @@ private:
         if (!link_.mark_lost(captured)) {
             return;  // a disconnect, a relink or another call got there first
         }
+        // May run with mutex_ held, so cancel only (decision 0006 rule 7); the next Disconnect, Connect or the
+        // destructor joins the timer.
+        pulse_slot_.cancel();
         std::string label;
         {
             std::lock_guard<std::mutex> lost(lost_mutex_);
@@ -1504,7 +1586,7 @@ private:
         exposure_frame_.reset();
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
-        pulse_guiding_->store(false);
+        pulse_guiding_.store(false);
         pulse_guiding_end_ = {};
     }
 

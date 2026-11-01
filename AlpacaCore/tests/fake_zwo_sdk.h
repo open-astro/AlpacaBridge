@@ -194,6 +194,12 @@ public:
         return unit_touches_;
     }
 
+    /// Directions of the pulse_guide_off calls an open unit accepted, in call order.
+    std::vector<GuideDirection> guide_offs() const {
+        std::lock_guard lock(mutex_);
+        return guide_offs_;
+    }
+
     bool closed_during_download() const {
         std::lock_guard lock(download_mutex_);
         return closed_during_download_;
@@ -419,9 +425,10 @@ public:
         require_open_locked(camera_id);
     }
 
-    void raw_pulse_guide_off(int camera_id, GuideDirection) {
+    void raw_pulse_guide_off(int camera_id, GuideDirection direction) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
+        guide_offs_.push_back(direction);
     }
 
     std::string raw_get_serial_number(int camera_id) {
@@ -573,6 +580,7 @@ private:
     std::vector<util::TaskClock::clock::time_point> start_times_;
     std::optional<util::TaskClock::clock::time_point> last_download_time_;
     std::optional<std::map<int, std::string>> units_;
+    std::vector<GuideDirection> guide_offs_;
     std::set<int> open_ids_;
     mutable int unit_touches_{0};
     int temperature_reads_since_open_{0};

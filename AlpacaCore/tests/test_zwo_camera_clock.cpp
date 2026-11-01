@@ -36,6 +36,7 @@ using alpacacore::test::FakeZWOSDK;
 using alpacacore::vendor::zwo::create_zwo_camera;
 namespace AlpacaError = alpacacore::AlpacaError;
 using std::chrono::milliseconds;
+using Direction = FakeZWOSDK::GuideDirection;
 
 constexpr auto kRendezvous = std::chrono::seconds(5);
 
@@ -104,6 +105,87 @@ TEST_CASE("ZWO camera clock - pulse guide turns off after the duration on the ta
     clock.advance(milliseconds(1));
     REQUIRE(sdk.wait_for_call_count("pulse_guide_off", 1, kRendezvous));
     REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+}
+
+// Falsified by: zwo_camera_driver.cpp set_connected(false) not cancelling and joining pulse_slot_ before the close
+// (the guide stays on until the timer runs out and the timer outlives the Disconnect). Decision 0006 rules 1 and 8.
+TEST_CASE("ZWO camera clock - Disconnect mid-pulse turns the guide off at once", "[zwo][camera][unit][clock]") {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    camera->pulse_guide(0, 1000);
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+
+    camera->set_connected(false);
+
+    CHECK(sdk.guide_offs() == std::vector<Direction>{Direction::North});
+    CHECK_FALSE(camera->get_is_pulse_guiding());
+    CHECK(clock.waiter_count() == 0);  // no timer outlives the Disconnect
+}
+
+// Falsified by: zwo_camera_driver.cpp run_pulse_timer() returning on a cancel without sending the pending turn-offs,
+// or a detached turn-off thread (it outlives the driver and the guide stays on).
+TEST_CASE("ZWO camera clock - destroying the driver mid-pulse turns the guide off and leaves no timer",
+          "[zwo][camera][unit][clock]") {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    camera->pulse_guide(2, 1000);
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+
+    camera.reset();
+
+    CHECK(sdk.guide_offs() == std::vector<Direction>{Direction::East});
+    CHECK(clock.waiter_count() == 0);
+}
+
+// Falsified by: zwo_camera_driver.cpp set_connected(true) not joining pulse_slot_ before the open while note_loss()
+// does not cancel it (the timer from before the replug survives the reconnect, free to turn off the new handle).
+TEST_CASE("ZWO camera clock - a pulse from before a replug never turns off the guide on the new handle",
+          "[zwo][camera][unit][clock]") {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    camera->pulse_guide(0, 1000);
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+    sdk.removed = true;
+    CHECK(error_code([&] { (void)camera->get_ccd_temperature(); }) == AlpacaError::NotConnected);
+    REQUIRE_FALSE(camera->get_connected());
+
+    sdk.replug({{sdk.camera.camera_id, sdk.serial}});
+    camera->set_connected(true);
+
+    CHECK(clock.waiter_count() == 0);  // the old timer did not survive the reconnect
+    clock.advance(milliseconds(2000));
+    CHECK(sdk.guide_offs().empty());
+    camera->set_connected(false);
+}
+
+// Falsified by: zwo_camera_driver.cpp pulse_guide() dropping the running pulse's pending turn-off when a new pulse
+// supersedes the timer body (the North output would stay on for ever), or end_pulses() acting for a superseded body
+// (it ends both pulses at once). Decision 0006 rules 3 and 6.
+TEST_CASE("ZWO camera clock - a pulse on another axis does not cut the running pulse short",
+          "[zwo][camera][unit][clock]") {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    camera->pulse_guide(0, 1000);
+    REQUIRE(clock.wait_for_wait_count(1, kRendezvous));
+    camera->pulse_guide(2, 200);
+    REQUIRE(clock.wait_for_wait_count(2, kRendezvous));
+
+    clock.advance(milliseconds(200));
+    REQUIRE(sdk.wait_for_call_count("pulse_guide_off", 1, kRendezvous));
+    CHECK(sdk.guide_offs() == std::vector<Direction>{Direction::East});
+    clock.advance(milliseconds(799));
+    CHECK(sdk.guide_offs() == std::vector<Direction>{Direction::East});
+    clock.advance(milliseconds(1));
+    REQUIRE(sdk.wait_for_call_count("pulse_guide_off", 2, kRendezvous));
+    CHECK(sdk.guide_offs() == std::vector<Direction>{Direction::East, Direction::North});
 }
 
 TEST_CASE("ZWO camera clock - exposure retries are paced by the task clock", "[zwo][camera][unit][clock]") {
