@@ -1064,7 +1064,7 @@ public:
         int active_start_y = 0;
         int active_num_x = 0;
         int active_num_y = 0;
-        // Frame size the SDK will report for that ROI (see below): the worker
+        // Frame size the SDK will report for that ROI (see below): the body
         // treats anything smaller as a malformed frame.
         int expected_w = 0;
         int expected_h = 0;
@@ -1101,7 +1101,7 @@ public:
             // the 16-bit BITDEPTH option when bit_depth_max > 8, so a RAW8-only
             // camera streams 1 byte/pixel — pulling it as 16-bit with a 2-byte
             // row pitch garbles every frame. Snapshot the mode with the rest of
-            // the geometry so the worker's bits/pitch/buffer stay consistent.
+            // the geometry so the body's bits/pitch/buffer stay consistent.
             active_16bit = camera_info_.bit_depth_max > 8;
             active_bin = bin_;
             active_start_x = start_x_;
@@ -1166,14 +1166,14 @@ public:
             // NB: at bin 1 an odd NumX/NumY (the +1 even pad), and at bin >= 2 the
             // grown span, make the SDK frame one pixel wider/taller than
             // requested, so got_w/got_h from WaitImageV4 can exceed
-            // active_num_x/active_num_y — this is NOT an off-by-one. The worker
+            // active_num_x/active_num_y — this is NOT an off-by-one. The body
             // lays the frame out at that wider stride and build_image_array reads
             // the first active_num_x columns of each row (WaitImageV4 rejects a
             // rowPitch shorter than the delivered row with E_INVALIDARG, measured
             // on the GPCMOS01200KPF, so the stride can never be the requested
             // width). Reported NumX/NumY stay = active_num_x/y.
             // What the SDK will report for this ROI: the even-padded span at bin
-            // 1, floor(span/bin) rounded down to even otherwise. The worker
+            // 1, floor(span/bin) rounded down to even otherwise. The body
             // rejects anything smaller as a malformed frame (#913); a value one
             // below num is the documented edge fill, never a short frame.
             expected_w = active_bin >= 2 ? (span_w / active_bin) & ~1 : span_w;
@@ -1816,7 +1816,7 @@ private:
         // that would fix it is off the sensor (#977). That frame is exactly one
         // short; fill the missing edge from its neighbour rather than fail
         // every full-frame exposure at that bin. Anything shorter than that is
-        // a malformed frame (#913), and the exposure worker has already checked
+        // a malformed frame (#913), and the exposure body has already checked
         // the frame against the size the ROI math predicted.
         if (actual_width + 1 < out_width || actual_height + 1 < out_height) {
             alpacacore::util::throw_invalid_camera_image(
