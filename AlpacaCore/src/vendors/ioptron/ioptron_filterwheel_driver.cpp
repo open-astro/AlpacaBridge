@@ -13,7 +13,9 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_iefw_protocol_wrapper.h>
@@ -39,7 +41,7 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     IefwFilterWheelDriver(int device_number, std::optional<std::string> serial_port, std::optional<int> wheel_index,
-                          const std::string& model)
+                          const std::string& model, util::TaskClock& clock)
         : AsyncConnectable("iOptron"),
           device_number_(device_number),
           serial_port_(std::move(serial_port)),
@@ -47,7 +49,7 @@ public:
           connected_(false),
           protocol_(),
           model_name_(model == "iefw18" ? "iEFW-18" : "iEFW-15"),
-          status_cache_("iOptron iEFW", kStatusTtl, 3, "iOptron") {}
+          status_cache_(kCacheLabel, kStatusTtl, 3, "iOptron", clock) {}
 
     ~IefwFilterWheelDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -81,10 +83,12 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Firmware captured at connect; surfaced in the web UI only (never
-    // DriverInfo). Non-empty exactly while connected.
+    // DriverInfo). Set at connect and kept until the next Connect or
+    // Disconnect; a lost link hides it (the wrapper's lock-free latch), so the
+    // web UI never shows firmware beside Connected false.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (firmware_.empty()) {
+        if (firmware_.empty() || !protocol_.link_alive()) {
             return std::nullopt;
         }
         return firmware_;
@@ -92,7 +96,21 @@ public:
 
     int get_interface_version() const override { return 3; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (decision 0009 rule 2): once an exchange
+    // has seen the port gone the wrapper latches the loss and releases the port.
+    // Both reads are lock-free.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
+
+    // Decision 0009 rules 1 and 5: the loss reason, kept after the link is lost, else the Position fault latched by
+    // the status cache (Connected stays true). Neither read waits on the wire: the wrapper's text mutex and the
+    // cache's fault mutex are leaves no exchange holds.
+    std::string get_link_fault() const override {
+        std::string lost = protocol_.link_fault();
+        if (!lost.empty()) {
+            return lost;
+        }
+        return status_cache_.fault();
+    }
 
     void connect() override { start_connection_task(true); }
 
@@ -111,11 +129,18 @@ public:
         if (connected && consume_pending_disconnect(connected_.load())) {
             return;
         }
-        if (connected == connected_.load()) {
+        // The connect check reads the link-aware value, so Connect over a lost
+        // link reconnects (decision 0009 rule 4); the disconnect check reads
+        // the raw flag, so a lost link still runs the teardown (#1289).
+        if (connected ? connected_.load() && protocol_.link_alive() : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            // Start clean: after a lost link the raw flag and the firmware
+            // from before the loss are still set, and Connected must not read
+            // true while the reconnect is still reading the wheel.
+            teardown_locked();
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 IefwConnectionConfig config;
@@ -142,22 +167,7 @@ public:
             return;
         }
 
-        // Clear driver state before the protocol close: if the close throws the driver must not stay
-        // half-connected.
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            firmware_.clear();
-            moving_ = false;
-            connected_.store(false);
-        }
-        status_cache_.reset();
-        try {
-            // Waits for an exchange in flight: the port is never closed under one.
-            std::lock_guard<std::mutex> io(io_mutex_);
-            protocol_.disconnect();
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", "iEFW disconnect error: " + std::string(e.what()));
-        }
+        teardown_locked();
         ALPACA_LOG_INFO("iOptron", "iEFW filter wheel disconnected");
     }
 
@@ -185,22 +195,35 @@ public:
         ensure_connected();
         // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
         // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
-        const Status status = status_cache_.get([this] {
-            std::lock_guard<std::mutex> io(io_mutex_);
-            Status fresh;
-            if (!connected_.load()) {
-                // A disconnect that won the I/O lock has closed the port. Returning (not throwing) keeps it
-                // out of the link-health count; the disconnect's reset() drops this frame.
-                fresh.closed = true;
+        Status status;
+        try {
+            status = status_cache_.get([this] {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                Status fresh;
+                if (!connected_.load()) {
+                    // A disconnect that won the I/O lock has closed the port. Returning (not throwing) keeps it
+                    // out of the link-health count; the disconnect's reset() drops this frame.
+                    fresh.closed = true;
+                    return fresh;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    fresh.move_seq = move_seq_;
+                }
+                fresh.wire = protocol_.get_position();
                 return fresh;
-            }
+            });
+        } catch (const std::exception&) {
+            // A refill that lost the link counts as a failed read for the cache, which turns the third one in a row
+            // into its "communications compromised" DriverException; a lost link is NotConnected (decision 0009
+            // rule 3), whatever the count. So is a fault that has now stood past the staleness bound (rule 2).
+            ensure_connected();
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                fresh.move_seq = move_seq_;
+                std::lock_guard<std::mutex> io(io_mutex_);
+                lose_link_if_fault_stale_locked();
             }
-            fresh.wire = protocol_.get_position();
-            return fresh;
-        });
+            throw;
+        }
         if (status.closed) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
         }
@@ -254,6 +277,14 @@ public:
             // A disconnect that won the I/O lock has closed the port; mutex_ held across the move gave
             // this guarantee before the conversion.
             ensure_connected();
+            // Decision 0009 rule 1: a latched Position fault refuses the move, as it refuses the read; a wheel that
+            // does not answer :WP# would otherwise take :WM with no ack and report success. Past the staleness
+            // bound the refused move loses the link (rule 2). Only a good Position read clears the fault.
+            lose_link_if_fault_stale_locked();
+            if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+                throw AlpacaException(std::string(kCacheLabel) + " communications compromised: " + fault,
+                                      AlpacaError::DriverException);
+            }
             std::int32_t previous_target = 0;
             bool previous_moving = false;
             {
@@ -313,9 +344,54 @@ public:
     }
 
 private:
+    // NotConnected while disconnected and once the wrapper has seen the port
+    // gone (decision 0009 rule 3); lock-free, and checked before the status
+    // cache, so a frame from before the loss is never served.
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
+        }
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("Filter wheel link lost; Connect again once the wheel is back",
+                                  AlpacaError::NotConnected);
+        }
+    }
+
+    // Decision 0009 rule 2: a Position fault that has stood past util::kLinkStalenessBound on the task clock is a
+    // lost link, found by the next failed read or refused move (there is no poll). The wrapper releases the port and
+    // keeps the reason (rules 3 and 5); then this throws NotConnected. Caller holds io_mutex_ (so no exchange is in
+    // flight) and no other driver lock; this reads the cache's leaf fault mutex, then takes the wrapper's mutex.
+    // Checked under io_mutex_: a Connect since the failed read reset the cache in its teardown before it reopened
+    // the port, so a fresh session is never lost on the old fault.
+    void lose_link_if_fault_stale_locked() const {
+        // The text first: a stale fault was latched at least the bound ago, so it is already set here (a refill that
+        // finished its exchange before this took io_mutex_ can clear it or latch a fresh one, never a stale one).
+        const std::string fault = status_cache_.fault();
+        if (!status_cache_.fault_stale()) {
+            return;
+        }
+        protocol_.lose_link("iEFW Position fault stood for " + std::to_string(util::kLinkStalenessBound.count()) +
+                            " s with no good reply: " + fault);
+        ensure_connected();
+    }
+
+    // Disconnect body shared by the explicit disconnect and the connect. Caller holds transition_mutex_ and no other
+    // driver lock. Driver state first, port close second (driver-lifecycle.instructions.md, issue #387): if the close
+    // throws the driver must not stay half-connected. The wrapper's disconnect() also clears the kept loss reason;
+    // after a lost link the port is already released and the close is a no-op.
+    void teardown_locked() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            firmware_.clear();
+            connected_.store(false);
+        }
+        status_cache_.reset();
+        try {
+            // Waits for an exchange in flight: the port is never closed under one.
+            std::lock_guard<std::mutex> io(io_mutex_);
+            protocol_.disconnect();
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("iOptron", "iEFW disconnect error: " + std::string(e.what()));
         }
     }
 
@@ -377,6 +453,11 @@ private:
         if (!offsets_configured) {
             stored = read_stored_offsets(slots);
         }
+        // The two reads above log and carry on when they fail; a cable pulled during them lost the link (the
+        // wrapper released the port), so this Connect fails rather than publishing a wheel that is gone.
+        if (!protocol_.link_alive()) {
+            throw AlpacaException(protocol_.link_fault(), AlpacaError::NotConnected);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         slot_count_ = slots;
         firmware_ = std::move(firmware);
@@ -386,6 +467,9 @@ private:
         if (seed) {
             focus_offsets_ = std::move(stored);
         }
+        // The move latch from before a loss or a Disconnect ends here, under the I/O lock: a set_position that
+        // won the lock before the teardown's connected_ flag was seen can still set it after the teardown, but
+        // none can run once the handshake holds the lock. Position is not readable while disconnected.
         moving_ = false;
     }
 
@@ -473,6 +557,7 @@ private:
         std::uint64_t move_seq = 0;  // move_seq_ when the refill took the I/O lock; the latch needs a match
     };
     static constexpr std::chrono::milliseconds kStatusTtl{100};
+    static constexpr const char* kCacheLabel = "iOptron iEFW";  // the status cache's label, its fault text prefix
 
     int device_number_;
     std::optional<std::string> serial_port_;
@@ -485,6 +570,10 @@ private:
     // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
     // latch set + :WM + restore of a move against a :WP# refill and the connect/close. Nothing calls the
     // cache (reset/invalidate) while holding io_mutex_ or mutex_; fault() takes only the leaf fault_mutex_.
+    // A lost link is latched inside an exchange (under io_mutex_ and the wrapper's mutex) and takes only the
+    // wrapper's leaf fault-text mutex, never a cache lock; link_alive() is lock-free (#1723). A stale fault is lost
+    // under io_mutex_ by lose_link_if_fault_stale_locked(), which reads the cache's leaf fault mutex (never the
+    // cache mutex) and then takes the wrapper's mutex.
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
 
@@ -492,7 +581,7 @@ private:
     mutable std::mutex mutex_;
     std::int32_t slot_count_ = 0;   // from the handshake model code at connect
     const std::string model_name_;  // "iEFW-15" / "iEFW-18" from config; fixed after construction
-    std::string firmware_;          // web-UI only; non-empty exactly while connected
+    std::string firmware_;          // web-UI only; set at connect, cleared by the next Connect/Disconnect
     std::vector<std::string> filter_names_;
     std::vector<int> focus_offsets_;
     // Position reports -1 from a commanded move until the wheel reports the
@@ -505,13 +594,13 @@ private:
 };
 
 std::unique_ptr<FilterWheelDriver> create_iefw_filterwheel(int device_number, const std::string& serial_port,
-                                                           const std::string& model) {
-    return std::make_unique<IefwFilterWheelDriver>(device_number, serial_port, std::nullopt, model);
+                                                           const std::string& model, util::TaskClock& clock) {
+    return std::make_unique<IefwFilterWheelDriver>(device_number, serial_port, std::nullopt, model, clock);
 }
 
 std::unique_ptr<FilterWheelDriver> create_iefw_filterwheel_by_index(int device_number, int wheel_index,
-                                                                    const std::string& model) {
-    return std::make_unique<IefwFilterWheelDriver>(device_number, std::nullopt, wheel_index, model);
+                                                                    const std::string& model, util::TaskClock& clock) {
+    return std::make_unique<IefwFilterWheelDriver>(device_number, std::nullopt, wheel_index, model, clock);
 }
 
 }  // namespace alpacacore::vendor::ioptron
