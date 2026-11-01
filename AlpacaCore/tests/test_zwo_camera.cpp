@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/version.h>
 
@@ -18,9 +19,11 @@
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
@@ -396,4 +399,180 @@ TEST_CASE("ZWO Camera Driver - A name refresh that overlapped a connect does not
 
     CHECK(camera->get_name() == connect_name);
     camera->set_connected(false);
+}
+
+// ---- Camera replug and link loss (issue #1667, decision 0009) ----
+
+namespace {
+
+using alpacacore::AlpacaError::NotConnected;
+using alpacacore::test::FakeTaskClock;
+using alpacacore::test::FakeZWOSDK;
+using alpacacore::vendor::zwo::ZWOExposureStatus;
+
+constexpr const char* kSerial = "FAKE-ZWO-17";
+
+// Every WARN logged while it lives; restores the previous sink on any exit.
+struct WarnCapture {
+    std::vector<std::string> messages;
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    WarnCapture() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) messages.emplace_back(message);
+            });
+    }
+    ~WarnCapture() { alpacacore::logging::set_log_sink(previous); }
+    WarnCapture(const WarnCapture&) = delete;
+    WarnCapture& operator=(const WarnCapture&) = delete;
+};
+
+// A camera with an exposure in flight, the clock past the retry window.
+struct ExposingCamera {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    std::unique_ptr<alpacacore::CameraDriver> camera =
+        alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+
+    ExposingCamera() {
+        camera->set_connected(true);
+        clock.advance(std::chrono::seconds(1));
+        sdk.auto_complete_exposure = false;
+        camera->start_exposure(30.0, true);
+    }
+};
+
+}  // namespace
+
+// Falsified by: zwo_camera_driver.cpp poll_exposure_status() running the retry burst after the stop met a removal
+// error (the exposure fails with 1280 and Connected stays true, as on the rig); on_link() not calling note_loss().
+// Decision 0009 rule 2a: the first removal error drops the link, and no retry re-triggers the exposure.
+TEST_CASE("ZWO Camera Driver - a pulled cable during an exposure loses the link at once", "[zwo][camera][unit][link]") {
+    WarnCapture log;
+    ExposingCamera rig;
+    const int starts = rig.sdk.call_count("start_exposure");
+    const int writes = rig.sdk.call_count("set_control_value");
+    rig.sdk.removed = true;  // the status read answers Failed, the retry's stop ASI_ERROR_CAMERA_REMOVED
+
+    require_alpaca_error([&] { (void)rig.camera->get_image_ready(); }, NotConnected);
+
+    CHECK_FALSE(rig.camera->get_connected());
+    CHECK(rig.sdk.call_count("start_exposure") == starts);  // no retry re-triggered the exposure
+    CHECK(rig.sdk.call_count("set_control_value") == writes);
+    require_alpaca_error([&] { (void)rig.camera->get_camera_state(); }, NotConnected);
+    require_alpaca_error([&] { (void)rig.camera->get_ccd_temperature(); }, NotConnected);
+    CHECK(rig.camera->get_device_state().empty());
+    std::vector<std::string> lost;
+    for (const auto& message : log.messages) {
+        if (message.find(" lost (") != std::string::npos) lost.push_back(message);
+    }
+    REQUIRE(lost.size() == 1);  // one WARN, with the serial
+    CHECK(lost.front().find(kSerial) != std::string::npos);
+}
+
+// Falsified by: zwo_camera_driver.cpp on_link() not calling note_loss() (Connected stays true). The wrapper side,
+// zwo_sdk_wrapper.cpp get_control_value() answering false on a removal code (which hid a pulled cable from every
+// temperature read): MUTATION: not runnable here: it needs the vendor library, which has no x86_64 build.
+TEST_CASE("ZWO Camera Driver - a removal error on a temperature read loses the link", "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    CHECK(camera->get_ccd_temperature() == Catch::Approx(15.0));
+    sdk.removed = true;
+
+    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, NotConnected);
+
+    CHECK_FALSE(camera->get_connected());
+    require_alpaca_error([&] { camera->set_bin_x(1); }, NotConnected);
+    CHECK(camera->get_link_fault().find("was removed from USB") != std::string::npos);
+    camera->set_connected(false);  // decision 0009 rule 5: a Disconnect clears the loss text
+    CHECK(camera->get_link_fault().empty());
+}
+
+// Falsified by: zwo_camera_driver.cpp set_connected(false) treating a lost link as still connected (the Disconnect
+// never completes), or the next Connect binding the old id instead of the serial read at the first connect.
+TEST_CASE("ZWO Camera Driver - Disconnect after a loss completes and Connect reopens by serial on the new id",
+          "[zwo][camera][unit][link]") {
+    ExposingCamera rig;
+    const int old_id = rig.sdk.camera.camera_id;
+    rig.sdk.removed = true;
+    require_alpaca_error([&] { (void)rig.camera->get_image_ready(); }, NotConnected);
+
+    rig.camera->set_connected(false);
+    CHECK_FALSE(rig.camera->get_connected());
+
+    rig.sdk.replug({{23, kSerial}});
+    rig.camera->set_connected(true);
+    CHECK(rig.camera->get_connected());
+    CHECK(rig.sdk.holders(23) == 1);
+    CHECK(rig.sdk.holders(old_id) == 0);
+    rig.sdk.auto_complete_exposure = true;
+    rig.camera->start_exposure(0.001, true);
+    CHECK(rig.camera->get_image_ready());
+    CHECK(rig.sdk.open_count() == 1);
+
+    rig.camera->set_connected(false);
+    CHECK(rig.sdk.open_count() == 0);
+}
+
+// Falsified by: zwo_camera_driver.cpp resolve_camera_id() binding the configured id again after the first connect
+// (cameras whose ids swapped while disconnected are mixed up).
+TEST_CASE("ZWO Camera Driver - two cameras swapped while disconnected are told apart by serial",
+          "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    sdk.set_units({{17, "SERIAL-A"}, {18, "SERIAL-B"}});
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, 17, sdk);
+    camera->set_connected(true);
+    CHECK(sdk.holders(17) == 1);
+    CHECK(camera->get_unique_id() == "ZWO_SN_SERIAL-A");
+    camera->set_connected(false);
+
+    sdk.set_units({{17, "SERIAL-B"}, {18, "SERIAL-A"}});
+    camera->set_connected(true);
+
+    CHECK(sdk.holders(18) == 1);  // A moved to id 18
+    CHECK(sdk.holders(17) == 0);  // and B at 17 stays closed
+    CHECK(camera->get_unique_id() == "ZWO_SN_SERIAL-A");
+    camera->set_connected(false);
+}
+
+// Falsified by: zwo_camera_driver.cpp set_connected() taking exposure_trigger_mutex_ before it publishes the closed
+// state (a retry burst stuck in a hung SDK call keeps Connected true through every Disconnect, as on the rig).
+TEST_CASE("ZWO Camera Driver - Disconnect reads false while a retry burst is stuck in the SDK",
+          "[zwo][camera][unit][link]") {
+    ExposingCamera rig;
+    std::atomic<bool> stuck{false};
+    std::atomic<bool> release{false};
+    static thread_local bool is_poller = false;
+    rig.sdk.before_call = [&](const std::string& call) {
+        if (call != "stop_exposure" || !is_poller) return;
+        stuck = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!release.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    rig.sdk.set_exposure_status(ZWOExposureStatus::Failed);  // the retry burst starts at the next poll
+    std::thread poller([&] {
+        is_poller = true;
+        try {
+            (void)rig.camera->get_image_ready();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): any outcome after Disconnect
+        }
+    });
+    REQUIRE(alpacacore::test::wait_for_flag(stuck));
+
+    std::thread disconnect([&] { rig.camera->set_connected(false); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (rig.camera->get_connected() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool connected_while_stuck = rig.camera->get_connected();
+    release = true;
+    poller.join();
+    disconnect.join();
+
+    CHECK_FALSE(connected_while_stuck);
+    CHECK_FALSE(rig.camera->get_connected());
+    CHECK(rig.sdk.open_count() == 0);
 }

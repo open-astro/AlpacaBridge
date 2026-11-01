@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/last_exposure.h>
+#include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/version_format.h>
@@ -64,6 +65,13 @@ bool supports_bin(const std::vector<int>& bins, int bin) {
     return std::find(bins.begin(), bins.end(), bin) != bins.end();
 }
 
+// CWE-117: the serial and SDK error texts are device text; control characters never reach the log or a client.
+std::string printable(std::string text) {
+    std::replace_if(
+        text.begin(), text.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f; }, '?');
+    return text;
+}
+
 }  // namespace
 
 class ZWOCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
@@ -82,7 +90,6 @@ public:
           camera_info_(),
           camera_info_valid_(false),
           control_caps_(),
-          connected_(false),
           image_type_(ZWOImageType::Raw8),
           bin_x_(1),
           bin_y_(1),
@@ -111,7 +118,7 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        if (connected_.load()) {
+        if (link_.is_open()) {
             try {
                 set_connected(false);
             } catch (const std::exception& e) {
@@ -162,7 +169,13 @@ public:
         return 4;  // ICameraV4 (Platform 7)
     }
 
-    bool get_connected() const override { return connected_.load(); }
+    bool get_connected() const override { return link_.is_open(); }
+
+    // Decision 0009 rule 5: why the link was lost, kept until the next Connect or Disconnect.
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lost(lost_mutex_);
+        return lost_reason_;
+    }
 
     void connect() override { start_connection_task(true); }
 
@@ -172,27 +185,38 @@ public:
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
-        // Serialize lifecycle teardown with Start/Stop and the transient-failure
-        // retry burst before taking mutex_, so no trigger can race a camera close.
-        std::lock_guard<std::mutex> trigger_lock(exposure_trigger_mutex_);
-        std::unique_lock<std::mutex> lock(mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
         // newer pending disconnect by staying down.
-        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+        if (!connected && record_disconnect_if_connect_in_flight(link_.is_open())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        if (connected && consume_pending_disconnect(link_.is_open())) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected == link_.is_open()) {
             // Idempotent (ASCOM): a redundant Connect/Disconnect is a no-op and must
             // NOT reset exposure state. The Platform-7 `connect` endpoint calls
             // connect() unconditionally, so wiping here would abort an in-flight
             // exposure or discard a just-completed image. Matches the QHY driver.
+            // A lost link reads as disconnected, so a Disconnect after a loss lands here and completes: it
+            // clears the loss text (decision 0009 rule 5), and the next Connect releases what the loss left.
+            if (!connected) {
+                std::lock_guard<std::mutex> lost(lost_mutex_);
+                lost_reason_.clear();
+            }
             return;
         }
+        // A new epoch first: Connected reads false from here on, before the locks below, so a trigger or
+        // retry burst stuck in a hung SDK call cannot keep a Disconnect from showing (issue #1667), and a
+        // call that captured the old link can no longer drop the new one (decision 0009 rule 3).
+        link_.begin_transition();
+
+        // Serialize lifecycle teardown with Start/Stop and the transient-failure
+        // retry burst before taking mutex_, so no trigger can race a camera close.
+        std::lock_guard<std::mutex> trigger_lock(exposure_trigger_mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
 
         if (connected) {
             // Decision 0016 rule 4: the handshake runs under transition_mutex_ with mutex_
@@ -208,6 +232,11 @@ public:
                 ~ClearInFlight() { flag.store(false); }
             } clear_in_flight{connect_in_flight_};
 
+            release_open();  // an open left from a lost link: the table retired it, so this only forgets it
+            {
+                std::lock_guard<std::mutex> lost(lost_mutex_);
+                lost_reason_.clear();
+            }
             const int resolved_id = resolve_camera_id();
             const auto opened = sdk_.open_camera_link(resolved_id);
             open_id_.store(resolved_id);
@@ -276,26 +305,33 @@ public:
             }
             if (opened.serial.empty()) {
                 ALPACA_LOG_WARN("ZWO", "Camera serial number unavailable");
+            } else {
+                // Every later Connect scans for this serial, so a replug that moved the camera to another SDK id,
+                // or swapped two cameras' ids, still opens the same camera and never another (issue #1667).
+                bound_serial_ = opened.serial;
+            }
+            {
+                std::lock_guard<std::mutex> lost(lost_mutex_);
+                unit_label_ = opened.serial.empty() ? "ZWO camera id " + std::to_string(resolved_id)
+                                                    : "ZWO camera " + printable(opened.serial);
             }
             reset_exposure_state_locked();
             first_temperature_read_pending_.store(true);
-            connected_.store(true);
+            link_.publish_open();
             return;
         }
 
-        // Clear driver state and publish disconnected BEFORE the SDK close so
-        // a racing operational call fails fast at its connection check instead
-        // of hitting a just-closed camera, and a throwing close can't trap the
+        // Clear driver state before the SDK close so a racing operational call fails fast at its
+        // connection check instead of hitting a just-closed camera, and a throwing close can't trap the
         // driver half-connected — same order as the switch/EFW/CAA/EAF
-        // siblings, per the driver-lifecycle.instructions.md disconnect rule (issue #116).
+        // siblings, per the driver-lifecycle.instructions.md disconnect rule (issue #116). The
+        // disconnected state itself was published by begin_transition() above.
         const std::optional<int> close_id = camera_id_;
         serial_number_.clear();
         camera_id_.reset();
         reset_exposure_state_locked();
-        connected_.store(false);
-        // Publish the disconnected state before waiting for a bulk read to
-        // finish. SDK-backed getters will now fail on the empty camera_id_,
-        // while local cached getters can still take mutex_.
+        // Wait for a bulk read to finish before the close. SDK-backed getters
+        // now fail on the empty camera_id_, while local cached getters can still take mutex_.
         lock.unlock();
         if (close_id.has_value()) {
             try {
@@ -541,9 +577,7 @@ public:
         ExposureFrame frame{};
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load()) {
-                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-            }
+            ensure_connected();
             if (exposure_starting_) {
                 throw AlpacaException("Exposure start is in progress", AlpacaError::InvalidOperation);
             }
@@ -580,9 +614,7 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load()) {
-                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-            }
+            ensure_connected();
             if (!acquisition_valid_ || exposure_seq_ != download_seq || !exposure_frame_.has_value()) {
                 throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
             }
@@ -613,9 +645,7 @@ public:
         std::unique_lock<std::mutex> image_lock(image_operation_mutex_, std::defer_lock);
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load()) {
-                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-            }
+            ensure_connected();
             if (!image_failure_.empty()) throw_image_failure_locked();
             if (image_cached_) return last_image_;
             if (!acquisition_valid_ || exposure_seq_ != download_seq || !exposure_frame_.has_value()) {
@@ -672,9 +702,7 @@ public:
         std::uint64_t poll_seq = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load()) {
-                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-            }
+            ensure_connected();
             if (exposure_starting_) {
                 return false;
             }
@@ -692,9 +720,7 @@ public:
         auto status = poll_exposure_status();
         const bool ready = (status == ZWOExposureStatus::Success);
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load()) {
-            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-        }
+        ensure_connected();
         if (exposure_starting_) {
             return false;
         }
@@ -1013,9 +1039,7 @@ public:
         std::unique_lock<std::mutex> image_lock(image_operation_mutex_, std::defer_lock);
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load()) {
-                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-            }
+            ensure_connected();
             if (!is_roi_valid_locked(num_x_, num_y_, start_x_, start_y_)) {
                 throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
             }
@@ -1061,7 +1085,7 @@ public:
         image_lock.unlock();
 
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load() || exposure_seq_ != start_seq) {
+        if (!link_.is_open() || exposure_seq_ != start_seq) {
             throw AlpacaException("Camera disconnected while starting exposure", AlpacaError::InvalidOperation);
         }
         invalidate_exposure_image_locked();
@@ -1133,9 +1157,7 @@ private:
         std::uint64_t stop_seq = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load()) {
-                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
-            }
+            ensure_connected();
             if (!camera_id_.has_value()) {
                 throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
             }
@@ -1197,12 +1219,20 @@ private:
 
     std::unordered_map<ZWOControlType, ZWOControlCaps> control_caps_;
 
-    std::atomic<bool> connected_;
+    // Connected, as epoch << 1 | open bit: begin_transition() and publish_open() in set_connected(), mark_lost() when a
+    // device call shows the camera is gone (decision 0009 rule 2a).
+    mutable util::LinkEpoch link_;
     // The open this driver holds (open_link_ 0 = none): written by set_connected() under transition_mutex_ only,
-    // read by any thread running a device call. Both are set before connected_ and reset (0, -1) by release_open()
-    // before its close.
+    // read by any thread running a device call. Both are set before publish_open() and reset (0, -1) by
+    // release_open() before its close.
     std::atomic<int> open_id_{-1};
     std::atomic<std::uint64_t> open_link_{0};
+    // A leaf lock (taken under mutex_ or with none held, takes no other): why a lost link refuses, and the log label.
+    mutable std::mutex lost_mutex_;
+    mutable std::string lost_reason_;
+    std::string unit_label_{"ZWO camera"};
+    // Under transition_mutex_: the serial every Connect binds once one is known (in memory, not persisted).
+    std::string bound_serial_;
     // True while set_connected(true) runs its SDK handshake with mutex_ released.
     std::atomic<bool> connect_in_flight_{false};
     // True from connect until the first CCDTemperature read of the connection (#722).
@@ -1289,37 +1319,76 @@ private:
     util::TaskClock::clock::time_point pulse_guiding_end_;
 
     void ensure_connected() const {
-        if (!connected_.load()) {
-            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        if (!link_.is_open()) {
+            throw_not_connected();
         }
+    }
+
+    [[noreturn]] void throw_not_connected() const {
+        std::lock_guard<std::mutex> lost(lost_mutex_);
+        throw AlpacaException(lost_reason_.empty() ? "Camera not connected" : lost_reason_, AlpacaError::NotConnected);
     }
 
     // Runs one device call under the open this driver holds. A call for another id than the open's is a stale
-    // snapshot from before a reconnect (or any id after Disconnect): refused without touching the new link.
+    // snapshot from before a reconnect (or any id after Disconnect): refused without touching the new link. A
+    // NotConnected from the call (a removal code; the table already retired the open and closed the dead handle, or
+    // refused a link it retired) drops the link at once, per decision 0009 rule 2a and #1656; any other error
+    // surfaces as itself. Takes no driver lock but the leaf lost_mutex_, so it may run with mutex_ held.
     template <typename Fn>
     auto on_link(int camera_id, Fn&& fn) const {
         using Result = decltype(fn());
+        const auto captured = link_.load();
         if (camera_id != open_id_.load()) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
-        if constexpr (std::is_void_v<Result>) {
-            sdk_.with_link(camera_id, open_link_.load(), [&] { fn(); });
-        } else {
-            std::optional<Result> result;
-            sdk_.with_link(camera_id, open_link_.load(), [&] { result.emplace(fn()); });
-            if (!result) {
-                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        try {
+            if constexpr (std::is_void_v<Result>) {
+                sdk_.with_link(camera_id, open_link_.load(), [&] { fn(); });
+            } else {
+                std::optional<Result> result;
+                sdk_.with_link(camera_id, open_link_.load(), [&] { result.emplace(fn()); });
+                if (!result) {
+                    throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+                }
+                return std::move(*result);
             }
-            return std::move(*result);
+        } catch (const std::exception& e) {
+            if (!util::is_link_loss(e)) {
+                throw;
+            }
+            note_loss(captured, e);
+            throw_not_connected();
         }
     }
 
-    // Drops this driver's open, if any. Caller holds transition_mutex_.
+    void note_loss(util::LinkEpoch::Word captured, const std::exception& e) const {
+        if (!link_.mark_lost(captured)) {
+            return;  // a disconnect, a relink or another call got there first
+        }
+        std::string label;
+        {
+            std::lock_guard<std::mutex> lost(lost_mutex_);
+            label = unit_label_;
+            lost_reason_ = label + " was removed from USB; Connect again when it is back";
+        }
+        ALPACA_LOG_WARN("ZWO", label + " lost (" + printable(e.what()) + ")");
+    }
+
+    // Drops this driver's open, if any. A close that fails because the camera is gone is logged and swallowed (a
+    // Disconnect after a replug must complete); any other close error surfaces. Caller holds transition_mutex_.
     void release_open() {
         const std::uint64_t link = open_link_.exchange(0);
         const int id = open_id_.exchange(-1);
-        if (link != 0) {
+        if (link == 0) {
+            return;
+        }
+        try {
             sdk_.close_camera_link(id, link);
+        } catch (const std::exception& e) {
+            if (!util::is_link_loss(e)) {
+                throw;
+            }
+            ALPACA_LOG_WARN("ZWO", "close of a removed camera: " + printable(e.what()));
         }
     }
 
@@ -1456,7 +1525,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!camera_id_.has_value() || !acquisition_valid_ || !exposure_frame_.has_value()) {
-                // A disconnect completed between the caller's connected_
+                // A disconnect completed between the caller's connection
                 // check and this snapshot — report Idle like the guarded
                 // status read below, or no current frame is pending, instead
                 // of polling an old exposure after an ROI change.
@@ -1537,6 +1606,15 @@ private:
             dev_.stop_exposure(id);
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG("ZWO", "best-effort stop before retry failed: " + std::string(e.what()));
+        }
+        if (!link_.is_open()) {
+            // The stop met a removal error, or a Disconnect began: no retry on a camera that is gone (issue #1667).
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (exposure_seq_ == retry_seq) {
+                exposure_starting_ = false;
+                exposure_failed_ = true;
+            }
+            return ZWOExposureStatus::Failed;
         }
         // Re-apply the exposure register before re-triggering — the SDK
         // is not guaranteed to retain it across the failure (the INDI
@@ -1680,7 +1758,12 @@ private:
     int resolve_camera_id() {
         std::vector<ZwoUnreadableSlot> unreadable;
         const auto found = sdk_.enumerate_identified_cameras(trim_zwo_name(binding_.identity.camera_name), &unreadable);
-        const auto result = resolve_zwo_camera(binding_.identity, found, binding_.claimed_serials);
+        // Once a serial is known, every Connect binds it, never the id or index the entry started from.
+        ZwoConfiguredIdentity identity = binding_.identity;
+        if (identity.serial.empty() && !bound_serial_.empty()) {
+            identity.serial = bound_serial_;
+        }
+        const auto result = resolve_zwo_camera(identity, found, binding_.claimed_serials);
         if (!result.camera.has_value()) {
             // The camera this entry means may be the slot the SDK could not read: say so.
             std::string message = result.message;
@@ -1727,7 +1810,7 @@ private:
 
     void refresh_cached_camera_info_if_needed() {
         // A connect in flight owns the SDK: the by-id read would wait out its open.
-        if (connected_.load() || connect_in_flight_.load()) {
+        if (link_.is_open() || connect_in_flight_.load()) {
             return;
         }
 
@@ -1747,7 +1830,7 @@ private:
                     std::lock_guard<std::mutex> lock(mutex_);
                     // A connect ran while the by-id read was out: it owns camera_info_ now
                     // (decision 0016 rule 6), and this read may come from a stale id.
-                    if (connected_.load() || connect_in_flight_.load() || camera_id_ != camera_id) {
+                    if (link_.is_open() || connect_in_flight_.load() || camera_id_ != camera_id) {
                         return;
                     }
                     camera_info_ = info;

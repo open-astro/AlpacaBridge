@@ -223,11 +223,20 @@ int map_error_code(ASI_ERROR_CODE code) {
     }
 }
 
-void throw_on_error(ASI_ERROR_CODE code, const std::string& context) {
+// Issue #1667, decision 0009 rule 2a: the bridge passes only enumerated ids, so ASI_ERROR_INVALID_ID on a per-device
+// call means the id is gone (NotConnected, a lost link), like CAMERA_CLOSED and CAMERA_REMOVED. ASIOpenCamera keeps
+// InvalidValue for an id it does not know.
+// TODO(#1667): confirm on the rig that a call on an old id after a replug returns CLOSED, REMOVED or INVALID_ID.
+void throw_on_error(ASI_ERROR_CODE code, const std::string& context, int invalid_id_code = AlpacaError::NotConnected) {
     if (code == ASI_SUCCESS) {
         return;
     }
-    throw AlpacaException(context + ": " + error_code_to_string(code), map_error_code(code));
+    const int mapped = code == ASI_ERROR_INVALID_ID ? invalid_id_code : map_error_code(code);
+    throw AlpacaException(context + ": " + error_code_to_string(code), mapped);
+}
+
+bool is_removal_code(ASI_ERROR_CODE code) {
+    return code == ASI_ERROR_INVALID_ID || code == ASI_ERROR_CAMERA_CLOSED || code == ASI_ERROR_CAMERA_REMOVED;
 }
 
 std::string read_serial_number(int camera_id) {
@@ -243,7 +252,7 @@ std::string read_serial_number(int camera_id) {
 // The SDK needs ASIInitCamera once after every ASIOpenCamera, so the table's real open does both: a handle that
 // opened but did not initialise is closed before the error propagates.
 void open_and_init(int camera_id) {
-    throw_on_error(ASIOpenCamera(camera_id), "ASIOpenCamera");
+    throw_on_error(ASIOpenCamera(camera_id), "ASIOpenCamera", AlpacaError::InvalidValue);
     const ASI_ERROR_CODE code = ASIInitCamera(camera_id);
     if (code != ASI_SUCCESS) {
         ASICloseCamera(camera_id);
@@ -438,10 +447,15 @@ std::vector<ZWOControlCaps> ZWOSDKWrapper::get_control_caps(int camera_id) {
     });
 }
 
+// false: the control is not readable on this camera. A removal code throws (a lost link), so a temperature or status
+// read cannot hide a pulled cable behind "not readable" (issue #1667, decision 0009 rule 2a).
 bool ZWOSDKWrapper::get_control_value(int camera_id, ZWOControlType type, long& value, bool& is_auto) {
     return pimpl_->table_.call(camera_id, [&] {
         ASI_BOOL auto_flag = ASI_FALSE;
         const ASI_ERROR_CODE code = ASIGetControlValue(camera_id, to_asi_control_type(type), &value, &auto_flag);
+        if (is_removal_code(code)) {
+            throw_on_error(code, "ASIGetControlValue");
+        }
         if (code != ASI_SUCCESS) {
             return false;
         }

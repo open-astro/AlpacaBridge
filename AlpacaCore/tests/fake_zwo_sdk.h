@@ -41,7 +41,8 @@ namespace alpacacore::test {
 // share one fake exactly as they share the wrapper: a per-device call outside with_link() is refused, and a retired
 // link is NotConnected before the fake is touched. The raw_* bodies below are the unchecked fake; the public methods of
 // the same name without the prefix run them under the table. get_data_after_exposure() runs unserialised, so a held
-// download never blocks the table.
+// download never blocks the table. The attached units are camera.camera_id with `serial`, or the id -> serial map of
+// set_units() and replug(); every unit answers with the one `camera` state.
 class FakeZWOSDK final : public vendor::zwo::ZWOSDK {
 public:
     using CameraInfo = vendor::zwo::ZWOCameraInfo;
@@ -61,7 +62,9 @@ public:
     std::function<void(const std::string&)> before_call;
     bool fail_open{false};
     bool fail_close{false};
-    // ASI_ERROR_CAMERA_REMOVED: every per-device call on the open camera throws NotConnected, as the wrapper maps it.
+    // The cable is pulled: every per-device call on an open camera throws NotConnected, as the wrapper maps
+    // ASI_ERROR_CAMERA_REMOVED, except the exposure status read, which answers Failed (ASI_EXP_FAILED, what the SDK
+    // gave on the rig). A close still drops the handle and then throws the same; no unit enumerates or opens.
     std::atomic<bool> removed{false};
     // The serial the one camera reports, read at every open (a different unit behind the same id changes it).
     std::string serial{"FAKE-ZWO-17"};
@@ -168,7 +171,27 @@ public:
 
     int open_count() const {
         std::lock_guard lock(mutex_);
-        return open_count_;
+        return static_cast<int>(open_ids_.size());
+    }
+
+    /// Replaces the attached units (SDK id -> serial; "" is a camera that reports none).
+    void set_units(std::map<int, std::string> units) {
+        std::lock_guard lock(mutex_);
+        units_ = std::move(units);
+    }
+
+    /// The cable is back with these units: `removed` clears, and the handles opened before the pull are gone.
+    void replug(std::map<int, std::string> units) {
+        std::lock_guard lock(mutex_);
+        units_ = std::move(units);
+        open_ids_.clear();
+        removed = false;
+    }
+
+    /// Per-device calls that reached a unit (a raw_* body); one the table refused first is not counted.
+    int unit_touches() const {
+        std::lock_guard lock(mutex_);
+        return unit_touches_;
     }
 
     bool closed_during_download() const {
@@ -178,31 +201,46 @@ public:
 
     std::vector<CameraInfo> enumerate_cameras(std::vector<vendor::zwo::ZwoUnreadableSlot>* = nullptr) override {
         hit("enumerate_cameras");
-        return {camera};
+        std::vector<CameraInfo> cameras;
+        std::lock_guard lock(mutex_);
+        for (const auto& [id, unit_serial] : units_locked()) {
+            cameras.push_back(camera);
+            cameras.back().camera_id = id;
+        }
+        return cameras;
     }
 
     std::vector<vendor::zwo::ZwoEnumeratedCamera> enumerate_identified_cameras(
         const std::string& only_model_name, std::vector<vendor::zwo::ZwoUnreadableSlot>*) override {
         hit("enumerate_identified_cameras");
         if (!only_model_name.empty() && only_model_name != camera.name) return {};
-        return {{0, camera.camera_id, camera.name, serial}};
+        std::vector<vendor::zwo::ZwoEnumeratedCamera> found;
+        std::lock_guard lock(mutex_);
+        for (const auto& [id, unit_serial] : units_locked()) {
+            found.push_back({static_cast<int>(found.size()), id, camera.name, unit_serial});
+        }
+        return found;
     }
 
     bool get_camera_info_by_id(int camera_id, CameraInfo& info) override {
         hit("get_camera_info_by_id");
         const auto unchecked = table_.lock_unchecked();
-        if (camera.camera_id != camera_id) return false;
         std::lock_guard lock(mutex_);
+        if (units_locked().count(camera_id) == 0) return false;
         require_open_locked(camera_id);
         info = camera;
+        info.camera_id = camera_id;
         return true;
     }
 
     bool get_camera_info_by_index(int camera_index, CameraInfo& info) override {
         hit("get_camera_info_by_index");
         const auto unchecked = table_.lock_unchecked();
-        if (camera_index != 0) return false;
+        std::lock_guard lock(mutex_);
+        const auto units = units_locked();
+        if (camera_index < 0 || camera_index >= static_cast<int>(units.size())) return false;
         info = camera;
+        info.camera_id = std::next(units.begin(), camera_index)->first;
         return true;
     }
 
@@ -326,6 +364,10 @@ public:
 
     ExposureStatus raw_get_exposure_status(int camera_id) {
         std::lock_guard lock(mutex_);
+        if (removed) {
+            ++unit_touches_;
+            return ExposureStatus::Failed;
+        }
         require_open_locked(camera_id);
         if (!exposure_status_error_.empty()) {
             const auto message = std::exchange(exposure_status_error_, {});
@@ -385,7 +427,9 @@ public:
     std::string raw_get_serial_number(int camera_id) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
-        return serial;
+        const std::string unit_serial = units_locked().at(camera_id);
+        if (unit_serial.empty()) throw AlpacaException("fake ZWO camera has no serial", AlpacaError::DriverException);
+        return unit_serial;
     }
 
     // The per-device interface: each runs its raw_* body under the caller's link (hit() first, so a before_call hook
@@ -460,20 +504,24 @@ private:
         calls_cv_.notify_all();
     }
 
-    void require_id(int camera_id) const {
-        if (camera_id != camera.camera_id) {
-            throw AlpacaException("fake ZWO camera id mismatch", AlpacaError::DriverException);
-        }
+    std::map<int, std::string> units_locked() const {
+        return units_.value_or(std::map<int, std::string>{{camera.camera_id, serial}});
     }
 
-    // The table's real open (ASIOpenCamera, then ASIInitCamera) and close.
+    // The table's real open (ASIOpenCamera, then ASIInitCamera) and close. An id that is not attached is
+    // InvalidValue on the open (the wrapper's ASIOpenCamera mapping).
     void real_open(int camera_id) {
         hit("open_camera");
-        require_id(camera_id);
+        {
+            std::lock_guard lock(mutex_);
+            if (removed || units_locked().count(camera_id) == 0) {
+                throw AlpacaException("fake ZWO camera id not attached", AlpacaError::InvalidValue);
+            }
+        }
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         {
             std::lock_guard lock(mutex_);
-            ++open_count_;
+            open_ids_.insert(camera_id);
             last_download_time_.reset();  // a reopened camera has no download behind it
             temperature_reads_since_open_ = 0;
         }
@@ -482,20 +530,26 @@ private:
 
     void real_close(int camera_id) {
         hit("close_camera");
-        require_id(camera_id);
         {
             std::lock_guard lock(download_mutex_);
             closed_during_download_ = closed_during_download_ || download_in_progress_;
         }
         std::lock_guard lock(mutex_);
-        if (open_count_ <= 0) throw AlpacaException("fake ZWO camera is not open", AlpacaError::DriverException);
-        --open_count_;
+        if (open_ids_.erase(camera_id) == 0) {
+            throw AlpacaException("fake ZWO camera is not open", AlpacaError::DriverException);
+        }
+        if (removed) throw AlpacaException("fake ZWO camera removed", AlpacaError::NotConnected);
         if (fail_close) throw AlpacaException("scripted close failure", AlpacaError::DriverException);
     }
 
+    // An id that is no longer attached answers ASI_ERROR_INVALID_ID, which the wrapper maps to NotConnected on a
+    // per-device call, as it does ASI_ERROR_CAMERA_REMOVED.
     void require_open_locked(int camera_id) const {
-        require_id(camera_id);
-        if (open_count_ <= 0) {
+        ++unit_touches_;
+        if (units_locked().count(camera_id) == 0) {
+            throw AlpacaException("fake ZWO camera id not attached", AlpacaError::NotConnected);
+        }
+        if (open_ids_.count(camera_id) == 0) {
             throw AlpacaException("fake ZWO operation requires an open camera", AlpacaError::DriverException);
         }
         if (removed) {
@@ -518,7 +572,9 @@ private:
     std::string exposure_status_error_;
     std::vector<util::TaskClock::clock::time_point> start_times_;
     std::optional<util::TaskClock::clock::time_point> last_download_time_;
-    int open_count_{0};
+    std::optional<std::map<int, std::string>> units_;
+    std::set<int> open_ids_;
+    mutable int unit_touches_{0};
     int temperature_reads_since_open_{0};
     bool download_held_{false};
     bool download_entered_{false};
