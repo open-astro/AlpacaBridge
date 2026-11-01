@@ -294,7 +294,7 @@ private:
         std::string pending;
         char buf[64];
         while (!stop_.load()) {
-            struct pollfd pfd{};
+            struct pollfd pfd {};
             pfd.fd = pty_.master_fd();
             pfd.events = POLLIN;
             if (::poll(&pfd, 1, 20) <= 0) continue;
