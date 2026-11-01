@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-29
+## Updated 2026-10-31
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -752,9 +752,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 #### Direct USB backend
 
-- **Validated hardware/scope**: bare northern CGX, both motor controllers firmware **7.17.25**, model **0x1788**, native Linux arm64 (RPi4, Debian 13), 2026-10-14. ConformU **4.5.1.54507**: **0 errors, 0 warnings, 0 issues**, all **98** timing rows passed. [Privacy-scrubbed report](AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt); [build provenance and lab evidence](docs/celestron-cgx-usb-motion.md#run-5-passing-qualification-and-final-software-verification).
+- **Validated hardware/scope**: bare northern CGX, native Linux arm64 (OPi6-class SBC, Armbian 26.8.3 trixie), 2026-10-31, binary `e833bc39`. ConformU **4.5.3.56334**: **0 errors, 0 warnings, 0 issues**, **0** timing misses, all **98** timing rows passed, with both guide rates set to 0.25x sidereal for this run. [Privacy-scrubbed report](AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt); [earlier lab evidence (run 5)](docs/celestron-cgx-usb-motion.md#run-5-passing-qualification-and-final-software-verification).
 - **Configuration/reference**: select `protocol="cgx-aux"`, serial transport, explicit USB `portPath`, `siteLatitude` and `siteLongitude`; the AUX link is 115200 baud. No HC startup/alignment sequence is required for this backend. Connect does not home or write labels: explicitly FindHome to establish the encoder reference, then Sync as needed. Reference retention is limited to a verified, exclusively owned logical reconnect; it is not persistence across restart or proof against controller resets/HC interference.
-- **Qualification limits**: this pass covers this CGX/firmware at a northern site, not direct-USB CGX-L, southern operation or optical pointing accuracy. Earlier intermittent guide-onset excess remains recorded and is not claimed fixed by this one successful run; native guide-wire behavior was unchanged. Published site and derived Sync coordinates are privacy-rounded, with residuals retained.
+- **Qualification limits**: this pass covers this CGX at a northern site, not direct-USB CGX-L, southern operation or optical pointing accuracy. Two attempts at the default 0.5x guide rate on the same build and binary stopped at a PulseGuide North ISSUE (+39.2" measured, +37.6" expected, 1.0" tolerance); the 2026-10-15 report measured 0.4-0.9" differences on the same test. The change under test (the #1759 lock order) touches no PulseGuide code, so that result is recorded, not waived and not attributed to the change. Earlier intermittent guide-onset excess remains recorded and is not claimed fixed by this one successful run; native guide-wire behavior was unchanged. Site, site-derived coordinates and time values in the published report are redacted.
 
 </details>
 

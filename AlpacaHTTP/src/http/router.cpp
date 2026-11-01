@@ -71,6 +71,7 @@
 #include "../core/catalog_json.h"
 #include "device_call.h"
 #include "image_payload.h"
+#include "thread_join.h"
 
 namespace {
 
@@ -1168,7 +1169,7 @@ Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_
     set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "", "");
     load_persisted_devices();
 }
-Router::~Router() = default;
+Router::~Router() { cancel_delayed_callback(); }
 
 void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
     const auto interval = motion_watchdog_interval();
@@ -1261,6 +1262,52 @@ void Router::set_shutdown_callback(std::function<void()> callback) {
 
 void Router::set_restart_callback(std::function<void()> callback) {
     restart_callback_ = callback;
+}
+
+void Router::start_delayed_callback(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(delayed_mutex_);
+    if (delayed_pending_ || delayed_cancelled_) {
+        return;
+    }
+    // A finished thread is past its callback, so joining it cannot deadlock.
+    for (auto it = delayed_threads_.begin(); it != delayed_threads_.end();) {
+        if (it->finished->load()) {
+            it->thread.join();
+            it = delayed_threads_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    delayed_pending_ = true;
+    auto finished = std::make_shared<std::atomic<bool>>(false);
+    auto body = [this, finished, cb = std::move(callback)]() {
+        {
+            std::unique_lock<std::mutex> wait_lock(delayed_mutex_);
+            if (delayed_cv_.wait_for(wait_lock, std::chrono::milliseconds(100),
+                                     [this] { return delayed_cancelled_; })) {
+                return;
+            }
+            delayed_pending_ = false;
+        }
+        // Touches no Router member after the delay: the callback may destroy the Router.
+        cb();
+        finished->store(true);
+    };
+    delayed_threads_.push_back({std::thread(std::move(body)), finished});
+}
+
+void Router::cancel_delayed_callback() {
+    std::vector<DelayedThread> threads;
+    {
+        std::lock_guard<std::mutex> lock(delayed_mutex_);
+        delayed_cancelled_ = true;
+        threads.swap(delayed_threads_);
+    }
+    delayed_cv_.notify_all();
+    for (auto& entry : threads) {
+        // A callback that destroys the Server joins itself: join_or_abandon detaches then (ADR 0002).
+        detail::join_or_abandon(entry.thread, "cancel_delayed_callback");
+    }
 }
 
 Response Router::route(const Request& request, std::uint32_t server_transaction_id) {
@@ -2467,6 +2514,12 @@ Response Router::dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver
                                         const std::string& method_name, const DeviceCall& call) {
     const Request& request = call.request();
 
+    // A PUT on a camera can start, end or drop a frame: no imagearray GET shares a build across it.
+    std::optional<ImageBuildEpoch> image_epoch;
+    if (request.method() != HttpMethod::GET && device->get_device_type() == alpacacore::DeviceType::Camera) {
+        image_epoch.emplace();
+    }
+
     return call.run("device method", [&]() -> Response {
         // Handle common AlpacaDriver methods
         if (method_name == "name") {
@@ -3584,7 +3637,8 @@ Response Router::dispatch_camera_method(std::shared_ptr<alpacacore::CameraDriver
                 const std::string accept = has_accept ? request.get_header("accept") : std::string();
                 util::log_debug("Camera imagearray Accept: " + (has_accept ? util::escape_for_log(accept) : "<none>") +
                                 ", imagebytes=" + std::string(accepts_imagebytes(accept) ? "true" : "false"));
-                auto payload = build(camera->get_image_array(), accept, call);
+                auto payload =
+                    build_shared(camera.get(), [&camera] { return camera->get_image_array(); }, accept, call);
                 Response response;
                 response.set_content_type(payload.content_type);
                 response.set_body(std::move(payload.body));
@@ -5468,16 +5522,11 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = std::string("Shutdown initiated");
         response.set_body(alpaca_response);
-        
-        // Call callback asynchronously (after response is sent)
-        // Use a small delay to ensure response is sent first
-        std::thread([this]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (shutdown_callback_) {
-                shutdown_callback_();
-            }
-        }).detach();
-        
+
+        // Call callback asynchronously (after response is sent). The delay
+        // lets the response go out first; the Router owns and joins the thread.
+        start_delayed_callback(shutdown_callback_);
+
         return response;
     } else {
         AlpacaResponse alpaca_response = make_error_response(
@@ -5933,12 +5982,7 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
         alpaca_response.value = std::string("Restart initiated");
         response.set_body(alpaca_response);
 
-        std::thread([this]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (restart_callback_) {
-                restart_callback_();
-            }
-        }).detach();
+        start_delayed_callback(restart_callback_);
 
         return response;
     }

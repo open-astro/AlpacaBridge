@@ -40,7 +40,7 @@ Symbol: `transition_mutex_`
 | Altair camera | `create_toupcam_family_camera` | `AlpacaCore/src/vendors/altair/altair_camera_driver.cpp` | adopted |  |  |
 | Astroasis focuser |  | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted |  | served from `PolledState` |
 | Bisque telescope |  | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | partial | #1838 | rule 6: slew gate re-locks after a live `is_tracking()` without re-checking park |
-| Celestron CGX telescope |  | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | partial | #1837 | coordinate getters, the slew-arrival and PulseGuide position reads and SyncToCoordinates (settle, label write, tracking off/restore) drop `mutex_` for AUX exchanges; still on the old order (I/O under `mutex_`): `set_tracking` and `set_tracking_rate` (`set_tracking_locked` without a lock argument), the slew start tracking-off write and its failure restore, the slew-arrival `set_tracking_locked(true)` and `goto_axis_slow`, stop, home and the flip slew |
+| Celestron CGX telescope |  | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #1759 |  |
 | Celestron focuser |  | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted |  |  |
 | Celestron telescope |  | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted |  |  |
 | Gemini flat panel |  | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted |  |  |
@@ -62,7 +62,7 @@ Symbol: `transition_mutex_`
 | QHY focuser |  | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted |  | served from `PolledState` |
 | Sky-Watcher telescope |  | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted |  | `util::LockGate` drops `mutex_` per exchange |
 | SVBONY camera |  | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | partial | #1842 | `mutex_` held across the SDK connect |
-| SynScan telescope | `mutex_` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | partial | #1828 | `mutex_` held across the connect handshake |
+| SynScan telescope |  | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted |  | the wrapper's lock is the I/O lock; served from `PolledState` |
 | ToupTek camera |  | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted |  |  |
 | ToupTek filter wheel |  | `AlpacaCore/src/vendors/touptek/touptek_filterwheel_driver.cpp` | adopted |  |  |
 | ToupTek focuser |  | `AlpacaCore/src/vendors/touptek/touptek_focuser_driver.cpp` | adopted |  |  |
@@ -93,7 +93,7 @@ Symbol: `transition_mutex_`
 
 - Reviewers check each driver PR against the Rules above. A driver that still holds `mutex_` across device I/O is a defect with its own issue, not an exception.
 - Each slice is one driver family. A getter that must reach the device (a live read) still takes the I/O lock and waits; the rule covers members that need no device access.
-- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (SynScan #1828, iOptron #1829, the cameras #1841 to #1845, and others).
+- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (iOptron #1829, the cameras #1841 to #1845, and others).
 
 ## How to reverse
 

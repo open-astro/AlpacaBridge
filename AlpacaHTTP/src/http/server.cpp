@@ -95,6 +95,8 @@ void Server::set_restart_callback(std::function<void()> callback) {
 }
 
 Server::~Server() {
+    // First: the delayed shutdown/restart callback reaches this Server.
+    router_.cancel_delayed_callback();
     stop();
     {
         // Anything stop() could not join because it ran on that thread.
@@ -217,7 +219,7 @@ void Server::stop() {
         //
         // only_if_stopped: reap a thread that already returned, never adopt a
         // live one. Between this `!running_` read and the lock inside, a
-        // restart (handle_restart_request() stops then starts on a detached
+        // restart (handle_restart_request() stops then starts on a delayed
         // thread) can install a running server -- adopting it hangs this
         // caller forever, which for an embedder that also calls stop() is the
         // process never exiting.
@@ -297,7 +299,7 @@ void Server::stop() {
             if (thread.get_id() == current_id) {
                 // stop() was called from inside a request handler on this
                 // worker (not a path any current handler takes: the management
-                // restart/shutdown endpoints run it on a detached thread). It
+                // restart/shutdown endpoints run it on the Router's delayed thread). It
                 // cannot join itself. It finishes its request and exits on
                 // the shutdown flag or the generation check; its handle is
                 // kept, not detached, so the next stop() from another thread
@@ -327,7 +329,7 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
     // on it with the lock released. Whoever wins the move joins; every other
     // caller finds server_thread_ empty and returns, so exactly one join()
     // ever runs on it. stop() is re-entrant from another thread (the restart
-    // endpoint's detached thread stops the server, and an embedder that also
+    // endpoint's delayed thread stops the server, and an embedder that also
     // calls stop() can run it at the same time), and concurrent join() on one
     // std::thread is UB -- in practice the second pthread_join throws
     // std::system_error that nothing catches, i.e. std::terminate().
@@ -340,7 +342,7 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
     // matter:
     //
     //  - Exactly one caller may join. stop() is re-entrant from another thread
-    //    (the restart endpoint's detached thread stops the server, and an
+    //    (the restart endpoint's delayed thread stops the server, and an
     //    embedder that also calls stop() can run it at the same time), and
     //    concurrent join() on one std::thread is UB -- in practice the second
     //    pthread_join throws std::system_error that nothing catches.

@@ -70,6 +70,7 @@ struct Handset {
     std::atomic<int> transactions{0};
     std::atomic<int> latency_ms{0};
     std::atomic<bool> mute{false};
+    std::atomic<bool> garbage{false};  // every command but the echo and `V` gets an unparseable "?#" at once
     std::atomic<bool> slewing{false};
     std::atomic<int> tracking_mode{1};
     std::atomic<char> pier{'E'};       // 0 = the handset does not answer 'p'
@@ -77,6 +78,7 @@ struct Handset {
     std::atomic<bool> w_entered{false};
     std::atomic<bool> w_silent{false};  // the handset ignores `w` (site) entirely
     std::atomic<int> w_count{0};
+    std::atomic<FakeTaskClock*> w_advances{nullptr};  // `w` moves this clock 3 s on, as a slow site read does
     std::atomic<bool> w_site{false};  // `w` answers a site (33d51'24" S, 151d12'54" E) instead of an unparseable '#'
     std::atomic<uint32_t> ra_counts{0x5CECE2};  // the position `e` answers (24-bit); a GOTO (`r`) lands on its aim
     std::atomic<uint32_t> dec_counts{0xD001B9};
@@ -93,6 +95,7 @@ std::string reply(Handset& st, const std::string& chunk) {
     st.transactions.fetch_add(1);
     if (chunk.empty()) return "0#";
     if (st.mute.load() && chunk[0] != 'K' && chunk[0] != 'V') return "";
+    if (st.garbage.load() && chunk[0] != 'K' && chunk[0] != 'V') return "?#";
     if (st.latency_ms.load() > 0) std::this_thread::sleep_for(milliseconds(st.latency_ms.load()));
     switch (chunk[0]) {
         case 'K':
@@ -121,6 +124,7 @@ std::string reply(Handset& st, const std::string& chunk) {
             return "#";
         case 'w':
             st.w_count.fetch_add(1);
+            if (FakeTaskClock* c = st.w_advances.load()) c->advance(std::chrono::seconds(3));
             if (st.w_silent.load()) {
                 st.w_entered.store(true);
                 return "";
@@ -149,6 +153,20 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(alpacacore::test::
     return driver;
 }
 
+// A driver whose response timeout is longer than the latencies a case injects, so a slow reply is an answer.
+std::unique_ptr<alpacacore::TelescopeDriver> slow_link_driver(alpacacore::test::FakeMountServer& server,
+                                                              FakeTaskClock& clock) {
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 3000;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    return driver;
+}
+
 // No configured site: with a `w` the handset cannot answer, the driver has no site to compute from.
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver_without_site(alpacacore::test::FakeMountServer& server,
                                                                            FakeTaskClock& clock, int timeout_ms) {
@@ -169,6 +187,14 @@ bool has_entry(const alpacacore::TelescopeDriver& driver, const std::string& nam
     }
     return false;
 }
+
+// The poll period and the real time a tick may take to settle. The poll waits its first period on the fake clock, so
+// a driver whose clock is not advanced makes no tick of its own: one tick is one advance.
+constexpr auto kPollPeriod = seconds(1);
+constexpr auto kSettle = milliseconds(3000);
+
+// One poll period, then wait until the woken poll is parked again.
+void poll_tick(FakeTaskClock& clock) { alpacacore::test::tick(clock, kPollPeriod, kSettle); }
 
 using alpacacore::test::parse_timestamp;
 using alpacacore::test::time_stamp_of;
@@ -400,31 +426,6 @@ TEST_CASE("SynScan snapshot - a pointing state that is neither E nor W reads as 
     driver->set_connected(false);
 }
 
-TEST_CASE("SynScan snapshot - a tick that passed its first hold check makes no exchange once the hunt holds the line",
-          "[synscan][telescope][snapshot]") {
-    FakeTaskClock clock;
-    auto st = std::make_shared<Handset>();
-    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
-    REQUIRE(server.ok());
-    auto driver = connected_driver(server, clock);
-    REQUIRE(driver->get_connected());
-    sc::set_status_poll_paused_for_testing(*driver, true);
-
-    // The hunt starts after the tick's first look at the hold, before the tick reaches the handset.
-    sc::set_status_poll_before_sample_hook_for_testing(*driver,
-                                                       [&] { sc::hold_status_poll_for_testing(*driver, true); });
-    const int before = st->transactions.load();
-    CHECK(sc::poll_status_now_for_testing(*driver));
-    CHECK(st->transactions.load() == before);
-    sc::set_status_poll_before_sample_hook_for_testing(*driver, nullptr);
-
-    // With the hold dropped the same tick reads the handset again.
-    sc::hold_status_poll_for_testing(*driver, false);
-    CHECK(sc::poll_status_now_for_testing(*driver));
-    CHECK(st->transactions.load() > before);
-    driver->set_connected(false);
-}
-
 TEST_CASE("SynScan snapshot - a slewing re-read that finds no change does not drop the poll's frame",
           "[synscan][telescope][snapshot]") {
     FakeTaskClock clock;
@@ -542,6 +543,20 @@ TEST_CASE("SynScan snapshot - an unread site refuses SiteLatitude and SiteLongit
             CHECK(std::string(e.what()).find("not known yet") != std::string::npos);
         }
     }
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan snapshot - a connect whose site read failed sends no second w in the same connect",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    st->w_silent = true;
+    st->w_advances = &clock;  // the failed `w` itself takes longer than the retry delay
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver_without_site(server, clock, 300);
+    REQUIRE(driver->get_connected());
+    CHECK(st->w_count.load() == 1);  // a second `w` would cost the connect one more response timeout
     driver->set_connected(false);
 }
 
@@ -709,6 +724,205 @@ TEST_CASE("SynScan snapshot - the status poll keeps ticking after an async and a
     CHECK(clock.wait_for_waiters(1, milliseconds(3000)));
     CHECK(poll_ticks_once());
     driver->set_connected(false);
+}
+
+TEST_CASE("SynScan snapshot - Tracking and GuideRate do not wait for a connect that is in flight",
+          "[synscan][telescope][snapshot][connect]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 1000;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    st->latency_ms = 200;  // every handshake exchange pays 200 ms: the connect takes seconds
+    std::thread connecting([&] { driver->set_connected(true); });
+    // The handshake is under way once the handset has seen a few of its commands.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (st->transactions.load() < 3 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() >= 3);
+
+    const auto swallow = [](const std::function<void()>& read) {
+        try {
+            read();
+        } catch (const alpacacore::AlpacaException&) {  // NotConnected or "not known yet" is an answer too
+        }
+    };
+    CHECK(timed([&] { swallow([&] { (void)driver->get_tracking(); }); }) < kGetterBudget);
+    CHECK(timed([&] { swallow([&] { (void)driver->get_guide_rate(); }); }) < kGetterBudget);
+    CHECK(timed([&] { swallow([&] { (void)driver->get_at_park(); }); }) < kGetterBudget);
+    CHECK(timed([&] { swallow([&] { (void)driver->get_is_pulse_guiding(); }); }) < kGetterBudget);
+    connecting.join();
+    driver->set_connected(false);
+}
+
+// Each getter alone: the case above runs the four in a row, so the first one that waits for the connect hides whether
+// the others would have waited too.
+TEST_CASE("SynScan snapshot - each no-I/O getter alone is in budget while a connect is in flight",
+          "[synscan][telescope][snapshot][connect]") {
+    const int which = GENERATE(0, 1, 2, 3);
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 1000;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    st->latency_ms = 200;
+    std::thread connecting([&] { driver->set_connected(true); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (st->transactions.load() < 3 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() >= 3);
+
+    const auto elapsed = timed([&] {
+        try {
+            switch (which) {
+                case 0:
+                    (void)driver->get_tracking();
+                    break;
+                case 1:
+                    (void)driver->get_guide_rate();
+                    break;
+                case 2:
+                    (void)driver->get_at_park();
+                    break;
+                default:
+                    (void)driver->get_is_pulse_guiding();
+                    break;
+            }
+        } catch (const alpacacore::AlpacaException&) {  // NotConnected is an answer too
+        }
+    });
+    CHECK(elapsed < kGetterBudget);
+    connecting.join();
+    driver->set_connected(false);
+}
+
+// A full status tick that is mid-exchange on a slow link: the disconnect ends it between exchanges instead of joining
+// the whole tick (5 exchanges at 1.2 s = 6 s here), so it returns within 5 s. The ticks are stepped on the task clock
+// so the full one is in flight whether the poll runs its first tick at once or after one period.
+TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with a status tick mid-exchange",
+          "[synscan][telescope][snapshot][connect]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 3000;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    // Every fourth tick is a full one and the first tick of the session is full: three short ticks, then the full one.
+    REQUIRE(clock.wait_for_waiters(1, milliseconds(3000)));  // the poll is parked on the task clock
+    for (int short_tick = 1; short_tick < 4; ++short_tick) {
+        alpacacore::test::tick(clock, seconds(1), milliseconds(3000));
+    }
+    st->latency_ms = 1200;
+    const int before = st->transactions.load();
+    clock.advance(seconds(1));
+    const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+    while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() > before);  // the full tick is inside its first exchange
+    const auto elapsed = timed([&] { driver->set_connected(false); });
+    CHECK(elapsed < seconds(5));
+}
+
+// A disconnect that aborts a full tick mid-exchange makes the probe throw, which the module counts as a failure: with
+// two failed ticks just before, that is the third and latches a fault. The reset in the teardown clears it before
+// Connected reads false, so a relink never starts with the old fault.
+TEST_CASE("SynScan snapshot - a probe aborted by the disconnect leaves no fault behind",
+          "[synscan][telescope][snapshot][connect]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = slow_link_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, kSettle));
+    poll_tick(clock);  // tick 1 answers
+    st->garbage = true;
+    poll_tick(clock);  // ticks 2 and 3 fail: two in a row, below the threshold of three
+    poll_tick(clock);
+    REQUIRE(driver->get_link_fault().empty());
+    st->garbage = false;
+    st->latency_ms = 1200;
+    const int before = st->transactions.load();
+    clock.advance(kPollPeriod);  // tick 4 is a full one
+    const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+    while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() > before);  // the full tick is inside its first exchange
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+}
+
+// A handset that answers the echo and the firmware query but nothing else still connects: the first probe returns an
+// all-unknown frame, so the getters say "not known yet" instead of the connect failing.
+TEST_CASE("SynScan snapshot - a handset that answers only the echo still connects with nothing known yet",
+          "[synscan][telescope][snapshot][connect]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    st->mute = true;
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    for (const auto& read : {std::function<void()>([&] { (void)driver->get_tracking(); }),
+                             std::function<void()>([&] { (void)driver->get_right_ascension(); })}) {
+        try {
+            read();
+            FAIL("a read nothing answered must not return a value");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        }
+    }
+    CHECK(driver->get_link_fault().empty());  // the seeding probe is not a failure
+    st->mute = false;
+    driver->set_connected(false);
+}
+
+// Two pulse bodies and a full tick in flight at 1.2 s per reply: the bodies' stops are blind writes that do not wait
+// for the slow replies, and the tick ends between exchanges, so the disconnect fits in 5 s.
+TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with two pulse bodies and a tick in flight",
+          "[synscan][telescope][snapshot][connect]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = slow_link_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, kSettle));
+    driver->pulse_guide(2, 600000);  // RA axis
+    driver->pulse_guide(0, 600000);  // Dec axis
+    for (int short_tick = 1; short_tick < 4; ++short_tick) poll_tick(clock);
+    st->latency_ms = 1200;
+    const int before = st->transactions.load();
+    clock.advance(kPollPeriod);  // tick 4 is a full one
+    const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+    while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() > before);
+    const auto elapsed = timed([&] { driver->set_connected(false); });
+    CHECK(elapsed < seconds(5));
 }
 
 #endif

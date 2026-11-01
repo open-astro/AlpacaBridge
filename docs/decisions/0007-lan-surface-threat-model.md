@@ -15,7 +15,7 @@ Five surfaces: (1) Device API `/api/v1/<type>/<n>/...`; (2) Management API `/man
 ### Trust statement
 
 - **A LAN host is trusted to operate and configure the server.** Alpaca has no login, so a peer that can open a TCP connection may drive devices, register or remove them, set the log level and the clock, join or leave a Wi-Fi network, stop or restart the service, and start a software update. The limit of that trust is the process: a LAN host is not trusted to make the server unresponsive for other clients (held sockets, oversized input, unbounded work) and cannot reach anything beyond the service privileges.
-- **A browser page is not trusted.** A page the operator opens elsewhere can send requests to the board from the operator browser. It is held by `reject_cross_origin_request` (`AlpacaHTTP/src/http/router.cpp`), an opt-in Host allowlist against DNS rebinding, off by default (`http.host_check_enabled`; `reject_disallowed_host`, called from `Router::route()`; NS-02, issue #392) and framing headers against clickjacking (NS-08, not landed).
+- **A browser page is not trusted.** A page the operator opens elsewhere can send requests to the board from the operator browser. It is held by `reject_cross_origin_request` (`AlpacaHTTP/src/http/router.cpp`), an opt-in Host allowlist against DNS rebinding, off by default (`http.host_check_enabled`; `reject_disallowed_host`, called from `Router::route()`; NS-02, issue #392) and framing headers against clickjacking (NS-08, issue #1717: `Response::to_header_string()` sends `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` and `X-Content-Type-Options: nosniff` on every response).
 - **A device in radio range is not trusted.** On an open hotspot anyone in range is on the LAN. The hotspot must carry a passphrase by default (NS-06). The server refuses to create or start an open one (#1715); an open profile from an earlier release still autoconnects at boot until the operator turns it off or sets a passphrase, and until then radio range equals LAN trust.
 - **Localhost gets no extra trust**: a local browser is still a browser.
 
@@ -35,14 +35,14 @@ The guard compares `Origin` with `Host` as strings. It passes every GET and ever
 - **What it can do.** Read and change persisted device configuration, remove devices, change the server description and the `SyncSystemClockFromClients` opt-out, read, download and delete log files, set the log level, set the system clock (`synctime`, needs `CAP_SYS_TIME`), stop (`shutdown`) and restart the service, read server values and the device catalog, and start a software update (`/management/v1/update/status`, `check`, `install`, `channel`; routed in `Router::route()` to `Router::handle_software_update()`). `check` makes the board fetch the configured `Packages` index; `install` makes systemd start the root oneshot unit `alpacabridge-update.service`, which runs `apt-get update` and `apt-get install --only-upgrade alpacabridge` against the host's own signed apt sources (`debian/alpacabridge-update.service`, `debian/alpacabridge-software-update`, `docs/software-update.md`). The daemon passes no arguments to the update unit, and the polkit rule lets the service user start three units and nothing else (that unit and the two channel instances below) (`debian/alpacabridge-update.polkit-rules`), so a LAN host can make the board upgrade AlpacaBridge as root but cannot choose the package, the source or the command. `channel` makes systemd start one of the two instances `alpacabridge-channel@stable.service` and `alpacabridge-channel@beta.service`, which add or remove one fixed apt source for OpenAstro's own `beta` component (`debian/alpacabridge-set-update-channel`); the polkit rule names both by exact string and the daemon takes the unit from a two-entry table, so a LAN host can move the board between OpenAstro's stable and beta releases, nothing else.
 - **What is trusted and why.** The configuring host is trusted to choose which device to talk to (source of R1). Field values are not: they pass `sanitize_device_config` (strict allowlist) and typed reads through `DeviceConfig::get()` and the `catalog_json` readers (`has_value()`, `get_string()`, `get_int()`). Log file names are matched against the daily-file pattern, so a path cannot leave the log directory.
 - **Guard coverage.** Every state-changing handler calls the guard: server description PUT (`handle_description`, which also guards the clock-sync opt-out), `configuredevice` (`handle_configure_device`), removal (`handle_remove_device`), log level (`handle_log_level`), log files (`handle_log_files_list`, `handle_log_file_item`), shutdown (`handle_shutdown`), synctime (`handle_sync_time`), Wi-Fi (`handle_wifi`), software update (`handle_software_update`, the `check`, `install` and `channel` POSTs; the guard passes every GET, so `status` is unguarded), restart (`handle_restart`), all `Router::` members in `router.cpp`. New handlers must do the same.
-- **Resource budget.** Surface 1 limits apply; log reads are capped at 10 MiB (`util::read_log_file`). `shutdown` (`Router::handle_shutdown()`) and `restart` (`Router::handle_restart()`) detach one thread per accepted request with no cap on how many live at once. Fix shape: a once-flag, so a second shutdown or restart while one is pending answers without spawning a thread (tracked with the NS-14 low-severity items).
+- **Resource budget.** Surface 1 limits apply; log reads are capped at 10 MiB (`util::read_log_file`). `shutdown` (`Router::handle_shutdown()`) and `restart` (`Router::handle_restart()`) start at most one pending delayed-callback thread, owned by the Router and joined at teardown; a second request while one is pending starts no thread ([#1739](https://github.com/open-astro/AlpacaBridge/issues/1739)).
 
 ### Surface 3: Web UI
 
 - **Who can reach it.** Any LAN host loads the static files (`Router::handle_static_file()`); the operator browser runs them.
 - **What it can do.** Everything the APIs can, with the operator reach. It renders server-supplied strings (device names, descriptions, `LastConnectError`, log lines, Wi-Fi SSIDs from a scan).
 - **What is trusted and why.** Nothing from the network is trusted as markup: an SSID and a driver error are chosen by third parties. `AlpacaHTTP/web/app.js` has 28 `innerHTML`-class sites (text search count); none has been audited for an unescaped server- or network-supplied value. This record does not claim the UI is free of script injection; the audit of these sites is tracked with the NS-14 low-severity items (web UI item).
-- **Framing.** No `X-Frame-Options`, `frame-ancestors` or CSP is sent, so an attacker page can frame the UI (NS-08).
+- **Framing.** `Response::to_header_string()` (`AlpacaHTTP/src/core/response.cpp`) adds `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` and `X-Content-Type-Options: nosniff` to every response, so an attacker page cannot frame the UI (NS-08, issue #1717). No other CSP directive is sent: the UI uses inline script and style.
 
 ### Surface 4: Wi-Fi API
 
@@ -88,9 +88,7 @@ A change passes only when every rule in the Rules section below holds.
 
 ### Known gaps (open)
 
-- No framing or CSP headers (NS-08).
 - Driver-reaching device PUTs are not origin-guarded; safe while no CORS preflight is answered. The DNS-rebinding path to them is open by default: the Host allowlist (NS-02) closes it only when `http.host_check_enabled` is on. The reviewer check holds the rest.
-- Unbounded detached threads per shutdown and restart request ([#1739](https://github.com/open-astro/AlpacaBridge/issues/1739)).
 - 28 unaudited `innerHTML`-class sinks in `app.js`; tracked with the NS-14 items (web UI item).
 
 ### Finding map
@@ -103,7 +101,7 @@ A change passes only when every rule in the Rules section below holds.
 | NS-04 | all HTTP surfaces | fixed | request body cap lowered from 10 MiB to 64 KiB (issue #741) |
 | NS-06 | Wi-Fi API | open | hotspot passphrase by default; server side done (set_ap refuses an open hotspot, #1715); an open profile from an earlier release still autoconnects at boot until turned off |
 | NS-07 | Device API, Management API | fixed | JSON output replaces invalid UTF-8 with U+FFFD instead of throwing (`error_handler_t::replace` in `Response::set_body`, `AlpacaHTTP/src/core/response.cpp`, issue #764) |
-| NS-08 | Web UI | open | framing headers and CSP |
+| NS-08 | Web UI | fixed | framing headers (`X-Frame-Options`, CSP `frame-ancestors`, `nosniff`) sent by `Response::to_header_string()`; no other CSP directive |
 | NS-09 | Device API | fixed | the iOptron telescope no longer changes the mount altitude limit (`:SAL`) or meridian treatment (`:SMT`); a GOTO the firmware refuses is reported and not retried (issue #763) |
 | NS-10 | Management API | open | the WeeWX feed URL follows redirects and reads an unbounded body (`http_get()` in `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp`); its scheme is limited to `http,https` for the request and every redirect |
 | NS-11 | Management API | fixed | a device config may name only the board's own GPIO chip and lines (`AlpacaCore/include/alpacacore/util/hardware_config_refusal.h`, issue #765, PR #818) |
@@ -144,7 +142,7 @@ The update check URL `update_packages_url` (`server:` key in the YAML config and
 ## Consequences
 
 - Reviewers get one list for any new route or config field: the Rules above. The instruction files link here rather than restating it.
-- Gaps with a filed upstream issue name it in the finding map (NS-02 issue #392, NS-04 issue #741, NS-07 issue #764 and NS-13 issue #740, all four landed). The other open rows have a proposed fix and no owner or issue yet; this record does not promise one. The device PUT guard rests on the Host allowlist and the reviewer check; the detached threads are [#1739](https://github.com/open-astro/AlpacaBridge/issues/1739) and the `innerHTML` audit goes with the NS-14 low-severity items.
+- Gaps with a filed upstream issue name it in the finding map (NS-02 issue #392, NS-04 issue #741, NS-07 issue #764 and NS-13 issue #740, all four landed). The other open rows have a proposed fix and no owner or issue yet; this record does not promise one. The device PUT guard rests on the Host allowlist and the reviewer check; the `innerHTML` audit goes with the NS-14 low-severity items.
 - Accepted by the board on 2026-09-30 (R1 to R4 accepted as residual risk).
 - NS-09 to NS-14 are not decided here; each carrier decides its fix and must pass the reviewer check.
 - ConformU and other non-browser clients are unaffected by every control named here.
