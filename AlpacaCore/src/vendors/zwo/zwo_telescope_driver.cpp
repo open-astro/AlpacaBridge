@@ -1107,6 +1107,7 @@ public:
         if (!std::isfinite(elevation) || elevation < kMinSiteElevationMeters || elevation > kMaxSiteElevationMeters) {
             throw AlpacaException("SiteElevation must be in [-300,10000] meters", AlpacaError::InvalidValue);
         }
+        check_writable_state();
         std::lock_guard<std::mutex> lock(mutex_);
         site_elevation_m_ = elevation;
         pending_site_elevation_ = elevation;
