@@ -124,8 +124,9 @@ private:
                 pull = unplug_on_ && unplug_on_(chunk);
             }
             if (pull) {
-                pty_.sever();
+                // Flag first: the host sees the hangup the instant the pty closes.
                 unplugged_.store(true);
+                pty_.sever();
                 return;
             }
             if (silent_.load()) {
