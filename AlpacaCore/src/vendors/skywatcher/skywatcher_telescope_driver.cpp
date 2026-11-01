@@ -1085,13 +1085,13 @@ public:
         if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
             throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
         }
-        StateLock lock(lock_gate_);
-        check_connected();
         double ra_fraction = rate.ra / kSiderealDegPerSec;
         double dec_fraction = rate.dec / kSiderealDegPerSec;
         if (ra_fraction < 0.0 || ra_fraction > 1.0 || dec_fraction < 0.0 || dec_fraction > 1.0) {
             throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
         }
+        StateLock lock(lock_gate_);
+        check_connected();
         guide_rate_ = rate;
     }
 

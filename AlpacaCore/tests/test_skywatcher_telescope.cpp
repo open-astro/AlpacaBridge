@@ -305,6 +305,53 @@ TEST_CASE("SkyWatcher Telescope Driver - non-finite guide rate is rejected",
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
 }
 
+// open-astro#1786: the guide-rate range check (0 to 1x sidereal, per axis) ran
+// after the connection check, so a disconnected mount answered an out-of-range
+// GuideRateRightAscension or GuideRateDeclination write with NotConnected.
+TEST_CASE("SkyWatcher Telescope Driver - guide-rate range errors precede NotConnected",
+          "[skywatcher][telescope][unit]") {
+    auto driver = make_driver();
+    const auto before = driver->get_guide_rate();
+    const double two_sidereal = 2.0 * 360.0 / 86164.0905;
+
+    for (const double bad : {two_sidereal, -1.0, 99999.0}) {
+        require_alpaca_error([&] { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+
+    // An in-range value still reaches the connection check and is not stored.
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.002); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.002); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_guide_rate().ra == before.ra);
+    CHECK(driver->get_guide_rate().dec == before.dec);
+}
+
+// open-astro#1786: Sky-Watcher stores one rate per axis, so writing one axis
+// keeps the other, and a refused write keeps both.
+TEST_CASE("SkyWatcher Telescope Driver - individual guide-rate writes keep the other axis",
+          "[skywatcher][telescope][unit]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    driver->set_guide_rate({0.001, 0.002});
+    driver->set_guide_rate_right_ascension(0.003);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_guide_rate_declination(0.004);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.004);
+
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(99999.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.004);
+
+    driver->set_connected(false);
+}
+
 // ── #1478 spec-audit items ───────────────────────────────────────────────────
 
 TEST_CASE("SkyWatcher Telescope Driver spec audit - DestinationSideOfPier rejects out-of-range RA and Dec",

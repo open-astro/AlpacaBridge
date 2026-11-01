@@ -1,0 +1,3 @@
+### Fixed
+
+- **SynScan and Sky-Watcher refuse an out-of-range guide rate with `InvalidValue` while disconnected**, AlpacaCore SynScan and Sky-Watcher drivers, issue #1786. A `GuideRateRightAscension` or `GuideRateDeclination` write above 1x sidereal or below zero returned `NotConnected` on a disconnected mount because the 0 to 1x sidereal check ran after the connection check; each driver now runs its own check first, and an in-range write on a disconnected mount still returns `NotConnected` and keeps the stored rate. Writing one axis keeps the other, and a refused write keeps both (cases in `test_synscan_telescope.cpp` and `test_skywatcher_telescope.cpp`). Refs #1786; remaining: Celestron CGX individual guide-rate setters.

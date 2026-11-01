@@ -325,6 +325,32 @@ TEST_CASE("SynScan Telescope Driver - motion argument errors precede NotConnecte
     require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// open-astro#1786: the guide-rate range check (0 to 1x sidereal, per axis) ran
+// after the connection check, so a disconnected mount answered an out-of-range
+// GuideRateRightAscension or GuideRateDeclination write with NotConnected.
+TEST_CASE("SynScan Telescope Driver - guide-rate range errors precede NotConnected", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    const auto before = driver->get_guide_rate();
+    const double two_sidereal = 2.0 * 15.0411 / 3600.0;
+
+    for (const double bad : {two_sidereal, -1.0, 99999.0}) {
+        require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+
+    // An in-range value still reaches the connection check and is not stored.
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(0.002); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(0.002); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_guide_rate().ra == before.ra);
+    CHECK(driver->get_guide_rate().dec == before.dec);
+}
+
 // open-astro#346, the shape #304 fixed on the Sky-Watcher driver: ASCOM treats
 // TargetRightAscension and TargetDeclination as independent properties, each
 // throwing ValueNotSet until that property itself has been written. One shared
@@ -598,6 +624,37 @@ TEST_CASE("SynScan Telescope Driver - non-finite guide rate is rejected", "[syns
     require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// open-astro#1786: SynScan stores one rate per axis, so writing one axis keeps
+// the other, and a refused write keeps both.
+TEST_CASE("SynScan Telescope Driver - individual guide-rate writes keep the other axis", "[synscan][telescope][unit]") {
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver =
+        alpacacore::vendor::synscan::create_synscan_telescope(0, conn, alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->set_guide_rate({0.001, 0.002});
+    driver->set_guide_rate_right_ascension(0.003);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_guide_rate_declination(0.004);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.004);
+
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(-1.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(99999.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.004);
+
+    driver->set_connected(false);
 }
 
 // #627: `validate_ra_dec` is `ra < 0 || ra >= 24` / `dec < -90 || dec > 90`,
