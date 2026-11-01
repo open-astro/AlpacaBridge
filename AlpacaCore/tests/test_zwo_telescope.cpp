@@ -973,3 +973,31 @@ TEST_CASE("ZWO Mount Telescope Driver spec audit - SiteElevation never set throw
     driver->set_site_elevation(42.0);
     CHECK(driver->get_site_elevation() == 42.0);
 }
+
+#ifndef _WIN32
+
+// ITelescopeV4 SiteElevation lists NotConnectedException, like SiteLatitude and SiteLongitude; decision 0009 rule 3.
+// Falsified by: zwo_telescope_driver.cpp get_site_elevation() without check_connected_locked() (the read after the
+// set returns 42 m while disconnected).
+TEST_CASE("ZWO Mount Telescope Driver - SiteElevation reads NotConnected while disconnected",
+          "[zwo][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+
+    // A value set before the first connect is kept for it, but a read is NotConnected, not InvalidOperation.
+    driver->set_site_elevation(42.0);
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::NotConnected);
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    CHECK(driver->get_site_elevation() == 42.0);
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+#endif
