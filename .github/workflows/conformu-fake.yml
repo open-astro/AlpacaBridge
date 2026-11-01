@@ -114,15 +114,15 @@ jobs:
             -DALPACACORE_ENABLE_SKYWATCHER=ON
           cmake --build AlpacaHTTP/build --target fake_skywatcher_server --parallel "$(nproc)"
 
-      - name: Install ConformU 4.5.3 (pinned release, sha256-checked)
+      - name: Install ConformU 4.6.0-rc.1 (pinned release, sha256-checked)
         # The standard in .github/instructions/testing.instructions.md; the same
         # asset and checksum as /conformu step 2g.
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/conformu"
           cd "$RUNNER_TEMP/conformu"
-          curl -sSfL -o cu.tar.gz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.5.3/conformu.4.5.3.linux-arm64.tar.gz'
-          echo '8c01fce9447f78e7f076c2279d6f38c7b8f78ef8d3c9f92e78566a61fb778bbc  cu.tar.gz' | sha256sum -c -
+          curl -sSfL -o cu.tar.gz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.6.0-rc.1/conformu.4.6.0.linux-arm64.tar.gz'
+          echo '98ae1853e61832e4ed33270c70bbbe442dc7d698756214b4bb294803639482ba  cu.tar.gz' | sha256sum -c -
           tar xzf cu.tar.gz
           rm cu.tar.gz
           chmod +x conformu

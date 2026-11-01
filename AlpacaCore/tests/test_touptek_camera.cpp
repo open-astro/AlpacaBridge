@@ -499,6 +499,111 @@ TEST_CASE("ToupTek Camera Driver - a superseding pulse cancels the clock wait", 
     CHECK_FALSE(outcome.connected);
 }
 
+TEST_CASE("ToupTek Camera Driver - a superseded pulse timer leaves the new pulse running",
+          "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera(true);
+    fake.guiding = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));  // the thermal poller's wait
+
+    driver->pulse_guide(0, 500);
+    REQUIRE(clock.wait_for_wait_count(2, 5s));
+    driver->pulse_guide(1, 2000);
+    REQUIRE(clock.wait_for_wait_count(3, 5s));
+
+    // The first pulse's 500 ms is up, but it was replaced: no stale end.
+    clock.advance(500ms);
+    REQUIRE(clock.wait_for_woken_settled(5s));
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(1499ms);
+    REQUIRE(clock.wait_for_woken_settled(5s));
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(1ms);
+    CHECK(spin_until([&] { return !driver->get_is_pulse_guiding(); }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - disconnect mid-pulse reports no pulse and the destructor ends the parked timer",
+          "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera(true);
+    fake.guiding = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+    driver->pulse_guide(0, 10000);
+    REQUIRE(clock.wait_for_wait_count(2, 5s));
+
+    auto work = std::async(std::launch::async, [&] {
+        driver->set_connected(false);
+        const bool guiding = driver->get_is_pulse_guiding();
+        driver.reset();  // the destructor cancels and joins the parked pulse timer
+        return guiding;
+    });
+    const bool ready = work.wait_for(5s) == std::future_status::ready;
+    for (int i = 0; !ready && i < 200 && work.wait_for(10ms) != std::future_status::ready; ++i) clock.advance(20s);
+    REQUIRE(ready);
+    CHECK_FALSE(work.get());
+}
+
+TEST_CASE("ToupTek Camera Driver - the thermal poll stops on disconnect and restarts on reconnect",
+          "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(spin_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+
+    driver->set_connected(false);
+    const int after_disconnect = fake.call_count("get_temperature_deciC");
+    REQUIRE(clock.waiter_count() == 0);  // the poller was joined: nothing is parked on the clock
+    clock.advance(10s);
+    CHECK(fake.call_count("get_temperature_deciC") == after_disconnect);
+
+    driver->set_connected(true);
+    REQUIRE(spin_until([&] { return fake.call_count("get_temperature_deciC") > after_disconnect; }));
+    const int primed = fake.call_count("get_temperature_deciC");
+    REQUIRE(clock.wait_for_wait_count(2, 5s));  // the restarted poller waits out its interval
+    clock.advance(1000ms);
+    CHECK(spin_until([&] { return fake.call_count("get_temperature_deciC") > primed; }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - thermal reads racing a disconnect only fail NotConnected",
+          "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> other_failures{0};
+    std::thread reader([&] {
+        while (!stop.load()) {
+            try {
+                (void)driver->get_ccd_temperature();
+            } catch (const alpacacore::AlpacaException& e) {
+                if (e.error_code() != alpacacore::AlpacaError::NotConnected) ++other_failures;
+            } catch (...) {
+                ++other_failures;
+            }
+            clock.advance(1000ms);  // ages the cache, so every read can reach the SDK
+        }
+    });
+    for (int i = 0; i < 20; ++i) {
+        driver->set_connected(false);
+        driver->set_connected(true);
+    }
+    driver->set_connected(false);
+    stop.store(true);
+    reader.join();
+    CHECK(other_failures.load() == 0);
+}
+
 // Issue #1277: the ToupTek SDK has no e-/ADU or full-well figure, so both raise PropertyNotImplemented (ICameraV4
 // "if not available") instead of a made-up 1.0 or the ADU saturation; an unknown SensorName is "", not a placeholder.
 TEST_CASE(
