@@ -525,7 +525,7 @@ TEST_CASE("ToupTek Camera Driver - a superseded pulse timer leaves the new pulse
     driver->set_connected(false);
 }
 
-TEST_CASE("ToupTek Camera Driver - disconnect during a pulse guide ends the timer without a clock advance",
+TEST_CASE("ToupTek Camera Driver - disconnect mid-pulse reports no pulse and the destructor ends the parked timer",
           "[touptek][camera][unit][taskclock]") {
     alpacacore::test::FakeTaskClock clock;
     auto fake = make_fake_camera(true);
@@ -559,8 +559,8 @@ TEST_CASE("ToupTek Camera Driver - the thermal poll stops on disconnect and rest
 
     driver->set_connected(false);
     const int after_disconnect = fake.call_count("get_temperature_deciC");
+    REQUIRE(clock.waiter_count() == 0);  // the poller was joined: nothing is parked on the clock
     clock.advance(10s);
-    std::this_thread::sleep_for(50ms);  // real time for a stray tick to show; the clock never moves it
     CHECK(fake.call_count("get_temperature_deciC") == after_disconnect);
 
     driver->set_connected(true);

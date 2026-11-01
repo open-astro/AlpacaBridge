@@ -1559,7 +1559,8 @@ private:
     util::AsyncOperation thermal_slot_{"touptek-thermal", thermal_generation_, clock_};
 
     mutable std::atomic<bool> pulse_guiding_;
-    // Guards the end of a pulse against a superseding pulse (see pulse_guide).
+    // The claim lock for pulse_slot_ (decision 0006 rule 3): pulse_guide bumps
+    // pulse_generation_ under it, and the timer body ends a pulse only under it.
     std::mutex pulse_guide_mutex_;
     util::OperationGeneration pulse_generation_;
     // The timer body that clears pulse_guiding_ after the pulse duration; the
