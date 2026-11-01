@@ -2963,6 +2963,8 @@ private:
         SamplePlan home_plan;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // The raw link_lost_ here and at the pre-sample check: a later link_lost() check in this tick ends the poll
+            // after a wrapper loss, and the calls between fail at once on the closed wrapper with no device I/O.
             if (!connected_ || link_lost_.load() || stopped()) {
                 return false;
             }
@@ -3004,6 +3006,7 @@ private:
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // Raw link_lost_ on purpose, see the first check of this tick.
             if (!connected_ || link_lost_.load() || stopped()) {
                 return false;
             }

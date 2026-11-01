@@ -2282,6 +2282,13 @@ TEST_CASE("Celestron Link - over TCP a hangup is a failed exchange, not a lost l
             code = e.error_code();
         }
     });
+    // A failed REQUIRE below unwinds the case; joining here keeps a joinable thread from reaching std::terminate.
+    struct JoinOnExit {
+        std::thread& t;
+        ~JoinOnExit() {
+            if (t.joinable()) t.join();
+        }
+    } join_call{call};
     REQUIRE(snapshot_wait_for([&] { return st->transactions.load() > before; }));
     REQUIRE(server.drop_connections());  // the read in flight meets the reset
     call.join();
