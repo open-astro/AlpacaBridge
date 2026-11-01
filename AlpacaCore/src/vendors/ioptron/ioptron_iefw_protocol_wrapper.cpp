@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/ioptron/ioptron_iefw_protocol_wrapper.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -303,6 +304,8 @@ public:
         }
 
         connected_ = true;
+        link_lost_.store(false);
+        set_fault("");
         ALPACA_LOG_INFO("iOptron", iefw_model_name(info.model) + " connected (model " + std::to_string(info.model) +
                                        ", firmware " + std::to_string(info.firmware) + ", " +
                                        std::to_string(iefw_slot_count(info.model)) + " slots)");
@@ -312,11 +315,24 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+        set_fault("");
     }
 
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
+    }
+
+    bool link_alive() const noexcept { return !link_lost_.load(); }
+
+    std::string link_fault() const {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        return fault_;
+    }
+
+    void lose_link(const std::string& reason) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lose_link_locked(reason);
     }
 
     std::string get_firmware() {
@@ -415,6 +431,31 @@ private:
 #endif
     }
 
+    void set_fault(const std::string& text) {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        fault_ = text;
+    }
+
+    // Decision 0009 rules 2 and 3: release the port so a replugged wheel can be reopened, keep the reason and latch
+    // link_lost_ for the driver's Connected getter. A no-op when no session is open: during connect() the handshake
+    // retries and connect() closes the port itself, and a link already lost keeps its first reason.
+    void lose_link_locked(const std::string& reason) {
+        if (connected_) {
+            ALPACA_LOG_ERROR("iOptron",
+                             "iEFW link lost on " + config_.serial_port + ": " + reason + " (port released)");
+            set_fault(reason);
+            link_lost_.store(true);
+            disconnect_locked();
+        }
+    }
+
+    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
+    // closed): decision 0009 rule 2 loses the link at once and fails with NotConnected.
+    [[noreturn]] void fail_link_locked(const std::string& reason) {
+        lose_link_locked(reason);
+        throw AlpacaException(reason, AlpacaError::NotConnected);
+    }
+
     void tcflush_port() {
 #ifndef _WIN32
         if (link_) {
@@ -426,7 +467,11 @@ private:
     void write_data(const std::string& data) {
 #ifndef _WIN32
         if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
-            throw AlpacaException("Write failed: " + util::errno_string(errno), AlpacaError::DriverException);
+            const int err = errno;
+            if (err == EIO || err == ENXIO || err == ENODEV) {
+                fail_link_locked("iEFW serial link lost (errno " + std::to_string(err) + ")");
+            }
+            throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
 #else
         (void)data;
@@ -448,8 +493,7 @@ private:
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("iEFW response too long", AlpacaError::DriverException);
             case util::ReadOutcome::LinkDead:
-                throw AlpacaException("iEFW serial link lost (errno " + std::to_string(r.err) + ")",
-                                      AlpacaError::DriverException);
+                fail_link_locked("iEFW serial link lost (errno " + std::to_string(r.err) + ")");
             default:
                 throw AlpacaException("iEFW read timeout", AlpacaError::DriverException);
         }
@@ -474,7 +518,8 @@ private:
     // :WM / :WO answer with a single '1' byte and no '#'. Consume it so it
     // cannot race the flush at the start of the next :WP# (the same leaked
     // ack race the iEAF driver hit on hardware). The ack is optional: a
-    // silent firmware only costs READ_CHAR_TIMEOUT_MS.
+    // silent firmware only costs READ_CHAR_TIMEOUT_MS. A hangup is not
+    // silence: it loses the link like any other read.
     void send_command_ack_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("iOptron", "iEFW command (ack): " + cmd);
         tcflush_port();
@@ -491,6 +536,9 @@ private:
             }
             return;
         }
+        if (r.outcome == util::ReadOutcome::LinkDead) {
+            fail_link_locked("iEFW serial link lost (errno " + std::to_string(r.err) + ")");
+        }
 #endif
         ALPACA_LOG_DEBUG("iOptron", "iEFW no ack for " + cmd);
     }
@@ -498,6 +546,11 @@ private:
     mutable std::mutex mutex_;
     IefwConnectionConfig config_;
     bool connected_ = false;
+    std::atomic<bool> link_lost_{false};  // set by lose_link_locked(), cleared by the next connect
+    // The loss reason for get_link_fault(); its own mutex, never held across an exchange, so a getter cannot wait on
+    // the wire while mutex_ is held by one.
+    mutable std::mutex fault_mutex_;
+    std::string fault_;
 
 #ifndef _WIN32
     util::SerialLink link_;
@@ -515,6 +568,12 @@ IefwDeviceInfo IefwProtocolWrapper::connect(const IefwConnectionConfig& config) 
 void IefwProtocolWrapper::disconnect() { impl_->disconnect(); }
 
 bool IefwProtocolWrapper::is_connected() const { return impl_->is_connected(); }
+
+bool IefwProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
+
+std::string IefwProtocolWrapper::link_fault() const { return impl_->link_fault(); }
+
+void IefwProtocolWrapper::lose_link(const std::string& reason) { impl_->lose_link(reason); }
 
 std::string IefwProtocolWrapper::get_firmware() { return impl_->get_firmware(); }
 
