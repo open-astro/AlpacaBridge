@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/version.h>
@@ -26,6 +27,7 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_task_clock.h"
 #include "fake_zwo_eaf_sdk.h"
 #include "getter_stall_probe.h"
 
@@ -50,6 +52,8 @@ using alpacacore::test::require_alpaca_error;
 
 using FakeEAFSDK = alpacacore::test::FakeZWOEAFSDK;
 
+// The drivers these cases build run on the real default task clock, so the 100 ms status TTL is real time. The
+// staleness cases at the end of the file use a FakeTaskClock instead (decision 0005 rule 2).
 void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
 
 } // namespace
@@ -774,4 +778,133 @@ TEST_CASE("ZWO EAF Focuser Driver - A lost link is logged once with its serial e
     CHECK(capture.messages[0].find('\n') == std::string::npos);
     CHECK(capture.messages[0].find("500") != std::string::npos);    // last position
     CHECK(capture.messages[0].find("60000") != std::string::npos);  // max step
+}
+
+namespace {
+
+constexpr auto kPastTtl = std::chrono::milliseconds(150);
+
+int code_of(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& e) {
+        return e.error_code();
+    }
+    return 0;
+}
+
+// An EAF on a fake task clock (decision 0005) whose status reads fail with a generic error, the unit still attached:
+// three failed reads latch the status cache's fault at the clock's current time. No real waits.
+struct FaultedEaf {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    FakeEAFSDK sdk;
+    std::unique_ptr<alpacacore::FocuserDriver> driver;
+
+    FaultedEaf() {
+        driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_position() == 500);
+        latch();
+    }
+
+    // Ages the good frame out, then fails three reads in a row; the third reports the latched fault.
+    void latch() {
+        clock.advance(kPastTtl);
+        sdk.fail_reads = true;
+        CHECK(code_of([&] { (void)driver->get_position(); }) != 0);
+        CHECK(code_of([&] { (void)driver->get_position(); }) != 0);
+        CHECK(code_of([&] { (void)driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
+        REQUIRE(driver->get_link_fault().find("consecutive failures") != std::string::npos);
+    }
+};
+
+}  // namespace
+
+// Issue #1666, decision 0009 rule 2(b): a status fault that has stood for util::kLinkStalenessBound on the task clock
+// is a lost link, found by the next failed read: Connected false, members NotConnected, DeviceState empty, the open
+// closed at the loss, the reason kept (rule 5) and logged once. Nothing reopens it until the client's Connect.
+// Falsified by: zwo_focuser_driver.cpp read_status() without the staleness check in its catch (the read throws
+// DriverException and Connected stays true).
+TEST_CASE("ZWO EAF Focuser Driver - A fault standing past the staleness bound loses the link on the next read",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FaultedEaf eaf;
+    eaf.clock.advance(alpacacore::util::kLinkStalenessBound);
+    CHECK(eaf.driver->get_connected());  // nothing loses it until a read fails
+    CHECK(eaf.sdk.close_calls == 0);
+
+    WarnCapture capture;
+    require_alpaca_error([&] { (void)eaf.driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(eaf.driver->get_connected());
+    CHECK(eaf.driver->get_device_state().empty());
+    CHECK(eaf.sdk.close_calls == 1);  // the unit is still attached: the driver closed its open
+    const std::string reason = eaf.driver->get_link_fault();
+    CHECK(reason.rfind("ZWO EAF EAF-SN-1 did not answer for 30 s", 0) == 0);
+    CHECK(reason.find("consecutive failures") != std::string::npos);
+    REQUIRE(capture.messages.size() == 1);
+    CHECK(capture.messages[0].find("EAF-SN-1") != std::string::npos);
+    CHECK(capture.messages[0].find("500") != std::string::npos);  // last position
+
+    require_alpaca_error([&] { (void)eaf.driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { eaf.driver->move(100); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(eaf.driver->get_link_fault() == reason);
+    CHECK(eaf.sdk.open_calls == 1);  // nothing reopens it on its own (rule 4)
+    CHECK(capture.messages.size() == 1);
+
+    eaf.sdk.fail_reads = false;
+    eaf.driver->set_connected(true);  // the client's Connect over the lost link reopens and clears the reason
+    REQUIRE(eaf.driver->get_connected());
+    CHECK(eaf.sdk.open_calls == 2);
+    CHECK(eaf.driver->get_link_fault().empty());
+    CHECK(eaf.driver->get_position() == 500);
+}
+
+// Just under the bound the fault is still only a fault (rule 1): DriverException, Connected true, the open kept.
+// Falsified by: zwo_focuser_driver.cpp lose_link_if_fault_stale_locked() without its fault_stale() test (any latched
+// fault loses the link).
+TEST_CASE("ZWO EAF Focuser Driver - A fault just under the staleness bound does not lose the link",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FaultedEaf eaf;
+    eaf.clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::milliseconds(1));
+    CHECK(code_of([&] { (void)eaf.driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(eaf.driver->get_connected());
+    CHECK(eaf.sdk.close_calls == 0);
+    CHECK(eaf.driver->get_link_fault().find("consecutive failures") != std::string::npos);
+}
+
+// A good read ends the fault run; the next fault is timed from its own latch, not the first one's.
+// Falsified by: ttl_status_cache.h get() not calling health_.on_reply() on a good refill (the first latch stays and
+// its stamp is kept, so the second run loses the link 2 s after it latched).
+TEST_CASE("ZWO EAF Focuser Driver - A good read starts the staleness clock again for the next fault",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FaultedEaf eaf;
+    eaf.clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::seconds(1));
+    eaf.sdk.fail_reads = false;
+    CHECK(eaf.driver->get_position() == 500);  // restored with no reconnect
+    CHECK(eaf.driver->get_link_fault().empty());
+
+    eaf.latch();
+    eaf.clock.advance(std::chrono::seconds(2));  // past the bound from the first latch, not from the second
+    CHECK(code_of([&] { (void)eaf.driver->get_position(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(eaf.driver->get_connected());
+
+    eaf.clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)eaf.driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(eaf.driver->get_connected());
+}
+
+// A Disconnect after a staleness loss completes, does not close the open twice, and drops the kept reason (rule 5).
+// Falsified by: zwo_focuser_driver.cpp set_connected(false) without its lost_reason_.clear() (the reason survives
+// the Disconnect).
+TEST_CASE("ZWO EAF Focuser Driver - A Disconnect after a staleness loss clears the kept reason",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FaultedEaf eaf;
+    eaf.clock.advance(alpacacore::util::kLinkStalenessBound);
+    require_alpaca_error([&] { (void)eaf.driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE_FALSE(eaf.driver->get_link_fault().empty());
+
+    CHECK_NOTHROW(eaf.driver->set_connected(false));
+    CHECK_FALSE(eaf.driver->get_connected());
+    CHECK(eaf.sdk.close_calls == 1);
+    CHECK(eaf.driver->get_link_fault().empty());
+    require_alpaca_error([&] { (void)eaf.driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
 }
