@@ -490,8 +490,15 @@ public:
         table_.call(camera_id, [&] { raw_pulse_guide_on(camera_id, direction); });
     }
     void pulse_guide_off(int camera_id, GuideDirection direction) override {
-        hit("pulse_guide_off");
-        table_.call(camera_id, [&] { raw_pulse_guide_off(camera_id, direction); });
+        // Counted after the raw body, so a waiter on the count sees the direction in guide_offs().
+        if (before_call) before_call("pulse_guide_off");
+        try {
+            table_.call(camera_id, [&] { raw_pulse_guide_off(camera_id, direction); });
+        } catch (...) {
+            count_call("pulse_guide_off");
+            throw;
+        }
+        count_call("pulse_guide_off");
     }
     std::string get_serial_number(int camera_id) override {
         hit("get_serial_number");
@@ -506,6 +513,10 @@ public:
 private:
     void hit(const std::string& name) {
         if (before_call) before_call(name);
+        count_call(name);
+    }
+
+    void count_call(const std::string& name) {
         std::lock_guard lock(mutex_);
         ++calls_[name];
         calls_cv_.notify_all();

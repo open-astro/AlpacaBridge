@@ -181,6 +181,8 @@ TEST_CASE("ZWO camera clock - a pulse on another axis does not cut the running p
     clock.advance(milliseconds(200));
     REQUIRE(sdk.wait_for_call_count("pulse_guide_off", 1, kRendezvous));
     CHECK(sdk.guide_offs() == std::vector<Direction>{Direction::East});
+    // A wait's deadline is fixed when it registers: advance only once the body waits again, for the North deadline.
+    REQUIRE(clock.wait_for_wait_count(3, kRendezvous));
     clock.advance(milliseconds(799));
     CHECK(sdk.guide_offs() == std::vector<Direction>{Direction::East});
     clock.advance(milliseconds(1));
