@@ -1094,7 +1094,9 @@ public:
     }
 
     double get_site_elevation() const override {
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked();
         if (!site_elevation_m_) {
             throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
         }
