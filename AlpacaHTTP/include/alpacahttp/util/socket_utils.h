@@ -114,7 +114,8 @@ inline std::chrono::milliseconds send_budget(std::size_t bytes, std::chrono::mil
 // makes no progress, so a peer that drains a few bytes per interval would
 // otherwise hold the sender forever. The send never blocks in the kernel, so
 // SO_SNDTIMEO no longer applies; on a full buffer it waits with poll(POLLOUT)
-// for the shorter of the time left and `stall`, the no-progress bound. It
+// for the shorter of the time left and `stall`, the no-progress bound (zero
+// or less is none). It
 // returns false when either runs out (errno ETIMEDOUT) so the caller closes
 // the connection. Progress restarts the `stall` wait.
 inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t first_length, const char* second,
@@ -147,10 +148,11 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
                 errno = ETIMEDOUT;
                 return false;
             }
-            // Round up so a sub-millisecond remainder still waits.
+            // Round up so a sub-millisecond remainder still waits. A stall of
+            // zero or less is no stall bound: wait against the deadline only.
+            const auto left_ms = std::chrono::ceil<std::chrono::milliseconds>(left);
             const auto wait_ms = std::min<std::chrono::milliseconds::rep>(
-                std::min(std::chrono::ceil<std::chrono::milliseconds>(left), stall).count(),
-                std::numeric_limits<int>::max());
+                (stall.count() > 0 ? std::min(left_ms, stall) : left_ms).count(), std::numeric_limits<int>::max());
             pollfd wait_fd = {handle, POLLOUT, 0};
             const int ready = poll(&wait_fd, 1, static_cast<int>(wait_ms));
             if (ready < 0 && errno != EINTR) {

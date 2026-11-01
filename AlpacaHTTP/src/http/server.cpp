@@ -856,9 +856,10 @@ void Server::run_server() {
                     ++refused_since_log;
                     const auto now = std::chrono::steady_clock::now();
                     if (now - last_refusal_log >= std::chrono::seconds(kPerIpRefusalLogSeconds)) {
-                        util::log_info("Refused " + std::to_string(refused_since_log) + " connection(s) from " +
-                                       remote_address + ": " + std::to_string(max_per_ip) +
-                                       " open connections per address (http.max_connections_per_ip)");
+                        util::log_info("Refused " + std::to_string(refused_since_log) +
+                                       " connection(s) over the limit of " + std::to_string(max_per_ip) +
+                                       " open connections per address (http.max_connections_per_ip), the latest from " +
+                                       remote_address);
                         last_refusal_log = now;
                         refused_since_log = 0;
                     }
