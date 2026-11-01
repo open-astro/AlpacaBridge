@@ -849,3 +849,193 @@ TEST_CASE("ToupTek Camera Driver - Range and thermal members throw NotConnected 
     require_alpaca_error([&] { driver->set_set_ccd_temperature(0.0); }, not_connected);
     require_alpaca_error([&] { (void)driver->get_heat_sink_temperature(); }, not_connected);
 }
+
+// --- Exposure session (decision 0020) -------------------------------------
+
+namespace {
+
+// The Alpaca error a call raised, or 0 when it returned.
+int error_of(const std::function<void()>& call) {
+    try {
+        call();
+    } catch (const alpacacore::AlpacaException& e) {
+        return e.error_code();
+    }
+    return 0;
+}
+
+// ImageReady, false while it raises.
+bool frame_ready(const alpacacore::CameraDriver& driver) {
+    try {
+        return driver.get_image_ready();
+    } catch (const alpacacore::AlpacaException&) {
+        return false;
+    }
+}
+
+}  // namespace
+
+// Decision 0020 rule 3. Falsified by: a driver that clears the failure on a read, reports Exposing after it, or
+// keeps it across the next StartExposure.
+TEST_CASE("ToupTek Camera Driver - a failed exposure is kept until the next StartExposure",
+          "[touptek][camera][unit][capture-session]") {
+    auto fake = make_fake_camera();  // deliver_frame is false: the exposure fails
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->start_exposure(0.01, true);
+    const int driver_error = alpacacore::AlpacaError::DriverException;
+    REQUIRE(spin_until([&] { return error_of([&] { (void)driver->get_image_ready(); }) == driver_error; }));
+
+    for (int poll = 0; poll < 3; ++poll) {
+        CHECK(error_of([&] { (void)driver->get_image_ready(); }) == driver_error);
+        CHECK(error_of([&] { (void)driver->get_image_array(); }) == driver_error);
+        CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    }
+
+    fake.hold_next_wait_image();
+    driver->start_exposure(0.01, true);
+    REQUIRE(fake.wait_for_held_image(5s));
+    CHECK(error_of([&] { (void)driver->get_image_ready(); }) == 0);
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    driver->abort_exposure();
+    driver->set_connected(false);
+}
+
+// Decision 0020 rule 5. Falsified by: an abort that joins without the SDK stop (the held wait never returns), or
+// one that leaves the stopped stream for the next exposure to reuse.
+TEST_CASE("ToupTek Camera Driver - AbortExposure during an exposure wakes the SDK wait and leaves the camera idle",
+          "[touptek][camera][unit][capture-session]") {
+    auto fake = make_fake_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    fake.hold_next_wait_image();
+    driver->start_exposure(5.0, true);
+    REQUIRE(fake.wait_for_held_image(5s));
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    const int stops = fake.call_count("stop");
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->abort_exposure();
+    CHECK(std::chrono::steady_clock::now() - t0 < 1s);
+    CHECK(fake.call_count("stop") == stops + 1);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(error_of([&] { (void)driver->get_image_ready(); }) == 0);
+    CHECK(error_of([&] { (void)driver->get_image_array(); }) == alpacacore::AlpacaError::InvalidOperation);
+
+    // The body is gone, so the fake may change; the next exposure restarts the stopped stream.
+    fake.deliver_frame = true;
+    driver->start_exposure(0.01, true);
+    CHECK(spin_until([&] { return frame_ready(*driver); }));
+    CHECK(fake.call_count("start_pull_mode") == 2);
+    driver->set_connected(false);
+}
+
+// Decision 0020 rules 5 and 8. Falsified by: a disconnect that closes the camera before the SDK stop and the join
+// (the close lands while the wait is held), or one that keeps the last exposure across the reconnect.
+TEST_CASE("ToupTek Camera Driver - a disconnect during an exposure stops the SDK wait before the close",
+          "[touptek][camera][unit][capture-session]") {
+    auto fake = make_fake_camera();
+    std::atomic<bool> closed_while_held{false};
+    fake.before_call = [&](const std::string& fn) {
+        if (fn == "close_camera" && fake.wait_for_held_image(0ms)) closed_while_held = true;
+    };
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    fake.hold_next_wait_image();
+    driver->start_exposure(5.0, true);
+    REQUIRE(fake.wait_for_held_image(5s));
+    const int stops = fake.call_count("stop");
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    CHECK(std::chrono::steady_clock::now() - t0 < 1s);
+    CHECK_FALSE(closed_while_held.load());
+    CHECK(fake.call_count("stop") >= stops + 1);
+    CHECK_FALSE(driver->get_connected());
+
+    driver->set_connected(true);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(error_of([&] { (void)driver->get_last_exposure_duration(); }) == alpacacore::AlpacaError::InvalidOperation);
+    fake.deliver_frame = true;
+    driver->start_exposure(0.01, true);
+    CHECK(spin_until([&] { return frame_ready(*driver); }));
+    driver->set_connected(false);
+}
+
+// Decision 0020 rule 2. Falsified by: a second StartExposure that supersedes the first (stops it and starts
+// another trigger) instead of being refused.
+TEST_CASE("ToupTek Camera Driver - a StartExposure during an exposure is refused and the first frame still arrives",
+          "[touptek][camera][unit][capture-session]") {
+    auto fake = make_fake_camera();
+    fake.deliver_frame = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    fake.hold_next_wait_image();
+    driver->start_exposure(5.0, true);
+    REQUIRE(fake.wait_for_held_image(5s));
+    const int stops = fake.call_count("stop");
+
+    CHECK(error_of([&] { driver->start_exposure(1.0, true); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK(fake.call_count("stop") == stops);
+    CHECK(fake.call_count("trigger") == 1);
+
+    fake.release_wait_image();
+    REQUIRE(spin_until([&] { return frame_ready(*driver); }));
+    CHECK(driver->get_last_exposure_duration() == 5.0);
+    driver->set_connected(false);
+}
+
+// Decision 0020 rule 5. Falsified by: a body that fails and leaves the triggered stream running for the next
+// StartExposure or AbortExposure to stop.
+TEST_CASE("ToupTek Camera Driver - an exposure body that fails stops the stream it started",
+          "[touptek][camera][unit][capture-session]") {
+    auto fake = make_fake_camera();
+    std::atomic<bool> fail_wait{true};
+    fake.before_call = [&](const std::string& fn) {
+        if (fn == "wait_image" && fail_wait.load()) {
+            throw alpacacore::AlpacaException("injected image wait failure", alpacacore::AlpacaError::DriverException);
+        }
+    };
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    const int stops = fake.call_count("stop");
+    driver->start_exposure(0.01, true);
+    REQUIRE(spin_until([&] {
+        return error_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+    CHECK(fake.call_count("stop") == stops + 1);
+
+    fail_wait = false;
+    fake.deliver_frame = true;
+    driver->start_exposure(0.01, true);
+    CHECK(spin_until([&] { return frame_ready(*driver); }));
+    CHECK(fake.call_count("start_pull_mode") == 2);  // the stopped stream was restarted
+    driver->set_connected(false);
+}
+
+// Decision 0020 rules 2 and 5. Falsified by: a StartExposure that waits out the session's start timeout behind a
+// body the watchdog left in the SDK wait, instead of stopping the stream to wake it.
+TEST_CASE("ToupTek Camera Driver - a StartExposure wakes a body the watchdog left in the SDK wait",
+          "[touptek][camera][unit][capture-session][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera();
+    fake.deliver_frame = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    fake.hold_next_wait_image();
+    driver->start_exposure(1.0, true);
+    REQUIRE(fake.wait_for_held_image(5s));
+    clock.advance(16s);  // past 1 s + the 15 s margin
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    REQUIRE(error_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(error_of([&] { driver->start_exposure(0.01, true); }) == 0);
+    CHECK(std::chrono::steady_clock::now() - t0 < 1s);
+    CHECK(spin_until([&] { return frame_ready(*driver); }));
+    CHECK(driver->get_last_exposure_duration() == 0.01);
+    driver->set_connected(false);
+}

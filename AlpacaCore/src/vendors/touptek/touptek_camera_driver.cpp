@@ -12,9 +12,9 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
-#include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
@@ -29,10 +29,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -94,12 +94,9 @@ public:
           start_y_(0),
           num_x_(0),
           num_y_(0),
-          image_ready_(false),
-          image_cached_(false),
-          last_image_(),
           stream_clean_(false),
-          exposure_active_(false),
-          pulse_guiding_(false) {
+          pulse_guiding_(false),
+          session_(branding_.label, clock_, kWatchdogMargin) {
         preload_camera_info();
     }
 
@@ -107,7 +104,12 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        stop_exposure_thread();
+        // The SDK stop first, then the join: the body must be gone before the camera closes (decision 0020 rule 5).
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_unclean_stream_locked();
+        }
+        session_.disconnect_and_join();
         stop_thermal_poller();
         pulse_slot_.cancel_all_and_join();
         if (connected_.load()) {
@@ -164,23 +166,26 @@ public:
         // item 4). connected_, the handle and the identity change only inside
         // this lock; mutex_ is taken just to publish them, or to clear connected_
         // and the handle (the identity stays for the getters).
+        // transition_mutex_ also serialises the thermal poller's start (connect
+        // path, below) against its stop (disconnect path).
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
-        // exposure_lifecycle_mutex_ also serialises the thermal poller's
-        // start (connect path, below) against its stop (disconnect path).
-        // Taken in both directions, after transition_mutex_ and before mutex_
-        // (documented lock order).
-        std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         if (!connected) {
-            // Join the exposure thread BEFORE taking mutex_ and closing the handle:
-            // the thread runs Toupcam_WaitImageV4 on a raw handle snapshot, so
-            // closing under it is a use-after-close. It must happen out here —
-            // stop_exposure_thread() takes mutex_ itself and joins, so calling it
-            // with mutex_ held would self-deadlock. Hold exposure_lifecycle_mutex_
-            // from before the join through the close below, so a concurrent
-            // start_exposure cannot spawn a fresh thread in the join→close gap
-            // (it would block on this mutex, then fail NotConnected after we
-            // null the handle). Lock order: exposure_lifecycle_mutex_ -> mutex_.
-            stop_exposure_thread();
+            // Stop the SDK exposure, then join the body, BEFORE taking mutex_ and
+            // closing the handle: the body runs Toupcam_WaitImageV4 on a raw handle
+            // snapshot, so closing under it is a use-after-close (decision 0020 rule
+            // 5). The stop wakes that wait; a body failure it causes is dropped, not
+            // kept. disconnect_and_join() closes the session first, so a
+            // StartExposure that passed its connection check raises NotConnected and
+            // runs no body; it joins without mutex_ (the body takes mutex_).
+            session_.set_stopping(true);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (stop_unclean_stream_locked()) {
+                    format_dirty_ = true;
+                    roi_dirty_ = true;
+                }
+            }
+            session_.disconnect_and_join();
             // The poller takes mutex_ on every tick, so stop and join its slot
             // out here too -- before mutex_ is taken and the handle closed.
             stop_thermal_poller();
@@ -319,8 +324,7 @@ public:
 
             {
                 // Publish under mutex_ (the short state lock) only now: identity,
-                // limits and the handle appear together. Lock order mutex_ ->
-                // readout_mutex_.
+                // limits and the handle appear together.
                 std::lock_guard<std::mutex> lock(mutex_);
                 camera_info_ = std::move(info);
                 camera_info_valid_ = true;
@@ -336,16 +340,13 @@ public:
                 num_y_ = camera_info_.max_height & ~1;
                 roi_dirty_ = false;
                 format_dirty_ = false;
-                // Same invariant as the redundant-reconnect path above: clear
-                // exposure_active_ (inside reset_exposure_state_locked) under
-                // readout_mutex_. No exposure thread runs yet here, but keeping every
-                // caller consistent means the invariant holds by construction.
-                std::lock_guard<std::mutex> rlock(readout_mutex_);
-                reset_exposure_state_locked();
+                reset_connection_state_locked();
                 // start_pull_mode above established a reusable stream. A client
                 // may send AbortExposure while no exposure is active (PHD2 does
                 // this when Loop stops); that must not tear this stream down.
                 stream_clean_ = true;
+                // The disconnect closed the session (decision 0020 rule 8).
+                session_.open();
                 connected_.store(true);
             }
             // Started with mutex_ released (never joined here -- see the top of
@@ -362,18 +363,17 @@ public:
         // under readout_mutex_ with a handle snapshot -- has completed before
         // Toupcam_Close. A getter does not wait for the SDK close itself, but can
         // still wait behind a concurrent ReadoutMode read, which holds mutex_ while it
-        // waits on readout_mutex_ (decision 0016 item 6). The
-        // exposure_active_ store also belongs under readout_mutex_ (the documented
-        // invariant that the flag only changes under that lock).
+        // waits on readout_mutex_ (decision 0016 item 6). The exposure body is
+        // already joined (disconnect_and_join() above), which also cleared the
+        // image, the kept failure and LastExposure*.
         std::unique_lock<std::mutex> state_lock(mutex_);
         std::lock_guard<std::mutex> rlock(readout_mutex_);
-        exposure_active_.store(false);
         HToupcam handle = std::exchange(handle_, nullptr);
         // camera_info_ stays: no getter asks the SDK for it again, which a second
         // ToupTek device's open can hold (decision 0016 rule 1); connect overwrites it.
         serial_number_.clear();
         firmware_version_.clear();
-        reset_exposure_state_locked();
+        reset_connection_state_locked();
         connected_.store(false);
         state_lock.unlock();
         if (handle) {
@@ -433,22 +433,7 @@ public:
 
     CameraState get_camera_state() const override {
         ensure_connected();
-        if (exposure_active_.load()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
-                ALPACA_LOG_WARN(branding_.label, "Exposure deadline exceeded; forcing CameraState=Idle.");
-                // Publish the false-transition under readout_mutex_ too, so the
-                // invariant "exposure_active_ only changes under readout_mutex_"
-                // (which set_readout_mode relies on) holds on this path as well.
-                // Lock order is mutex_ -> readout_mutex_, held consistently.
-                std::lock_guard<std::mutex> rlock(readout_mutex_);
-                exposure_active_.store(false);
-                exposure_deadline_valid_ = false;
-                return CameraState::Idle;
-            }
-            return CameraState::Exposing;
-        }
-        return CameraState::Idle;
+        return session_.camera_state();  // the session applies the watchdog
     }
 
     int get_camera_x_size() const override {
@@ -619,25 +604,26 @@ public:
     double get_heat_sink_temperature() const override { return get_ccd_temperature(); }
 
     ImageArray get_image_array() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        if (!exposure_failure_.empty()) {
-            throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
+        std::shared_ptr<const ImageArray> image;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            if (failure_dismissed_ && session_.failure()) {
+                throw AlpacaException::asked_too_early("Image not ready");
+            }
+            image = session_.image();
         }
-        if (!image_ready_ || !image_cached_) {
-            throw AlpacaException::asked_too_early("Image not ready");
-        }
-        return last_image_;
+        return *image;
     }
     std::string get_image_array_variant() const override { return "Int32"; }
 
     bool get_image_ready() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!exposure_failure_.empty()) {
-            throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
+        if (failure_dismissed_ && session_.failure()) {
+            return false;
         }
-        return image_ready_ && image_cached_;
+        return session_.image_ready();
     }
 
     bool get_is_pulse_guiding() const override {
@@ -657,13 +643,13 @@ public:
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return last_exposure_.duration();
+        return session_.last_exposure_duration();
     }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return last_exposure_.start_time();
+        return session_.last_exposure_start_time();
     }
 
     int get_max_adu() const override {
@@ -711,9 +697,9 @@ public:
         // reconnect that changed the bit depth between the check and the write left
         // the accepted bound stale (spurious SDK DriverException). Holding both locks
         // also makes the exposure check atomic with the write (start_exposure
-        // publishes exposure_active_ under readout_mutex_). Lock order mutex_ ->
+        // sets exposure_starting_ under mutex_). Lock order mutex_ ->
         // readout_mutex_ -> SDK, so the bound is read from handle_ directly, not via
-        // offset_max_value()/handle_copy() (which would re-take mutex_).
+        // offset_max_value() (which would re-take mutex_).
         std::lock_guard<std::mutex> lock(mutex_);
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         if (!handle_) {
@@ -747,17 +733,7 @@ public:
 
     double get_percent_completed() const override {
         ensure_connected();
-        if (!exposure_active_.load()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            return image_ready_ ? 100.0 : 0.0;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (pending_exposure_duration_ <= 0.0 || !exposure_triggered_) return 0.0;
-        double elapsed = std::chrono::duration<double>(clock_.now() - exposure_start_steady_).count();
-        double pct = (elapsed / pending_exposure_duration_) * 100.0;
-        if (pct < 0.0) return 0.0;
-        if (pct > 100.0) return 100.0;
-        return pct;
+        return session_.percent_completed();  // from the trigger, on the task clock
     }
 
     double get_pixel_size_x() const override {
@@ -938,6 +914,7 @@ public:
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
+    // StopExposure is the same: this camera cannot end a triggered frame early and keep it.
     void abort_exposure() override { stop_exposure(); }
 
     void pulse_guide(int direction, int duration) override {
@@ -1003,7 +980,7 @@ public:
     // a whole exposure, since the freshness check is bypassed while exposing.
     bool cache_fresh_locked(bool valid, util::TaskClock::clock::time_point stamped) const {
         if (!valid) return false;
-        if (exposure_active_.load()) return true;
+        if (exposure_body_running()) return true;
         return clock_.now() - stamped < kThermalCacheMaxAge;
     }
 
@@ -1045,11 +1022,10 @@ public:
             if (ctx.stop_reason() != util::StopReason::None) return;
             // Never touch the SDK while a frame is integrating (see
             // cache_fresh_locked); the cache just ages until it ends.
-            if (exposure_active_.load()) continue;
             try {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!handle_ || !connected_.load()) return;
-                if (exposure_active_.load()) continue;
+                if (exposure_body_running()) continue;
                 read_temperature_locked(handle_, sdk);
                 if (camera_info_valid_ && camera_info_.supports_cooler) {
                     read_tec_voltage_locked(handle_, sdk);
@@ -1071,24 +1047,10 @@ public:
         }
         ensure_connected();
 
-        // Held for the whole function, through the thread spawn at the end: a
-        // disconnect holds this same mutex from its exposure-thread join through
-        // Toupcam_Close, so a spawn can never slip into that join→close gap and
-        // hand the new thread a handle that is about to be freed. If the
-        // disconnect wins the lock, handle_copy() below throws NotConnected.
-        // Also serialises spawn against the joins in stop_exposure — concurrent
-        // join vs thread-assignment on the same std::thread is UB.
-        // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
-        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-
         auto& sdk = sdk_;
-        // Snapshot the handle for the exposure thread below (line ~1011). The
-        // thread's use is safe because stop_exposure_thread() joins it before any
-        // set_connected(false) can Toupcam_Close the handle (both under
-        // exposure_lifecycle_mutex_). The range read here, however, runs
-        // synchronously on THIS thread, so it still goes through with_handle(),
-        // which holds mutex_ across Toupcam_get_ExpTimeRange.
-        HToupcam handle = handle_copy();
+        // The range read runs on this thread through with_handle(), which holds
+        // mutex_ across Toupcam_get_ExpTimeRange. The body reads handle_ itself
+        // (see below).
         auto range = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
 
         const double rounded_us = std::max(std::round(duration * 1'000'000.0), static_cast<double>(range.min_us));
@@ -1096,14 +1058,6 @@ public:
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
         const unsigned exposure_us = static_cast<unsigned>(rounded_us);
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            validate_exposure_roi_locked();
-        }
-        // Validate before cancelling anything; snapshot after the join because
-        // stopping the previous worker dirties the stream configuration.
-        stop_exposure_thread();
 
         int active_bin = 0;
         int active_start_x = 0;
@@ -1122,10 +1076,26 @@ public:
         bool dirty_format = false;
         bool dirty_roi = false;
         bool active_16bit = true;
+        bool saved_stream_clean = false;
+        std::uint64_t generation = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!camera_info_valid_) {
                 throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
+            }
+            // Validate before refusing or stopping anything.
+            validate_exposure_roi_locked();
+            const CameraState state = session_.camera_state();
+            if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
+                throw AlpacaException("An exposure is already in progress", AlpacaError::InvalidOperation);
+            }
+            // A body the watchdog failed can still be parked in Toupcam_WaitImageV4:
+            // stop the stream to wake it, so session_.start() below does not wait out
+            // the SDK timeout (decision 0020 rule 5). Before the snapshot, because the
+            // stop dirties the stream configuration.
+            if (session_.busy() && stop_unclean_stream_locked()) {
+                format_dirty_ = true;
+                roi_dirty_ = true;
             }
             // Pull at the sensor's actual bit depth (M14): connect only enables
             // the 16-bit BITDEPTH option when bit_depth_max > 8, so a RAW8-only
@@ -1150,7 +1120,6 @@ public:
             // column). Deriving max from the even size makes that unreachable.
             const int even_max_w = camera_info_.max_width & ~1;
             const int even_max_h = camera_info_.max_height & ~1;
-            validate_exposure_roi_locked();
 
             // Toupcam_put_Roi requires an even sensor-coordinate offset, width,
             // and height, and the ROI must fit the sensor. The binned span is
@@ -1222,45 +1191,56 @@ public:
 
             format_dirty_ = false;
             roi_dirty_ = false;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            pending_exposure_duration_ = exposure_us / 1'000'000.0;
-            exposure_triggered_ = false;
-            exposure_failure_.clear();
-            image_ready_ = false;
-            image_cached_ = false;
             // From this point until a frame is published successfully, an abort,
             // timeout or failure must stop and re-initialise the stream before it
-            // is reused. The worker marks it clean only in the generation-checked
+            // is reused. The body marks it clean only in the generation-checked
             // publication block at the end.
+            saved_stream_clean = stream_clean_;
             stream_clean_ = false;
-            exposure_deadline_ = clock_.now() + std::chrono::microseconds(exposure_us) + std::chrono::seconds(15);
-            exposure_deadline_valid_ = true;
+            generation = abort_generation_.load();
+            // Holds the settings (ensure_not_exposing) from this snapshot until
+            // session_.start() has published Exposing, so a register or geometry
+            // write cannot slip in between.
+            exposure_starting_ = true;
         }
 
-        {
-            // Publish exposure_active_ under readout_mutex_ so set_readout_mode's
-            // exposure check (also under readout_mutex_) can't race the start of an
-            // integration and write CG/HFW mid-frame (TOCTOU close).
-            std::lock_guard<std::mutex> rlock(readout_mutex_);
-            exposure_active_.store(true);
-        }
-
-        const uint64_t abort_generation = abort_generation_.load();
-        exposure_thread_ = std::thread([this, handle, abort_generation, exposure_us, active_bin, active_num_x,
-                                        active_num_y, expected_w, expected_h, roi_x, roi_y, roi_w, roi_h, dirty_format,
-                                        dirty_roi, active_16bit]() {
+        auto body = [this, generation, exposure_us, active_bin, active_num_x, active_num_y, expected_w, expected_h,
+                     roi_x, roi_y, roi_w, roi_h, dirty_format, dirty_roi, active_16bit](util::CaptureControl& c) {
             auto& sdk_local = sdk_;
+            const auto cancelled = [&c] { return c.stop_reason() != util::StopReason::None; };
+            // Assumes mutex_ is held. False once an abort, a disconnect or a later
+            // StartExposure has stopped the stream this body uses.
+            const auto current_locked = [this, generation] { return abort_generation_.load() == generation; };
+            // A body that ends without a frame stops the stream it started (decision
+            // 0020 rule 5), unless the driver already did. True when it had.
+            const auto stop_own_stream = [this, &current_locked] {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!current_locked()) return true;
+                if (stop_unclean_stream_locked()) {
+                    format_dirty_ = true;
+                    roi_dirty_ = true;
+                }
+                return false;
+            };
+            HToupcam handle = nullptr;
+            {
+                // Read here, not in start_exposure: a disconnect stops this body and
+                // joins it before Toupcam_Close, so the handle stays open throughout.
+                std::lock_guard<std::mutex> lock(mutex_);
+                handle = handle_;
+            }
+            if (!handle) {
+                throw AlpacaException("Camera handle is null", AlpacaError::NotConnected);
+            }
             // Track which reconfigure stages actually completed, so the catch
             // re-marks ONLY the stage that failed — re-marking an
             // already-applied stage would trigger a spurious stream restart on
             // the next exposure.
             bool format_applied = false;
             bool roi_applied = false;
-            bool frame_ready = false;
-            std::chrono::system_clock::time_point candidate_start;
+            bool published = false;
+            std::exception_ptr failure;
+            std::string failure_text;
             try {
                 // Reconfiguring bitdepth / pixel format / binning requires the
                 // stream to be stopped (SDK returns E_WRONG_THREAD otherwise).
@@ -1275,10 +1255,10 @@ public:
                     {
                         // An abort that landed during the restart stopped the stream
                         // already; starting it again would undo the abort and park
-                        // the worker in a frame wait. Check under mutex_ (the abort
+                        // the body in a frame wait. Check under mutex_ (the abort
                         // bumps the generation under the same lock as its stop()).
                         std::lock_guard<std::mutex> lock(mutex_);
-                        if (abort_generation_.load() != abort_generation) throw ExposureAborted{};
+                        if (!current_locked() || cancelled()) throw ExposureAborted{};
                         sdk_local.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
                     }
                     format_applied = true;  // flag cleared at snapshot time
@@ -1298,11 +1278,9 @@ public:
                 // LastExposureStartTime accuracy check.
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    if (abort_generation_.load() != abort_generation) throw ExposureAborted{};
-                    candidate_start = std::chrono::system_clock::now();
-                    exposure_start_steady_ = clock_.now();
+                    if (!current_locked() || cancelled()) throw ExposureAborted{};
+                    c.exposure_started();
                     sdk_local.trigger(handle, 1);
-                    exposure_triggered_ = true;
                 }
 
                 unsigned timeout_ms = (exposure_us / 1000) + 10000;
@@ -1330,27 +1308,11 @@ public:
                 bool got = sdk_local.wait_image(handle, timeout_ms, pixel_buffer.data(), active_16bit ? 16 : 8,
                                                 stride_px * static_cast<int>(bytes_per_pixel), got_w, got_h);
 
-                if (!got || !exposure_active_.load()) {
-                    const char* failure_message = got ? "A frame arrived after the exposure was no longer active"
-                                                      : "The camera failed to deliver the exposure frame";
-                    ALPACA_LOG_WARN(branding_.label, failure_message);
-                    // Publish the false-transition under readout_mutex_ so the
-                    // invariant "exposure_active_ only changes under readout_mutex_"
-                    // holds on the exposure thread's own exit paths too (matching
-                    // the disconnect and deadline paths). Taken alone here — the
-                    // thread holds neither mutex_ nor the SDK lock — so it respects
-                    // the mutex_ -> readout_mutex_ order, and no join site holds
-                    // readout_mutex_, so this cannot deadlock the joining thread.
-                    {
-                        std::lock_guard<std::mutex> rlock(readout_mutex_);
-                        exposure_active_.store(false);
-                    }
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (abort_generation_.load() == abort_generation) {
-                        exposure_failure_ = failure_message;
-                    }
-                    return;
+                if (!got) {
+                    throw AlpacaException("The camera failed to deliver the exposure frame",
+                                          AlpacaError::DriverException);
                 }
+                c.reading_out();
 
                 if (got_w > static_cast<unsigned>(std::numeric_limits<int>::max()) ||
                     got_h > static_cast<unsigned>(std::numeric_limits<int>::max())) {
@@ -1374,98 +1336,89 @@ public:
                         "ToupTek frame is smaller than the frame the ROI predicts");
                 }
 
+                auto image = std::make_shared<const ImageArray>(
+                    build_image_array(pixel_buffer, active_16bit, stride_px, active_num_x, active_num_y,
+                                      static_cast<int>(got_w), static_cast<int>(got_h)));
                 {
+                    // An abort or a disconnect that stopped the stream discards the
+                    // frame even when the read succeeded; the session drops it past
+                    // the watchdog deadline (the failure it keeps then says so).
                     std::lock_guard<std::mutex> lock(mutex_);
-                    ImageArray image =
-                        build_image_array(pixel_buffer, active_16bit, stride_px, active_num_x, active_num_y,
-                                          static_cast<int>(got_w), static_cast<int>(got_h));
-                    alpacacore::util::validate_image_array(image);
-                    last_image_ = std::move(image);
-                    image_cached_ = true;
-                    // image_ready_ is intentionally NOT set here — it is published
-                    // AFTER exposure_active_ is cleared below, so a poller never
-                    // observes ImageReady=true while camera_state still reports
-                    // Exposing (an ASCOM-forbidden combination). The frame is fully
-                    // captured, so remaining Exposing during this build is fine.
+                    if (current_locked() && c.image_ready(std::move(image))) {
+                        stream_clean_ = true;
+                        published = true;
+                    }
                 }
-                frame_ready = true;
             } catch (const ExposureAborted&) {
-                // Aborted before the frame started: the abort already forced the
-                // next exposure to re-init the stream; nothing to re-mark.
                 ALPACA_LOG_DEBUG(branding_.label, "Exposure aborted before the frame started");
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN(branding_.label, "Exposure failed: " + std::string(e.what()));
+                failure = std::current_exception();
+                failure_text = e.what();
                 // Re-mark only the stage that did NOT complete, so the next
                 // exposure re-applies the failed reconfigure without needlessly
                 // restarting the stream for one that already succeeded.
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (abort_generation_.load() == abort_generation) {
-                    exposure_failure_ = e.what();
-                    image_ready_ = false;
-                    image_cached_ = false;
-                }
                 if (dirty_format && !format_applied) format_dirty_ = true;
                 if (dirty_roi && !roi_applied) roi_dirty_ = true;
             }
-            // Clear exposure_active_ FIRST (under readout_mutex_, matching the
-            // abort path) so the camera leaves the Exposing state, THEN publish
-            // image_ready_ — never the reverse, or a poller could observe
-            // ImageReady=true while camera_state still returns Exposing. This also
-            // keeps every exposure_active_ transition on this thread under
-            // readout_mutex_ (the documented invariant).
-            {
-                std::lock_guard<std::mutex> rlock(readout_mutex_);
-                exposure_active_.store(false);
+            if (published) return;
+            const bool stopped_by_driver = stop_own_stream();
+            if (!failure) return;
+            if (stopped_by_driver || cancelled()) {
+                // The stop broke the wait, or the session already ended the exposure.
+                ALPACA_LOG_DEBUG(branding_.label, "Exposure body ended after a stop: " + failure_text);
+                return;
             }
-            if (frame_ready) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (abort_generation_.load() == abort_generation && exposure_deadline_valid_ &&
-                    clock_.now() < exposure_deadline_) {
-                    last_exposure_.commit(exposure_us / 1'000'000.0, candidate_start);
-                    image_ready_ = true;
-                    stream_clean_ = true;
-                } else {
-                    image_cached_ = false;
-                    last_image_ = {};
-                    if (abort_generation_.load() == abort_generation) {
-                        exposure_failure_ = "Exposure deadline exceeded before frame publication";
-                    }
-                }
-            }
-        });
+            ALPACA_LOG_WARN(branding_.label, "Exposure failed: " + failure_text);
+            std::rethrow_exception(failure);  // kept by the session until the next StartExposure
+        };
+        try {
+            session_.start(static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
+        } catch (...) {
+            // Refused (NotConnected, or the previous body still finishing): no body
+            // ran, so the stream and the settings still need what they needed.
+            std::lock_guard<std::mutex> lock(mutex_);
+            exposure_starting_ = false;
+            stream_clean_ = saved_stream_clean;
+            format_dirty_ = format_dirty_ || dirty_format;
+            roi_dirty_ = roi_dirty_ || dirty_roi;
+            throw;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        exposure_starting_ = false;
+        failure_dismissed_ = false;  // the session cleared the failure
     }
 
     void stop_exposure() override {
         ensure_connected();
-        // Serialise this stop+join against start_exposure's spawn (join racing the
-        // thread-assignment is UB on std::thread) and against the disconnect's
-        // join+close. Taken before mutex_, preserving lock order.
-        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-        // A completed exposure leaves a joinable thread but a reusable pull-mode
-        // stream. Join that thread without stopping the stream. For an active,
-        // failed or timed-out exposure, stop() still wakes WaitImageV4 promptly
-        // (a 10-min frame would otherwise take ~10 min to abort). Hold mutex_
-        // across stop() so a concurrent disconnect can't close the handle in the
-        // gap. Do NOT pre-clear exposure_active_: the worker owns that transition.
-        bool stream_stopped = false;
+        bool exposing = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            stream_stopped = stop_unclean_stream_locked();
+            const CameraState state = session_.camera_state();
+            exposing = state == CameraState::Exposing || state == CameraState::Download;
+            if (exposing) {
+                session_.set_stopping(true);  // a frame wait the stop breaks is not a failure
+            } else {
+                if (exposure_starting_) return;  // nothing has begun yet; the start goes ahead
+                // A completed exposure: drop its frame, and a failure it left (#979).
+                failure_dismissed_ = session_.failure().has_value();
+                session_.discard_image();
+            }
+            // A completed exposure leaves a reusable pull-mode stream: keep it. For an
+            // active, failed or timed-out exposure, stop() wakes WaitImageV4 promptly
+            // (a 10-min frame would otherwise take ~10 min to abort) and is the SDK
+            // stop before the join (decision 0020 rule 5). Held under mutex_ so a
+            // concurrent disconnect can't close the handle in the gap.
+            if (stop_unclean_stream_locked()) {
+                // Stream was stopped; force the next exposure to re-init it. Mark the
+                // ROI dirty too as a defensive safety net in case a future SDK resets
+                // ROI on restart.
+                format_dirty_ = true;
+                roi_dirty_ = true;
+            }
         }
-        if (exposure_thread_.joinable()) {
-            exposure_thread_.join();
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        image_ready_ = false;
-        exposure_failure_.clear();  // a failure from an already completed exposure
-        image_cached_ = false;
-        exposure_deadline_valid_ = false;
-        if (stream_stopped) {
-            // Stream was stopped; force the next exposure to re-init it. Mark the
-            // ROI dirty too as a defensive safety net in case a future SDK resets
-            // ROI on restart.
-            format_dirty_ = true;
-            roi_dirty_ = true;
+        if (exposing) {
+            session_.abort();  // joins the body; bounded by the stop above waking its frame wait
         }
     }
 
@@ -1487,29 +1440,24 @@ private:
     std::string firmware_version_;
 
     std::atomic<bool> connected_;
-    // Bumped by stop_exposure() under mutex_, together with its stop(). The
-    // exposure worker compares it under mutex_ before restarting the stream and
-    // before the trigger, so an abort landing mid-restart is not undone.
+    // Bumped with every stream stop (stop_unclean_stream_locked, under mutex_). The
+    // exposure body compares it under mutex_ before restarting the stream, before
+    // the trigger and before publishing, so an abort, a disconnect or a later
+    // StartExposure that lands mid-body is not undone.
     std::atomic<uint64_t> abort_generation_{0};
     struct ExposureAborted {};
     // Spans the whole of set_connected() (connect handshake and disconnect close);
     // no getter takes it, so mutex_ is free during the SDK open (decision 0016).
-    // Lock order: transition_mutex_ -> exposure_lifecycle_mutex_ -> mutex_ ->
-    // readout_mutex_ -> SDK-wrapper mutex. Connect takes mutex_ only to publish the
-    // identity and handle; disconnect clears state under mutex_ + readout_mutex_,
-    // releases mutex_, then closes the handle under readout_mutex_.
+    // It also serialises the thermal poller's start (connect) against its stop
+    // (disconnect). Lock order: transition_mutex_ -> mutex_ -> readout_mutex_ ->
+    // SDK-wrapper mutex; the session's mutex is a leaf under mutex_, and
+    // session_.start(), abort() and disconnect_and_join() run without mutex_
+    // (decision 0020 rule 6). Connect takes mutex_ only to publish the identity and
+    // handle; disconnect stops and joins the exposure body, clears state under
+    // mutex_ + readout_mutex_, releases mutex_, then closes the handle under
+    // readout_mutex_.
     std::mutex transition_mutex_;
     mutable std::mutex mutex_;
-    // Serialises the exposure thread's LIFECYCLE: spawn (start_exposure) vs
-    // join + handle close (set_connected(false)) vs join (stop_exposure). Without
-    // it, a start_exposure landing between the disconnect's join and its
-    // Toupcam_Close could spawn a fresh thread whose handle snapshot is then
-    // closed under it (use-after-close inside WaitImageV4) — and two joiners /
-    // a joiner racing the spawn's thread-assignment is UB on std::thread.
-    // Lock order: transition_mutex_ -> exposure_lifecycle_mutex_ -> mutex_ ->
-    // readout_mutex_ -> SDK.
-    // The exposure thread itself never takes it, so joins under it can't deadlock.
-    std::mutex exposure_lifecycle_mutex_;
     // Serialises the two-step CG+HFW apply in set_readout_mode against the
     // paired reads in get_readout_mode, so a reader never observes a
     // half-applied combination that isn't in the enumerated specs.
@@ -1523,24 +1471,18 @@ private:
     bool roi_dirty_{false};
     bool format_dirty_{false};
 
-    mutable bool image_ready_;
-    mutable bool image_cached_;
-    mutable ImageArray last_image_;
-    util::LastExposure last_exposure_;
-    double pending_exposure_duration_{0.0};
-    util::TaskClock::clock::time_point exposure_start_steady_{};
-    bool exposure_triggered_{false};
-    std::string exposure_failure_;
     // Guarded by mutex_. True only when pull mode is running and the last
     // exposure (if any) published a frame without an abort/failure/timeout.
-    // A joinable std::thread does not imply a live exposure: completed threads
-    // remain joinable until the next request reaps them.
+    // An idle camera does not imply a stopped body: a body the watchdog failed
+    // can still be parked in Toupcam_WaitImageV4 until a stop wakes it.
     bool stream_clean_;
-
-    mutable std::atomic<bool> exposure_active_;
-    std::thread exposure_thread_;
-    mutable util::TaskClock::clock::time_point exposure_deadline_{};
-    mutable bool exposure_deadline_valid_{false};
+    // Guarded by mutex_. True from a StartExposure's settings snapshot until
+    // session_.start() has published Exposing (or refused).
+    bool exposure_starting_{false};
+    // Guarded by mutex_. An idle AbortExposure dismissed the session's kept
+    // failure (#979): ImageReady reads false and ImageArray "not ready" until the
+    // next StartExposure or connect.
+    bool failure_dismissed_{false};
 
     // Thermal cache fed by thermal_poll_loop (all guarded by mutex_).
     static constexpr std::chrono::milliseconds kThermalPollInterval{1000};
@@ -1569,11 +1511,18 @@ private:
     // Serialises pulse_guide calls (SDK write plus timer start).
     std::mutex pulse_guide_lifecycle_mutex_;
 
+    // Past start + duration + this, the session fails the exposure (watchdog).
+    // Toupcam_WaitImageV4's own timeout is the exposure + 10 s, inside it.
+    static constexpr std::chrono::seconds kWatchdogMargin{15};
+    // The exposure (decision 0020). Declared after every member the body touches:
+    // destroyed first, so the body is joined before they die.
+    util::CaptureSession session_;
+
     static void on_event_static(unsigned /*event*/, void* /*ctx*/) {
         // Pull-mode callbacks fire on an SDK-owned thread. Do not touch the
         // handle here — close/stop from this context deadlocks (SDK contract).
-        // Frame delivery is handled by Toupcam_WaitImageV4 on the exposure
-        // thread, so this callback is intentionally a no-op.
+        // Frame delivery is handled by Toupcam_WaitImageV4 in the exposure
+        // body, so this callback is intentionally a no-op.
     }
 
     void ensure_connected() const {
@@ -1582,21 +1531,13 @@ private:
         }
     }
 
-    HToupcam handle_copy() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!handle_) {
-            throw AlpacaException("Camera handle is null", AlpacaError::NotConnected);
-        }
-        return handle_;
-    }
-
     // Runs fn(handle_) with mutex_ HELD across the SDK call. set_connected(false)
     // nulls handle_ under mutex_ before it closes the handle, so holding it here
     // means a concurrent disconnect cannot Toupcam_Close the handle mid-call — closing the
-    // use-after-close window that the bare handle_copy() snapshot idiom left open
-    // (it released mutex_ before the SDK call). Use this for every fast SDK option
+    // use-after-close window that a bare handle snapshot left open (it released
+    // mutex_ before the SDK call). Use this for every fast SDK option
     // read/write. Do NOT use it for blocking SDK calls (Toupcam_WaitImageV4) or
-    // the exposure thread, which must not hold mutex_. Callers that also need
+    // the exposure body, which must not hold mutex_ across them. Callers that also need
     // readout_mutex_ (set_gain/set_offset/get/set_readout_mode) take both locks
     // directly instead, to stay atomic against the two-step readout-mode apply.
     // Trailing return type (not bare `auto`) so the type is known at the call
@@ -1612,11 +1553,22 @@ private:
     }
 
     // Reject runtime sensor-register writes (readout mode / gain / offset) while
-    // a frame is integrating: the exposure thread is blocked in wait_image
+    // a frame is integrating: the exposure body is blocked in wait_image
     // holding no lock, so a mid-exposure register write would race the live
     // integration and yield a mixed-state or stalled frame with no error.
+    // Requires mutex_ held, the lock start_exposure sets exposure_starting_ under.
+    // A cancelled or failed body can still be in the SDK, so the settings stay
+    // locked while the session is busy, except once the frame is Ready.
     void ensure_not_exposing() const {
-        if (exposure_active_.load()) {
+        const CameraState state = session_.camera_state();
+        bool frame_ready = false;
+        try {
+            frame_ready = session_.image_ready();
+        } catch (const AlpacaException&) {
+            frame_ready = false;  // a kept failure: not ready
+        }
+        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download ||
+            (session_.busy() && !frame_ready)) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
         }
     }
@@ -1719,20 +1671,19 @@ private:
         });
     }
 
-    void reset_exposure_state_locked() {
-        image_ready_ = false;
-        exposure_failure_.clear();
+    // Assumes mutex_ is held. The exposure state lives in session_, which the
+    // disconnect clears (disconnect_and_join).
+    void reset_connection_state_locked() {
         temperature_cache_valid_ = false;
         tec_cache_valid_ = false;
         tec_voltage_max_valid_ = false;
-        image_cached_ = false;
-        last_exposure_.clear();
-        pending_exposure_duration_ = 0.0;
-        exposure_triggered_ = false;
         stream_clean_ = false;
-        exposure_active_.store(false);
-        exposure_deadline_valid_ = false;
+        failure_dismissed_ = false;
     }
+
+    // A body has not returned: it may be parked in Toupcam_WaitImageV4, where a
+    // thermal control transfer makes the SDK drop the frame.
+    bool exposure_body_running() const { return session_.busy(); }
 
     // Assumes mutex_ is held. Returns true when the pull-mode stream was not
     // reusable and therefore had to be stopped (or treated as stopped if the
@@ -1747,32 +1698,6 @@ private:
             }
         }
         return true;
-    }
-
-    // Callers must hold exposure_lifecycle_mutex_ (start_exposure, stop_exposure,
-    // set_connected(false)) — the join must not race a concurrent spawn's
-    // thread-assignment. Sole exception: the destructor, which runs after the
-    // connection thread is joined and no client calls can be in flight.
-    void stop_exposure_thread() {
-        if (!exposure_thread_.joinable()) return;
-        // A successfully completed worker leaves the pull-mode stream reusable;
-        // join it without Toupcam_Stop. Any other joinable worker is active,
-        // failed, timed out or aborted, so stop the stream to wake WaitImageV4 and
-        // force a clean restart. stream_clean_ and abort_generation_ are checked
-        // and changed under the same mutex used by the worker's publication tail.
-        bool stream_stopped = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stream_stopped = stop_unclean_stream_locked();
-        }
-        exposure_thread_.join();
-        if (stream_stopped) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            // Stream was stopped; re-init format + ROI on the next exposure (ROI
-            // is a defensive safety net — see stop_exposure).
-            format_dirty_ = true;
-            roi_dirty_ = true;
-        }
     }
 
     void preload_camera_info() {
@@ -1794,10 +1719,10 @@ private:
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        // Check the exposure state under readout_mutex_ (lock order mutex_ ->
-        // readout_mutex_) so it is atomic with the geometry mutation below and with
-        // start_exposure publishing exposure_active_ — a bare pre-lock check is a
-        // TOCTOU (matches set_gain / set_readout_mode).
+        // Check the exposure state under mutex_ (with readout_mutex_, lock order
+        // mutex_ -> readout_mutex_) so it is atomic with the geometry mutation below
+        // and with start_exposure setting exposure_starting_ — a bare pre-lock check
+        // is a TOCTOU (matches set_gain / set_readout_mode).
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         ensure_not_exposing();
         if (!camera_info_valid_) {
@@ -1820,7 +1745,7 @@ private:
         start_y_ = 0;
         format_dirty_ = true;
         roi_dirty_ = true;
-        image_cached_ = false;
+        session_.discard_image();
     }
 
     // width/height (or sx/sy) of std::nullopt means "leave that axis unchanged",
@@ -1841,7 +1766,7 @@ private:
         num_x_ = width;
         num_y_ = height;
         roi_dirty_ = true;
-        image_cached_ = false;
+        session_.discard_image();
     }
 
     // NOTE: the ROI origin snaps DOWN to an even sensor-coordinate boundary at

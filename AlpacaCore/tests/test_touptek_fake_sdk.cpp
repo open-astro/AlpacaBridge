@@ -189,7 +189,10 @@ TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and surv
             REQUIRE(wait_for(
                 [&] { return error([&] { driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException; }));
             CHECK(error([&] { driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
-            driver->abort_exposure();  // join before changing the fake's script
+            driver->abort_exposure();
+            // The watchdog failure shows before the late body returns; the settings unlock once it has, so the
+            // fake's script may change.
+            REQUIRE(wait_for([&] { return error([&] { driver->set_start_x(0); }) == 0; }));
         }
         check_metadata();
     }
@@ -543,7 +546,7 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     // control transfers issued while Toupcam_WaitImageV4 is pending make the
     // SDK abandon the frame. The poller must (1) have read the temperature
     // before the client's first DeviceState poll, (2) issue NO thermal SDK
-    // call while exposure_active_, while the getters still answer from the
+    // call while an exposure body runs, while the getters still answer from the
     // cache, and (3) resume once the exposure ends.
     alpacacore::test::FakeTaskClock clock;
     auto fake = make_fake_with_camera();
@@ -1014,8 +1017,7 @@ TEST_CASE("ToupTek camera - a frame arriving after the watchdog fails both image
             read();
         } catch (const AlpacaException& e) {
             return e.error_code() == alpacacore::AlpacaError::DriverException &&
-                   std::string(e.what()).find("frame arrived after the exposure was no longer active") !=
-                       std::string::npos;
+                   std::string(e.what()).find("did not complete before its deadline") != std::string::npos;
         }
         return false;
     };

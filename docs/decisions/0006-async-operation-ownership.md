@@ -73,7 +73,7 @@ Symbol: `AsyncOperation`
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378, #1783 | MoveAxis re-send body; status poll slot (`status_poll_`); pulse-end slot (`pulse_measurement_`); Park/FindHome tail (`park_home_`) |
 | iOptron iGuider camera | | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | stream worker body, connect to disconnect |
 | Player One camera | | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1605 | pulse-guide off-timer body; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)) |
-| ToupTek camera | | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | partial | #1418 | thermal poll and pulse-guide timer slots; the exposure moves to a `CaptureSession` ([decision 0020](0020-capture-session.md)); Altair rides this driver |
+| ToupTek camera | | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted | #1418 | thermal poll and pulse-guide timer slots; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)); Altair rides this driver |
 | ZWO telescope | | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1918 | telemetry poll slot; GOTO, pulse-queue and disconnect-teardown slots; claim protocol; send gate |
 
 ## Links
