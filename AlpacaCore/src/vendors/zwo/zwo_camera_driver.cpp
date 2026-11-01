@@ -1199,7 +1199,8 @@ private:
 
     std::atomic<bool> connected_;
     // The open this driver holds (open_link_ 0 = none): written by set_connected() under transition_mutex_ only,
-    // read by any thread running a device call. The link is set before connected_ and zeroed after the close.
+    // read by any thread running a device call. Both are set before connected_ and reset (0, -1) by release_open()
+    // before its close.
     std::atomic<int> open_id_{-1};
     std::atomic<std::uint64_t> open_link_{0};
     // True while set_connected(true) runs its SDK handshake with mutex_ released.
@@ -1294,7 +1295,7 @@ private:
     }
 
     // Runs one device call under the open this driver holds. A call for another id than the open's is a stale
-    // snapshot from before a reconnect: refused without touching the new link.
+    // snapshot from before a reconnect (or any id after Disconnect): refused without touching the new link.
     template <typename Fn>
     auto on_link(int camera_id, Fn&& fn) const {
         using Result = decltype(fn());
@@ -1316,8 +1317,9 @@ private:
     // Drops this driver's open, if any. Caller holds transition_mutex_.
     void release_open() {
         const std::uint64_t link = open_link_.exchange(0);
+        const int id = open_id_.exchange(-1);
         if (link != 0) {
-            sdk_.close_camera_link(open_id_.load(), link);
+            sdk_.close_camera_link(id, link);
         }
     }
 
