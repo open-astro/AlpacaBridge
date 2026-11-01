@@ -2390,8 +2390,17 @@ private:
                 ALPACA_LOG_WARN("Celestron", "site write at connect failed; the mount keeps its own site");
             }
         }
+        // Decision 0009 rule 2a: a pulled cable during any exchange so far (each failure is swallowed) released the
+        // port. The Connect fails; the caller's catch closes and clears the session.
+        const auto fail_if_link_released = [&protocol] {
+            if (!protocol.link_alive()) {
+                throw AlpacaException("Failed to connect to Celestron mount: " + protocol.link_fault(),
+                                      AlpacaError::NotConnected);
+            }
+        };
         std::optional<TimeWrite> time_write;
         if (sync_time_on_connect_) {
+            fail_if_link_released();  // set_time() on a released port would throw a plain DriverException
             time_write = prepare_time_write(std::chrono::system_clock::now());
             protocol.set_time(time_write->info);
         }
@@ -2436,12 +2445,7 @@ private:
         } catch (...) {
             ALPACA_LOG_WARN("Celestron", "site read at connect failed; the site stays unread");
         }
-        // Decision 0009 rule 2a: a pulled cable during any exchange above (each failure there is swallowed) released
-        // the port. The Connect fails; the caller's catch closes and clears the session.
-        if (!protocol.link_alive()) {
-            throw AlpacaException("Failed to connect to Celestron mount: " + protocol.link_fault(),
-                                  AlpacaError::NotConnected);
-        }
+        fail_if_link_released();
         std::lock_guard<std::mutex> lock(mutex_);
         snapshot_.publish(token, seed);
         if (!time_write) {

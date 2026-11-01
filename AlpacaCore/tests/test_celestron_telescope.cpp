@@ -1995,12 +1995,13 @@ struct SerialLinkRig {
     alpacacore::test::ReplugPort port{*mount};
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
 
-    explicit SerialLinkRig(std::optional<double> latitude = -33.856784, std::optional<double> longitude = 151.215297) {
+    explicit SerialLinkRig(std::optional<double> latitude = -33.856784, std::optional<double> longitude = 151.215297,
+                           bool sync_time = false) {
         cel::ConnectionInfo info;
         info.type = cel::ConnectionType::Serial;
         info.port_path = port.path.string();
         info.response_timeout_ms = kLinkReadTimeoutMs;
-        driver = cel::create_celestron_telescope_with_site(0, info, latitude, longitude, 42.0, false,
+        driver = cel::create_celestron_telescope_with_site(0, info, latitude, longitude, 42.0, sync_time,
                                                            cel::CelestronAlignmentSetting::Auto, clock);
     }
     ~SerialLinkRig() {
@@ -2176,6 +2177,21 @@ TEST_CASE("Celestron Link - a cable pulled during the connect fails the Connect 
     SerialLinkRig rig;
     auto& driver = *rig.driver;
     rig.mount->unplug_on(on_command('V'));  // the first handshake query; the connect swallows its failure
+    require_alpaca_error([&] { driver.set_connected(true); }, err::NotConnected);
+    CHECK_FALSE(driver.get_connected());
+    CHECK_FALSE(cel::CelestronProtocolWrapper::instance().is_connected());
+    rig.replug();
+    driver.set_connected(true);
+    CHECK(driver.get_connected());
+}
+
+TEST_CASE(
+    "Celestron Link - a cable pulled during the connect with sync_time_on_connect on fails the Connect with "
+    "NotConnected",
+    "[celestron][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig(-33.856784, 151.215297, true);
+    auto& driver = *rig.driver;
+    rig.mount->unplug_on(on_command('V'));  // the first handshake query; the time write would meet the released port
     require_alpaca_error([&] { driver.set_connected(true); }, err::NotConnected);
     CHECK_FALSE(driver.get_connected());
     CHECK_FALSE(cel::CelestronProtocolWrapper::instance().is_connected());
