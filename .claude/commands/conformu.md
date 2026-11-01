@@ -172,40 +172,40 @@ Require a `System time` offset in the low-millisecond range and a non-zero `Upda
 
 ### 2g. ConformU is installed ON THE SBC and is the CURRENT release
 
-ConformU lives at `/home/astro/conformu/conformu` on the SBC. Validation logs advertise the ConformU version they were produced with, so always test with the latest release, **except that the linux-arm64 4.5.0 release is unusable for timing** (see the arm64 exception below). Get the installed and newest upstream versions:
+ConformU lives at `/home/astro/conformu/conformu` on the SBC. Validation logs advertise the ConformU version they were produced with, so always test with the current standard (4.6.0-rc.1, a GitHub pre-release; a final release newer than it is the next candidate), **except that the linux-arm64 4.5.0 release is unusable for timing** (see the arm64 exception below). Get the installed and newest upstream versions:
 
 ```bash
 ssh astro@<host> '~/conformu/conformu --version 2>/dev/null | tail -1 || echo MISSING'
-gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name
+gh api "repos/ASCOMInitiative/ConformU/releases?per_page=100" --jq '.[] | select(.draft|not) | .tag_name'
 ```
 
-(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0 or 4.5.1, which step 2g replaces regardless of whether the upstream lookup succeeded.)
+(If `gh` is unavailable, `curl -sS "https://api.github.com/repos/ASCOMInitiative/ConformU/releases?per_page=100" | jq -r ".[] | select(.draft|not) | .tag_name"`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0 or 4.5.1, which step 2g replaces regardless of whether the upstream lookup succeeded.)
 
-Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix, then `printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1` — installed is current only if it equals that maximum.
+`releases/latest` skips pre-releases, so the command above lists every release; the newest is the highest version in the list, where a final release outranks its own pre-release (`4.6.0` is newer than `4.6.0-rc.1`; `4.5.3` is not). Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix and any `-rc.N` suffix, compare those, and on a tie the one without the suffix is newer. Installed is current only if no listed release is newer.
 
 **Read this before running any install command.** On arm64 -- which is every rig this project
 supports (AGENTS.md "Target Architecture"; the version rule is "ConformU version" in `.github/instructions/testing.instructions.md`) -- an installed **4.5.0 or 4.5.1 counts as outdated no matter what
 `releases/latest` says**. The 4.5.0 arm64 asset was published without `PublishReadyToRun`, so the *first*
 member returning each distinct response type is charged ~0.13-0.22 s "OUTSIDE FAST RESPONSE TIME TARGET"
-([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); the standard is **4.5.3**, which carries that fix and
+([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); the standard is **4.6.0-rc.1** (build 56430, a GitHub pre-release), which carries that fix and
 keeps the Telescope PulseGuide test declinations within +-65 degrees
-([ConformU#35](https://github.com/ASCOMInitiative/ConformU/issues/35)).
+([ConformU#35](https://github.com/ASCOMInitiative/ConformU/issues/35)), as 4.5.3 did.
 
-If the installed version is MISSING, outdated, or **4.5.0 or 4.5.1**, install the pinned 4.5.3 release asset
+If the installed version is MISSING, outdated, or **4.5.0 or 4.5.1**, install the pinned 4.6.0-rc.1 release asset
 (no confirmation needed -- this is part of the standard rig setup). The install stops before unpacking if the
 checksum does not match:
 
 ```bash
-ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSfL -o cu.tar.gz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.5.3/conformu.4.5.3.linux-arm64.tar.gz' && echo '8c01fce9447f78e7f076c2279d6f38c7b8f78ef8d3c9f92e78566a61fb778bbc  cu.tar.gz' | sha256sum -c - && tar xzf cu.tar.gz && rm cu.tar.gz && chmod +x conformu && ./conformu --version | tail -1"
+ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSfL -o cu.tar.gz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.6.0-rc.1/conformu.4.6.0.linux-arm64.tar.gz' && echo '98ae1853e61832e4ed33270c70bbbe442dc7d698756214b4bb294803639482ba  cu.tar.gz' | sha256sum -c - && tar xzf cu.tar.gz && rm cu.tar.gz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
-The printed version line must read `Conform Universal 4.5.3 (Build 56334.33d9e18)`. A saved report's log header
-(`ASCOM Universal Device Conformance Checker Version ...`) must carry `4.5.3.56334, Build time:` (4.5.3, build 56334). Reports made with
-4.5.2 (build 56139), 4.5.2-rc.1 (build 56111) and 4.5.1 (build 54507) stay valid. A newer ConformU release is adopted after a
+The printed version line must name 4.6.0 and build 56430 (it was not run when this was pinned, so the commit suffix is unrecorded). A saved report's log header
+(`ASCOM Universal Device Conformance Checker Version ...`) must carry `4.6.0.56430, Build time:` (4.6.0-rc.1, build 56430). Reports made with
+4.5.3 (build 56334), 4.5.2 (build 56139), 4.5.2-rc.1 (build 56111) and 4.5.1 (build 54507) stay valid. A newer ConformU release is adopted after a
 check on one camera and one telescope run: then update the URL, sha256 and build line above, the
 `conformu` watch in `scripts/dependency_sdk_versions.json` and the version `.github/instructions/testing.instructions.md` names ("ConformU version").
 A release that only adds a fix on the same ReadyToRun (`PublishReadyToRun`) publish build as the current standard (4.5.3 over 4.5.2) may be pinned provisionally before that check; record the
-camera and telescope run in `SUPPORTED-DRIVERS.md` afterwards.
+camera and telescope run in `SUPPORTED-DRIVERS.md` afterwards. 4.6.0-rc.1 was pinned provisionally on a board instruction, before the one-camera plus one-telescope rig check; those runs are recorded in `SUPPORTED-DRIVERS.md` afterwards.
 
 (If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/`
 directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a
