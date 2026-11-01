@@ -240,7 +240,8 @@ std::string read_one_response(int fd, std::string& carry) {
     return response;
 }
 
-std::string read_response_headers(int fd) {
+// Report body bytes received with the headers so callers can count the full body.
+std::string read_response_headers(int fd, std::size_t* body_bytes = nullptr) {
     std::string response;
     char buffer[1024];
     while (response.find("\r\n\r\n") == std::string::npos) {
@@ -250,7 +251,11 @@ std::string read_response_headers(int fd) {
         }
         response.append(buffer, static_cast<std::size_t>(received));
     }
-    return response.substr(0, response.find("\r\n\r\n") + 4);
+    const auto header_size = response.find("\r\n\r\n") + 4;
+    if (body_bytes) {
+        *body_bytes = response.size() - header_size;
+    }
+    return response.substr(0, header_size);
 }
 
 // open-astro#547: minimal telescope stub for the end-to-end watchdog-timer
@@ -646,13 +651,13 @@ int main() {
             EXPECT(fd >= 0);
             set_receive_timeout(fd);
             send_all(fd, image_request);
-            EXPECT(read_response_headers(fd).find("Content-Length: ") != std::string::npos);
+            std::size_t drained = 0;
+            EXPECT(read_response_headers(fd, &drained).find("Content-Length: ") != std::string::npos);
             std::this_thread::sleep_for(std::chrono::milliseconds(800));
 
             timeval drain_timeout{};
             drain_timeout.tv_sec = 2;
             EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &drain_timeout, sizeof(drain_timeout)) == 0);
-            std::size_t drained = 0;
             ssize_t last = 0;
             std::vector<char> sink(65536);
             const auto drain_start = std::chrono::steady_clock::now();
@@ -696,13 +701,13 @@ int main() {
             EXPECT(fd >= 0);
             set_receive_timeout(fd);
             send_all(fd, image_request);
-            EXPECT(read_response_headers(fd).find("Content-Length: ") != std::string::npos);
+            std::size_t drained = 0;
+            EXPECT(read_response_headers(fd, &drained).find("Content-Length: ") != std::string::npos);
             std::this_thread::sleep_for(std::chrono::milliseconds(800));
 
             timeval drain_timeout{};
             drain_timeout.tv_sec = 2;
             EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &drain_timeout, sizeof(drain_timeout)) == 0);
-            std::size_t drained = 0;
             ssize_t last = 0;
             std::vector<char> sink(65536);
             const auto drain_start = std::chrono::steady_clock::now();
@@ -736,9 +741,9 @@ int main() {
             EXPECT(fd >= 0);
             set_receive_timeout(fd);
             send_all(fd, image_request);
-            EXPECT(read_response_headers(fd).find("Content-Length: ") != std::string::npos);
-
             std::size_t drained = 0;
+            EXPECT(read_response_headers(fd, &drained).find("Content-Length: ") != std::string::npos);
+
             ssize_t last = 1;
             std::vector<char> chunk(4096);
             const auto read_start = std::chrono::steady_clock::now();
@@ -778,10 +783,10 @@ int main() {
             EXPECT(fd >= 0);
             set_receive_timeout(fd);
             send_all(fd, image_request);
-            const std::string headers = read_response_headers(fd);
+            std::size_t drained = 0;
+            const std::string headers = read_response_headers(fd, &drained);
             EXPECT(headers.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
 
-            std::size_t drained = 0;
             ssize_t last = 1;
             std::vector<char> chunk(fast_reader ? 65536 : 4096);
             const auto read_start = std::chrono::steady_clock::now();
@@ -794,9 +799,7 @@ int main() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
             if (fast_reader) {
-                // read_response_headers() drops body bytes that arrived with the
-                // headers (under 1 KiB), so the count is short by at most that.
-                EXPECT(payload_size - drained < 1024);
+                EXPECT(drained == payload_size);
             } else {
                 EXPECT(last == 0);  // EOF from the server at the extended deadline
                 EXPECT(drained < payload_size);
