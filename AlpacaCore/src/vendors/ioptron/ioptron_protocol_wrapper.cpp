@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -944,6 +945,7 @@ public:
         
         if (success) {
             connected_ = true;
+            link_lost_.store(false);
             std::string conn_type = (info.type == ConnectionType::Serial ? "Serial" : "Network");
             ALPACA_LOG_INFO("iOptron", "Connected to mount via " + conn_type);
         } else {
@@ -965,6 +967,21 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+        set_fault("");
+    }
+
+    bool link_alive() const noexcept { return !link_lost_.load(); }
+
+    std::string link_fault() const {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        return fault_;
+    }
+
+    void lose_link(const std::string& reason) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_) {
+            latch_link_lost_locked(reason);
+        }
     }
 
     // Tear down the connection. Caller MUST already hold mutex_ (so connect()
@@ -1024,6 +1041,7 @@ public:
 
         // Send command
         if (!write_data(full_command)) {
+            fail_link_if_gone_locked(errno);
             throw AlpacaException("Failed to send command to mount");
         }
         
@@ -1060,6 +1078,7 @@ public:
         ALPACA_LOG_TRACE("iOptron", "CMD " + full_command + " (blind)");
 
         if (!write_data(full_command)) {
+            fail_link_if_gone_locked(errno);
             throw AlpacaException("Failed to send command to mount");
         }
 
@@ -1082,8 +1101,8 @@ public:
     // Wait up to wait_ms for acknowledgment bytes and discard them; once any
     // byte has arrived, read on past wait_ms until the line goes idle
     // (util::read_until in idle-gap mode), so acks that straddle wait_ms are
-    // all drained. Never throws and never reports a lost link: a silent
-    // mount, or one that hung up, is the expected "no ack" for a blind command.
+    // all drained. A silent mount is the expected "no ack" for a blind command;
+    // a hangup is not silence: it loses the link like any other read.
     void drain_serial_stale(int wait_ms) {
 #ifndef _WIN32
         util::ReadSpec spec;
@@ -1093,9 +1112,12 @@ public:
         spec.skip.clear();  // every byte is an ack byte, CR/LF included
         spec.max_len = kMaxReplyLen;
         // The deadline only caps a line that never goes idle: max_len bytes, each within one idle gap.
-        (void)util::read_until(link_.fd(), spec,
-                               std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms) +
-                                   spec.idle_gap * static_cast<int>(spec.max_len));
+        const auto r = util::read_until(link_.fd(), spec,
+                                        std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms) +
+                                            spec.idle_gap * static_cast<int>(spec.max_len));
+        if (r.outcome == util::ReadOutcome::LinkDead) {
+            throw_link_lost(r.err);
+        }
 #else
         (void)wait_ms;
 #endif
@@ -1491,10 +1513,57 @@ private:
 #endif
     }
 
-    [[noreturn]] void throw_link_lost(int err) const {
-        throw AlpacaException(std::string("iOptron mount ") +
-                              (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
-                              " link lost (hangup): " + util::errno_string(err));
+    // A hangup on a read. Over serial the port is gone (decision 0009 rule 2a): the link is lost at once. Over TCP it
+    // stays a DriverException, and the driver's fault latch and staleness bound decide.
+    [[noreturn]] void throw_link_lost(int err) {
+        const std::string reason = std::string("iOptron mount ") +
+                                   (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
+                                   " link lost (hangup): " + util::errno_string(err);
+        if (connection_type_ == ConnectionType::Serial) {
+            fail_link_locked(reason);
+        }
+        throw AlpacaException(reason);
+    }
+
+    // A failed serial write with EIO/ENXIO/ENODEV (`err`, the write's errno) is the port gone: the link is lost at
+    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout; a TCP send fails with
+    // a socket errno instead, so the network link keeps its fault latch.
+    void fail_link_if_gone_locked(int err) {
+#ifndef _WIN32
+        if (connection_type_ == ConnectionType::Serial && (err == EIO || err == ENXIO || err == ENODEV)) {
+            fail_link_locked("iOptron mount serial link lost (write): " + util::errno_string(err));
+        }
+#else
+        (void)err;
+#endif
+    }
+
+    // Decision 0009 rule 2a: release the port so a replugged mount can be reopened, latch link_lost_ for the driver
+    // (its Connected getter, its checks and its connect) and fail with NotConnected. Caller holds mutex_ inside an
+    // exchange, so the link is connected. Takes only fault_mutex_ (a leaf), never a driver lock.
+    [[noreturn]] void fail_link_locked(const std::string& reason) {
+        latch_link_lost_locked(reason);
+        throw AlpacaException(reason, AlpacaError::NotConnected);
+    }
+
+    // Caller holds mutex_ and the link is connected.
+    void latch_link_lost_locked(const std::string& reason) {
+        ALPACA_LOG_ERROR("iOptron", "Mount link lost on " + location_locked() + ": " + reason +
+                                        " (port released; reconnect to resume)");
+        set_fault(reason);
+        link_lost_.store(true);
+        disconnect_locked();
+    }
+
+    std::string location_locked() const {
+        return connection_type_ == ConnectionType::Serial
+                   ? connection_info_.port_path
+                   : connection_info_.host + ":" + std::to_string(connection_info_.tcp_port);
+    }
+
+    void set_fault(const std::string& text) {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        fault_ = text;
     }
 
     // The read slice of the byte-at-a-time loop: 100 ms over serial, the
@@ -1611,6 +1680,12 @@ public:
 private:
     mutable std::mutex mutex_;
     bool connected_;
+    std::atomic<bool> link_lost_{false};  // set by latch_link_lost_locked(), cleared by the next connect()
+    // The loss reason for the driver's get_link_fault() (decision 0009 rule 5), cleared by disconnect(), which
+    // the driver runs before it reconnects over a lost link. Its own leaf mutex, never held across an exchange, so a
+    // getter never waits on the wire.
+    mutable std::mutex fault_mutex_;
+    std::string fault_;
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
     
@@ -1651,6 +1726,12 @@ std::string iOptronProtocolWrapper::last_connect_error() const { return pimpl_->
 bool iOptronProtocolWrapper::is_connected() const {
     return pimpl_->is_connected();
 }
+
+bool iOptronProtocolWrapper::link_alive() const noexcept { return pimpl_->link_alive(); }
+
+std::string iOptronProtocolWrapper::link_fault() const { return pimpl_->link_fault(); }
+
+void iOptronProtocolWrapper::lose_link(const std::string& reason) { pimpl_->lose_link(reason); }
 
 std::string iOptronProtocolWrapper::send_command(const std::string& command,
                                                  bool require_hash_terminator,
