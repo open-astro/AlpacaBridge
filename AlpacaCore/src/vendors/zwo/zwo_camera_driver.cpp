@@ -26,10 +26,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -100,7 +102,8 @@ public:
           pending_exposure_start_(),
           acquisition_valid_(false),
           pulse_guiding_(std::make_shared<std::atomic<bool>>(false)),
-          pulse_guiding_end_(util::TaskClock::clock::time_point{}) {
+          pulse_guiding_end_(util::TaskClock::clock::time_point{}),
+          dev_(*this) {
         preload_camera_info_locked();
     }
 
@@ -191,8 +194,6 @@ public:
             return;
         }
 
-        auto& sdk = sdk_;
-
         if (connected) {
             // Decision 0016 rule 4: the handshake runs under transition_mutex_ with mutex_
             // released, so Name and the other identity getters answer while the SDK opens.
@@ -208,46 +209,43 @@ public:
             } clear_in_flight{connect_in_flight_};
 
             const int resolved_id = resolve_camera_id();
-            sdk.open_camera(resolved_id);
-            // Guard the ENTIRE remaining init: the ZWO open is ref-counted, so
-            // an unclosed open on a throw is a permanent leak (the next connect
-            // bumps the count and Close never balances) — driver-lifecycle.instructions.md connect
-            // rule, same shape as the EAF/EFW/CAA siblings.
+            const auto opened = sdk_.open_camera_link(resolved_id);
+            open_id_.store(resolved_id);
+            open_link_.store(opened.link);
+            // Guard the ENTIRE remaining init: an open left unreleased on a throw is held for ever
+            // (driver-lifecycle.instructions.md connect rule, same shape as the EAF/EFW/CAA siblings).
+            std::unordered_map<ZWOControlType, ZWOControlCaps> caps;
+            ZWOImageType image_type{};
+            int max_width = 0;
+            int max_height = 0;
+            int roi_width = 0;
+            int roi_height = 0;
             try {
-                sdk.init_camera(resolved_id);
+                sdk_.with_link(resolved_id, opened.link, [&] {
+                    ZWOCameraInfo fresh;
+                    if (sdk_.get_camera_info_by_id(resolved_id, fresh)) {
+                        info = std::move(fresh);
+                        info_valid = true;
+                    }
+                    for (const auto& cap : dev_.get_control_caps(resolved_id)) {
+                        caps[cap.type] = cap;
+                    }
+                    apply_usb_bandwidth(resolved_id, caps, info.name);
+                    image_type = select_default_image_type(info, info_valid);
 
-                ZWOCameraInfo fresh;
-                if (sdk.get_camera_info_by_id(resolved_id, fresh)) {
-                    info = std::move(fresh);
-                    info_valid = true;
-                }
-                std::unordered_map<ZWOControlType, ZWOControlCaps> caps;
-                for (const auto& cap : sdk.get_control_caps(resolved_id)) {
-                    caps[cap.type] = cap;
-                }
-                apply_usb_bandwidth(resolved_id, caps, info.name);
-                const ZWOImageType image_type = select_default_image_type(info, info_valid);
+                    max_width = info_valid ? info.max_width : 0;
+                    max_height = info_valid ? info.max_height : 0;
+                    roi_width = max_width - (max_width % 8);
+                    roi_height = max_height - (max_height % 2);
 
-                const int max_width = info_valid ? info.max_width : 0;
-                const int max_height = info_valid ? info.max_height : 0;
-                const int roi_width = max_width - (max_width % 8);
-                const int roi_height = max_height - (max_height % 2);
-
-                if (roi_width > 0 && roi_height > 0) {
-                    sdk.set_roi_format(resolved_id, roi_width, roi_height, 1, image_type);
-                    sdk.set_start_pos(resolved_id, 0, 0);
-                }
-
-                // Some cameras have no serial number and ASIGetSerialNumber
-                // returns an error — non-fatal, connect with an empty serial
-                // (same policy as the EAF/EFW/CAA siblings).
-                std::string serial;
-                try {
-                    serial = sdk.get_serial_number(resolved_id);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "Camera serial number unavailable: " + std::string(e.what()));
-                }
-
+                    if (roi_width > 0 && roi_height > 0) {
+                        dev_.set_roi_format(resolved_id, roi_width, roi_height, 1, image_type);
+                        dev_.set_start_pos(resolved_id, 0, 0);
+                    }
+                });
+                // Published after with_link returns, so mutex_ is never taken under the SDK lock.
+                // The serial was read at the open. Some cameras have none: non-fatal, connect with an
+                // empty serial (same policy as the EAF/EFW/CAA siblings).
                 lock.lock();
                 camera_id_ = resolved_id;
                 camera_info_ = info;
@@ -264,14 +262,20 @@ public:
                 roi_height_effective_ = roi_height;
                 roi_crop_x_ = 0;
                 roi_crop_y_ = 0;
-                serial_number_ = std::move(serial);
+                serial_number_ = opened.serial;
             } catch (...) {
+                if (lock.owns_lock()) {
+                    lock.unlock();
+                }
                 try {
-                    sdk.close_camera(resolved_id);
+                    release_open();
                 } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "close_camera after failed connect: " + std::string(e.what()));
+                    ALPACA_LOG_WARN("ZWO", "close of the camera after failed connect: " + std::string(e.what()));
                 }
                 throw;
+            }
+            if (opened.serial.empty()) {
+                ALPACA_LOG_WARN("ZWO", "Camera serial number unavailable");
             }
             reset_exposure_state_locked();
             first_temperature_read_pending_.store(true);
@@ -295,7 +299,7 @@ public:
         lock.unlock();
         if (close_id.has_value()) {
             try {
-                sdk.stop_exposure(close_id.value());
+                dev_.stop_exposure(close_id.value());
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "stop_exposure during disconnect failed: " + std::string(e.what()));
             }
@@ -308,7 +312,7 @@ public:
             // after the reset above; clear it again so the next connection's first start waits
             // for nothing.
             last_download_ns_.store(kNoDownload);
-            sdk.close_camera(close_id.value());
+            release_open();
         }
     }
 
@@ -626,7 +630,7 @@ public:
             image_lock.lock();
         }
         try {
-            sdk_.get_data_after_exposure(active_camera_id, buffer.data(), static_cast<long>(buffer.size()));
+            dev_.get_data_after_exposure(active_camera_id, buffer.data(), static_cast<long>(buffer.size()));
         } catch (const std::exception& e) {
             image_lock.unlock();
             std::lock_guard<std::mutex> lock(mutex_);
@@ -948,7 +952,7 @@ public:
         }
 
         const int pulse_camera_id = with_camera([&](int id) {
-            sdk_.pulse_guide_on(id, guide_direction);
+            dev_.pulse_guide_on(id, guide_direction);
             return id;
         });
         // End timestamp BEFORE the flag: a reader that observes the flag as
@@ -969,11 +973,12 @@ public:
         // the sleep costs at most a rejected pulse_guide_off on a closed id.
         // IsPulseGuiding self-clears from pulse_guiding_end_ in the getter,
         // so the thread does not need to touch the flag either.
-        std::thread([sdk = &sdk_, clock = &clock_, pulse_camera_id, guide_direction, duration,
-                     flag = pulse_guiding_]() {
+        std::thread([sdk = &sdk_, clock = &clock_, pulse_camera_id, pulse_link = open_link_.load(), guide_direction,
+                     duration, flag = pulse_guiding_]() {
             clock->sleep_for(std::chrono::milliseconds(duration));
             try {
-                sdk->pulse_guide_off(pulse_camera_id, guide_direction);
+                sdk->with_link(pulse_camera_id, pulse_link,
+                               [&] { sdk->pulse_guide_off(pulse_camera_id, guide_direction); });
             } catch (const std::exception&) {
             }
             // Unconditional clear for fire-and-forget clients that never
@@ -1035,18 +1040,18 @@ public:
         // register write and the trigger; a racing disconnect costs an SDK
         // error surfaced to the caller, which is the correct outcome for a
         // StartExposure that lost to a disconnect (round 10).
-        auto& sdk = sdk_;
         std::chrono::system_clock::time_point started_at;
         util::TaskClock::clock::time_point started_monotonic;
         try {
-            if (prior_exposure_needs_check && sdk.get_exposure_status(active_camera_id) == ZWOExposureStatus::Working) {
+            if (prior_exposure_needs_check &&
+                dev_.get_exposure_status(active_camera_id) == ZWOExposureStatus::Working) {
                 throw AlpacaException("A camera exposure is already in progress", AlpacaError::InvalidOperation);
             }
-            sdk.set_control_value(active_camera_id, ZWOControlType::Exposure, exposure_us, false);
+            dev_.set_control_value(active_camera_id, ZWOControlType::Exposure, exposure_us, false);
             // The SDK has no sensor timestamp; stamp its trigger, not setup or return latency.
             started_at = std::chrono::system_clock::now();
             started_monotonic = clock_.now();
-            sdk.start_exposure(active_camera_id, !light);
+            dev_.start_exposure(active_camera_id, !light);
         } catch (...) {
             image_lock.unlock();
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1161,7 +1166,7 @@ private:
         // mutex_-guarded state read (PR #119 round 6). A racing disconnect
         // costs at most an SDK error on a closed id — the abort intent has
         // already been recorded above either way.
-        sdk_.stop_exposure(stop_id);
+        dev_.stop_exposure(stop_id);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (exposure_seq_ == stop_seq) image_failure_.clear();
@@ -1193,6 +1198,10 @@ private:
     std::unordered_map<ZWOControlType, ZWOControlCaps> control_caps_;
 
     std::atomic<bool> connected_;
+    // The open this driver holds (open_link_ 0 = none): written by set_connected() under transition_mutex_ only,
+    // read by any thread running a device call. The link is set before connected_ and zeroed after the close.
+    std::atomic<int> open_id_{-1};
+    std::atomic<std::uint64_t> open_link_{0};
     // True while set_connected(true) runs its SDK handshake with mutex_ released.
     std::atomic<bool> connect_in_flight_{false};
     // True from connect until the first CCDTemperature read of the connection (#722).
@@ -1284,6 +1293,81 @@ private:
         }
     }
 
+    // Runs one device call under the open this driver holds. A call for another id than the open's is a stale
+    // snapshot from before a reconnect: refused without touching the new link.
+    template <typename Fn>
+    auto on_link(int camera_id, Fn&& fn) const {
+        using Result = decltype(fn());
+        if (camera_id != open_id_.load()) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        }
+        if constexpr (std::is_void_v<Result>) {
+            sdk_.with_link(camera_id, open_link_.load(), [&] { fn(); });
+        } else {
+            std::optional<Result> result;
+            sdk_.with_link(camera_id, open_link_.load(), [&] { result.emplace(fn()); });
+            if (!result) {
+                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+            }
+            return std::move(*result);
+        }
+    }
+
+    // Drops this driver's open, if any. Caller holds transition_mutex_.
+    void release_open() {
+        const std::uint64_t link = open_link_.exchange(0);
+        if (link != 0) {
+            sdk_.close_camera_link(open_id_.load(), link);
+        }
+    }
+
+    // The per-device SDK calls, each under this driver's open (on_link). Same names as ZWOSDK, so a call site reads
+    // as before. Never used for enumeration or info lookups, which need no link.
+    class OpenCalls {
+    public:
+        explicit OpenCalls(ZWOCameraDriver& driver) : driver_(driver) {}
+        std::vector<ZWOControlCaps> get_control_caps(int id) {
+            return driver_.on_link(id, [&] { return driver_.sdk_.get_control_caps(id); });
+        }
+        bool get_control_value(int id, ZWOControlType type, long& value, bool& is_auto) {
+            return driver_.on_link(id, [&] { return driver_.sdk_.get_control_value(id, type, value, is_auto); });
+        }
+        void set_control_value(int id, ZWOControlType type, long value, bool is_auto) {
+            driver_.on_link(id, [&] { driver_.sdk_.set_control_value(id, type, value, is_auto); });
+        }
+        ZWOROIFormat get_roi_format(int id) {
+            return driver_.on_link(id, [&] { return driver_.sdk_.get_roi_format(id); });
+        }
+        void set_roi_format(int id, int width, int height, int bin, ZWOImageType type) {
+            driver_.on_link(id, [&] { driver_.sdk_.set_roi_format(id, width, height, bin, type); });
+        }
+        ZWOStartPos get_start_pos(int id) {
+            return driver_.on_link(id, [&] { return driver_.sdk_.get_start_pos(id); });
+        }
+        void set_start_pos(int id, int start_x, int start_y) {
+            driver_.on_link(id, [&] { driver_.sdk_.set_start_pos(id, start_x, start_y); });
+        }
+        void start_exposure(int id, bool is_dark) {
+            driver_.on_link(id, [&] { driver_.sdk_.start_exposure(id, is_dark); });
+        }
+        void stop_exposure(int id) {
+            driver_.on_link(id, [&] { driver_.sdk_.stop_exposure(id); });
+        }
+        ZWOExposureStatus get_exposure_status(int id) {
+            return driver_.on_link(id, [&] { return driver_.sdk_.get_exposure_status(id); });
+        }
+        void get_data_after_exposure(int id, std::uint8_t* buffer, long buffer_size) {
+            driver_.on_link(id, [&] { driver_.sdk_.get_data_after_exposure(id, buffer, buffer_size); });
+        }
+        void pulse_guide_on(int id, ZWOGuideDirection direction) {
+            driver_.on_link(id, [&] { driver_.sdk_.pulse_guide_on(id, direction); });
+        }
+
+    private:
+        ZWOCameraDriver& driver_;
+    };
+    mutable OpenCalls dev_;
+
     void ensure_frame_geometry_mutable_locked() const {
         if (acquisition_valid_ && exposure_frame_.has_value() && !image_cached_ && image_failure_.empty()) {
             throw AlpacaException("Cannot change camera ROI before retrieving the current exposure image",
@@ -1315,8 +1399,8 @@ private:
     }
 
     void validate_frame_format_locked(int camera_id, const ExposureFrame& frame) const {
-        const ZWOROIFormat actual = sdk_.get_roi_format(camera_id);
-        const ZWOStartPos actual_start = sdk_.get_start_pos(camera_id);
+        const ZWOROIFormat actual = dev_.get_roi_format(camera_id);
+        const ZWOStartPos actual_start = dev_.get_start_pos(camera_id);
         if (actual.width <= 0 || actual.height <= 0 || actual.bin <= 0 || actual.image_type == ZWOImageType::Unknown ||
             actual.width != frame.effective_width || actual.height != frame.effective_height ||
             actual.bin != frame.bin || actual.image_type != frame.image_type || actual_start.start_x != frame.start_x ||
@@ -1382,7 +1466,7 @@ private:
         }
         ZWOExposureStatus status = ZWOExposureStatus::Idle;
         try {
-            status = sdk_.get_exposure_status(id);
+            status = dev_.get_exposure_status(id);
         } catch (const std::exception& e) {
             // A disconnect can close the camera between the id snapshot and
             // this read. Ignore that stale error, but latch a failure if this
@@ -1448,7 +1532,7 @@ private:
         // leaving the failed state before a new start, skipping it would
         // make every retry fail instantly and burn the whole budget.
         try {
-            sdk_.stop_exposure(id);
+            dev_.stop_exposure(id);
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG("ZWO", "best-effort stop before retry failed: " + std::string(e.what()));
         }
@@ -1463,12 +1547,12 @@ private:
         std::chrono::system_clock::time_point started_at;
         util::TaskClock::clock::time_point started_monotonic;
         try {
-            sdk_.set_control_value(id, ZWOControlType::Exposure, reg_us, false);
+            dev_.set_control_value(id, ZWOControlType::Exposure, reg_us, false);
             ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
                                        std::to_string(retries_left) + " retries left");
             started_at = std::chrono::system_clock::now();
             started_monotonic = clock_.now();
-            sdk_.start_exposure(id, is_dark);
+            dev_.start_exposure(id, is_dark);
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("ZWO", "exposure retry re-trigger failed: " + std::string(e.what()));
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1492,7 +1576,7 @@ private:
         // sequence moved) — undo it rather than leave an unwanted exposure
         // running.
         try {
-            sdk_.stop_exposure(id);
+            dev_.stop_exposure(id);
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG("ZWO", "stop after cancelled retry failed: " + std::string(e.what()));
         }
@@ -1587,7 +1671,7 @@ private:
         applied_y = std::max(0, applied_y);
         roi_crop_x_ = start_x_ - applied_x;
         roi_crop_y_ = start_y_ - applied_y;
-        sdk_.set_start_pos(active_camera_id, applied_x, applied_y);
+        dev_.set_start_pos(active_camera_id, applied_x, applied_y);
     }
 
     // Touches no driver state, so it runs with mutex_ released.
@@ -1613,16 +1697,23 @@ private:
         return camera.camera_id;
     }
 
+    // The SDK read runs with mutex_ released: under LockedZWOSDK the decorator lock is taken before mutex_ on the
+    // connect path, so holding mutex_ across the read would invert the order.
     void preload_camera_info_locked() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_) {
-            return;
+        std::optional<int> camera_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (camera_info_valid_) {
+                return;
+            }
+            camera_id = camera_id_;
         }
 
         try {
-            if (camera_id_.has_value()) {
+            if (camera_id.has_value()) {
                 ZWOCameraInfo info;
-                if (sdk_.get_camera_info_by_id(camera_id_.value(), info)) {
+                if (sdk_.get_camera_info_by_id(camera_id.value(), info)) {
+                    std::lock_guard<std::mutex> lock(mutex_);
                     camera_info_ = info;
                     camera_info_valid_ = true;
                 }
@@ -1694,10 +1785,10 @@ private:
         const long applied =
             requested ? static_cast<long>(*requested) : std::clamp(default_bandwidth, caps.min_value, caps.max_value);
         try {
-            sdk_.set_control_value(camera_id, ZWOControlType::BandwidthOverload, applied, false);
+            dev_.set_control_value(camera_id, ZWOControlType::BandwidthOverload, applied, false);
             long actual = 0;
             bool is_auto = false;
-            if (!sdk_.get_control_value(camera_id, ZWOControlType::BandwidthOverload, actual, is_auto)) {
+            if (!dev_.get_control_value(camera_id, ZWOControlType::BandwidthOverload, actual, is_auto)) {
                 throw AlpacaException("camera did not return the USB Limit readback", AlpacaError::DriverException);
             }
             if (actual != applied || is_auto) {
@@ -1772,7 +1863,7 @@ private:
         }
         bool is_auto = false;
         long value = 0;
-        if (!sdk_.get_control_value(camera_id_.value(), type, value, is_auto)) {
+        if (!dev_.get_control_value(camera_id_.value(), type, value, is_auto)) {
             throw AlpacaException("Failed to get control value", AlpacaError::DriverException);
         }
         return value;
@@ -1790,7 +1881,7 @@ private:
         if (!camera_id_.has_value()) {
             throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
-        sdk_.set_control_value(camera_id_.value(), type, value, false);
+        dev_.set_control_value(camera_id_.value(), type, value, false);
     }
 
     // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
@@ -1830,8 +1921,8 @@ private:
         if (!adjust_roi_size_locked(max_width, max_height, width, height)) {
             throw AlpacaException("ROI size invalid for binning", AlpacaError::InvalidValue);
         }
-        sdk_.set_roi_format(active_camera_id, width, height, bin_x_, image_type_);
-        sdk_.set_start_pos(active_camera_id, 0, 0);
+        dev_.set_roi_format(active_camera_id, width, height, bin_x_, image_type_);
+        dev_.set_start_pos(active_camera_id, 0, 0);
         num_x_ = max_width;
         num_y_ = max_height;
         roi_width_effective_ = width;
@@ -1869,7 +1960,7 @@ private:
         if (valid && is_roi_valid_locked(width, height, start_x_, start_y_)) {
             roi_width_effective_ = adjusted_width;
             roi_height_effective_ = adjusted_height;
-            sdk_.set_roi_format(active_camera_id, adjusted_width, adjusted_height, bin_x_, image_type_);
+            dev_.set_roi_format(active_camera_id, adjusted_width, adjusted_height, bin_x_, image_type_);
             // The padded size may change how far the applied start must be
             // shifted to keep the SDK window on-sensor — re-apply it so the
             // crop offset stays consistent with the new effective size.

@@ -41,8 +41,14 @@ namespace alpacacore::vendor::zwo {
  * entry (the old handle is closed best effort at once, decision 0009 rule 3) and opens afresh;
  * any other read failure fails that open and keeps the entry. A per-device call runs only under
  * the caller's link for that id (with_link() on the calling thread): no link is a
- * DriverException, a retired link is NotConnected, both refused before the SDK is touched, and
+ * DriverException, a retired link (or link 0) is NotConnected, both refused before the SDK is touched, and
  * a loss code from the call retires the entry.
+ *
+ * call_unserialised() is the one per-device call that must not hold the mutex (a blocking bulk
+ * download): it checks the link in one hold, runs with no lock, and counts as in flight. A loss
+ * retires the entry at once for every later caller, but the dead handle is closed only when the
+ * last in-flight call returns, so a close never lands under a running transfer; a reopen of that
+ * id meanwhile is refused (InvalidOperation) until the close happened.
  *
  * Residual: a held unit with no serial cannot be proven after a replug. open() shares it;
  * open_candidate() skips it.
@@ -82,10 +88,14 @@ public:
     void close(int id, std::uint64_t link) {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = entries_.find(id);
-        if (it == entries_.end() || it->second.link != link) {
+        if (it == entries_.end() || link == 0 || it->second.link != link) {
             return;
         }
         if (--it->second.open_count > 0) {
+            return;
+        }
+        if (it->second.inflight > 0) {  // a transfer is running: the last one out closes
+            retire(id);
             return;
         }
         entries_.erase(it);
@@ -96,20 +106,38 @@ public:
     template <class Fn>
     decltype(auto) call(int id, Fn&& fn) {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto expected = expected_link(id);
-        if (!expected.has_value()) {
-            throw AlpacaException("no link for id " + std::to_string(id) + " on this thread",
-                                  AlpacaError::DriverException);
-        }
-        const auto it = entries_.find(id);
-        if (it == entries_.end() || it->second.link != *expected) {
-            throw AlpacaException("stale link for id " + std::to_string(id), AlpacaError::NotConnected);
-        }
+        checked_entry(id);
         try {
             return std::forward<Fn>(fn)();
         } catch (const std::exception& e) {
             if (util::is_link_loss(e)) {
                 retire(id);
+            }
+            throw;
+        }
+    }
+
+    /// As call(), but @p fn runs with no lock held, so a blocking transfer stalls no other SDK call. The caller's
+    /// link is checked before @p fn starts; a loss code from @p fn retires the entry if it is still that link.
+    template <class Fn>
+    decltype(auto) call_unserialised(int id, Fn&& fn) {
+        std::uint64_t link = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = checked_entry(id);
+            link = it->second.link;
+            ++it->second.inflight;
+        }
+        const InFlightGuard guard(*this, id);
+        try {
+            return std::forward<Fn>(fn)();
+        } catch (const std::exception& e) {
+            if (util::is_link_loss(e)) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto it = entries_.find(id);
+                if (it != entries_.end() && it->second.link == link) {
+                    retire(id);
+                }
             }
             throw;
         }
@@ -140,8 +168,10 @@ public:
 private:
     struct Entry {
         std::size_t open_count{};
-        std::uint64_t link{};
+        std::uint64_t link{};  // 0 once retired with a call in flight: no caller's link matches
         std::string serial_at_open;
+        std::size_t inflight{};  // call_unserialised() calls running
+        bool retired{};          // closed by the last in-flight call
     };
     struct Expected {
         const SharedOpenTable* table;
@@ -159,6 +189,41 @@ private:
         LinkScope(const LinkScope&) = delete;
         LinkScope& operator=(const LinkScope&) = delete;
     };
+
+    // Counts a call_unserialised() out when it returns; the last one out of a retired entry closes it.
+    class InFlightGuard {
+    public:
+        InFlightGuard(SharedOpenTable& table, int id) : table_(table), id_(id) {}
+        ~InFlightGuard() {
+            std::lock_guard<std::mutex> lock(table_.mutex_);
+            const auto it = table_.entries_.find(id_);
+            if (it != table_.entries_.end() && --it->second.inflight == 0 && it->second.retired) {
+                table_.entries_.erase(it);
+                table_.close_best_effort(id_);
+            }
+        }
+        InFlightGuard(const InFlightGuard&) = delete;
+        InFlightGuard& operator=(const InFlightGuard&) = delete;
+
+    private:
+        SharedOpenTable& table_;
+        int id_;
+    };
+
+    // Caller holds mutex_. The entry the caller's link names, or the refusal: no link is a DriverException, a
+    // retired or replaced one is NotConnected, both before the SDK is touched.
+    std::map<int, Entry>::iterator checked_entry(int id) {
+        const auto expected = expected_link(id);
+        if (!expected.has_value()) {
+            throw AlpacaException("no link for id " + std::to_string(id) + " on this thread",
+                                  AlpacaError::DriverException);
+        }
+        const auto it = entries_.find(id);
+        if (*expected == 0 || it == entries_.end() || it->second.retired || it->second.link != *expected) {
+            throw AlpacaException("stale link for id " + std::to_string(id), AlpacaError::NotConnected);
+        }
+        return it;
+    }
 
     static std::vector<Expected>& expected_stack() {
         thread_local std::vector<Expected> stack;
@@ -180,6 +245,9 @@ private:
         const auto it = entries_.find(id);
         if (it != entries_.end()) {
             Entry& held = it->second;
+            if (held.retired) {
+                throw_still_closing(id);
+            }
             if (held.serial_at_open.empty()) {
                 ++held.open_count;
                 return Opened{held.link, {}};
@@ -197,6 +265,9 @@ private:
                 return Opened{held.link, *serial};
             }
             retire(id);
+            if (entries_.count(id) != 0) {
+                throw_still_closing(id);
+            }
         }
         ops_.real_open(id);
         std::string serial;
@@ -215,9 +286,21 @@ private:
     }
 
     // Caller holds mutex_, so nothing can have reopened the id: EAFClose(id) closes the dead handle.
+    // An in-flight call_unserialised() defers the close to the last of them (a transfer is never closed under).
     void retire(int id) {
+        const auto it = entries_.find(id);
+        if (it != entries_.end() && it->second.inflight > 0) {
+            it->second.link = 0;
+            it->second.retired = true;
+            return;
+        }
         entries_.erase(id);
         close_best_effort(id);
+    }
+
+    [[noreturn]] static void throw_still_closing(int id) {
+        throw AlpacaException("id " + std::to_string(id) + " is still closing after a loss; try again",
+                              AlpacaError::InvalidOperation);
     }
 
     void close_best_effort(int id) {
