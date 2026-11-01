@@ -49,7 +49,7 @@ Symbol: `TaskClock`
 | Sky-Watcher telescope | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #751, #917 | UTC anchors stay off the clock ([decision 0001](0001-skywatcher-pointing-clock.md)); position model clock in #1405 |
 | Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #923 | |
 | SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1403 | |
-| iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1223 | |
+| iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1223, #1723 | the fault latch stamp (the decision 0009 staleness bound) and its probe interval |
 | Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1162 | |
 | Celestron CGX telescope | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | partial | #1409 | continuity deadline and sleeps use the clock (#1404); UTC anchor elapsed time and host-discipline resampling remain on `steady_clock` |
 | ToupTek camera | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted | #1268 | |
