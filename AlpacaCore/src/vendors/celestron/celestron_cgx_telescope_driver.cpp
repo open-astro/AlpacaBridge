@@ -76,6 +76,13 @@ void require_cgx_ack(const AuxFrame& response, const char* operation) {
 
 }  // namespace
 
+// Lock order (decision 0016): transition_mutex_ -> motion_start_mutex_ -> the protocol wrapper's I/O lock -> mutex_
+// (leaf of the driver's own locks) -> firmware_mutex_; the AsyncOperation slot mutexes are leaves under mutex_ too.
+// Every AUX exchange runs with mutex_ free, so a getter that reads only driver state never waits on the wire.
+// motion_start_mutex_ is the motion-ownership lock: motion starts and stages, PulseGuide, Sync, the tracking writes and
+// the disconnect stop hold it across their exchanges, so ownership, the site and the reference cannot change under
+// them. Of the getters only the five coordinate getters take it, and they read the axes themselves. firmware_mutex_
+// guards the firmware string alone; Connect publishes it under mutex_.
 class CelestronCgxTelescopeDriver final : public TelescopeDriver, protected AsyncConnectable {
 public:
     ALPACA_EXPOSE_CONNECT_ERROR()
@@ -305,19 +312,13 @@ private:
     // Releases mutex_ for a wire exchange and takes it back on scope exit, also when the exchange throws.
     class MutexRelease final {
     public:
-        explicit MutexRelease(std::unique_lock<std::mutex>& lock) : MutexRelease(&lock) {}
-        // A null lock releases nothing (the caller holds no mutex_ to drop).
-        explicit MutexRelease(std::unique_lock<std::mutex>* lock) : lock_(lock) {
-            if (lock_ != nullptr) lock_->unlock();
-        }
-        ~MutexRelease() {
-            if (lock_ != nullptr) lock_->lock();
-        }
+        explicit MutexRelease(std::unique_lock<std::mutex>& lock) : lock_(lock) { lock_.unlock(); }
+        ~MutexRelease() { lock_.lock(); }
         MutexRelease(const MutexRelease&) = delete;
         MutexRelease& operator=(const MutexRelease&) = delete;
 
     private:
-        std::unique_lock<std::mutex>* lock_;
+        std::unique_lock<std::mutex>& lock_;
     };
     void reset_telemetry_locked() const {
         stationary_raw_pair_.reset();
@@ -341,9 +342,9 @@ private:
     void stop_motion_worker_checked();
     void start_stop_operation(bool unpark);
     void run_stop_operation(util::OperationContext& context);
-    // A non-null `release` is the caller's held mutex_ lock: the tracking exchanges run with it dropped.
-    void set_tracking_locked(bool tracking, std::unique_lock<std::mutex>* release = nullptr);
-    void write_tracking_state_locked(bool tracking, int rate, std::unique_lock<std::mutex>* release = nullptr);
+    // `lock` is the caller's held mutex_ lock: the tracking exchanges run with it dropped.
+    void set_tracking_locked(bool tracking, std::unique_lock<std::mutex>& lock);
+    void write_tracking_state_locked(bool tracking, int rate, std::unique_lock<std::mutex>& lock);
     bool finish_slew_operation(util::OperationContext& context, util::TaskClock::clock::time_point deadline,
                                double right_ascension_hours, double declination_degrees, CgxPointingSide pointing_side,
                                const char* timeout_message);
@@ -352,7 +353,7 @@ private:
                                   std::chrono::milliseconds poll_interval = std::chrono::milliseconds(200));
     bool wait_for_slew_settle(util::OperationContext& context) const;
     void require_site_change_allowed_locked() const;
-    void set_tracking_rate_locked(int rate);
+    void set_tracking_rate_locked(int rate, std::unique_lock<std::mutex>& lock);
     CgxHemisphere hemisphere_locked() const;
     bool reference_valid_locked() const {
         return calibrated_ && reference_generation_ == protocol_.session_generation();
@@ -377,7 +378,7 @@ private:
     util::AsyncOperation pulse_slot_;
     util::OperationGeneration stop_generation_;
     util::AsyncOperation stop_slot_;
-    std::atomic<bool> stop_pending_{false};  // Slewing reads progress without waiting for stop I/O under mutex_.
+    std::atomic<bool> stop_pending_{false};  // Slewing reads stop progress before it takes mutex_ (#1402).
     bool unpark_after_stop_ = false;
     bool calibrated_ = false;
     std::uint64_t reference_generation_ = 0;
@@ -949,11 +950,11 @@ bool CelestronCgxTelescopeDriver::get_tracking() const {
 void CelestronCgxTelescopeDriver::set_tracking(bool tracking) {
     require_connected();
     MotionTransition transition(*this);
-    std::lock_guard<std::mutex> lock(mutex_);
-    set_tracking_locked(tracking);
+    std::unique_lock<std::mutex> lock(mutex_);
+    set_tracking_locked(tracking, lock);
 }
 
-void CelestronCgxTelescopeDriver::set_tracking_locked(bool tracking, std::unique_lock<std::mutex>* release) {
+void CelestronCgxTelescopeDriver::set_tracking_locked(bool tracking, std::unique_lock<std::mutex>& lock) {
     if (tracking && parked_) {
         throw AlpacaException("Cannot enable tracking while parked", AlpacaError::InvalidWhileParked);
     }
@@ -961,7 +962,7 @@ void CelestronCgxTelescopeDriver::set_tracking_locked(bool tracking, std::unique
     if (tracking && !reference_valid_locked()) {
         throw AlpacaException("Run FindHome before enabling Celestron CGX tracking", AlpacaError::InvalidOperation);
     }
-    write_tracking_state_locked(tracking, tracking_rate_, release);
+    write_tracking_state_locked(tracking, tracking_rate_, lock);
     tracking_ = tracking;
     if (tracking) at_home_ = false;
 }
@@ -1103,7 +1104,7 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                 ALPACA_LOG_DEBUG("Celestron CGX", arrival_diagnostic);
                 if (ra_error_degrees <= kSlewArrivalToleranceDegrees &&
                     dec_error_degrees <= kSlewArrivalToleranceDegrees) {
-                    set_tracking_locked(true);
+                    set_tracking_locked(true, lock);
                     arrived = true;
                     return;
                 }
@@ -1127,6 +1128,7 @@ bool CelestronCgxTelescopeDriver::finish_slew_operation(util::OperationContext& 
                     utc, configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude"));
                 const auto target = cgx_sky_position_to_encoders(right_ascension_hours, declination_degrees, lst,
                                                                  hemisphere_locked(), pointing_side);
+                lock.unlock();  // The corrections run with mutex_ free (decision 0016).
                 if (ra_error_degrees > kSlewArrivalToleranceDegrees)
                     protocol_.goto_axis_slow(CgxAxis::RightAscension, target.first);
                 if (dec_error_degrees > kSlewArrivalToleranceDegrees)
@@ -1159,19 +1161,19 @@ double CelestronCgxTelescopeDriver::get_sidereal_time() const {
                                          configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude"));
 }
 
-void CelestronCgxTelescopeDriver::set_tracking_rate_locked(int rate) {
+void CelestronCgxTelescopeDriver::set_tracking_rate_locked(int rate, std::unique_lock<std::mutex>& lock) {
     if (rate < 0 || rate > 2) {
         throw AlpacaException("TrackingRate must be Sidereal, Lunar, or Solar", AlpacaError::InvalidValue);
     }
     if (!tracking_state_valid_)
         throw AlpacaException("Set Tracking before changing TrackingRate after a partial controller update",
                               AlpacaError::InvalidOperation);
-    write_tracking_state_locked(tracking_, rate);
+    write_tracking_state_locked(tracking_, rate, lock);
     tracking_rate_ = rate;
 }
 
 void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int rate,
-                                                              std::unique_lock<std::mutex>* release) {
+                                                              std::unique_lock<std::mutex>& lock) {
     // Every nonzero rate path, including TrackingRate, needs the same reference.
     // Zero-rate cleanup remains available after a session fault.
     if (tracking && !reference_valid_locked())
@@ -1202,21 +1204,23 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         return failure;
     };
 
-    // A caller that passed its lock has the I/O lock taken first (decision 0016 rule 2).
-    // Read before the release; safe because the Sync caller holds transition_mutex_ and motion_start_mutex_,
-    // so no other writer changes tracking_state_valid_ while mutex_ is dropped.
+    // The exchanges run with the caller's mutex_ dropped, so the I/O lock is never taken under it (decision 0016).
+    // Read before the release; safe because every caller holds motion_start_mutex_ and either transition_mutex_ or
+    // the motion slot the stop worker joins before its stop writes, so no other writer changes tracking_state_valid_
+    // while mutex_ is dropped.
     const bool previous_state_valid = tracking_state_valid_;
     std::exception_ptr failure;
     bool rollback_succeeded = false;
     bool rolled_back = false;
     {
-        const MutexRelease unlocked(release);
+        const MutexRelease unlocked(lock);
         failure = write(tracking, rate, "tracking command");
         if (failure) {
             try {
                 // Lost matching invalidates the reference. Recover on the owned fd
                 // and leave tracking off rather than resume an uncertain frame.
-                // Never wait out another device's probe (#1457); mutex_ is held here unless the caller passed its lock.
+                // Never wait out another device's probe (#1457): the caller holds motion_start_mutex_, which the
+                // coordinate getters take.
                 protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
                 rollback_succeeded = !write(false, previous_rate, "tracking rollback");
                 rolled_back = rollback_succeeded;
@@ -1233,7 +1237,7 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         }
         std::rethrow_exception(failure);
     }
-    if (release != nullptr) require_connected();  // Re-check after the exchanges (decision 0016 rule 6).
+    require_connected();  // Re-check after the exchanges (decision 0016 rule 6).
     tracking_state_valid_ = true;
 }
 void CelestronCgxTelescopeDriver::set_site_elevation(double elevation) {
@@ -1333,8 +1337,8 @@ void CelestronCgxTelescopeDriver::set_tracking_rate(int rate) {
         throw AlpacaException("TrackingRate must be Sidereal, Lunar, or Solar", AlpacaError::InvalidValue);
     require_connected();
     MotionTransition transition(*this);
-    std::lock_guard<std::mutex> lock(mutex_);
-    set_tracking_rate_locked(rate);
+    std::unique_lock<std::mutex> lock(mutex_);
+    set_tracking_rate_locked(rate, lock);
 }
 std::chrono::system_clock::time_point CelestronCgxTelescopeDriver::get_utc_date() const {
     require_connected();
@@ -1476,7 +1480,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
     const bool restore_tracking = tracking_;
     bool reference_write_started = false;
     try {
-        if (restore_tracking) set_tracking_locked(false, &lock);
+        if (restore_tracking) set_tracking_locked(false, lock);
         // A rate-off ACK can precede encoder standstill. Never re-label a
         // drifting axis, including when the client just switched tracking off.
         util::ConsecutiveSettle settle(3, 15);
@@ -1562,7 +1566,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         }
         throw;
     }
-    if (restore_tracking) set_tracking_locked(true, &lock);
+    if (restore_tracking) set_tracking_locked(true, lock);
 }
 void CelestronCgxTelescopeDriver::sync_to_target() {
     require_connected();
@@ -1652,10 +1656,10 @@ void CelestronCgxTelescopeDriver::run_stop_operation(util::OperationContext& con
         motion_slot_.clear_failure();
         pulse_slot_.clear_failure();
         std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         const bool restore_tracking = restore_tracking_requested && reference_valid_locked() && !parked_;
         if (unpark_after_stop_) parked_ = false;
-        if (restore_tracking) set_tracking_locked(true);
+        if (restore_tracking) set_tracking_locked(true, lock);
         slew_in_progress_ = false;
         restore_tracking_after_slew_ = false;
         stop_pending_ = false;
@@ -1695,39 +1699,39 @@ void CelestronCgxTelescopeDriver::stop_motion_worker_checked() {
 void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds verification_budget) {
     const std::array axes{CgxAxis::RightAscension, CgxAxis::Declination};
     bool stop_acknowledged = false;
-    {
-        // Freeze tracking reads across the complete stop write pair. Unknown is
-        // a retained failure state, not an observable normal-dispatch transient.
-        std::lock_guard<std::mutex> lock(mutex_);
-        tracking_state_valid_ = false;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            std::exception_ptr acknowledgement_failure;
-            for (const auto axis : axes) {
+    // The stop write pair runs with mutex_ free (decision 0016) and tracking state is published once after it, so a
+    // tracking read sees the state before the stop or after it. Unknown is a retained failure state, not an
+    // observable normal-dispatch transient.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        std::exception_ptr acknowledgement_failure;
+        for (const auto axis : axes) {
+            try {
+                const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), 0x24, {0}};
+                require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), "axis stop");
+            } catch (...) {
+                if (!acknowledgement_failure) acknowledgement_failure = std::current_exception();
                 try {
-                    const AuxFrame request{0x00, static_cast<std::uint8_t>(axis), 0x24, {0}};
-                    require_cgx_ack(protocol_.exchange(request, std::chrono::milliseconds(500)), "axis stop");
+                    // AUX synchronization is shared: a missing RA reply must
+                    // not prevent the responsive Dec controller receiving stop.
+                    // Never wait out another device's probe (#1457): the caller holds transition_mutex_ or
+                    // motion_start_mutex_.
+                    protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
+                } catch (const std::exception& error) {
+                    ALPACA_LOG_WARN(
+                        "Celestron CGX",
+                        std::string("Could not reconnect AUX before retrying the axis stop: ") + error.what());
                 } catch (...) {
-                    if (!acknowledgement_failure) acknowledgement_failure = std::current_exception();
-                    try {
-                        // AUX synchronization is shared: a missing RA reply must
-                        // not prevent the responsive Dec controller receiving stop.
-                        // Under mutex_: never wait out another device's probe (#1457).
-                        protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200,
-                                                 std::chrono::milliseconds(0));
-                    } catch (const std::exception& error) {
-                        ALPACA_LOG_WARN(
-                            "Celestron CGX",
-                            std::string("Could not reconnect AUX before retrying the axis stop: ") + error.what());
-                    } catch (...) {
-                        ALPACA_LOG_WARN("Celestron CGX", "Could not reconnect AUX before retrying the axis stop");
-                    }
+                    ALPACA_LOG_WARN("Celestron CGX", "Could not reconnect AUX before retrying the axis stop");
                 }
             }
-            if (!acknowledgement_failure) {
-                stop_acknowledged = true;
-                break;
-            }
         }
+        if (!acknowledgement_failure) {
+            stop_acknowledged = true;
+            break;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
         tracking_ = false;
         tracking_state_valid_ = stop_acknowledged;
     }
@@ -1786,8 +1790,8 @@ void CelestronCgxTelescopeDriver::start_home_operation(bool park_after) {
     if (!park_after && get_at_park())
         throw AlpacaException("Cannot FindHome while parked; Unpark first", AlpacaError::InvalidWhileParked);
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (tracking_) set_tracking_locked(false);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (tracking_) set_tracking_locked(false, lock);
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1852,7 +1856,7 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
                         }
                         protocol_.set_axis_position(CgxAxis::RightAscension, kRaHomeEncoder);
                         protocol_.set_axis_position(CgxAxis::Declination, kDecHomeEncoder);
-                        std::lock_guard<std::mutex> lock(mutex_);
+                        std::unique_lock<std::mutex> lock(mutex_);
                         if (reference_generation != protocol_.session_generation())
                             throw AlpacaException("Celestron CGX session changed while establishing the home reference",
                                                   AlpacaError::DriverException);
@@ -1869,7 +1873,7 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
                         parked_ = park_after;
                         slew_in_progress_ = false;
                         restore_tracking_after_slew_ = false;
-                        if (park_after && tracking_) set_tracking_locked(false);
+                        if (park_after && tracking_) set_tracking_locked(false, lock);
                     })) {
                     return;
                 }
@@ -1928,10 +1932,10 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     }
     const auto positions = cgx_sky_position_to_encoders(ra, dec, lst, hemisphere, side);
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         // Disable tracking before publishing the slew transition. If the
         // controller update fails, the prior calibrated/idle state remains.
-        set_tracking_locked(false);
+        set_tracking_locked(false, lock);
         at_home_ = false;
         parked_ = false;
         slew_in_progress_ = true;
@@ -1984,11 +1988,11 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
             slew_in_progress_ = false;
             restore_tracking_after_slew_ = false;
         } else {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             const bool restore_tracking = restore_tracking_after_slew_ && reference_valid_locked();
             slew_in_progress_ = false;
             restore_tracking_after_slew_ = false;
-            if (restore_tracking) set_tracking_locked(true);
+            if (restore_tracking) set_tracking_locked(true, lock);
         }
         throw;
     }
