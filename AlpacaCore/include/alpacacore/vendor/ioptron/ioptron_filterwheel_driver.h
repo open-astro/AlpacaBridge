@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <memory>
 #include <string>
@@ -30,10 +31,13 @@ namespace alpacacore::vendor::ioptron {
  * @param serial_port Serial port path (e.g., "/dev/ttyUSB0")
  * @param model "iefw15" (default) or "iefw18": sets the reported device name.
  *              The slot count always comes from the wheel's handshake.
+ * @param clock TaskClock the Position cache age and the link-fault staleness bound run on (decision 0005): real
+ *              by default, a FakeTaskClock in tests
  * @return Unique pointer to filter wheel driver
  */
 std::unique_ptr<FilterWheelDriver> create_iefw_filterwheel(int device_number, const std::string& serial_port,
-                                                           const std::string& model = "iefw15");
+                                                           const std::string& model = "iefw15",
+                                                           util::TaskClock& clock = util::default_task_clock());
 
 /**
  * @brief Create an iOptron iEFW filter wheel driver by auto-detecting the serial port.
@@ -45,9 +49,11 @@ std::unique_ptr<FilterWheelDriver> create_iefw_filterwheel(int device_number, co
  * @param device_number Alpaca device number
  * @param wheel_index 0-based index into the list of detected wheels
  * @param model "iefw15" (default) or "iefw18": sets the reported device name
+ * @param clock TaskClock as for create_iefw_filterwheel()
  * @return Unique pointer to filter wheel driver
  */
-std::unique_ptr<FilterWheelDriver> create_iefw_filterwheel_by_index(int device_number, int wheel_index = 0,
-                                                                    const std::string& model = "iefw15");
+std::unique_ptr<FilterWheelDriver> create_iefw_filterwheel_by_index(
+    int device_number, int wheel_index = 0, const std::string& model = "iefw15",
+    util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::ioptron
