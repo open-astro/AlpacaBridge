@@ -15,6 +15,7 @@
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -28,8 +29,9 @@ namespace alpacacore::test {
  * FakeZWOSDK locks its own state, so the decorator is not needed to keep the
  * fake race-free; it serialises the SDK the way a single-threaded vendor
  * library would, for tests that want that shape. All 22 entry points are
- * wrapped. The mutex is a leaf: the inner SDK never calls back into this
- * interface.
+ * wrapped. The mutex is recursive because with_link() holds it across its body, which calls back into this
+ * decorator's per-device methods on the same thread (issue #1667, as LockedZWOEAFSDK); every other entry
+ * point holds it across the inner call only, which never calls back into this interface.
  *
  * Do not use it over a FakeZWOSDK configured to block: after hold_download()
  * get_data_after_exposure() waits for release_download(), and behind this
@@ -65,14 +67,14 @@ public:
         return locked([&] { return inner_.get_camera_info_by_index(camera_index, info); });
     }
 
-    void open_camera(int camera_id) override {
-        locked([&] { inner_.open_camera(camera_id); });
+    vendor::zwo::SharedOpenTable::Opened open_camera_link(int camera_id) override {
+        return locked([&] { return inner_.open_camera_link(camera_id); });
     }
-    void init_camera(int camera_id) override {
-        locked([&] { inner_.init_camera(camera_id); });
+    void close_camera_link(int camera_id, std::uint64_t link) override {
+        locked([&] { inner_.close_camera_link(camera_id, link); });
     }
-    void close_camera(int camera_id) override {
-        locked([&] { inner_.close_camera(camera_id); });
+    void with_link(int camera_id, std::uint64_t link, const std::function<void()>& fn) override {
+        locked([&] { inner_.with_link(camera_id, link, fn); });
     }
 
     std::vector<ZWOControlCaps> get_control_caps(int camera_id) override {
@@ -129,12 +131,12 @@ public:
 private:
     template <typename Fn>
     auto locked(Fn&& fn) -> decltype(fn()) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         return fn();
     }
 
     ZWOSDK& inner_;
-    std::mutex mutex_;
+    std::recursive_mutex mutex_;
 };
 
 }  // namespace alpacacore::test
