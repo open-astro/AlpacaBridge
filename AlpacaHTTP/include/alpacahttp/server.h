@@ -56,7 +56,7 @@ public:
     void stop();
 
     // Check if server is running. stop() clears running_ before it joins, so
-    // a restart (stop then start on the endpoint's detached thread) read false
+    // a restart (stop then start on the Router's delayed thread) read false
     // for the whole join window; the embedder's wait loop exited on that and
     // the process ended with status 0, which Restart=on-failure does not
     // respawn (#713). restart_epoch_ bridges that window: it is odd while a
@@ -80,7 +80,7 @@ public:
 
     // Test-only: true from the moment a management restart claims the server
     // until handle_restart_request() has made its last write to it, so a test
-    // can wait for the detached restart thread before stop() or destruction.
+    // can wait for the Router's delayed restart thread before stop() or destruction.
     bool restart_in_progress_for_test() const { return restart_requested_; }
 
     // The port actually bound, read back from the listening socket via
@@ -124,7 +124,7 @@ private:
     std::thread server_thread_;
     // Guards ownership of server_thread_ only (not the lifecycle phases).
     // stop() is re-entrant from another thread -- the restart endpoint's
-    // detached thread stops and restarts the server, and an embedder that also
+    // delayed thread stops and restarts the server, and an embedder that also
     // calls stop() from its own thread can land in the middle of it (the
     // shutdown endpoint no longer stops when a callback is installed, #713,
     // but an embedder may still) -- so without this both callers could reach

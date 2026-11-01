@@ -75,7 +75,8 @@ TEST_CASE("ZWO USB Limit defaults clamp and only real connects write", "[zwo][ca
     connect_camera(*camera);
     long value = 0;
     bool is_auto = true;
-    REQUIRE(sdk.get_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value, is_auto));
+    REQUIRE(
+        sdk.raw_get_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value, is_auto));
     CHECK(value == expected);
     CHECK_FALSE(is_auto);
     CHECK(sdk.call_count("set_bandwidth") == 1);
@@ -135,8 +136,8 @@ TEST_CASE("ZWO USB Limit applies explicit values and rejects unsupported setting
         if (binding.usb_bandwidth) {
             long value = 0;
             bool is_auto = true;
-            REQUIRE(sdk.get_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value,
-                                          is_auto));
+            REQUIRE(sdk.raw_get_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value,
+                                              is_auto));
             CHECK(value == *binding.usb_bandwidth);
             CHECK_FALSE(is_auto);
         } else {
@@ -1227,7 +1228,7 @@ TEST_CASE("ZWO fake SDK - first CCDTemperature read after connect skips the SDK'
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
     // The control cache is only reachable through the SDK: seed the real reading.
     camera->set_connected(true);
-    sdk.set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::Temperature, 215, false);
+    sdk.raw_set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::Temperature, 215, false);
     const int connect_reads = sdk.call_count("get_control_value");
 
     CHECK(camera->get_ccd_temperature() == Catch::Approx(21.5));
@@ -1277,29 +1278,32 @@ TEST_CASE("FakeZWOSDK behind LockedZWOSDK - forwards every entry point", "[zwo][
 
     CHECK(sdk.enumerate_cameras().size() == 1);
     CHECK(sdk.enumerate_identified_cameras().size() == 1);
-    sdk.open_camera(id);
+    const auto opened = sdk.open_camera_link(id);
+    CHECK(opened.serial == "FAKE-ZWO-17");
     CHECK(sdk.get_camera_info_by_id(id, info));
     CHECK(sdk.get_camera_info_by_index(0, info));
     CHECK_FALSE(sdk.get_camera_info_by_index(3, info));
-    sdk.init_camera(id);
-    CHECK(sdk.get_control_caps(id).size() == 10);
-    sdk.set_control_value(id, ZWOControlType::Gain, 42, false);
-    CHECK(sdk.get_control_value(id, ZWOControlType::Gain, value, is_auto));
-    CHECK(value == 42);
-    sdk.set_roi_format(id, 16, 8, 1, ZWOImageType::Raw16);
-    CHECK(sdk.get_roi_format(id).width == 16);
-    sdk.set_start_pos(id, 2, 4);
-    CHECK(sdk.get_start_pos(id).start_x == 2);
-    sdk.start_exposure(id, false);
-    CHECK(sdk.get_exposure_status(id) == ZWOExposureStatus::Success);
-    sdk.get_data_after_exposure(id, buf.data(), static_cast<long>(buf.size()));
-    CHECK(buf[0] == 0x5a);
-    sdk.stop_exposure(id);
-    sdk.pulse_guide_on(id, ZWOGuideDirection::North);
-    sdk.pulse_guide_off(id, ZWOGuideDirection::North);
-    CHECK(sdk.get_serial_number(id) == "FAKE-ZWO-17");
+    // Every per-device call runs under the open's link (issue #1667); the decorator forwards with_link too.
+    sdk.with_link(id, opened.link, [&] {
+        CHECK(sdk.get_control_caps(id).size() == 10);
+        sdk.set_control_value(id, ZWOControlType::Gain, 42, false);
+        CHECK(sdk.get_control_value(id, ZWOControlType::Gain, value, is_auto));
+        CHECK(value == 42);
+        sdk.set_roi_format(id, 16, 8, 1, ZWOImageType::Raw16);
+        CHECK(sdk.get_roi_format(id).width == 16);
+        sdk.set_start_pos(id, 2, 4);
+        CHECK(sdk.get_start_pos(id).start_x == 2);
+        sdk.start_exposure(id, false);
+        CHECK(sdk.get_exposure_status(id) == ZWOExposureStatus::Success);
+        sdk.get_data_after_exposure(id, buf.data(), static_cast<long>(buf.size()));
+        CHECK(buf[0] == 0x5a);
+        sdk.stop_exposure(id);
+        sdk.pulse_guide_on(id, ZWOGuideDirection::North);
+        sdk.pulse_guide_off(id, ZWOGuideDirection::North);
+        CHECK(sdk.get_serial_number(id) == "FAKE-ZWO-17");
+    });
     CHECK(sdk.get_sdk_version() == "fake-zwo-sdk-1.0");
-    sdk.close_camera(id);
+    sdk.close_camera_link(id, opened.link);
 
     for (const char* name : {"enumerate_cameras",     "enumerate_identified_cameras",
                              "get_camera_info_by_id", "get_camera_info_by_index",
@@ -1315,4 +1319,66 @@ TEST_CASE("FakeZWOSDK behind LockedZWOSDK - forwards every entry point", "[zwo][
         INFO(name);
         CHECK(fake.call_count(name) >= 1);
     }
+}
+
+// ---- The camera opens through the shared open table (issue #1667) ----
+
+// Falsified by: SharedOpenTable::close() acting on a link that is not the open's current one (a close from a holder
+// of an earlier open closes the handle a later Connect opened).
+TEST_CASE("ZWO fake SDK - a stale close does not close another holder's open", "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    const int id = sdk.camera.camera_id;
+    const auto first = sdk.open_camera_link(id);
+    sdk.close_camera_link(id, first.link);
+    CHECK(sdk.open_count() == 0);
+
+    const auto second = sdk.open_camera_link(id);
+    REQUIRE(second.link != first.link);
+    sdk.close_camera_link(id, first.link);  // the earlier holder closes again
+    CHECK(sdk.open_count() == 1);
+    CHECK(sdk.call_count("close_camera") == 1);
+    sdk.close_camera_link(id, second.link);
+    CHECK(sdk.open_count() == 0);
+}
+
+// Falsified by: SharedOpenTable::open() sharing a held id without reading its serial (the dead handle of a replugged
+// unit, or another camera behind the same id, is handed to the new holder).
+TEST_CASE("ZWO fake SDK - an open of a held id whose serial changed closes it and reopens",
+          "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    const int id = sdk.camera.camera_id;
+    const auto first = sdk.open_camera_link(id);
+    CHECK(first.serial == "FAKE-ZWO-17");
+    sdk.serial = "FAKE-ZWO-99";
+
+    const auto second = sdk.open_camera_link(id);
+
+    CHECK(second.serial == "FAKE-ZWO-99");
+    CHECK(second.link != first.link);
+    CHECK(sdk.call_count("close_camera") == 1);
+    CHECK(sdk.call_count("init_camera") == 2);
+    CHECK(sdk.open_count() == 1);
+    // The first holder's link is retired: its call is refused.
+    CHECK(error_code([&] { sdk.with_link(id, first.link, [&] { (void)sdk.get_roi_format(id); }); }) ==
+          AlpacaError::NotConnected);
+}
+
+// Finding on the old wrapper: close_camera() threw before it erased its bookkeeping, so after a failed close the next
+// open skipped ASIInitCamera. Falsified by: SharedOpenTable::close() erasing the entry only after real_close()
+// succeeded (the reopen shares the dead entry and the real open, which includes the init, never runs).
+TEST_CASE("ZWO fake SDK - a close that throws still lets the next open initialise the camera",
+          "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    const int id = sdk.camera.camera_id;
+    const auto first = sdk.open_camera_link(id);
+    sdk.fail_close = true;
+    CHECK(error_code([&] { sdk.close_camera_link(id, first.link); }) == AlpacaError::DriverException);
+    sdk.fail_close = false;
+
+    const auto again = sdk.open_camera_link(id);
+
+    CHECK(again.link != first.link);
+    CHECK(sdk.call_count("init_camera") == 2);
+    CHECK(sdk.holders(id) == 1);
+    sdk.close_camera_link(id, again.link);
 }
