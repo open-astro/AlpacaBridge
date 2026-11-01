@@ -168,6 +168,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - static members cost no camera reads", 
     CHECK(sdk.reads == 0);
 }
 
+// Falsified by: zwo_switch_driver.cpp set_switch_value, call set_control_value outside with_link (the fake refuses it)
 TEST_CASE("ZWO Dew Heater Switch Driver - a write and a reconnect drop the cached frame", "[zwo][switch][unit]") {
     FakeDewSdk sdk;
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
@@ -293,6 +294,8 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Auto binds the one camera with a heate
     driver->set_connected(false);
 }
 
+// Falsified by: zwo_switch_driver.cpp list_dew_heater_cameras, read the caps and serial outside with_link (the fake
+// refuses them, so no camera lists the serial)
 TEST_CASE("ZWO Dew Heater Switch Driver - a serial binds its camera over a conflicting index", "[zwo][switch][unit]") {
     FakeDewSdk sdk;
     add_mini_and_pro(sdk, true);
@@ -530,4 +533,27 @@ TEST_CASE("ZWO dew heater and camera - the switch disconnects first and the came
 
     rig.camera->set_connected(false);
     CHECK(rig.sdk.open_count() == 0);
+}
+
+// Falsified by: shared_open_table.h call() not retiring the entry on a loss code from the camera's call, so the
+// switch's next read reaches the SDK on the dead handle.
+TEST_CASE("ZWO camera and dew heater - a camera removal error stops the switch before the SDK",
+          "[zwo][switch][camera][unit][link]") {
+    SharedCamera rig;
+    rig.camera->set_connected(true);
+    rig.heater->set_connected(true);
+
+    rig.sdk.removed = true;  // ASI_ERROR_CAMERA_REMOVED on the camera's next call
+    require_alpaca_error([&] { (void)rig.camera->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(rig.sdk.holders(rig.sdk.camera.camera_id) == 0);
+    CHECK(rig.sdk.open_count() == 0);  // the dead handle is closed at once
+
+    rig.sdk.removed = false;  // a read that reached the SDK now gets the fake's "not open" DriverException
+    try {
+        (void)rig.heater->get_switch_value(0);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
+        CHECK(std::string(ex.what()).find("stale link") != std::string::npos);
+    }
 }
