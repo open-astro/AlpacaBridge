@@ -35,10 +35,13 @@ Connection types: Serial (RS-232 on hand control base) and Network (WiFi bridge 
 ### CGX / CGX-L direct USB backend
 
 The [published ConformU report](../../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
-records a complete pass on 2026-10-15 after the
-[operator-approved firmware update](../../docs/celestron-cgx-cgxl-usb-review.md#operator-approved-firmware-update--2026-10-15):
-both motors 7.18.2214 / model 0x1788, binary `f11acde9`, zero errors/issues/configuration
-alerts, all 16 extended guide tests and all 98 timing rows passing; DeviceState 62 ms.
+records a complete ConformU 4.5.3.56334 pass on 2026-10-31 with both guide rates at 0.25x
+sidereal: binary `e833bc39`, zero errors/warnings/issues and timing misses, all 16 extended
+guide tests and all 98 timing rows passing; DeviceState 55 ms. Motor firmware was not
+recorded for that run; the last recorded change is the
+[operator-approved firmware update](../../docs/celestron-cgx-cgxl-usb-review.md#operator-approved-firmware-update--2026-10-15).
+Two attempts at the default 0.5x guide rate on the same binary stopped at a PulseGuide North
+ISSUE (+39.2" measured, +37.6" expected, 1.0" tolerance); that result is recorded, not waived.
 This qualifies the tested bare northern CGX/backend, not CGX-L, southern operation
 or optical accuracy, and does not establish a fix for intermittent guide or AUX faults.
 
@@ -75,7 +78,7 @@ or optical accuracy, and does not establish a fix for intermittent guide or AUX 
 - Gate every enabled tracking write in the common `write_tracking_state_locked()` path on a valid session reference, including TrackingRate and restoration callers. Zero-rate cleanup remains available after faults. Cached hardware-state reads refuse a known unhealthy/closed transport; prior true Home/Park and enabled tracking also require valid reference provenance after recovery. A verified stop establishes stopped/off state without restoring calibration. `Slewing` reports true while an explicit stop is pending, before the health gate, so recovery does not falsely appear idle. The [continuity decision](../../docs/decisions/0011-cgx-logical-reference-continuity.md) and [review evidence](../../docs/celestron-cgx-usb-motion.md#latest-approved-session-and-software-review) distinguish recovered transport from recovered calibration.
 - Capture the transport generation before collecting home encoder or flip rebase/label evidence, compare it again before publication and retain that original token. Publish the flip reference-established flag only after that comparison. Capturing the current token at publication would adopt an intervening fault generation and incorrectly validate old evidence. The [review evidence](../../docs/celestron-cgx-usb-motion.md#latest-approved-session-and-software-review) records deterministic home/flip race regressions and both killed generation-adoption mutations.
 - Site latitude/longitude remain mutable while idle, including after FindHome; refuse changes during motion, guiding, stop or ownership transitions. Capture the mechanical hemisphere at successful FindHome: changing reported SiteLatitude must not reverse established encoder geometry or guide polarity.
-- AUX identity/status/encoder replies expose no reset-generation counter. Same firmware and matching labels cannot prove absence of a controller reset or HC/AUX interference; do not claim reset-safe continuity or HC/AUX coexistence. Historical [run 5](../../docs/celestron-cgx-usb-motion.md#run-5-passing-qualification-and-final-software-verification) used binary `9c353c87` and motors 7.17.25 / model 0x1788. The current [published privacy-scrubbed report](../../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt) instead records the 2026-10-15 ConformU 4.5.1.54507 pass on binary `f11acde940431dbe2d275af9c112a921ca4bb07383654e7d272dafbbcd7783e8`, both motors 7.18.2214 / model 0x1788, native Linux arm64, bare northern CGX. It qualifies this hardware/backend only, not CGX-L direct USB, southern operation or optical accuracy. Earlier intermittent guide excess remains unresolved; guide-wire behavior was unchanged. Prompt the user and obtain approval before any further deployment or hardware test.
+- AUX identity/status/encoder replies expose no reset-generation counter. Same firmware and matching labels cannot prove absence of a controller reset or HC/AUX interference; do not claim reset-safe continuity or HC/AUX coexistence. Historical [run 5](../../docs/celestron-cgx-usb-motion.md#run-5-passing-qualification-and-final-software-verification) used binary `9c353c87` and motors 7.17.25 / model 0x1788. The current [published privacy-scrubbed report](../../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt) instead records the 2026-10-31 ConformU 4.5.3.56334 pass on binary `e833bc394bbfb7a227d3d626d7020b8e775defe4cf9ab4da0821db32e7898f9d`, native Linux arm64, bare northern CGX, with both guide rates at 0.25x sidereal. It qualifies this hardware/backend only, not CGX-L direct USB, southern operation or optical accuracy. Earlier intermittent guide excess remains unresolved; guide-wire behavior was unchanged. Prompt the user and obtain approval before any further deployment or hardware test.
 
 ### Focus motor on its own USB port (issue #896)
 
