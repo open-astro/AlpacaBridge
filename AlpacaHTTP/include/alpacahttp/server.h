@@ -24,6 +24,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <semaphore>
 #include <string>
 #include <thread>
@@ -99,14 +100,18 @@ public:
     int listener_fd_for_test() const { return static_cast<int>(server_fd_.load()); }
 
 #ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
-    // Test-only: shorten the per-response send deadline (120 s), the send
-    // no-progress bound (30 s, when `stall` is above zero) and, when
+    // Test-only: shorten the per-response send deadline (120 s base), the send
+    // no-progress bound (30 s, when `stall` is above zero), set the minimum
+    // read rate that extends the deadline by body size (default zero: no
+    // extension, so `deadline` bounds the whole response) and, when
     // `send_buffer_bytes` is above zero, the SO_SNDBUF of each accepted
     // socket, so a test can stall a send on a body that fits no buffer
     // without waiting out the production bound. Set before start().
     void set_send_limits_for_test(std::chrono::milliseconds deadline, int send_buffer_bytes,
-                                  std::chrono::milliseconds stall = std::chrono::milliseconds(0)) {
+                                  std::chrono::milliseconds stall = std::chrono::milliseconds(0),
+                                  std::size_t min_rate_bytes_per_second = 0) {
         send_deadline_ = deadline;
+        send_min_rate_ = min_rate_bytes_per_second;
         send_stall_ = stall;
         send_buffer_bytes_ = send_buffer_bytes;
     }
@@ -282,9 +287,11 @@ private:
     // are erased.
     std::mutex per_ip_mutex_;
     std::unordered_map<std::string, std::size_t> per_ip_connections_;
-    // Per-response send deadline override; zero means kSendDeadlineSeconds
-    // (server.cpp). Only the test hook sets it.
+    // Per-response send deadline base override; zero means kSendDeadlineSeconds
+    // (server.cpp). Only the test hook sets it, with send_min_rate_ (unset:
+    // kMinSendBytesPerSecond).
     std::chrono::milliseconds send_deadline_{0};
+    std::optional<std::size_t> send_min_rate_;
     // Send no-progress override; zero means kSocketTimeoutSeconds.
     std::chrono::milliseconds send_stall_{0};
     int send_buffer_bytes_{0};

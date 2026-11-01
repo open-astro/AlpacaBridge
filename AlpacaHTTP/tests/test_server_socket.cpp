@@ -756,6 +756,55 @@ int main() {
             slow_server.stop();
         }
 
+        // The deadline grows with the body: base 500 ms plus the body at
+        // 1 MiB/s (about 4.5 s for 4 MiB). A reader taking 64 KiB every 50 ms
+        // (about 3.2 s in all, past the base) gets the whole body; one taking
+        // 4 KiB every 50 ms is still cut off at the extended deadline.
+        for (const bool fast_reader : {true, false}) {
+            // case: send deadline scales with body size for a reader above the minimum rate
+            Watchdog watchdog(std::chrono::seconds(30), "send deadline scaled by body size");
+            alpacahttp::Config scaled_config;
+            scaled_config.set_http_port(0);
+            scaled_config.set_discovery_enabled(false);
+            scaled_config.set_thread_pool_size(1);
+            alpacahttp::Server scaled_server(scaled_config);
+            scaled_server.set_send_limits_for_test(std::chrono::milliseconds(500), 4096, std::chrono::seconds(5),
+                                                   1024 * 1024);
+            scaled_server.start_async();
+            const auto scaled_port = wait_for_bound_port(scaled_server, 2000);
+            EXPECT(scaled_port != 0);
+
+            int fd = connect_local(scaled_port, fast_reader ? 0 : 4096);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            send_all(fd, image_request);
+            const std::string headers = read_response_headers(fd);
+            EXPECT(headers.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
+
+            std::size_t drained = 0;
+            ssize_t last = 1;
+            std::vector<char> chunk(fast_reader ? 65536 : 4096);
+            const auto read_start = std::chrono::steady_clock::now();
+            while (last > 0 && drained < payload_size &&
+                   std::chrono::steady_clock::now() - read_start < std::chrono::seconds(10)) {
+                last = ::recv(fd, chunk.data(), chunk.size(), 0);
+                if (last > 0) {
+                    drained += static_cast<std::size_t>(last);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (fast_reader) {
+                // read_response_headers() drops body bytes that arrived with the
+                // headers (under 1 KiB), so the count is short by at most that.
+                EXPECT(payload_size - drained < 1024);
+            } else {
+                EXPECT(last == 0);  // EOF from the server at the extended deadline
+                EXPECT(drained < payload_size);
+            }
+            ::close(fd);
+            scaled_server.stop();
+        }
+
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
     }
 

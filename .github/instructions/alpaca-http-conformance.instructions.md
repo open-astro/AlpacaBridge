@@ -421,8 +421,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     peer address. It is counted at accept and released in `close_connection`;
     a connection over it is closed at once with no response, logged at INFO
     at most once a minute. Every response send is bounded by
-    `kSendDeadlineSeconds` (120 s, `socket_send_allv`'s `deadline`), after
-    which the connection is closed, as is one that makes no progress for
+    `kSendDeadlineSeconds` (120 s) plus the body at
+    `kMinSendBytesPerSecond` (256 KiB/s) (`socket_send_allv`'s `deadline`),
+    after which the connection is closed, as is one that makes no progress for
     `kSocketTimeoutSeconds` (30 s, the `stall` argument); tested in
     `test_server_socket.cpp`.
   - `Config::motion_watchdog_seconds` (open-astro#547; 30 s default, matching

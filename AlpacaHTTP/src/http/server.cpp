@@ -519,7 +519,7 @@ constexpr int kListenBacklog = 64;
 
 // Per-connection socket timeout: a peer that stalls mid-request (slowloris)
 // or mid-response is disconnected after this many seconds without progress.
-// A response is also bounded as a whole by kSendDeadlineSeconds.
+// A response is also bounded as a whole (kSendDeadlineSeconds plus a minimum rate).
 constexpr int kSocketTimeoutSeconds = 30;
 
 // Window for the one log line about connections refused by the per-IP cap.
@@ -899,13 +899,26 @@ namespace {
 // large ImageArray responses are unaffected (this bounds the read side only).
 constexpr int kRequestDeadlineSeconds = 120;
 
-// Upper bound on how long one response may take to send. SO_SNDTIMEO only
-// bounds a send that makes no progress, so a peer that never reads (or reads a
-// few bytes per interval) would otherwise pin a worker for good. Fixed, not a
-// config key: a 4 MiB ImageBytes frame needs seconds on the slowest link we
-// serve, so 120 s is generous, and the per-IP cap bounds how many a host can
-// stall. Past it the connection is closed.
+// Base allowance for sending one response. SO_SNDTIMEO only bounds a send that
+// makes no progress, so a peer that never reads (or reads a few bytes per
+// interval) would otherwise pin a worker for good. The whole-response deadline
+// is this base plus the time the body needs at kMinSendBytesPerSecond, so a
+// 100 MB ImageBytes frame to a client on a slow link is not cut off while it
+// keeps reading, and a client slower than the floor still is. A peer that stops
+// reading is closed after kSocketTimeoutSeconds regardless. Fixed, not config
+// keys; the per-IP cap bounds how many a host can stall.
 constexpr int kSendDeadlineSeconds = 120;
+
+// Slowest sustained rate a client may read a response at: 256 KiB/s, below a
+// Pi on a weak Wi-Fi hotspot (1-3 MB/s).
+constexpr std::size_t kMinSendBytesPerSecond = std::size_t{256} * 1024;
+
+std::chrono::milliseconds send_allowance(std::chrono::milliseconds base, std::size_t bytes, std::size_t min_rate) {
+    if (min_rate == 0) {
+        return base;
+    }
+    return base + std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(bytes * 1000 / min_rate));
+}
 
 // How long a keep-alive connection may sit idle between requests before the
 // worker gives it up. Persistent connections matter for timing: ConformU's
@@ -1281,8 +1294,10 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
     const std::string& response_body = response.body();
     const auto send_deadline =
         std::chrono::steady_clock::now() +
-        (send_deadline_.count() > 0 ? send_deadline_
-                                    : std::chrono::milliseconds(std::chrono::seconds(kSendDeadlineSeconds)));
+        send_allowance(send_deadline_.count() > 0
+                           ? send_deadline_
+                           : std::chrono::milliseconds(std::chrono::seconds(kSendDeadlineSeconds)),
+                       response_headers.size() + response_body.size(), send_min_rate_.value_or(kMinSendBytesPerSecond));
     if (!util::socket_send_allv(conn.fd, response_headers.data(), response_headers.size(), response_body.data(),
                                 response_body.size(), send_deadline,
                                 send_stall_.count() > 0
