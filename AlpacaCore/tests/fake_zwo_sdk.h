@@ -14,6 +14,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/vendor/zwo/shared_open_table.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 
@@ -36,6 +37,11 @@
 
 namespace alpacacore::test {
 
+// Opens go through the production SharedOpenTable (issue #1667), so the camera driver and the dew heater switch
+// share one fake exactly as they share the wrapper: a per-device call outside with_link() is refused, and a retired
+// link is NotConnected before the fake is touched. The raw_* bodies below are the unchecked fake; the public methods of
+// the same name without the prefix run them under the table. get_data_after_exposure() runs unserialised, so a held
+// download never blocks the table.
 class FakeZWOSDK final : public vendor::zwo::ZWOSDK {
 public:
     using CameraInfo = vendor::zwo::ZWOCameraInfo;
@@ -54,6 +60,9 @@ public:
     std::optional<StartPosition> start_readback_override;
     std::function<void(const std::string&)> before_call;
     bool fail_open{false};
+    bool fail_close{false};
+    // The serial the one camera reports, read at every open (a different unit behind the same id changes it).
+    std::string serial{"FAKE-ZWO-17"};
     bool stop_releases_download{true};
     bool auto_complete_exposure{true};
     bool fail_exposure_register_write{false};
@@ -152,6 +161,9 @@ public:
         return start_times_;
     }
 
+    /// Holders of the table's open for @p camera_id (the camera driver and the dew heater each hold one).
+    std::size_t holders(int camera_id) const { return table_.open_count(camera_id); }
+
     int open_count() const {
         std::lock_guard lock(mutex_);
         return open_count_;
@@ -171,11 +183,12 @@ public:
         const std::string& only_model_name, std::vector<vendor::zwo::ZwoUnreadableSlot>*) override {
         hit("enumerate_identified_cameras");
         if (!only_model_name.empty() && only_model_name != camera.name) return {};
-        return {{0, camera.camera_id, camera.name, "FAKE-ZWO-17"}};
+        return {{0, camera.camera_id, camera.name, serial}};
     }
 
     bool get_camera_info_by_id(int camera_id, CameraInfo& info) override {
         hit("get_camera_info_by_id");
+        const auto unchecked = table_.lock_unchecked();
         if (camera.camera_id != camera_id) return false;
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
@@ -185,41 +198,21 @@ public:
 
     bool get_camera_info_by_index(int camera_index, CameraInfo& info) override {
         hit("get_camera_info_by_index");
+        const auto unchecked = table_.lock_unchecked();
         if (camera_index != 0) return false;
         info = camera;
         return true;
     }
 
-    void open_camera(int camera_id) override {
-        hit("open_camera");
-        require_id(camera_id);
-        if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
-        std::lock_guard lock(mutex_);
-        ++open_count_;
-        last_download_time_.reset();  // a reopened camera has no download behind it
-        temperature_reads_since_open_ = 0;
+    vendor::zwo::SharedOpenTable::Opened open_camera_link(int camera_id) override { return table_.open(camera_id); }
+
+    void close_camera_link(int camera_id, std::uint64_t link) override { table_.close(camera_id, link); }
+
+    void with_link(int camera_id, std::uint64_t link, const std::function<void()>& fn) override {
+        table_.with_link(camera_id, link, fn);
     }
 
-    void init_camera(int camera_id) override {
-        hit("init_camera");
-        std::lock_guard lock(mutex_);
-        require_open_locked(camera_id);
-    }
-
-    void close_camera(int camera_id) override {
-        hit("close_camera");
-        require_id(camera_id);
-        {
-            std::lock_guard lock(download_mutex_);
-            closed_during_download_ = closed_during_download_ || download_in_progress_;
-        }
-        std::lock_guard lock(mutex_);
-        if (open_count_ <= 0) throw AlpacaException("fake ZWO camera is not open", AlpacaError::DriverException);
-        --open_count_;
-    }
-
-    std::vector<ControlCaps> get_control_caps(int camera_id) override {
-        hit("get_control_caps");
+    std::vector<ControlCaps> raw_get_control_caps(int camera_id) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         std::vector<ControlCaps> caps = {
@@ -241,8 +234,7 @@ public:
         return caps;
     }
 
-    bool get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) override {
-        hit("get_control_value");
+    bool raw_get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         value = controls_[type];
@@ -258,8 +250,7 @@ public:
         return true;
     }
 
-    void set_control_value(int camera_id, ControlType type, long value, bool is_auto) override {
-        hit("set_control_value");
+    void raw_set_control_value(int camera_id, ControlType type, long value, bool is_auto) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         if (type == ControlType::Exposure && fail_exposure_register_write) {
@@ -277,36 +268,31 @@ public:
         controls_[type] = value;
     }
 
-    ROIDescription get_roi_format(int camera_id) override {
-        hit("get_roi_format");
+    ROIDescription raw_get_roi_format(int camera_id) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         return roi_readback_override.value_or(roi_);
     }
 
-    void set_roi_format(int camera_id, int width, int height, int bin, ImageType type) override {
-        hit("set_roi_format");
+    void raw_set_roi_format(int camera_id, int width, int height, int bin, ImageType type) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         roi_ = {width, height, bin, type};
     }
 
-    StartPosition get_start_pos(int camera_id) override {
-        hit("get_start_pos");
+    StartPosition raw_get_start_pos(int camera_id) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         return start_readback_override.value_or(start_pos_);
     }
 
-    void set_start_pos(int camera_id, int start_x, int start_y) override {
-        hit("set_start_pos");
+    void raw_set_start_pos(int camera_id, int start_x, int start_y) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         start_pos_ = {start_x, start_y};
     }
 
-    void start_exposure(int camera_id, bool) override {
-        hit("start_exposure");
+    void raw_start_exposure(int camera_id, bool) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         if (fail_exposure_start) {
@@ -327,8 +313,7 @@ public:
         }
     }
 
-    void stop_exposure(int camera_id) override {
-        hit("stop_exposure");
+    void raw_stop_exposure(int camera_id) {
         {
             std::lock_guard lock(mutex_);
             require_open_locked(camera_id);
@@ -337,8 +322,7 @@ public:
         if (stop_releases_download) release_download();
     }
 
-    ExposureStatus get_exposure_status(int camera_id) override {
-        hit("get_exposure_status");
+    ExposureStatus raw_get_exposure_status(int camera_id) {
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         if (!exposure_status_error_.empty()) {
@@ -353,8 +337,7 @@ public:
         return status_;
     }
 
-    void get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) override {
-        hit("get_data_after_exposure");
+    void raw_get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) {
         {
             std::unique_lock lock(download_mutex_);
             {
@@ -387,23 +370,79 @@ public:
         }
     }
 
-    void pulse_guide_on(int camera_id, GuideDirection) override {
+    void raw_pulse_guide_on(int camera_id, GuideDirection) {
+        std::lock_guard lock(mutex_);
+        require_open_locked(camera_id);
+    }
+
+    void raw_pulse_guide_off(int camera_id, GuideDirection) {
+        std::lock_guard lock(mutex_);
+        require_open_locked(camera_id);
+    }
+
+    std::string raw_get_serial_number(int camera_id) {
+        std::lock_guard lock(mutex_);
+        require_open_locked(camera_id);
+        return serial;
+    }
+
+    // The per-device interface: each runs its raw_* body under the caller's link (hit() first, so a before_call hook
+    // never holds the table's mutex).
+    std::vector<ControlCaps> get_control_caps(int camera_id) override {
+        hit("get_control_caps");
+        return table_.call(camera_id, [&] { return raw_get_control_caps(camera_id); });
+    }
+    bool get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) override {
+        hit("get_control_value");
+        return table_.call(camera_id, [&] { return raw_get_control_value(camera_id, type, value, is_auto); });
+    }
+    void set_control_value(int camera_id, ControlType type, long value, bool is_auto) override {
+        hit("set_control_value");
+        table_.call(camera_id, [&] { raw_set_control_value(camera_id, type, value, is_auto); });
+    }
+    ROIDescription get_roi_format(int camera_id) override {
+        hit("get_roi_format");
+        return table_.call(camera_id, [&] { return raw_get_roi_format(camera_id); });
+    }
+    void set_roi_format(int camera_id, int width, int height, int bin, ImageType type) override {
+        hit("set_roi_format");
+        table_.call(camera_id, [&] { raw_set_roi_format(camera_id, width, height, bin, type); });
+    }
+    StartPosition get_start_pos(int camera_id) override {
+        hit("get_start_pos");
+        return table_.call(camera_id, [&] { return raw_get_start_pos(camera_id); });
+    }
+    void set_start_pos(int camera_id, int start_x, int start_y) override {
+        hit("set_start_pos");
+        table_.call(camera_id, [&] { raw_set_start_pos(camera_id, start_x, start_y); });
+    }
+    void start_exposure(int camera_id, bool is_dark) override {
+        hit("start_exposure");
+        table_.call(camera_id, [&] { raw_start_exposure(camera_id, is_dark); });
+    }
+    void stop_exposure(int camera_id) override {
+        hit("stop_exposure");
+        table_.call(camera_id, [&] { raw_stop_exposure(camera_id); });
+    }
+    ExposureStatus get_exposure_status(int camera_id) override {
+        hit("get_exposure_status");
+        return table_.call(camera_id, [&] { return raw_get_exposure_status(camera_id); });
+    }
+    void get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) override {
+        hit("get_data_after_exposure");
+        table_.call_unserialised(camera_id, [&] { raw_get_data_after_exposure(camera_id, buffer, buffer_size); });
+    }
+    void pulse_guide_on(int camera_id, GuideDirection direction) override {
         hit("pulse_guide_on");
-        std::lock_guard lock(mutex_);
-        require_open_locked(camera_id);
+        table_.call(camera_id, [&] { raw_pulse_guide_on(camera_id, direction); });
     }
-
-    void pulse_guide_off(int camera_id, GuideDirection) override {
+    void pulse_guide_off(int camera_id, GuideDirection direction) override {
         hit("pulse_guide_off");
-        std::lock_guard lock(mutex_);
-        require_open_locked(camera_id);
+        table_.call(camera_id, [&] { raw_pulse_guide_off(camera_id, direction); });
     }
-
     std::string get_serial_number(int camera_id) override {
         hit("get_serial_number");
-        std::lock_guard lock(mutex_);
-        require_open_locked(camera_id);
-        return "FAKE-ZWO-17";
+        return table_.call(camera_id, [&] { return raw_get_serial_number(camera_id); });
     }
 
     std::string get_sdk_version() override {
@@ -423,6 +462,33 @@ private:
         if (camera_id != camera.camera_id) {
             throw AlpacaException("fake ZWO camera id mismatch", AlpacaError::DriverException);
         }
+    }
+
+    // The table's real open (ASIOpenCamera, then ASIInitCamera) and close.
+    void real_open(int camera_id) {
+        hit("open_camera");
+        require_id(camera_id);
+        if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
+        {
+            std::lock_guard lock(mutex_);
+            ++open_count_;
+            last_download_time_.reset();  // a reopened camera has no download behind it
+            temperature_reads_since_open_ = 0;
+        }
+        hit("init_camera");
+    }
+
+    void real_close(int camera_id) {
+        hit("close_camera");
+        require_id(camera_id);
+        {
+            std::lock_guard lock(download_mutex_);
+            closed_during_download_ = closed_during_download_ || download_in_progress_;
+        }
+        std::lock_guard lock(mutex_);
+        if (open_count_ <= 0) throw AlpacaException("fake ZWO camera is not open", AlpacaError::DriverException);
+        --open_count_;
+        if (fail_close) throw AlpacaException("scripted close failure", AlpacaError::DriverException);
     }
 
     void require_open_locked(int camera_id) const {
@@ -453,6 +519,11 @@ private:
     bool download_entered_{false};
     bool download_in_progress_{false};
     bool closed_during_download_{false};
+    vendor::zwo::SharedOpenTable table_{vendor::zwo::SharedOpenTable::Ops{
+        [this](int id) { real_open(id); },
+        [this](int id) { real_close(id); },
+        [this](int id) { return raw_get_serial_number(id); },
+    }};
 };
 
 // Scripted ZWODewHeaterSdk for the dew heater switch. Thread-safe: the driver
@@ -460,9 +531,9 @@ private:
 // fake from several threads. Setup fields (cameras, heater_by_id,
 // serial_by_id) are written before the driver exists and only read after; the
 // rest is atomic or behind call_mutex_. No method blocks except the explicit delays:
-// open_delay_ms holds open_camera(), read_delay_ms a get_control_value() and write_delay_ms
+// open_delay_ms holds open_camera_link(), read_delay_ms a get_control_value() and write_delay_ms
 // a set_control_value() in flight (getters-never-wait tests). The *_entered flags and `busy`
-// are polled from another thread; close_camera() sets closed_while_busy when a delayed call is
+// are polled from another thread; close_camera_link() sets closed_while_busy when a delayed call is
 // still in flight.
 class FakeDewHeaterSdk final : public vendor::zwo::ZWODewHeaterSdk {
 public:
@@ -501,15 +572,19 @@ public:
         touch(id);
         return false;
     }
-    void open_camera(int id) override {
+    // No table behind this seam (the shared-open case wraps FakeZWOSDK in ZWOSdkDewHeaterSdk): a link is a counter and
+    // with_link() just runs the body; the serial is the one get_serial_number() reads.
+    vendor::zwo::SharedOpenTable::Opened open_camera_link(int id) override {
         const InFlight in_flight(*this, open_delay_ms, open_entered);
         touch(id);
+        const auto it = serial_by_id.find(id);
+        return {next_link_++, it == serial_by_id.end() ? "FAKE1" : it->second};
     }
-    void init_camera(int id) override { touch(id); }
-    void close_camera(int id) override {
+    void close_camera_link(int id, std::uint64_t) override {
         if (busy.load() > 0) closed_while_busy = true;
         touch(id);
     }
+    void with_link(int, std::uint64_t, const std::function<void()>& fn) override { fn(); }
     std::vector<vendor::zwo::ZWOControlCaps> get_control_caps(int id) override {
         touch(id);
         if (!heater_by_id.empty()) {
@@ -569,6 +644,7 @@ private:
 
     mutable std::mutex call_mutex_;
     std::set<int> touched_;
+    std::atomic<std::uint64_t> next_link_{1};
 };
 
 }  // namespace alpacacore::test
