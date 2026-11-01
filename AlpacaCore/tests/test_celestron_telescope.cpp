@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -888,6 +889,7 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             }
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
+            if (op == 0x13) return st.slewing.load() ? std::string("\x00#", 2) : std::string("\xFF#");  // MC_SLEW_DONE
             if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
             // MC_GOTO_FAST: a park whose target lies across the meridian (host-clock LST) flips with it
             if (op == 0x02) {
@@ -1937,12 +1939,22 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
         }
         done.store(true);
     });
+    // Each step waits for two waiters, the paused poller and the slew body: on the poller alone, a slew thread that
+    // starts late finds the steps used up and sleeps on a clock nobody advances (#1949).
+    bool met = true;
     for (int i = 0; i < 400 && !done.load(); ++i) {  // past the forced-slewing window, to the first real read
-        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        if (!clock.wait_for_waiters(2, std::chrono::seconds(5))) {
+            met = done.load();
+            break;
+        }
         clock.advance(std::chrono::milliseconds(250));
         clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
+    if (!met && !clock.drain_until([&] { return done.load(); }, std::chrono::seconds(1), std::chrono::seconds(10))) {
+        std::terminate();  // the slew thread is stuck off the clock: joining it would hang
+    }
     slewer.join();
+    REQUIRE(met);  // the slew body reached the clock within 5 s of every step
     cel::set_slewing_read_hook_for_testing(*driver, nullptr);
     REQUIRE(aborted);
     CHECK_FALSE(driver->get_slewing());
