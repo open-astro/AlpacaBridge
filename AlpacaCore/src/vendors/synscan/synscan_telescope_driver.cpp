@@ -672,23 +672,31 @@ public:
 
     GuideRate get_guide_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        throw_if_link_faulted();
+        throw_if_link_lost_or_faulted();
         return guide_rate_;
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
-        }
-        double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
-        double dec_percent = (rate.dec / kSiderealDegPerSec) * 100.0;
-        if (ra_percent < 0.0 || ra_percent > 100.0 || dec_percent < 0.0 || dec_percent > 100.0) {
-            throw AlpacaException("Guide rate must be between 0 and 1x sidereal",
-                                  AlpacaError::InvalidValue);
-        }
+        validate_guide_rate(rate.ra);
+        validate_guide_rate(rate.dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         guide_rate_ = rate;
+    }
+
+    // One axis under one lock: the base default reads the pair first, and that read refuses a faulted link.
+    void set_guide_rate_right_ascension(double value) override {
+        validate_guide_rate(value);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        guide_rate_.ra = value;
+    }
+
+    void set_guide_rate_declination(double value) override {
+        validate_guide_rate(value);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        guide_rate_.dec = value;
     }
 
     double get_right_ascension() const override {
@@ -770,7 +778,7 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        throw_if_link_faulted();
+        throw_if_link_lost_or_faulted();
         // No handset read here: the poll retries an unread site (decision 0010), so DeviceState costs no transaction.
         return util::local_sidereal_hours(sidereal_wall_now(), site_longitude_cached_);
     }
@@ -794,7 +802,7 @@ public:
 
     double get_site_latitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        throw_if_link_faulted();
+        throw_if_link_lost_or_faulted();
         require_site_known_locked();
         return site_latitude_cached_;
     }
@@ -815,7 +823,7 @@ public:
 
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        throw_if_link_faulted();
+        throw_if_link_lost_or_faulted();
         require_site_known_locked();
         return site_longitude_cached_;
     }
@@ -878,7 +886,7 @@ public:
     }
 
     int get_tracking_rate() const override {
-        throw_if_link_faulted();
+        throw_if_link_lost_or_faulted();
         return 0;
     }
 
@@ -2207,6 +2215,27 @@ private:
     void check_connected() const {
         if (!connected_ || polled_.link_lost()) {
             throw AlpacaException("Not connected to SynScan mount", AlpacaError::NotConnected);
+        }
+    }
+
+    // For a getter with no connection check: a lost link is NotConnected (decision 0009 rule 3), ahead of the fault
+    // text that outlives the loss (rule 5).
+    void throw_if_link_lost_or_faulted() const {
+        if (polled_.link_lost()) {
+            throw AlpacaException("Not connected to SynScan mount", AlpacaError::NotConnected);
+        }
+        throw_if_link_faulted();
+    }
+
+    // One axis of a guide-rate write, checked before the connection so a bad value is InvalidValue even while
+    // disconnected (open-astro#1786).
+    static void validate_guide_rate(double deg_per_sec) {
+        if (!std::isfinite(deg_per_sec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
+        const double percent = (deg_per_sec / kSiderealDegPerSec) * 100.0;
+        if (percent < 0.0 || percent > 100.0) {
+            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
         }
     }
 

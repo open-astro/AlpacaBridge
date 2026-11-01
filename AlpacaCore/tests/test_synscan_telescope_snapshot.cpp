@@ -197,6 +197,7 @@ constexpr auto kSettle = milliseconds(3000);
 void poll_tick(FakeTaskClock& clock) { alpacacore::test::tick(clock, kPollPeriod, kSettle); }
 
 using alpacacore::test::parse_timestamp;
+using alpacacore::test::require_alpaca_error;
 using alpacacore::test::time_stamp_of;
 using alpacacore::test::timed;
 
@@ -398,6 +399,72 @@ TEST_CASE("SynScan snapshot - past the staleness bound DeviceState is empty with
     CHECK(alpacacore::test::settle_connected(*driver, true, seconds(10)));
     CHECK(driver->get_connected());
     CHECK(std::abs(driver->get_right_ascension() - 8.711749) < 1e-5);
+    driver->set_connected(false);
+}
+
+namespace {
+
+// Mutes the handset until the latched fault outlives the staleness bound: Connected false, the fault text kept.
+void lose_link(alpacacore::TelescopeDriver& driver, Handset& st, FakeTaskClock& clock) {
+    st.mute = true;
+    for (int i = 0; i < 3; ++i) sc::poll_status_now_for_testing(driver);
+    clock.advance(alpacacore::util::kLinkStalenessBound + seconds(1));
+    sc::poll_status_now_for_testing(driver);
+    REQUIRE_FALSE(driver.get_connected());
+    REQUIRE_FALSE(driver.get_link_fault().empty());
+}
+
+}  // namespace
+
+// open-astro#1786: the default per-axis setters read the guide rate first, and that read threw the kept fault
+// (DriverException) on a lost link, ahead of both the range check and NotConnected (decision 0009 rule 3).
+TEST_CASE("SynScan snapshot - a lost link refuses a guide-rate write by its value first, then as NotConnected",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    driver->set_guide_rate({0.001, 0.002});
+    lose_link(*driver, *st, clock);
+
+    for (const double bad : {2.0 * 15.0411 / 3600.0, -1.0}) {
+        require_alpaca_error([&] { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.003); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.003); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_guide_rate(); }, alpacacore::AlpacaError::NotConnected);
+
+    st->mute = false;
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_guide_rate().ra == 0.001);
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 3: the getters that serve no frame refuse a lost link as NotConnected, not with the fault text
+// rule 5 keeps after the loss.
+TEST_CASE("SynScan snapshot - a lost link refuses the getters that serve no frame as NotConnected",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    lose_link(*driver, *st, clock);
+
+    require_alpaca_error([&] { (void)driver->get_sidereal_time(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_site_latitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_site_longitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_tracking_rate(); }, alpacacore::AlpacaError::NotConnected);
+    st->mute = false;
     driver->set_connected(false);
 }
 
