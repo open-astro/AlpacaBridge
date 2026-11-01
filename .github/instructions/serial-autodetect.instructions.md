@@ -56,10 +56,10 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   see `closing_`. For the Celestron and SynScan binary payloads, a `Length`
   read, the same field keeps each payload byte within one read slice of the last, so a payload that starts after the
   timeout is read whole. A wait in `tty_read()`/`read_until()` rounds up to the next whole millisecond, never down
-  to a zero `poll()` that spins (#1696). On those five a hangup is not a timeout: the iOptron and SynScan wrappers throw
-  a `DriverException` "<mount> serial link lost (hangup): <errno text>" ("network" over TCP), the Celestron NexStar
-  wrapper loses the link on the tty (decision 0009, `NotConnected`, port released) and throws that `DriverException`
-  over TCP only, and the ZWO mount feeds
+  to a zero `poll()` that spins (#1696). On those five a hangup is not a timeout: the SynScan wrapper throws a
+  `DriverException` "<mount> serial link lost (hangup): <errno text>" ("network" over TCP), the Celestron NexStar and
+  iOptron mount wrappers lose the link on the tty (decision 0009, `NotConnected`, port released; the iOptron serial
+  blind-command ack drain too) and throw that `DriverException` over TCP only, and the ZWO mount feeds
   it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
   is noticed. OnStep keeps its decision 0009 loss on the tty (`lose_link_locked("read failed: <errno text>")`,
   `NotConnected`; a read that ends on silence checks the node, as each empty read slice did) and throws a

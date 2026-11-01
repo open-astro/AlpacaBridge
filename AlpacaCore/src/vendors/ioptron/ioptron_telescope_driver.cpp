@@ -19,6 +19,7 @@
 #include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/gps_status.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/task_clock.h>
@@ -189,12 +190,19 @@ public:
 
     // Reads published_connected_, raised only at the end of a connect and dropped first on a
     // disconnect, so it takes no lock set_connected() holds and stays false while Connecting
-    // is true (#910). The blocking-driver list lives in async_connectable.h.
-    bool get_connected() const override { return published_connected_.load(); }
+    // is true (#910). The blocking-driver list lives in async_connectable.h. A lost link
+    // (decision 0009: the wrapper's lock-free latch) reads false at once.
+    bool get_connected() const override { return published_connected_.load() && !link_lost(); }
 
     // Reads only the published copy under its own narrow mutex, never the coarse
-    // mutex_ that set_connected() holds across the connect.
+    // mutex_ that set_connected() holds across the connect. After a lost link, the
+    // wrapper's loss reason, kept until the next Connect or Disconnect (decision 0009
+    // rule 5); the wrapper's text mutex is a leaf no exchange holds.
     std::string get_link_fault() const override {
+        std::string lost = iOptronProtocolWrapper::instance().link_fault();
+        if (!lost.empty()) {
+            return lost;
+        }
         std::lock_guard<std::mutex> lock(link_fault_mutex_);
         return link_fault_text_;
     }
@@ -250,11 +258,14 @@ public:
         if (connected && consume_pending_disconnect(connected_)) {
             return;
         }
-        if (connected == connected_) {
+        // The connect check reads the link-aware value, so Connect over a lost link
+        // reconnects (decision 0009 rule 4); the disconnect check reads the raw flag, so a
+        // lost link still runs the teardown (#1289).
+        if (connected ? connected_ && !link_lost() : !connected_) {
             ALPACA_LOG_INFO("iOptron", "Already in requested state, returning");
             return;
         }
-        
+
         bool schedule_clock_sync = false;
         bool disconnect_protocol = false;
 
@@ -262,6 +273,22 @@ public:
             ALPACA_LOG_INFO("iOptron", "Attempting to connect...");
             auto& protocol = iOptronProtocolWrapper::instance();
             ALPACA_LOG_INFO("iOptron", "Got protocol instance");
+            if (connected_) {
+                // Connect over a lost link (decision 0009 rule 4): end the dead session first, as
+                // Disconnect does, then connect afresh below, which resets the rest of the session
+                // state. The joins run without mutex_ (the bodies take it); transition_mutex_ keeps
+                // every other connect and disconnect out meanwhile.
+                published_connected_ = false;
+                connected_ = false;
+                lock.unlock();
+                stop_clock_sync();
+                {
+                    std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
+                    reap_slew_dispatch();
+                }
+                protocol.disconnect();  // the port is already released; clears the kept loss reason
+                lock.lock();
+            }
 
             // Auto-detected devices resolve their port or host here, not in the
             // factory: a persisted device is constructed at server start-up,
@@ -371,6 +398,15 @@ public:
                     mount_info_ = protocol.get_mount_info();
                 } catch (...) {
                 }
+                // The reads above log and carry on when they fail; a cable pulled during them lost
+                // the link (the wrapper released the port), so this Connect fails rather than
+                // publishing a mount that is gone. The reason goes with the failure and is not kept.
+                if (link_lost()) {
+                    const std::string reason = protocol.link_fault();
+                    connected_ = false;
+                    protocol.disconnect();
+                    throw AlpacaException("Failed to connect to iOptron mount: " + reason, AlpacaError::NotConnected);
+                }
                 fast_cache_until_ = clock_.now() + kFastCacheGrace;
                 schedule_clock_sync = true;
                 std::string mount_desc = mount_info_.model_name.empty()
@@ -470,8 +506,9 @@ public:
     static constexpr std::string_view kGpsStatusAction = "gps_status";
 
     std::vector<std::string> get_supported_actions() const override {
-        // connected_ is atomic: no mutex_, so a command_* exchange holding it cannot stall this getter.
-        if (!connected_.load()) return {};
+        // connected_ and the wrapper's loss latch are atomic: no mutex_, so a command_* exchange holding it cannot
+        // stall this getter.
+        if (!connected_.load() || link_lost()) return {};
         return {std::string(kGpsStatusAction)};
     }
 
@@ -495,7 +532,7 @@ public:
     }
 
     bool can_action(std::string_view action_name) const override {
-        return connected_.load() && util::is_gps_status_action(action_name);
+        return connected_.load() && !link_lost() && util::is_gps_status_action(action_name);
     }
     
     std::string command_blind(std::string_view command, bool raw) override {
@@ -549,7 +586,7 @@ public:
     
     double get_altitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         refresh_altaz_cache_locked();
         return cached_alt_degrees_;
     }
@@ -574,14 +611,14 @@ public:
     
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         refresh_status_cache_locked();
         return cached_status_.is_at_home;
     }
     
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         auto now = clock_.now();
         if (park_override_until_ > now) {
             return false;
@@ -592,7 +629,7 @@ public:
     
     double get_azimuth() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         refresh_altaz_cache_locked();
         return cached_az_degrees_;
     }
@@ -612,6 +649,15 @@ public:
     bool get_is_pulse_guiding() const override {
         if (!connected_) {
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
+        }
+        // Lock-free like the rest of this getter: the loss latch and the fault flag are atomics and the fault
+        // text has its own leaf mutex (decision 0009 rules 1 and 3). It does not run the staleness loss (rule 2b):
+        // lose_link() takes the wrapper mutex, which every serial exchange holds, so the next check_connected() call
+        // finds a stale fault instead.
+        throw_if_link_lost();
+        if (device_faulted_.load()) {
+            throw AlpacaException("Mount communications compromised: " + published_fault_text(),
+                                  AlpacaError::DriverException);
         }
         if (pulse_guiding_active_.load(std::memory_order_acquire)) {
             auto now_ns = clock_.now().time_since_epoch().count();
@@ -685,7 +731,7 @@ public:
     
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         double dec_value = 0.0;
         if (pulse_guiding_hold_dec_valid_ && clock_.now() < pulse_guiding_hold_dec_until_) {
             dec_value = pulse_guiding_hold_dec_degrees_;
@@ -726,7 +772,7 @@ public:
     
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         return get_tracking_locked();
     }
     
@@ -801,7 +847,7 @@ public:
     
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         double ra_value = 0.0;
         if (pulse_guiding_hold_ra_valid_ && clock_.now() < pulse_guiding_hold_until_) {
             ra_value = pulse_guiding_hold_ra_hours_;
@@ -843,7 +889,7 @@ public:
     
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
 
         // Pier side only changes across a slew, flip, park or home, and every
         // motion initiator invalidates the position cache, so a position a
@@ -1136,7 +1182,7 @@ public:
 
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         // open-astro#575: surface a stored async-slew failure as an error
         // instead of a silent false, until AbortSlew or a new slew initiator
         // clears it (see last_slew_error_).
@@ -1212,8 +1258,10 @@ public:
                     position_cache_valid_ = false;
                     return true;
                 }
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                // Best-effort trim; fall through and report slew complete.
+            } catch (const std::exception&) {
+                // Best-effort trim; fall through and report slew complete, unless the link was lost: then
+                // NotConnected, never a "not slewing" from a mount that is gone.
+                throw_if_link_lost();
             }
         }
         slew_in_progress_ = false;
@@ -1260,7 +1308,7 @@ public:
     
     int get_tracking_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected(LatchProbe::Read);
         auto now = clock_.now();
         if (tracking_rate_override_until_ > now && status_cache_valid_) {
             return static_cast<int>(cached_status_.tracking_rate);
@@ -1365,6 +1413,7 @@ public:
             }
             clear_device_fault_locked();
         } catch (const std::exception& e) {
+            throw_if_link_lost();
             record_device_fault_locked("Park", e.what());
             throw AlpacaException(std::string("Failed to park mount: ") + e.what(),
                                   AlpacaError::DriverException);
@@ -1393,6 +1442,7 @@ public:
                 park_target_valid_ = true;
             } catch (const std::exception&) {
                 park_target_valid_ = false;
+                throw_if_link_lost();  // :MP1# went out, but a pulled cable is reported in this call
             }
         }
     }
@@ -1428,6 +1478,7 @@ public:
             protocol.stop_slewing();
             clear_device_fault_locked();
         } catch (const std::exception& e) {
+            throw_if_link_lost();
             record_device_fault_locked("AbortSlew", e.what());
             throw AlpacaException(std::string("AbortSlew failed: ") + e.what(),
                                   AlpacaError::DriverException);
@@ -1738,6 +1789,7 @@ public:
             protocol.unpark();
             clear_device_fault_locked();
         } catch (const std::exception& e) {
+            throw_if_link_lost();
             record_device_fault_locked("Unpark", e.what());
             throw AlpacaException(std::string("Failed to unpark mount: ") + e.what(),
                                   AlpacaError::DriverException);
@@ -1781,14 +1833,78 @@ private:
     // 11-16 arcsec east RA settle, Dec within 0.2 arcsec, park clean).
     bool goto_refine_active() const { return mount_info_.model_code == "0036" || mount_info_.model_code == "0012"; }
 
-    void check_connected() const {
+    // Whether a call may try the mount again while a fault is latched (decision 0009 rule 1). Read: the getters that
+    // already read position, Alt/Az or status from the mount. Every other call, writes included, only refuses.
+    enum class LatchProbe : std::uint8_t { Refuse, Read };
+
+    // At most one probe per this interval while latched, on the task clock: a probe that times out holds mutex_ for
+    // the read timeout (5 s by default), so a client polling at 1 Hz is not blocked on every call, and a mount that
+    // answers again is found within 5 s of polling, five probes before util::kLinkStalenessBound loses the link.
+    static constexpr std::chrono::seconds kFaultProbeInterval{5};
+
+    // NotConnected while disconnected and once the link is lost (decision 0009 rule 3), checked before any cache;
+    // DriverException while a fault is latched (rule 1), which past util::kLinkStalenessBound loses the link (rule 2).
+    // While latched, a LatchProbe::Read call once per kFaultProbeInterval sends one :GLS# status read instead of
+    // refusing: a good reply clears the latch (note_device_read_ok_locked()) and the call goes on; a failed one keeps
+    // it and throws DriverException; a hangup over serial is a lost link (NotConnected). Between probes it refuses
+    // with nothing sent. Caller holds mutex_, so the probe takes mutex_ -> wrapper mutex like every exchange.
+    void check_connected(LatchProbe probe = LatchProbe::Refuse) const {
         if (!connected_) {
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
         }
+        throw_if_link_lost();
         if (device_faulted_) {
+            lose_link_if_fault_stale();
+            if (probe == LatchProbe::Read && clock_.now() >= next_fault_probe_) {
+                next_fault_probe_ = clock_.now() + kFaultProbeInterval;
+                refresh_status_cache_locked(true);
+                return;
+            }
             throw AlpacaException("Mount communications compromised: " + last_device_error_,
                                   AlpacaError::DriverException);
         }
+    }
+
+    // Decision 0009 rule 2a: the wrapper saw the serial port gone (or lose_link() ran) and released it. Lock-free.
+    static bool link_lost() { return !iOptronProtocolWrapper::instance().link_alive(); }
+
+    // A lost link is NotConnected with the loss reason: never a DriverException that counts toward the fault latch,
+    // and never a value read before the loss. Called first in every catch that turns a failed exchange into a
+    // DriverException or into a value or "slew done" served instead (the wedged-park finalizer included, whose
+    // caller serves the status it just read). The catches that only skip optional work (the GOTO trim's guide-rate
+    // fallback, the calibrations, the clock-sync retries, the connect's reads, which the connect follows with its own
+    // loss check) and the slew body, which records its failed dispatch, leave a loss to the next call through
+    // check_connected(); Connected reads false at once either way.
+    static void throw_if_link_lost() {
+        auto& protocol = iOptronProtocolWrapper::instance();
+        if (protocol.link_alive()) {
+            return;
+        }
+        const std::string reason = protocol.link_fault();
+        throw AlpacaException(
+            reason.empty() ? std::string("Mount link lost; Connect again once the mount is back") : reason,
+            AlpacaError::NotConnected);
+    }
+
+    // Decision 0009 rule 2b: a latched fault that has stood past util::kLinkStalenessBound on the task clock is a lost
+    // link, found by the next call through check_connected() (no poll). The wrapper releases the port and keeps the
+    // reason (rules 3 and 5), then this throws NotConnected. No driver lock of its own: under mutex_ the order is
+    // mutex_ -> wrapper mutex, as for every exchange; link_fault_mutex_ is a leaf released before the wrapper call.
+    void lose_link_if_fault_stale() const {
+        const auto since = std::chrono::steady_clock::time_point(
+            std::chrono::steady_clock::duration(device_fault_since_ticks_.load()));
+        if (!device_faulted_ || clock_.now() - since < util::kLinkStalenessBound) {
+            return;
+        }
+        iOptronProtocolWrapper::instance().lose_link("Mount fault stood for " +
+                                                     std::to_string(util::kLinkStalenessBound.count()) +
+                                                     " s with no good reply: " + published_fault_text());
+        throw_if_link_lost();
+    }
+
+    std::string published_fault_text() const {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        return link_fault_text_;
     }
 
     void ensure_not_parked_locked(const char* action) const {
@@ -1836,6 +1952,12 @@ private:
         ++device_fault_count_;
         last_device_error_ = std::string(context) + ": " + detail;
         if (device_fault_count_ >= kDeviceFaultThreshold) {
+            if (!device_faulted_) {
+                // The staleness bound runs from the latch (decision 0009 rule 2b), on the task clock; the first
+                // probe one interval after it, since the read that latched has just failed.
+                device_fault_since_ticks_.store(clock_.now().time_since_epoch().count());
+                next_fault_probe_ = clock_.now() + kFaultProbeInterval;
+            }
             device_faulted_ = true;
             ALPACA_LOG_ERROR("iOptron", "Device fault (latched after " + std::to_string(device_fault_count_) +
                                             " consecutive failures) - " + last_device_error_);
@@ -1861,10 +1983,19 @@ private:
     }
 
     // open-astro#728: a successful read ends the run of failures, so only
-    // consecutive failures reach the threshold. It does not clear a latch that
-    // has already tripped; only AbortSlew or a reconnect does (Park and Unpark
-    // also clear it on success, but check_connected() refuses them while it is set).
-    void note_device_read_ok_locked() const { device_fault_count_ = 0; }
+    // consecutive failures reach the threshold. A good reply also clears a
+    // latch that has tripped (decision 0009 rule 1): while latched it comes
+    // from a check_connected() probe. AbortSlew's sent stop and a reconnect
+    // clear it too (Park and Unpark also clear it on success, but
+    // check_connected() refuses them while it is set).
+    void note_device_read_ok_locked() const {
+        if (device_faulted_) {
+            ALPACA_LOG_INFO("iOptron", "Device fault cleared: the mount answered again");
+            clear_device_fault_locked();
+            return;
+        }
+        device_fault_count_ = 0;
+    }
 
     void prefetch_mount_state_locked() {
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -2107,6 +2238,7 @@ private:
             last_position_update_ = now;
             note_device_read_ok_locked();
         } catch (const std::exception& e) {
+            throw_if_link_lost();
             record_device_fault_locked("Position", e.what());
             throw AlpacaException(std::string("Failed to refresh mount position: ") + e.what(),
                                   AlpacaError::DriverException);
@@ -2131,6 +2263,7 @@ private:
             last_altaz_update_ = now;
             note_device_read_ok_locked();
         } catch (const std::exception& e) {
+            throw_if_link_lost();
             record_device_fault_locked("AltAz", e.what());
             throw AlpacaException(std::string("Failed to refresh mount Alt/Az: ") + e.what(),
                                   AlpacaError::DriverException);
@@ -2153,6 +2286,7 @@ private:
             last_status_update_ = now;
             note_device_read_ok_locked();
         } catch (const std::exception& e) {
+            throw_if_link_lost();
             record_device_fault_locked("Status", e.what());
             throw AlpacaException(std::string("Failed to refresh mount status: ") + e.what(),
                                   AlpacaError::DriverException);
@@ -2203,8 +2337,10 @@ private:
             if (cached_status_.is_parked) {
                 park_finalize_pending_ = false;
             }
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-            // Best-effort — leave the flag armed and retry on the next refresh.
+        } catch (const std::exception&) {
+            // A pulled cable is NotConnected, never the status read just before it served as AtPark or Slewing.
+            throw_if_link_lost();
+            // Otherwise best-effort: leave the flag armed and retry on the next refresh.
         }
     }
 
@@ -2240,6 +2376,7 @@ private:
             last_site_info_fetch_ = now;
             note_device_read_ok_locked();
         } catch (const std::exception& e) {
+            throw_if_link_lost();
             if (site_info_valid_) {
                 ALPACA_LOG_WARN("iOptron", std::string("Failed to read site info; using cached values: ") + e.what());
                 last_site_info_fetch_ = now;
@@ -2407,6 +2544,7 @@ private:
         try {
             refresh_position_cache_locked(true);
         } catch (const std::exception&) {
+            throw_if_link_lost();  // a synchronous slew ends with NotConnected, not "position stabilized"
             return false;
         }
         const double ra_delta_hours = std::abs(util::shortest_ra_delta_hours(slew_target_ra_hours_, cached_ra_hours_));
@@ -2914,7 +3052,12 @@ private:
     mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;
     mutable double slew_target_dec_degrees_ = 0.0;
-    mutable bool device_faulted_ = false;
+    // Written under mutex_; atomic so the lock-free IsPulseGuiding can refuse on a fault (decision 0009 rule 1).
+    mutable std::atomic<bool> device_faulted_{false};
+    // When the latch tripped, in task-clock ticks (decision 0009 rule 2b); read only while device_faulted_ is set.
+    mutable std::atomic<std::chrono::steady_clock::rep> device_fault_since_ticks_{0};
+    // The earliest task-clock time check_connected() may probe a latched fault; under mutex_.
+    mutable std::chrono::steady_clock::time_point next_fault_probe_{};
     mutable int device_fault_count_ = 0;
     mutable std::string last_device_error_;
     mutable std::mutex link_fault_mutex_;
