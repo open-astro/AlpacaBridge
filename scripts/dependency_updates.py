@@ -13,7 +13,7 @@ graph, so there is one inventory. What is checked:
   were derived from, the gphoto2 tool, the ConformU beta build): provider ``github-file`` (the
   newest commit on a file), ``hash`` (sha256 of the document, or of an HTML page's visible text),
   ``page`` (the highest version a regex matches) or ``github-release`` (the repository's latest
-  release), against the recorded ``baseline``;
+  release, or its highest including pre-releases when the baseline is one), against the recorded ``baseline``;
 - every entry in its ``system_libraries`` list (libraries the build takes from Debian, such as
   LibRaw): the upstream repository's latest release against the recorded ``baseline``, the
   version Debian trixie ships or a newer upstream release already reviewed for the driver.
@@ -105,16 +105,16 @@ def is_newer(latest: str, current: str) -> bool:
     return lt > ct or (lt == ct and cpre and not lpre)
 
 
-def highest(versions: list[str]) -> str | None:
+def highest(versions: list[str], include_pre: bool = False) -> str | None:
     stable = []
     for v in versions:
         try:
             parts, pre = parse_version(v)
         except ValueError:
             continue
-        if not pre:
-            stable.append((parts, v))
-    return max(stable)[1] if stable else None
+        if include_pre or not pre:
+            stable.append((parts, not pre, v))  # a final release outranks its own pre-releases
+    return max(stable)[2] if stable else None
 
 
 def http_fetch(url: str, timeout: int = PAGE_TIMEOUT) -> tuple[bytes, str]:
@@ -147,7 +147,17 @@ def http_get(url: str) -> str:
     return http_fetch(url)[0].decode("utf-8", errors="replace")
 
 
-def latest_github(repo: str, get: HttpGet) -> str:
+def latest_github(repo: str, get: HttpGet, pre: bool = False) -> str:
+    """``pre``: the baseline is a pre-release, and /releases/latest skips those, so read the list."""
+    if pre:
+        try:
+            rels = json.loads(get(f"https://api.github.com/repos/{repo}/releases?per_page=100"))
+            best = highest([r["tag_name"] for r in rels if not r.get("draft")], include_pre=True)
+            if best:
+                return best
+        except FetchError as e:
+            if "HTTP 404" not in str(e):
+                raise
     try:
         tag = json.loads(get(f"https://api.github.com/repos/{repo}/releases/latest"))["tag_name"]
         if highest([tag]):
@@ -300,7 +310,7 @@ def check(t: dict, get: HttpGet, fetch: Fetch | None = None) -> dict:
             parse_version(t["current"])  # a pin that is no version (a commit SHA) is a broken entry
         kind = t["check"][0]
         if kind == "github":
-            latest = latest_github(t["check"][1], get)
+            latest = latest_github(t["check"][1], get, parse_version(t["current"])[1])
         elif kind == "json":
             latest = latest_json(*t["check"][1:], get)
         elif kind == "github-file":
@@ -781,6 +791,12 @@ def self_test() -> int:
     assert is_newer("4.5.1", "4.5.1-beta") and not is_newer("v4.5.0", "4.5.1-beta")
     assert not is_newer("2.3.0", "2.3") and is_newer("2.3.1", "2.3")
     assert highest(["v1.2", "v1.10", "v2.0-rc1", "nightly"]) == "v1.10"
+    assert highest(["4.6.0-rc.1", "4.5.3", "4.6.0"], include_pre=True) == "4.6.0"
+    assert highest(["4.6.0-rc.1", "4.5.3"], include_pre=True) == "4.6.0-rc.1"
+    # A pre-release baseline (ConformU 4.6.0-rc.1): not broken, 4.5.3 is no update, final 4.6.0 is.
+    assert parse_version("4.6.0-rc.1") == ((4, 6), True)
+    assert not is_newer("4.5.3", "4.6.0-rc.1") and is_newer("4.6.0", "4.6.0-rc.1") and is_newer("4.6.1", "4.6.0-rc.1")
+    assert not is_newer("4.6.0-rc.1", "4.6.0-rc.1")
 
     pages = {
         "https://api.github.com/repos/a/b/releases/latest": json.dumps({"tag_name": "v2.0.0"}),
@@ -1241,6 +1257,21 @@ def self_test() -> int:
     reconcile([lib], f, f.issues)
     assert f.issues[0]["title"] == "Update libgphoto2 2.5.31 -> v2.5.34" and f.issues[0]["labels"] == UPDATE_LABELS
     assert "Debian" in f.issues[0]["body"] and "baseline" in f.issues[0]["body"], "says it is Debian-provided"
+
+    # --- a pre-release baseline reads /releases (the list), not /releases/latest (ConformU 4.6.0-rc.1) ---
+    cu_url = "https://api.github.com/repos/ASCOMInitiative/ConformU/releases?per_page=100"
+    pages[cu_url] = json.dumps([{"tag_name": "v4.5.3"}, {"tag_name": "v4.6.0-rc.1"}])
+    pages["https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest"] = json.dumps({"tag_name": "v4.5.3"})
+    cu_table = {"sdks": [], "documents": [{"name": "conformu", "baseline": "4.6.0-rc.1",
+                                            "check": {"provider": "github-release", "repo": "ASCOMInitiative/ConformU"}}]}
+    cu_t = {t["key"]: t for t in targets({"manifests": {}}, cu_table)[0]}["doc:conformu"]
+    cu_r = check(cu_t, get)
+    assert cu_r["error"] is None and cu_r["latest"] == "v4.6.0-rc.1" and not differs(cu_r), cu_r  # (a) and (b)
+    pages[cu_url] = json.dumps([{"tag_name": "v4.6.0"}, {"tag_name": "v4.6.0-rc.1"}, {"tag_name": "v4.5.3"}])
+    cu_r = check(cu_t, get)
+    assert cu_r["latest"] == "v4.6.0" and differs(cu_r), cu_r  # (c)
+    pages[cu_url] = json.dumps([{"tag_name": "v4.7.0", "draft": True}, {"tag_name": "v4.6.0-rc.1"}])
+    assert check(cu_t, get)["latest"] == "v4.6.0-rc.1", "a draft is not a release"
 
     # Issue tables have a real header row: an empty "| | |" header renders as a blank row (#1134).
     for body in (update_body({**lib, "system": False, "where": "w"}), system_body(lib),
