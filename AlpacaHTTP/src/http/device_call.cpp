@@ -16,6 +16,7 @@
 #include <alpacahttp/util/error_mapping.h>
 #include <alpacahttp/util/log_text.h>
 #include <alpacahttp/util/logging_adapter.h>
+#include <alpacahttp/util/url_decode.h>
 
 #include <algorithm>
 #include <cctype>
@@ -42,25 +43,7 @@ std::string to_lower_copy(std::string value) {
     return value;
 }
 
-namespace {
-std::string url_decode(const std::string& value) {
-    std::string result;
-    result.reserve(value.size());
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        if (value[i] == '%' && i + 2 < value.size()) {
-            std::string hex = value.substr(i + 1, 2);
-            char decoded = static_cast<char>(std::strtol(hex.c_str(), nullptr, 16));
-            result.push_back(decoded);
-            i += 2;
-        } else if (value[i] == '+') {
-            result.push_back(' ');
-        } else {
-            result.push_back(value[i]);
-        }
-    }
-    return result;
-}
-}  // namespace
+using util::url_decode;
 
 std::uint32_t parse_client_transaction_id(const std::string& value) {
     if (value.empty()) {
