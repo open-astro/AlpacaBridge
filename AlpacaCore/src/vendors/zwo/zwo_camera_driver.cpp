@@ -236,7 +236,8 @@ public:
                 ~ClearInFlight() { flag.store(false); }
             } clear_in_flight{connect_in_flight_};
 
-            stop_pulse_timer();  // before the open below, so no turn-off from the old link outlives it
+            // Before the open below, so no turn-off from the old link outlives it.
+            stop_pulse_timer();
             release_open();  // an open left from a lost link: the table retired it, so this only forgets it
             {
                 std::lock_guard<std::mutex> lost(lost_mutex_);
