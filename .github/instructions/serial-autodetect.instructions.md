@@ -73,7 +73,7 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   (`drain_network_stale`), and the iOptron and ZWO mount TCP probes (`probe_ioptron_network`, `probe_network_mount`).
   The Sky-Watcher connected path and the Celestron CGX loops (decision 0017 rule 9) and the stream readers (Wanderer,
   Gemini PDH) keep their own shape.
-- `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
+- `scripts/check_serial_port_ownership.py` (the `static-checks` CI job and pre-flight gate 2e2)
   fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment, a
   pre-#1202 `mark_serial_port_*` call or a raw `read()`/`write()` on a link's fd (`x.fd()`, `x->fd()`,
   `serial_fd_`) anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the two helper headers.

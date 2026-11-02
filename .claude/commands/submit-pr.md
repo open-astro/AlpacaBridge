@@ -39,7 +39,7 @@ git log @{u}..HEAD --oneline 2>/dev/null || echo "NO_UPSTREAM"
 
 If this branch adds or modifies any ConformU files under `AlpacaCore/conformu/**` or `AlpacaHTTP/conformu/**`, every report must pass before the PR can be submitted. Merging a failing report misleads downstream consumers of `SUPPORTED-DRIVERS.md` (or `AlpacaHTTP/conformu/README.md`'s own compliance claim) into thinking a driver or endpoint is validated.
 
-This is checked here so a bad report never reaches CI in the first place, but it is **not** only a prompt-level rule anymore: the `conformu-reports` CI job runs the identical check (`scripts/check_conformu_reports.py`) on every PR and blocks the merge regardless of how the PR was opened. Run it directly instead of doing this by hand:
+This is checked here so a bad report never reaches CI in the first place, but it is **not** only a prompt-level rule anymore: the ConformU step of the `static-checks` CI job runs the identical check (`scripts/check_conformu_reports.py`) on every PR and blocks the merge regardless of how the PR was opened. Run it directly instead of doing this by hand:
 
 ```bash
 python3 scripts/check_conformu_reports.py main
@@ -288,11 +288,11 @@ CI runs a strict set of gates on every PR (`.github/workflows/ci.yml`), and the 
 The script prints a `[PASS]/[FAIL]/[SKIP]` summary. The quick set, in order:
 
 1. **clang-format** changed lines (CI `format`)
-2. **Python gates**: Unicode / Trojan-Source scan (CI `unicode`), stress registration, `Falsified by` and PR template (when `PR_BODY_FILE` is set), ConformU reports, docs drift, connect-error hook, layering, contract sweep (each its CI job of the same name)
+2. **Python gates**: Unicode / Trojan-Source scan, stress registration, `Falsified by` and PR template (when `PR_BODY_FILE` is set), ConformU reports, docs drift, connect-error hook, layering, contract sweep (each a step of CI `static-checks`, named after its gate; `Falsified by` and the PR template run in `pr-body.yml`)
 3. **Beta VERSION split** (`cmake -P` only, no configure; CI `build-test` step)
 4. **cppcheck** changed files (CI `cppcheck`)
-5. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
-6. **javascript** — `node --check` of web UI JS AND `node --test AlpacaHTTP/tests/web/*.test.js` (the file form -- the directory form breaks on Node 22), if either `AlpacaHTTP/web/*.js` or `AlpacaHTTP/tests/web/*.js` changed (CI `javascript`)
+5. **shellcheck** — only if shell scripts changed (CI `static-checks`)
+6. **javascript** — `node --check` of web UI JS AND `node --test AlpacaHTTP/tests/web/*.test.js` (the file form -- the directory form breaks on Node 22), if either `AlpacaHTTP/web/*.js` or `AlpacaHTTP/tests/web/*.js` changed (CI `static-checks`)
 7. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
 
 The build and test gates are reported `[SKIP] ... (quick run; PREFLIGHT_FULL=1 runs it, CI always does)`: both `run_all_tests.sh` passes (CI `build-test`, `build-vendors`), clang-tidy and the ASan+UBSan pass (CI `sanitizers`). `PREFLIGHT_FULL=1` runs them too on an arm64 Linux host; they are full rebuilds and the slow part. `build-vendors` in CI builds instrumented for gcov with atomic counters and the full pre-flight does not, so a test that only fails instrumented can pass locally and fail CI.
