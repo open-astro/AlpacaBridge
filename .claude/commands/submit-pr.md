@@ -557,6 +557,13 @@ Then ask the user for approval to merge; on yes:
 gh pr merge <number> --merge
 ```
 
+When `main` requires a merge queue (`ci-gates`, "Merge queue"), this adds the PR to the queue
+instead of merging it, and the queue runs `ci.yml` on the merged commit, including
+`sanitizers-tsan` and `package-deb`, which a PR into `main` skips. Never pass `--admin`: it
+bypasses the queue. Wait for the PR to merge or leave the queue with the background block in
+`/pr-checker`'s Step 3, and treat a removal like a red CI check: fix, push, poll for the fresh
+verdict, merge again. Never update or rebase the branch because `main` moved.
+
 ### Follow-up issue format
 
 Match the established pattern (e.g. issues #135–#137 from PR #134). One issue per finding:

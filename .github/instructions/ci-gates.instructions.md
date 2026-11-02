@@ -31,7 +31,8 @@ and fails before the agent runs when one is red, so a red push costs no review. 
 is green: a waited-for job that is skipped, neutral or ends any other way counts as red, so a
 `needs:` or `if:` that skips one cannot let the review run on a red head. The step
 matches those jobs' `name:` in `ci.yml`, so renaming one means updating the list in the same
-PR (the step fails at once with "never reported" otherwise).
+PR (the step fails at once with "never reported" otherwise). The list holds only jobs that run on
+every PR into `main`: a job that skips there (`sanitizers-tsan`, `package-deb`) would read as red.
 `/pr-checker` and `/submit-pr` read that failure as poll exit `4` (CI red: fix and push) or
 `5` (CI did not finish in time: approve or wait, then re-run the review), never as a broken
 review workflow.
@@ -43,7 +44,19 @@ Each gate script's docstring (for timeouts and the nightly job, the workflow fil
 authoritative description of what it enforces; the bullets below hold only what an
 author must do. Read the docstring before changing a gate.
 
-- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `serial-port-ownership` (`scripts/check_serial_port_ownership.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `serial-port-ownership` (`scripts/check_serial_port_ownership.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- **Merge queue** (`main` only): a PR into `main` lands through GitHub's merge queue, which runs
+  `ci.yml` on the queued merge commit (`merge_group`) and merges only when the required checks
+  pass on it. So a branch never has to be brought up to date with `main` before it merges: never
+  rebase or update a PR because `main` moved, only to resolve a real conflict. `sanitizers-tsan`
+  and `package-deb` skip a PR into `main` and run in the queue (and on a PR into `stable/**`,
+  which has no queue): a failure there removes the PR from the queue rather than reddening the
+  PR. Run them on a branch before queueing with `gh workflow run ci.yml --ref <branch>`; that
+  works only for a branch in this repository, so for a fork PR the queue is their first run.
+  `format`, `clang-tidy`, `conformu-reports` and cppcheck's check step diff against
+  `$GITHUB_BASE_REF`, which a `merge_group` run does not set, so they stay `pull_request` only; a
+  job skipped by its `if:` still satisfies a required check. Keep `cancel-in-progress` off for
+  `merge_group`, so a run the queue waits on is never cancelled.
 - **PR body gates** (`.github/workflows/pr-body.yml`, not required checks): `falsified-by`
   (`scripts/check_falsified_by.py`, pre-flight gate 2b2) needs a `## Falsified by` line for
   every test case the PR adds or renames (see the [testing rules](testing.instructions.md#new-test-cases-name-their-falsifying-mutation));
@@ -98,8 +111,8 @@ author must do. Read the docstring before changing a gate.
   #1313): `build-vendors` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
   (`-DNDEBUG`) nightly, off the PR path. The nightly `build` job runs only after `test-optimized`
   passes, so a red suite publishes nothing. It also installs the `.deb` it
-  builds and runs `scripts/check_bundled_gphoto.sh` before it publishes, as `package-deb` does on
-  every PR, so a nightly `.deb` that fails the check is never published.
+  builds and runs `scripts/check_bundled_gphoto.sh` before it publishes, as `package-deb` does before
+  every merge, so a nightly `.deb` that fails the check is never published.
 - **ConformU against the fake Sky-Watcher mount** (`.github/workflows/conformu-fake.yml`, issue #1637): the
   test-only `fake_skywatcher_server` over `FakeSkyWatcherMount`, driven by `scripts/run_fake_conformu.sh`. It is not
   a job in `ci.yml`: it runs on a PR only when the PR touches the workflow's `paths:` list (the Sky-Watcher driver,
