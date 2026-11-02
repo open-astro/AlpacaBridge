@@ -446,9 +446,11 @@ Handle them like this:
    produces one, it counts as one cleanup round.
 5. If the approval has **no** mechanical notes, skip straight to the merge below.
 
-Then:
+Then set `QUEUE` (the Step 1.3 command; set it again here, because a loop that went straight from
+Step 1.4 to this step never ran Step 1.3) and read the merge state:
 
 ```bash
+QUEUE=$(gh api repos/open-astro/AlpacaBridge/rules/branches/main --jq '[.[].type] | index("merge_queue") != null')
 gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft) mergeable=\(.mergeable) state=\(.mergeStateStatus)"'
 ```
 
@@ -474,9 +476,9 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
       --jq '.data.repository.pullRequest | "\(.state) \(.isInMergeQueue) \(.autoMergeRequest != null) \(.timelineItems.nodes[0].createdAt // "-") \(.timelineItems.nodes[0].reason // "-")"')
     read -r ST INQ AUTO AT REASON <<<"$R"
     [ "$ST" = MERGED ] && { echo "merged"; exit 0; }
-    # Out of the queue with no auto-merge waiting, or removed after this wait began
+    # Out of the queue with no auto-merge waiting, or removed since this wait began
     # (a removal that leaves auto-merge on would otherwise wait out the budget).
-    if [ "$ST $INQ" = "OPEN false" ] && { [ "$AUTO" = false ] || { [ "$AT" != - ] && [[ "$AT" > "$SINCE" ]]; }; }; then
+    if [ "$ST $INQ" = "OPEN false" ] && { [ "$AUTO" = false ] || { [ "$AT" != - ] && ! [[ "$AT" < "$SINCE" ]]; }; }; then
       echo "left the merge queue: $REASON" >&2; exit 6
     fi
     sleep 30
