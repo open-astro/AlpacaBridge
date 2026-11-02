@@ -17,7 +17,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <future>
 #include <limits>
 #include <memory>
 #include <set>
@@ -442,7 +444,116 @@ struct ExposingCamera {
     }
 };
 
+// Only armed for poll_exposure_status's unlocked call, never a loss under mutex_ or the trigger lock.
+struct LossPublicationGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool arrived{false};
+    bool released{false};
+    bool timed_out{false};
+
+    void pause() noexcept {
+        std::unique_lock lock(mutex);
+        arrived = true;
+        cv.notify_all();
+        timed_out = !cv.wait_for(lock, std::chrono::seconds(2), [&] { return released; });
+    }
+    bool wait_for_arrival() {
+        std::unique_lock lock(mutex);
+        return cv.wait_for(lock, std::chrono::seconds(2), [&] { return arrived; });
+    }
+    void release() {
+        std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+
+void check_loss_publication_after_transition(bool reconnect) {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    auto gate = std::make_shared<LossPublicationGate>();
+    auto camera =
+        alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock, {[gate] { gate->pause(); }});
+    camera->set_connected(true);
+    sdk.auto_complete_exposure = false;
+    camera->start_exposure(30.0, true);
+
+    // A peer observes removal first, retiring the shared open. The camera's next status call
+    // therefore throws NotConnected before its raw SDK body, without entering the retry burst.
+    const int id = sdk.camera.camera_id;
+    const auto peer = sdk.open_camera_link(id);
+    sdk.removed = true;
+    require_alpaca_error(
+        [&] {
+            sdk.with_link(id, peer.link, [&] {
+                long value = 0;
+                bool automatic = false;
+                (void)sdk.get_control_value(id, FakeZWOSDK::ControlType::Gain, value, automatic);
+            });
+        },
+        NotConnected);
+    sdk.close_camera_link(id, peer.link);
+
+    std::packaged_task<void()> report([&] {
+        try {
+            (void)camera->get_image_ready();
+        } catch (const alpacacore::AlpacaException&) {
+            // The racing lifecycle may clear the pending exposure; only LinkFault/state are asserted here.
+        }
+    });
+    auto report_done = report.get_future();
+    std::thread reporter(std::move(report));
+    struct ReleaseAndJoin {
+        LossPublicationGate& gate;
+        std::thread& reporter;
+        ~ReleaseAndJoin() {
+            gate.release();
+            reporter.join();
+        }
+    } cleanup{*gate, reporter};
+    REQUIRE(gate->wait_for_arrival());
+    CHECK_FALSE(camera->get_connected());
+
+    std::packaged_task<void()> transition([&] {
+        camera->set_connected(false);  // idempotent: the loss has already closed the epoch
+        if (reconnect) {
+            sdk.replug({{23, kSerial}});
+            camera->set_connected(true);
+        }
+    });
+    auto transition_done = transition.get_future();
+    std::thread lifecycle(std::move(transition));
+    const bool completed = transition_done.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    if (!completed) gate->release();
+    lifecycle.join();
+    REQUIRE(completed);
+    transition_done.get();
+    CHECK(camera->get_connected() == reconnect);
+    CHECK(camera->get_link_fault().empty());
+
+    gate->release();
+    REQUIRE(report_done.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    report_done.get();
+    CHECK_FALSE(gate->timed_out);
+    CHECK(camera->get_connected() == reconnect);
+    CHECK(camera->get_link_fault().empty());
+    camera->set_connected(false);  // also audit the ordinary Disconnect branch after a successful reconnect
+    CHECK_FALSE(camera->get_connected());
+    CHECK(camera->get_link_fault().empty());
+}
+
 }  // namespace
+
+TEST_CASE("ZWO Camera Driver - a delayed loss reporter cannot restore LinkFault after reconnect",
+          "[zwo][camera][unit][link][loss-publication]") {
+    check_loss_publication_after_transition(true);
+}
+
+TEST_CASE("ZWO Camera Driver - a delayed loss reporter cannot restore LinkFault after idempotent Disconnect",
+          "[zwo][camera][unit][link][loss-publication]") {
+    check_loss_publication_after_transition(false);
+}
 
 // Falsified by: zwo_camera_driver.cpp poll_exposure_status() running the retry burst after the stop met a removal
 // error (the exposure fails with 1280 and Connected stays true, as on the rig); on_link() not calling note_loss().

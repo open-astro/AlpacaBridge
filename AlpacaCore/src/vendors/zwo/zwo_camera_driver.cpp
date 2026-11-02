@@ -81,13 +81,15 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWOCameraDriver(int device_number, ZwoCameraBinding binding, ZWOSDK& sdk, util::TaskClock& clock)
+    ZWOCameraDriver(int device_number, ZwoCameraBinding binding, ZWOSDK& sdk, util::TaskClock& clock,
+                    ZwoCameraTestHooks hooks = {})
         : AsyncConnectable("ZWO"),
           device_number_(device_number),
           binding_(std::move(binding)),
           camera_id_(binding_.identity.camera_id),
           sdk_(sdk),
           clock_(clock),
+          test_hooks_(std::move(hooks)),
           serial_number_(),
           camera_info_(),
           camera_info_valid_(false),
@@ -360,6 +362,9 @@ public:
             last_download_ns_.store(kNoDownload);
             release_open();
         }
+        // A loss may win after the non-idempotent branch decision but before begin_transition().
+        std::lock_guard<std::mutex> lost(lost_mutex_);
+        lost_reason_.clear();
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }
@@ -1225,6 +1230,7 @@ private:
     std::optional<int> camera_id_;
     ZWOSDK& sdk_;
     util::TaskClock& clock_;
+    const ZwoCameraTestHooks test_hooks_;
     std::string serial_number_;
     ZWOCameraInfo camera_info_;
     bool camera_info_valid_;
@@ -1447,18 +1453,20 @@ private:
     }
 
     void note_loss(util::LinkEpoch::Word captured, const std::exception& e) const {
-        if (!link_.mark_lost(captured)) {
-            return;  // a disconnect, a relink or another call got there first
-        }
-        // May run with mutex_ held, so cancel only (async_operation.h Rule 7); the next Disconnect, Connect or the
-        // destructor joins the timer.
-        pulse_slot_.cancel();
         std::string label;
         {
             std::lock_guard<std::mutex> lost(lost_mutex_);
+            if (!link_.mark_lost(captured)) {
+                return;  // a disconnect, a relink or another call got there first
+            }
+            // Publish with the loss latch, so a lifecycle clear cannot be followed by this old reason.
             label = unit_label_;
             lost_reason_ = label + " was removed from USB; Connect again when it is back";
         }
+        // May run with mutex_ held, so cancel only (async_operation.h Rule 7); the next Disconnect, Connect or the
+        // destructor joins the timer. Neither the slot nor the test callback may run under the leaf lost_mutex_.
+        pulse_slot_.cancel();
+        if (test_hooks_.after_loss_cancel) test_hooks_.after_loss_cancel();
         ALPACA_LOG_WARN("ZWO", label + " lost (" + printable(e.what()) + ")");
     }
 
@@ -2303,6 +2311,14 @@ std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id
     binding.identity.camera_id = camera_id;
     binding.unique_id = generate_zwo_unique_id();
     return create_zwo_camera_bound(device_number, binding, sdk, clock);
+}
+
+std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id, ZWOSDK& sdk, util::TaskClock& clock,
+                                                ZwoCameraTestHooks hooks) {
+    ZwoCameraBinding binding;
+    binding.identity.camera_id = camera_id;
+    binding.unique_id = generate_zwo_unique_id();
+    return std::make_unique<ZWOCameraDriver>(device_number, std::move(binding), sdk, clock, std::move(hooks));
 }
 
 std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int camera_index) {
