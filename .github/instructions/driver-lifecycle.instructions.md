@@ -197,9 +197,11 @@ vendor-agnostic; do them in the driver from the start.
 
 **Long-op / exposure state machines (cameras)**
 - A runtime register write during a live exposure corrupts the frame. Guard it with
-  an `exposure_active_` flag, checked **under the same lock that publishes it**
-  (`start_exposure` sets it under `readout_mutex_`; the setters check it under
-  `readout_mutex_`). Checking the flag *before* taking that lock is a TOCTOU.
+  an exposure-in-progress state, checked **under the same lock that publishes it**.
+  GPhoto: `start_exposure` sets an `exposure_active_` flag and the setters check it
+  under the same lock. ToupTek: the `util::CaptureSession` is the state; `start_exposure`
+  claims it under `mutex_` (`exposure_starting_` covers the gap) and the setters'
+  `ensure_not_exposing()` reads the session under `mutex_`. Checking the state *before* taking that lock is a TOCTOU.
 - Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
   joining the worker — setting a flag alone makes `join()` block for the whole
   remaining operation (a 10-min frame → a 10-min abort).
@@ -280,8 +282,8 @@ the previous round's fix**, not new bugs. Before pushing any fix:
   router can dispatch) and fix or dismiss each **before** the push, naming them in the
   writeup so the sweep is auditable.
 - **A new invariant must be applied everywhere it is read/written, at once.** If a fix
-  establishes "X only changes under lock L" (e.g. `exposure_active_` under
-  `readout_mutex_`), grep every read and write of X and bring them all under L in the
+  establishes "X only changes under lock L" (e.g. GPhoto's `exposure_active_`
+  under its lock), grep every read and write of X and bring them all under L in the
   same change — a partially-applied invariant is worse than none.
 - **Re-run the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver)
   over the changed lines *and their siblings*** each round, not just at authoring.
