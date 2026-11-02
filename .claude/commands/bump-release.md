@@ -139,8 +139,8 @@ Today's date in `YYYY-MM-DD` (UTC is fine). Then:
 5. The `## Updated YYYY-MM-DD` line near the top of `SUPPORTED-DRIVERS.md` → today's date. Every release re-verifies
    the file (Step 2.4 recounts from it), and check 16 (issue #692) fails when the line is older than
    the README badge date, so this is not optional: it read 2026-09-24 on the 2026-09-27 release.
-   Between releases `/conformu` and `/commit` move it forward; it may run ahead of the badge, never
-   behind.
+   This step is the only one that sets it: `/conformu` and `/commit` leave it alone, because a
+   line every driver PR moved made open PRs conflict on it.
 6. README authored-line badge: `python3 scripts/check_docs_drift.py --badge` prints the count and a
    paste-ready `badge:` line; replace the `[![Authored code]...` line at the top of `README.md` with
    it. Check 25 (issue #1465) fails when the badge is more than 5% from the count; counting rules
