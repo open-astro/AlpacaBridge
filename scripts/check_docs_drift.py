@@ -142,8 +142,8 @@ Checks:
      the line to the release date and this gate holds it there; only that
      step sets it (/conformu and /commit leave it alone). It may run ahead
      but never behind, and never more than MAX_UPDATED_DAYS_AHEAD past the
-     badge, which catches a typo'd year without consulting the clock. Pure, so it runs in
-     pre-flight; no git state is consulted.
+     badge, which catches a typo'd year without consulting the clock. Pure,
+     so it runs in pre-flight; no git state is consulted.
  17. Every AlpacaError value AGENTS.md, the ascom-contract and testing
      instructions and .claude/commands/driver-build.md write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
      (issue #682): the name must be a constant in `namespace AlpacaError` and
