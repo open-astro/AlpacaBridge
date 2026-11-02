@@ -1082,17 +1082,27 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
-        }
-        double ra_fraction = rate.ra / kSiderealDegPerSec;
-        double dec_fraction = rate.dec / kSiderealDegPerSec;
-        if (ra_fraction < 0.0 || ra_fraction > 1.0 || dec_fraction < 0.0 || dec_fraction > 1.0) {
-            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
-        }
+        validate_guide_rate(rate.ra);
+        validate_guide_rate(rate.dec);
         StateLock lock(lock_gate_);
         check_connected();
         guide_rate_ = rate;
+    }
+
+    // One axis under one lock: the base default reads the pair and writes it back under a second acquisition, which
+    // lets a concurrent write to the other axis be overwritten with the stale value.
+    void set_guide_rate_right_ascension(double value) override {
+        validate_guide_rate(value);
+        StateLock lock(lock_gate_);
+        check_connected();
+        guide_rate_.ra = value;
+    }
+
+    void set_guide_rate_declination(double value) override {
+        validate_guide_rate(value);
+        StateLock lock(lock_gate_);
+        check_connected();
+        guide_rate_.dec = value;
     }
 
     double get_right_ascension() const override {
@@ -2916,6 +2926,17 @@ private:
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
+        }
+    }
+
+    // One axis of a guide-rate write: finite and 0 to 1x sidereal, checked before the connection (open-astro#1786).
+    static void validate_guide_rate(double deg_per_sec) {
+        if (!std::isfinite(deg_per_sec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
+        const double fraction = deg_per_sec / kSiderealDegPerSec;
+        if (fraction < 0.0 || fraction > 1.0) {
+            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
         }
     }
 

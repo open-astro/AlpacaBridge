@@ -16,9 +16,11 @@
 #include <alpacacore/version.h>
 
 #include <cmath>
+#include <atomic>
 #include <functional>
 #include <limits>
 #include <numbers>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
@@ -348,6 +350,37 @@ TEST_CASE("SkyWatcher Telescope Driver - individual guide-rate writes keep the o
     require_alpaca_error([&] { driver->set_guide_rate_declination(99999.0); }, alpacacore::AlpacaError::InvalidValue);
     CHECK(driver->get_guide_rate().ra == 0.003);
     CHECK(driver->get_guide_rate().dec == 0.004);
+
+    driver->set_connected(false);
+}
+
+// open-astro#1786 review note: the base per-axis setters read the pair and then wrote it under two lock
+// acquisitions, so a concurrent single-axis write could be overwritten by the stale pair. One thread keeps
+// rewriting RA while the other writes Dec once; the Dec value must survive.
+TEST_CASE("SkyWatcher Telescope Driver - concurrent individual guide-rate writes both land",
+          "[skywatcher][telescope][unit]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    for (int round = 0; round < 200; ++round) {
+        driver->set_guide_rate({0.001, 0.001});
+        std::atomic<bool> dec_done{false};
+        std::thread ra_writer([&] {
+            for (int i = 0; i < 100 || !dec_done.load(); ++i) {
+                driver->set_guide_rate_right_ascension(0.002);
+            }
+        });
+        std::thread dec_writer([&] {
+            driver->set_guide_rate_declination(0.003);
+            dec_done = true;
+        });
+        dec_writer.join();
+        ra_writer.join();
+        REQUIRE(driver->get_guide_rate().ra == 0.002);
+        REQUIRE(driver->get_guide_rate().dec == 0.003);
+    }
 
     driver->set_connected(false);
 }
