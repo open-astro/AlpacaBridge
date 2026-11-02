@@ -123,6 +123,11 @@ int main() {
         EXPECT(fresh.max_connections() == 1);
         fresh.set_max_connections(100000);
         EXPECT(fresh.max_connections() == 4096);
+        EXPECT(fresh.max_connections_per_ip() == 32);
+        fresh.set_max_connections_per_ip(0);
+        EXPECT(fresh.max_connections_per_ip() == 0);  // 0 = off, not clamped up
+        fresh.set_max_connections_per_ip(100000);
+        EXPECT(fresh.max_connections_per_ip() == 4096);
         fresh.set_keep_alive_lifetime_seconds(0);
         EXPECT(fresh.keep_alive_lifetime_seconds() == 1);
         fresh.set_keep_alive_lifetime_seconds(42);
@@ -148,25 +153,31 @@ int main() {
             out << "http:\n"
                    "  port: 6810\n"
                    "  max_connections: 7\n"
+                   "  max_connections_per_ip: 5\n"
                    "  keep_alive_lifetime_seconds: 45\n";
         }
         ::close(fd);
 
         ::unsetenv("ALPACAHTTP_MAX_CONNECTIONS");
+        ::unsetenv("ALPACAHTTP_MAX_CONNECTIONS_PER_IP");
         ::unsetenv("ALPACAHTTP_KEEP_ALIVE_LIFETIME_SECONDS");
         alpacahttp::Config from_file;
         EXPECT(from_file.load(path));
         EXPECT(from_file.http_port() == 6810);
         EXPECT(from_file.max_connections() == 7);
+        EXPECT(from_file.max_connections_per_ip() == 5);
         EXPECT(from_file.keep_alive_lifetime_seconds() == 45);
 
         ::setenv("ALPACAHTTP_MAX_CONNECTIONS", "9", 1);
+        ::setenv("ALPACAHTTP_MAX_CONNECTIONS_PER_IP", "0", 1);
         ::setenv("ALPACAHTTP_KEEP_ALIVE_LIFETIME_SECONDS", "0", 1);  // clamps to 1
         alpacahttp::Config from_env;
         EXPECT(from_env.load(path));
         EXPECT(from_env.max_connections() == 9);
+        EXPECT(from_env.max_connections_per_ip() == 0);
         EXPECT(from_env.keep_alive_lifetime_seconds() == 1);
         ::unsetenv("ALPACAHTTP_MAX_CONNECTIONS");
+        ::unsetenv("ALPACAHTTP_MAX_CONNECTIONS_PER_IP");
         ::unsetenv("ALPACAHTTP_KEEP_ALIVE_LIFETIME_SECONDS");
         ::unlink(path.c_str());
     }
