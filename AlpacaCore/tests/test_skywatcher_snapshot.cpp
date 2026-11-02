@@ -552,8 +552,8 @@ TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked:
 }
 
 // Decision 0009 rule 1 (open-astro#1786): while Connected stays true on a young fault, a guide-rate write is
-// refused with DriverException and stores nothing (the getter is configuration and keeps answering); an out-of-range value is still InvalidValue first; a good poll
-// restores both.
+// refused with DriverException and stores nothing (the getter is configuration and keeps answering); an out-of-range
+// value is still InvalidValue first; a good poll restores writes.
 TEST_CASE("SkyWatcher snapshot - a faulted link refuses guide-rate writes and a good poll restores them",
           "[skywatcher][snapshot][udp]") {
     FakeTaskClock clock;
