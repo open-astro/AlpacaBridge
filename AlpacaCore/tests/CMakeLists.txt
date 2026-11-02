@@ -415,6 +415,3 @@ endif()
 # Include Catch2's test discovery module
 include(${Catch2_DIR}/Catch.cmake)
 catch_discover_tests(alpacacore_tests)
-# Earlier ctest timings as COST properties (run_all_tests.sh CTEST_COST_DATA).
-# After catch_discover_tests on purpose: see the file.
-set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/CTestCost.cmake")
