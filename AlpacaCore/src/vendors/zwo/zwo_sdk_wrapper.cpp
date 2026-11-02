@@ -226,7 +226,10 @@ int map_error_code(ASI_ERROR_CODE code) {
 // Issue #1667, decision 0009 rule 2a: the bridge passes only enumerated ids, so ASI_ERROR_INVALID_ID on a per-device
 // call means the id is gone (NotConnected, a lost link), like CAMERA_CLOSED and CAMERA_REMOVED. ASIOpenCamera keeps
 // InvalidValue for an id it does not know.
-// TODO(#1667): confirm on the rig that a call on an old id after a replug returns CLOSED, REMOVED or INVALID_ID.
+// Rig result (#1667): on an ASI6200MM Pro with ASI SDK 1.41.0.0 on an arm64 single-board computer, the first per-device
+// call after a physical unplug returned ASI_ERROR_GENERAL_ERROR (error 1280) in one attempt and success in another,
+// never one of these removal codes. A bare cable pull is not yet recognised; #1667 stays open for detection by
+// non-enumeration. GENERAL_ERROR stays DriverException.
 void throw_on_error(ASI_ERROR_CODE code, const std::string& context, int invalid_id_code = AlpacaError::NotConnected) {
     if (code == ASI_SUCCESS) {
         return;
