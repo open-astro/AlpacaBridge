@@ -68,6 +68,10 @@ void poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs `hook` between a probe's last exchange and its decode, no lock held, so a case can land a client write in the
 /// window where a frame is dropped (decision 0010 point 3). An empty function removes it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` when a sender has taken its wire-turn ticket and is about to wait for its turn, with no driver lock
+/// held, so a case that holds the wire in one exchange can tell a second sender is queued behind it. An empty
+/// function removes it.
+void set_wire_turn_wait_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Test seam: replaces the wall time the driver uses for local sidereal time (park and SetPark target,
 /// DestinationSideOfPier, SiderealTime); an empty function restores std::chrono::system_clock. `driver` must come from
