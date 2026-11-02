@@ -44,8 +44,11 @@ std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id
 // Construction-only scheduling seam, owned by the driver. A blocking callback is safe only on the
 // unlocked exposure-status loss path, after with_link unwinds; other loss callers may hold mutex_.
 // Tests must use a bounded nonthrowing gate and release/join callers before destroying the driver.
+// on_relink: each Connect passes it the loss stamp it consumes (decision 0009 rule 3), the task-clock
+// time the link was lost or nullopt; it runs under the Connect's transition lock and must not block.
 struct ZwoCameraTestHooks {
     std::function<void()> after_loss_cancel;
+    std::function<void(std::optional<util::TaskClock::clock::time_point>)> on_relink{};
 };
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id, ZWOSDK& sdk, util::TaskClock& clock,
                                                 ZwoCameraTestHooks hooks);

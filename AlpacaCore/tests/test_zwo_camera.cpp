@@ -22,6 +22,7 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -687,4 +688,128 @@ TEST_CASE("ZWO Camera Driver - Disconnect reads false while a retry burst is stu
     CHECK_FALSE(connected_while_stuck);
     CHECK_FALSE(rig.camera->get_connected());
     CHECK(rig.sdk.open_count() == 0);
+}
+
+// ---- The loss stamp (decision 0009 rule 3) ----
+
+namespace {
+
+using StampTime = alpacacore::util::TaskClock::clock::time_point;
+
+// The loss stamp each Connect consumed, in call order (ZwoCameraTestHooks::on_relink, called on the connecting thread).
+struct RelinkLog {
+    std::vector<std::optional<StampTime>> stamps;
+
+    alpacacore::vendor::zwo::ZwoCameraTestHooks hooks() {
+        alpacacore::vendor::zwo::ZwoCameraTestHooks hooks;
+        hooks.on_relink = [this](std::optional<StampTime> lost_at) { stamps.push_back(lost_at); };
+        return hooks;
+    }
+};
+
+}  // namespace
+
+// Falsified by: zwo_camera_driver.cpp note_loss() not calling link_lost_at_.note() (the relink finds no stamp), or
+// stamping steady_clock::now() instead of the task clock; a Disconnect consuming the stamp (0009 Alternative E).
+TEST_CASE("ZWO Camera Driver - a lost link is stamped once on the task clock and the next Connect consumes it",
+          "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    RelinkLog relinks;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock, relinks.hooks());
+    camera->set_connected(true);
+    clock.advance(std::chrono::seconds(5));
+    const StampTime lost_at = clock.now();
+    sdk.removed = true;
+    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, NotConnected);
+    clock.advance(std::chrono::seconds(5));
+
+    camera->set_connected(false);  // the client's Disconnect after the loss keeps the stamp for the next Connect
+    sdk.replug({{23, kSerial}});
+    camera->set_connected(true);
+    camera->set_connected(false);  // a plain Disconnect stamps nothing
+    camera->set_connected(true);
+
+    REQUIRE(relinks.stamps.size() == 3);
+    CHECK_FALSE(relinks.stamps[0].has_value());
+    REQUIRE(relinks.stamps[1].has_value());
+    CHECK(*relinks.stamps[1] == lost_at);
+    CHECK_FALSE(relinks.stamps[2].has_value());  // consumed once
+    camera->set_connected(false);
+}
+
+// Falsified by: zwo_camera_driver.cpp note_loss() stamping the OnStep record_loss() way (consume(), then note()) before
+// its mark_lost() check, so a removal reported after the loss moves the stamp. The status read below captured the open
+// link before the loss and reports the removal after it: the first detection wins.
+TEST_CASE("ZWO Camera Driver - a removal reported after the loss does not move the loss stamp",
+          "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    RelinkLog relinks;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock, relinks.hooks());
+    camera->set_connected(true);
+    clock.advance(std::chrono::seconds(1));
+    sdk.auto_complete_exposure = false;
+    camera->start_exposure(30.0, true);
+
+    // The next status read is held in the SDK, on the poller thread with no driver lock, until released.
+    LossPublicationGate gate;
+    std::atomic<bool> hold_next_status{true};
+    sdk.before_call = [&](const std::string& call) {
+        if (call == "get_exposure_status" && hold_next_status.exchange(false)) gate.pause();
+    };
+    std::thread poller([&] {
+        try {
+            (void)camera->get_image_ready();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): NotConnected after the loss
+        }
+    });
+    struct ReleaseAndJoin {
+        LossPublicationGate& gate;
+        std::thread& poller;
+        ~ReleaseAndJoin() {
+            gate.release();
+            if (poller.joinable()) poller.join();
+        }
+    } cleanup{gate, poller};
+    REQUIRE(gate.wait_for_arrival());
+
+    const StampTime lost_at = clock.now();
+    sdk.removed = true;
+    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, NotConnected);  // the loss
+    clock.advance(std::chrono::seconds(5));
+    gate.release();
+    poller.join();  // its held read now meets the removal: a second report of the same loss
+    CHECK_FALSE(gate.timed_out);
+
+    camera->set_connected(false);
+    sdk.replug({{23, kSerial}});
+    camera->set_connected(true);
+
+    REQUIRE(relinks.stamps.size() == 2);
+    REQUIRE(relinks.stamps[1].has_value());
+    CHECK(*relinks.stamps[1] == lost_at);
+    camera->set_connected(false);
+}
+
+// Falsified by: zwo_camera_driver.cpp note_loss() stamping before its mark_lost() check: the Disconnect's own stop
+// meets the removal after begin_transition(), a report that latches no loss and so must stamp none.
+TEST_CASE("ZWO Camera Driver - a removal met by the Disconnect itself stamps no loss", "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    RelinkLog relinks;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock, relinks.hooks());
+    camera->set_connected(true);
+    sdk.removed = true;  // pulled while idle, before any call saw it
+    const int stops = sdk.call_count("stop_exposure");
+
+    camera->set_connected(false);
+
+    CHECK(sdk.call_count("stop_exposure") == stops + 1);  // the Disconnect's stop reached the removed camera
+    CHECK(camera->get_link_fault().empty());
+    sdk.replug({{23, kSerial}});
+    camera->set_connected(true);
+    REQUIRE(relinks.stamps.size() == 2);
+    CHECK_FALSE(relinks.stamps[1].has_value());
+    camera->set_connected(false);
 }

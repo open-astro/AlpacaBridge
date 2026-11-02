@@ -16,6 +16,7 @@
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/link_epoch.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/version_format.h>
@@ -208,7 +209,8 @@ public:
             // connect() unconditionally, so wiping here would abort an in-flight
             // exposure or discard a just-completed image. Matches the QHY driver.
             // A lost link reads as disconnected, so a Disconnect after a loss lands here and completes: it
-            // clears the loss text (decision 0009 rule 5), and the next Connect releases what the loss left.
+            // clears the loss text (decision 0009 rule 5) but keeps the loss stamp (Alternative E), and the next
+            // Connect releases what the loss left.
             if (!connected) {
                 stop_pulse_timer();  // the timer a loss cancelled
                 std::lock_guard<std::mutex> lost(lost_mutex_);
@@ -247,6 +249,9 @@ public:
                 std::lock_guard<std::mutex> lost(lost_mutex_);
                 lost_reason_.clear();
             }
+            // The relink consumes the loss stamp, so the next loss is stamped afresh; a camera times no motion by it.
+            const auto lost_at = link_lost_at_.consume();
+            if (test_hooks_.on_relink) test_hooks_.on_relink(lost_at);
             const int resolved_id = resolve_camera_id();
             const auto opened = sdk_.open_camera_link(resolved_id);
             open_id_.store(resolved_id);
@@ -1247,6 +1252,10 @@ private:
     mutable std::mutex lost_mutex_;
     mutable std::string lost_reason_;
     std::string unit_label_{"ZWO camera"};
+    // When the link was lost, on the task clock (decision 0009 rule 3): stamped once by the call that latched the loss,
+    // consumed by the next Connect; a Disconnect keeps it for that Connect (0009 Alternative E). Its own lock is a leaf
+    // (taken under mutex_ or with none held), never taken under lost_mutex_.
+    mutable util::LinkLostStamp link_lost_at_;
     // Under transition_mutex_: the serial every Connect binds once one is known (in memory, not persisted).
     std::string bound_serial_;
     // True while set_connected(true) runs its SDK handshake with mutex_ released.
@@ -1477,6 +1486,9 @@ private:
             label = unit_label_;
             lost_reason_ = label + " was removed from USB; Connect again when it is back";
         }
+        // Decision 0009 rule 3: stamped once, on the task clock, by the call that latched the loss. After lost_mutex_,
+        // which stays a leaf: a report held past a relink would stamp the new session, only read by its next Connect.
+        link_lost_at_.note(clock_.now());
         // May run with mutex_ held, so cancel only (async_operation.h Rule 7); the next Disconnect, Connect or the
         // destructor joins the timer. Neither the slot nor the test callback may run under the leaf lost_mutex_.
         pulse_slot_.cancel();
