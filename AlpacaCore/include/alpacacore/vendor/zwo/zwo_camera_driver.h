@@ -18,6 +18,7 @@
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -36,9 +37,21 @@ namespace alpacacore::vendor::zwo {
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id);
 
 // Test seam: sdk and clock are non-owning and must outlive the returned driver
-// and any in-flight ZWO SDK operation or pulse-guide turn-off thread started by it.
+// and any in-flight ZWO SDK operation started by it.
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id, ZWOSDK& sdk,
                                                 util::TaskClock& clock = util::default_task_clock());
+
+// Construction-only scheduling seam, owned by the driver. A blocking callback is safe only on the
+// unlocked exposure-status loss path, after with_link unwinds; other loss callers may hold mutex_.
+// Tests must use a bounded nonthrowing gate and release/join callers before destroying the driver.
+// on_relink: each Connect passes it the loss stamp it consumes (decision 0009 rule 3), the task-clock
+// time the link was lost or nullopt; it runs under the Connect's transition lock and must not block.
+struct ZwoCameraTestHooks {
+    std::function<void()> after_loss_cancel;
+    std::function<void(std::optional<util::TaskClock::clock::time_point>)> on_relink{};
+};
+std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id, ZWOSDK& sdk, util::TaskClock& clock,
+                                                ZwoCameraTestHooks hooks);
 
 /**
  * @brief Create a ZWO camera driver by camera index (enumeration order).

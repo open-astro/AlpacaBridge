@@ -53,7 +53,7 @@ vendor-agnostic; do them in the driver from the start.
   `set_connected()` against `set_connected()` only; never take it in a getter.
 - **Operation task threads: use the slot where a driver has adopted it.** The Celestron
   (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide, the OnStep
-  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), the ZWO telescope's GOTO setup, pulse drain, disconnect teardown and telemetry poll (#1918), and the Gemini focuser and flat panel run their operation bodies (async slew,
+  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), the ZWO telescope's GOTO setup, pulse drain, disconnect teardown and telemetry poll (#1918), the ZWO camera's pulse-guide turn-off (#1667), and the Gemini focuser and flat panel run their operation bodies (async slew,
   park, home, pulse-guide timer, slew-completion tail, move re-send) in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](../../docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
@@ -110,9 +110,10 @@ vendor-agnostic; do them in the driver from the start.
   operation lock (`readout_mutex_`, …) → SDK-wrapper mutex, and a driver not yet converted is a
   `partial` row in the decision 0016 Adoption table; the `AsyncOperation`
   slot mutex, the `StateSnapshot` mutex, the `util::PolledState` mutexes (a driver
-  that composes `PolledState` for its poll-fed frame) and the `util::CaptureSession` mutex (a
-  camera that composes the session; it never nests with the slot mutex) are leaves that nest
-  under `mutex_` (decisions 0006, 0010, 0016, 0020). A leaf takes no other lock and runs
+  that composes `PolledState` for its poll-fed frame), the `util::CaptureSession` mutex (a
+  camera that composes the session; it never nests with the slot mutex) and the
+  `util::LinkLostStamp` mutex are leaves that nest under `mutex_` (decisions 0006, 0009, 0010,
+  0016, 0020). A leaf takes no other lock and runs
   no I/O or joins; a vendor-local leaf is named in its vendor file. Never acquire in
   reverse, and convert a whole driver class in one PR so the old and new order never mix
   in one class.
@@ -377,7 +378,10 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
   (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`). The ZWO EAF follows it since #1500 for its
   SDK: `NotConnected` from a per-device call (`EAF_ERROR_REMOVED`, `CLOSED`, BLE disconnect, `INVALID_ID`) drops `Connected`
-  at once, and the next Connect rebinds by serial ([ZWO](zwo.instructions.md)); since #1666 a status fault standing past `util::kLinkStalenessBound` is a lost link too. The Astroasis focuser follows it since #1756
+  at once, and the next Connect rebinds by serial ([ZWO](zwo.instructions.md)); since #1666 a status fault standing past
+  `util::kLinkStalenessBound` is a lost link too. The ZWO camera drops `Connected` at once the same way since #1667
+  (`ASI_ERROR_CAMERA_REMOVED`, `ASI_ERROR_CAMERA_CLOSED`, `ASI_ERROR_INVALID_ID`, a status or temperature read included; its
+  exposure retry stops at the first one), with no staleness bound. The Astroasis focuser follows it since #1756
   (`AstroasisProtocolWrapper::link_alive()`, a lock-free latch set by a HID write or read error on the next transaction, which is the
   state poll; `test_astroasis_focuser.cpp`, `a removed transport drops Connected at once`). The #237 drivers still treat a
   removed node as a fault; that has not been changed. Tests: `sever_link()` on
