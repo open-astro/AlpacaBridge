@@ -1026,6 +1026,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     expect_compromised([&] { driver->get_tracking_rate(); });
     expect_compromised([&] { driver->get_right_ascension_rate(); });
     expect_compromised([&] { driver->get_declination_rate(); });
+    expect_compromised([&] { driver->get_guide_rate(); });  // decision 0009 rule 1 (open-astro#1786)
     expect_compromised([&] { driver->get_is_pulse_guiding(); });
     expect_compromised([&] { driver->get_at_home(); });
     expect_compromised([&] { driver->get_at_park(); });
@@ -1039,7 +1040,6 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     CHECK(driver->get_connected());               // DriverException, not NotConnected
     CHECK_NOTHROW(driver->get_alignment_mode());  // static metadata keeps answering
     CHECK_NOTHROW(driver->get_equatorial_system());
-    CHECK_NOTHROW(driver->get_guide_rate());  // driver-side configuration, not mount state
     CHECK_NOTHROW(driver->get_can_pulse_guide());
 
     board.set_muted(false);
@@ -1050,6 +1050,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     CHECK_NOTHROW(driver->get_tracking_rate());
     CHECK_NOTHROW(driver->get_right_ascension_rate());
     CHECK_NOTHROW(driver->get_declination_rate());
+    CHECK_NOTHROW(driver->get_guide_rate());
     CHECK_NOTHROW(driver->get_is_pulse_guiding());
     CHECK_NOTHROW(driver->get_at_home());
     CHECK_NOTHROW(driver->get_at_park());

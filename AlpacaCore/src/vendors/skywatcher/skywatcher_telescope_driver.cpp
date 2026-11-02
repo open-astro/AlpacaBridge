@@ -1078,6 +1078,10 @@ public:
 
     GuideRate get_guide_rate() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
+        if (connected_) {  // a driver that never connected still answers; once linked, lost is NotConnected, faulted
+            check_connected();  // is DriverException (decision 0009 rules 1 and 3, open-astro#1786)
+            throw_if_link_faulted_locked();
+        }
         return guide_rate_;
     }
 

@@ -450,6 +450,7 @@ TEST_CASE("SkyWatcher snapshot - a frame older than the link-loss bound with no 
     CHECK(driver->get_link_fault().empty());
     require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->get_guide_rate(); }, alpacacore::AlpacaError::NotConnected);  // rule 3
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_device_state().empty());
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
@@ -552,7 +553,7 @@ TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked:
 }
 
 // Decision 0009 rule 1 (open-astro#1786): while Connected stays true on a young fault, a guide-rate write is
-// refused with DriverException and stores nothing (the getter is configuration and keeps answering); an out-of-range
+// refused with DriverException and stores nothing, and the getter refuses the same way; an out-of-range
 // value is still InvalidValue first; a good poll restores writes.
 TEST_CASE("SkyWatcher snapshot - a faulted link refuses guide-rate writes and a good poll restores them",
           "[skywatcher][snapshot][udp]") {
@@ -577,7 +578,7 @@ TEST_CASE("SkyWatcher snapshot - a faulted link refuses guide-rate writes and a 
     require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.003); }, fault);
     require_alpaca_error([&] { driver->set_guide_rate_declination(0.003); }, fault);
     require_alpaca_error([&] { driver->set_guide_rate({0.003, 0.003}); }, fault);
-    CHECK_NOTHROW(driver->get_guide_rate());  // driver-side configuration keeps answering (test_skywatcher_serial)
+    require_alpaca_error([&] { driver->get_guide_rate(); }, fault);  // reads refuse too (decision 0009 rule 1)
     require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_guide_rate_declination(-1.0); }, alpacacore::AlpacaError::InvalidValue);
 
