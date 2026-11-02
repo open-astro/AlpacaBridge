@@ -105,8 +105,10 @@ public:
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
         // The SDK stop first, then the join: the body must be gone before the camera closes (decision 0020 rule 5).
+        session_.set_stopping(true);  // the broken frame wait is not kept as a failure
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            closing_ = true;
             stop_unclean_stream_locked();
         }
         session_.disconnect_and_join();
@@ -180,6 +182,7 @@ public:
             session_.set_stopping(true);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                closing_ = true;  // set with the stop: no StartExposure parks a body after it
                 if (stop_unclean_stream_locked()) {
                     format_dirty_ = true;
                     roi_dirty_ = true;
@@ -608,9 +611,6 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
-            if (failure_dismissed_ && session_.failure()) {
-                throw AlpacaException::asked_too_early("Image not ready");
-            }
             image = session_.image();
         }
         return *image;
@@ -620,9 +620,6 @@ public:
     bool get_image_ready() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (failure_dismissed_ && session_.failure()) {
-            return false;
-        }
         return session_.image_ready();
     }
 
@@ -1083,6 +1080,9 @@ public:
             if (!camera_info_valid_) {
                 throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
             }
+            if (closing_) {
+                throw AlpacaException("Not connected", AlpacaError::NotConnected);
+            }
             // Validate before refusing or stopping anything.
             validate_exposure_roi_locked();
             const CameraState state = session_.camera_state();
@@ -1379,14 +1379,14 @@ public:
             // ran, so the stream and the settings still need what they needed.
             std::lock_guard<std::mutex> lock(mutex_);
             exposure_starting_ = false;
-            stream_clean_ = saved_stream_clean;
+            // Not on a camera a disconnect has closed: the stream is gone with it.
+            if (handle_) stream_clean_ = saved_stream_clean;
             format_dirty_ = format_dirty_ || dirty_format;
             roi_dirty_ = roi_dirty_ || dirty_roi;
             throw;
         }
         std::lock_guard<std::mutex> lock(mutex_);
         exposure_starting_ = false;
-        failure_dismissed_ = false;  // the session cleared the failure
     }
 
     void stop_exposure() override {
@@ -1400,8 +1400,8 @@ public:
                 session_.set_stopping(true);  // a frame wait the stop breaks is not a failure
             } else {
                 if (exposure_starting_) return;  // nothing has begun yet; the start goes ahead
-                // A completed exposure: drop its frame, and a failure it left (#979).
-                failure_dismissed_ = session_.failure().has_value();
+                // A completed exposure: drop its frame. A kept failure stays until the
+                // next StartExposure or a reconnect (decision 0020 rule 3).
                 session_.discard_image();
             }
             // A completed exposure leaves a reusable pull-mode stream: keep it. For an
@@ -1479,10 +1479,11 @@ private:
     // Guarded by mutex_. True from a StartExposure's settings snapshot until
     // session_.start() has published Exposing (or refused).
     bool exposure_starting_{false};
-    // Guarded by mutex_. An idle AbortExposure dismissed the session's kept
-    // failure (#979): ImageReady reads false and ImageArray "not ready" until the
-    // next StartExposure or connect.
-    bool failure_dismissed_{false};
+    // Guarded by mutex_. Set with the disconnect's SDK stop, cleared on connect:
+    // a StartExposure in the gap before disconnect_and_join() closes the session
+    // would otherwise run a body that parks in Toupcam_WaitImageV4 and holds the
+    // join (decision 0020 rule 5).
+    bool closing_{false};
 
     // Thermal cache fed by thermal_poll_loop (all guarded by mutex_).
     static constexpr std::chrono::milliseconds kThermalPollInterval{1000};
@@ -1678,7 +1679,7 @@ private:
         tec_cache_valid_ = false;
         tec_voltage_max_valid_ = false;
         stream_clean_ = false;
-        failure_dismissed_ = false;
+        closing_ = false;
     }
 
     // A body has not returned: it may be parked in Toupcam_WaitImageV4, where a

@@ -283,35 +283,41 @@ TEST_CASE("ToupTek Camera Driver - Disconnect during the stream restart is not u
     CHECK(fake.call_count("trigger") == 0);
 }
 
-TEST_CASE("ToupTek Camera Driver - AbortExposure clears a failure from a completed exposure",
-          "[touptek][camera][unit]") {
+// Decision 0020 rule 3. Falsified by: an idle AbortExposure or StopExposure that dismisses the kept failure, so
+// ImageReady reads false instead of raising it.
+TEST_CASE("ToupTek Camera Driver - a failed exposure survives AbortExposure and StopExposure",
+          "[touptek][camera][unit][capture-session]") {
     alpacacore::test::FakeToupTekSDK fake;
     fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
     driver->set_connected(true);
     driver->start_exposure(0.01, true);  // the fake delivers no frame: the exposure fails
 
-    const auto image_ready_fails = [&] {
+    const auto image_ready_error = [&] {
         try {
             (void)driver->get_image_ready();
         } catch (const alpacacore::AlpacaException& e) {
-            return e.error_code() == alpacacore::AlpacaError::DriverException;
+            return static_cast<int>(e.error_code());
         }
-        return false;
+        return 0;
     };
-    bool failed = false;
-    for (int i = 0; i < 400 && !failed; ++i) {
-        failed = image_ready_fails();
-        if (!failed) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    REQUIRE(failed);
+    const auto failure_kept = [&] {
+        for (int i = 0; i < 400 && image_ready_error() == 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return image_ready_error() == static_cast<int>(alpacacore::AlpacaError::DriverException);
+    };
+    REQUIRE(failure_kept());
 
     driver->abort_exposure();
-    bool ready = true;
-    CHECK_NOTHROW(ready = driver->get_image_ready());
-    CHECK_FALSE(ready);
-    CHECK_NOTHROW(driver->get_camera_state());
+    CHECK(image_ready_error() == static_cast<int>(alpacacore::AlpacaError::DriverException));
+    driver->stop_exposure();
+    CHECK(image_ready_error() == static_cast<int>(alpacacore::AlpacaError::DriverException));
+    CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+
+    fake.deliver_frame = true;
+    driver->start_exposure(0.01, true);  // the next StartExposure clears it
+    CHECK(image_ready_error() != static_cast<int>(alpacacore::AlpacaError::DriverException));
     driver->set_connected(false);
 }
 
@@ -1038,4 +1044,39 @@ TEST_CASE("ToupTek Camera Driver - a StartExposure wakes a body the watchdog lef
     CHECK(spin_until([&] { return frame_ready(*driver); }));
     CHECK(driver->get_last_exposure_duration() == 0.01);
     driver->set_connected(false);
+}
+
+// Decision 0020 rule 5. Falsified by: a disconnect that leaves StartExposure open between its SDK stop and the
+// session close, so a start landing there parks a body in the SDK wait and the join blocks until the SDK timeout.
+TEST_CASE("ToupTek Camera Driver - a StartExposure during a disconnect is refused and the disconnect returns promptly",
+          "[touptek][camera][unit][capture-session]") {
+    auto fake = make_fake_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    // A failed exposure leaves the stream stopped, so the disconnect has an SDK stop to issue.
+    driver->start_exposure(0.01, true);
+    REQUIRE(spin_until([&] {
+        return error_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+    const int triggers = fake.call_count("trigger");
+    std::atomic<bool> in_stop{false};
+    std::atomic<int> start_error{-1};
+    std::thread starter;
+    fake.before_call = [&](const std::string& fn) {
+        if (fn != "stop" || in_stop.exchange(true)) return;
+        // The disconnect's SDK stop runs under mutex_, so the start cannot run inline: it queues on mutex_ and
+        // gets it the moment the stop is done, before or just as the session closes.
+        fake.hold_next_wait_image();
+        starter = std::thread([&] { start_error = error_of([&] { driver->start_exposure(5.0, true); }); });
+        std::this_thread::sleep_for(100ms);
+    };
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    fake.release_wait_image();
+    if (starter.joinable()) starter.join();
+    CHECK(elapsed < 1s);
+    CHECK(in_stop.load());
+    CHECK(start_error.load() == static_cast<int>(alpacacore::AlpacaError::NotConnected));
+    CHECK(fake.call_count("trigger") == triggers);
 }
