@@ -761,8 +761,8 @@ int main() {
             slow_server.stop();
         }
 
-        // The deadline grows with the body: base 500 ms plus the body at
-        // 1 MiB/s (about 4.5 s for 4 MiB). A reader taking 64 KiB every 50 ms
+        // The deadline is the greater of base 500 ms and the body at
+        // 1 MiB/s (about 4 s for 4 MiB). A reader taking 64 KiB every 50 ms
         // (about 3.2 s in all, past the base) gets the whole body; one taking
         // 4 KiB every 50 ms is still cut off at the extended deadline.
         for (const bool fast_reader : {true, false}) {
@@ -806,6 +806,72 @@ int main() {
             }
             ::close(fd);
             scaled_server.stop();
+        }
+
+        // The deadline scales with the response size (util::send_budget): a
+        // slow reader that keeps making progress gets the whole body even when
+        // that takes far longer than the base deadline.
+        // Base 200 ms, floor 256 KiB/s: the 4 MiB
+        // body has a 16 s budget, and the client paces its reads to 4 MB/s,
+        // so the body takes about a second. A fixed 200 ms deadline would
+        // close mid-body.
+        {
+            // case: send deadline scales with the body so a slow reader gets all of it
+            Watchdog watchdog(std::chrono::seconds(30), "send deadline scales with the body size");
+            alpacahttp::Config scaled_config;
+            scaled_config.set_http_port(0);
+            scaled_config.set_discovery_enabled(false);
+            scaled_config.set_thread_pool_size(1);
+            alpacahttp::Server scaled_server(scaled_config);
+            scaled_server.set_send_limits_for_test(std::chrono::milliseconds(200), 65536, std::chrono::seconds(5),
+                                                   std::size_t{256} * 1024);
+            scaled_server.start_async();
+            const auto scaled_port = wait_for_bound_port(scaled_server, 2000);
+            EXPECT(scaled_port != 0);
+
+            int fd = connect_local(scaled_port, 65536);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            send_all(fd, image_request);
+
+            std::size_t drained = 0;
+            const auto read_start = std::chrono::steady_clock::now();
+            const std::string headers = read_response_headers(fd, &drained);
+            EXPECT(headers.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
+            std::vector<char> chunk(65536);
+            ssize_t last = 1;
+            while (drained < payload_size && last > 0 &&
+                   std::chrono::steady_clock::now() - read_start < std::chrono::seconds(20)) {
+                last = ::recv(fd, chunk.data(), chunk.size(), 0);
+                if (last > 0) {
+                    drained += static_cast<std::size_t>(last);
+                }
+                // Pace to 4 MB/s (4000 bytes per millisecond) so the read
+                // outlasts the 200 ms base deadline by a wide margin.
+                while (static_cast<std::size_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                    std::chrono::steady_clock::now() - read_start)
+                                                    .count()) *
+                           4000 <
+                       drained) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
+            EXPECT(std::chrono::steady_clock::now() - read_start > std::chrono::milliseconds(200));
+            EXPECT(drained == payload_size);
+            ::close(fd);
+            scaled_server.stop();
+
+            // util::send_budget itself: the base for a small body, the size at
+            // the floor rate for a large one, and no scaling at a rate of 0.
+            using std::chrono::milliseconds;
+            EXPECT(alpacahttp::util::send_budget(1024, milliseconds(120000), 65536) == milliseconds(120000));
+            // A 61 MP frame as UInt16 ImageBytes: about 122 MB, far past 120 s at 64 KiB/s.
+            EXPECT(alpacahttp::util::send_budget(std::size_t{122} * 1000 * 1000, milliseconds(120000), 65536) ==
+                   milliseconds((std::uint64_t{122} * 1000 * 1000 * 1000 + 65535) / 65536));
+            EXPECT(alpacahttp::util::send_budget(std::size_t{122} * 1000 * 1000, milliseconds(120000), 65536) >
+                   milliseconds(1800000));
+            EXPECT(alpacahttp::util::send_budget(std::size_t{122} * 1000 * 1000, milliseconds(120000), 0) ==
+                   milliseconds(120000));
         }
 
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);

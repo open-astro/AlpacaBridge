@@ -43,7 +43,7 @@ cmake --build . --clean-first --parallel
 
 The server reads one YAML file: the path given as its first argument, or else `config/default.yaml` in the working directory, or else `AlpacaHTTP/config/default.yaml`. The package service runs in `/var/lib/alpacabridge`, so it reads `/var/lib/alpacabridge/config/default.yaml`. The environment variables `ALPACAHTTP_PORT`, `ALPACAHTTP_DISCOVERY`, `ALPACAHTTP_DISCOVERY_PORT` and `ALPACAHTTP_LOG_LEVEL` then override the file. `Config::apply_environment_overrides` in `src/core/config.cpp` reads further `ALPACAHTTP_*` variables for the other settings.
 
-See `config/default.yaml` for available options. The `http` section also takes `max_connections`, `max_connections_per_ip` and `keep_alive_lifetime_seconds`. `max_connections_per_ip` (default 32, 0 = off, env `ALPACAHTTP_MAX_CONNECTIONS_PER_IP`) caps the open connections one peer address may hold; a connection over it is closed at once with no response. A response is closed if the client stalls for 30 s without reading, or if it is not fully sent within 120 s plus the time its size needs at 256 KiB/s (a 100 MB image frame has about 9 minutes in all), so a client that keeps reading at a normal rate is not cut off.
+See `config/default.yaml` for available options. The `http` section also takes `max_connections`, `max_connections_per_ip` and `keep_alive_lifetime_seconds`. `max_connections_per_ip` (default 32, 0 = off, env `ALPACAHTTP_MAX_CONNECTIONS_PER_IP`) caps the open connections one peer address may hold; a connection over it is closed at once with no response. A response not fully sent within 120 s or the time its size takes at 64 KiB/s, whichever is longer, or stalled for 30 s without a positive send, closes its connection.
 
 ## Usage
 

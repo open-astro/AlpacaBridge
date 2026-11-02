@@ -125,6 +125,31 @@ int main(int argc, char** argv) {
             EXPECT(elapsed < 200ms);
         }
     }
-    EXPECT(selected == "expired" || selected == "retry" || selected == "interrupted");
+    {
+        // case: nonpositive stall retains response expiry and permits progress
+        if (selected == "nonpositive") {
+            for (const auto stall : {0ms, -1ms}) {
+                SocketPair sockets;
+                EXPECT(
+                    alpacahttp::util::socket_send_allv(sockets.fd[0], "head", 4, "body", 4, Clock::now() + 1s, stall));
+                char bytes[8];
+                EXPECT(::recv(sockets.fd[1], bytes, sizeof(bytes), MSG_DONTWAIT) == 8);
+                EXPECT(std::string(bytes, sizeof(bytes)) == "headbody");
+                EXPECT(!alpacahttp::util::socket_send_allv(sockets.fd[0], "head", 4, "body", 4, Clock::now() - 1ms,
+                                                           stall));
+                EXPECT(errno == ETIMEDOUT);
+                sockets.fill();
+                interruptions = 4;
+                const auto start = Clock::now();
+                EXPECT(!alpacahttp::util::socket_send_allv(sockets.fd[0], "head", 4, "body", 4, start + 100ms, stall));
+                EXPECT(errno == ETIMEDOUT);
+                EXPECT(interruptions < 4);
+                EXPECT(Clock::now() - start >= 100ms);
+                EXPECT(Clock::now() - start < 200ms);
+                interruptions = 0;
+            }
+        }
+    }
+    EXPECT(selected == "expired" || selected == "retry" || selected == "interrupted" || selected == "nonpositive");
     std::cout << selected << ": passed\n";
 }

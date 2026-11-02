@@ -27,6 +27,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -90,6 +91,21 @@ inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
     return setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
 }
 
+// Time budget for sending `bytes`: `base`, or the time `bytes` take at
+// `min_bytes_per_second` when that is longer, so a large image download on a
+// slow link receives a larger finite allowance. A rate of 0
+// means no scaling (the budget is `base`).
+inline std::chrono::milliseconds send_budget(std::size_t bytes, std::chrono::milliseconds base,
+                                             std::size_t min_bytes_per_second) {
+    if (min_bytes_per_second == 0) {
+        return base;
+    }
+    // Round up; `bytes` is at most a few hundred MB, so bytes * 1000 cannot overflow 64 bits.
+    const auto scaled = static_cast<std::chrono::milliseconds::rep>(
+        (static_cast<std::uint64_t>(bytes) * 1000 + min_bytes_per_second - 1) / min_bytes_per_second);
+    return std::max(base, std::chrono::milliseconds(scaled));
+}
+
 // Send two buffers as one logical write without concatenating them. Keeping
 // headers and bodies in one sendmsg call avoids the small-write Nagle/delayed-
 // ACK stall while large bodies do not need a second full response copy.
@@ -101,6 +117,7 @@ inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
 // until the earlier of the response and no-progress deadlines. It returns
 // false when either expires (errno ETIMEDOUT) so the caller closes the
 // connection. Only a positive write restarts the `stall` wait; EINTR does not.
+// A nonpositive `stall` omits that bound and keeps the response deadline.
 inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t first_length, const char* second,
                              std::size_t second_length, std::chrono::steady_clock::time_point deadline,
                              std::chrono::milliseconds stall) {
@@ -116,7 +133,7 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
             return true;
         }
 
-        const auto wait_deadline = std::min(deadline, progress_deadline);
+        const auto wait_deadline = stall.count() > 0 ? std::min(deadline, progress_deadline) : deadline;
         const auto left = wait_deadline - std::chrono::steady_clock::now();
         if (left <= std::chrono::steady_clock::duration::zero()) {
             errno = ETIMEDOUT;
