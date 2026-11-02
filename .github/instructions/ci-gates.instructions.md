@@ -44,7 +44,7 @@ Each gate script's docstring (for timeouts and the nightly job, the workflow fil
 authoritative description of what it enforces; the bullets below hold only what an
 author must do. Read the docstring before changing a gate.
 
-- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `serial-port-ownership` (`scripts/check_serial_port_ownership.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `static-checks` (one step per gate, each run even after an earlier one fails: `.github/scripts/check-unicode.py`, `scripts/check_docs_drift.py` and the scripts' self-tests, `scripts/check_connect_error_hook.py`, `scripts/check_serial_port_ownership.py`, `scripts/check_layering.py`, `scripts/check_stress_registration.py`, `scripts/check_contract_sweep.py`, `scripts/check_conformu_reports.py` on a PR only, ShellCheck, and `node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
 - **Merge queue** (`main` only): a PR into `main` lands through GitHub's merge queue, which runs
   `ci.yml` on the queued merge commit (`merge_group`) and merges only when the required checks
   pass on it. So a branch never has to be brought up to date with `main` before it merges: never
@@ -53,7 +53,7 @@ author must do. Read the docstring before changing a gate.
   which has no queue): a failure there removes the PR from the queue rather than reddening the
   PR. Run them on a branch before queueing with `gh workflow run ci.yml --ref <branch>`; that
   works only for a branch in this repository, so for a fork PR the queue is their first run.
-  `format`, `clang-tidy`, `conformu-reports` and cppcheck's check step diff against
+  `format`, `clang-tidy`, the ConformU step of `static-checks` and cppcheck's check step diff against
   `$GITHUB_BASE_REF`, which a `merge_group` run does not set, so they stay `pull_request` only; a
   job skipped by its `if:` still satisfies a required check. Keep `cancel-in-progress` off for
   `merge_group`, so a run the queue waits on is never cancelled.
@@ -93,7 +93,7 @@ author must do. Read the docstring before changing a gate.
   Tier 3 faults a fake after a camera, telescope, focuser, rotator or filter wheel operation has started
   and requires that failure after start is never a clean completion; every such tier-2 host needs a
   tier-3 recipe with a `recover`, which a guard case checks.
-- **Docs drift** (`scripts/check_docs_drift.py`, the `docs-drift` job): its docstring lists all
+- **Docs drift** (`scripts/check_docs_drift.py`, a step of the `static-checks` job): its docstring lists all
   checks. The ones authors trip: bump the `zizmor` version and sha256 in `ci.yml` and
   `ci_preflight.sh` together; keep the cppcheck `--suppress` lists identical; give each new CI job id
   a description in parentheses in the roster bullet above; a new `SUPPORTED-DRIVERS.md` vendor
@@ -138,7 +138,7 @@ author must do. Read the docstring before changing a gate.
   `/pr-checker` and `/submit-pr`; a poll timeout is a re-poll.
 - **Pre-flight** (`scripts/ci_preflight.sh`, the `/submit-pr` Step 4 gate) runs every gate that
   needs no build, in about a minute, and installs missing tools; it also runs on macOS's bash 3.2
-  (`ci_preflight.sh --self-test`, a step in the ShellCheck job, guards that: issue #1453).
+  (`ci_preflight.sh --self-test`, a step in the `static-checks` job, guards that: issue #1453).
   The build and test gates (both `run_all_tests.sh` passes, clang-tidy, ASan+UBSan) run
   only with `PREFLIGHT_FULL=1` and are reported `[SKIP]` otherwise: CI runs them on every PR, and
   the review waits for them. In a full run the ASan+UBSan pass is on by default (issue #588;
@@ -151,7 +151,7 @@ author must do. Read the docstring before changing a gate.
   ([failure record](../../docs/failures/0010-rpi4-asan-39-bit-va.md)).
 - **cppcheck is pinned to 2.17.x, built from source in CI**: the runner's apt 2.13 classifies some
   checks differently, and pre-flight uses the dev box's 2.17, so the two disagreed.
-- **Web UI JavaScript** (`javascript` job): `node --check` plus `node --test
+- **Web UI JavaScript** (the JavaScript steps of the `static-checks` job): `node --check` plus `node --test
   AlpacaHTTP/tests/web/*.test.js` (issue #385). **Pure helpers go in `AlpacaHTTP/web/format.js`,
   not `app.js`**: it touches no DOM, `index.html` loads it first, and its
   `typeof module !== 'undefined'` export block lets the tests `require` it with no browser stub. A

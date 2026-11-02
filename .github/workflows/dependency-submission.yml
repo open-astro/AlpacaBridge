@@ -2,7 +2,7 @@
 # SDKs) to GitHub's dependency graph, which otherwise sees only the workflow
 # action pins. Snapshot built by scripts/dependency_snapshot.py; see
 # docs/development.md "Dependency graph". No pull_request trigger: the drift
-# check runs in ci.yml's docs-drift job.
+# check runs in ci.yml's static-checks job.
 
 name: Dependency submission
 
