@@ -67,6 +67,8 @@ public:
     bool sync_system_clock_from_clients() const { return sync_system_clock_from_clients_; }
     std::size_t thread_pool_size() const { return thread_pool_size_; }
     std::size_t max_connections() const { return max_connections_; }
+    // Per source address cap on open connections; 0 turns it off.
+    std::size_t max_connections_per_ip() const { return max_connections_per_ip_; }
     int keep_alive_lifetime_seconds() const { return keep_alive_lifetime_seconds_; }
     // open-astro#314: how often the server's timer thread re-probes the
     // hardware RTC. Settable for the same reason the keep-alive cap is:
@@ -133,6 +135,10 @@ public:
         if (count > 4096) count = 4096;
         max_connections_ = count;
     }
+    void set_max_connections_per_ip(std::size_t count) {
+        if (count > 4096) count = 4096;
+        max_connections_per_ip_ = count;
+    }
     void set_keep_alive_lifetime_seconds(int seconds) {
         if (seconds < 1) seconds = 1;
         keep_alive_lifetime_seconds_ = seconds;
@@ -178,6 +184,11 @@ private:
     // serial ports and log files. At the bound the accept loop pauses and new
     // clients wait in the listen backlog until an idle connection expires.
     std::size_t max_connections_ = 512;
+    // Open connections one peer address may hold (0 = no cap). Counted at
+    // accept; a connection over it is closed at once with no response, so a
+    // single LAN host cannot take every slot of max_connections_ and every
+    // worker. 32 leaves room for several clients behind one NAT or proxy.
+    std::size_t max_connections_per_ip_ = 32;
     // How long one keep-alive connection may stay persistent, in seconds,
     // regardless of request count. The next response after this forces a
     // reconnect (cheap: one handshake every few minutes for a long-lived

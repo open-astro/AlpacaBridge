@@ -216,6 +216,11 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 if (parse_size_value(value, parsed)) {
                     set_max_connections(parsed);
                 }
+            } else if (key == "max_connections_per_ip") {
+                std::size_t parsed = 0;
+                if (parse_size_value(value, parsed)) {
+                    set_max_connections_per_ip(parsed);
+                }
             } else if (key == "keep_alive_lifetime_seconds") {
                 std::size_t parsed = 0;
                 if (parse_size_value(value, parsed) &&
@@ -424,6 +429,14 @@ void Config::apply_environment_overrides() {
         std::size_t parsed = 0;
         if (parse_size_value(max_connections_env, parsed)) {
             set_max_connections(parsed);
+        }
+    }
+
+    const char* per_ip_env = std::getenv("ALPACAHTTP_MAX_CONNECTIONS_PER_IP");
+    if (per_ip_env) {
+        std::size_t parsed = 0;
+        if (parse_size_value(per_ip_env, parsed)) {
+            set_max_connections_per_ip(parsed);
         }
     }
 

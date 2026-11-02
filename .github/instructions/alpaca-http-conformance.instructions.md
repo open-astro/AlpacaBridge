@@ -416,6 +416,18 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     in `test_config.cpp`. At the bound the accept
     loop pauses and new clients wait in the listen backlog (64) rather than
     being refused; an idle connection expires within 15 s.
+  - `Config::max_connections_per_ip` (32 default, 0 = off; `http:` key of the
+    same name, `ALPACAHTTP_MAX_CONNECTIONS_PER_IP`) caps open connections per
+    peer address. It is counted at accept and released in `close_connection`;
+    a connection over it is closed at once with no response, logged at INFO
+    at most once a minute. Every response send is bounded by
+    `kSendDeadlineSeconds` (120 s) or the response's size at
+    `kSendMinBytesPerSecond` (64 KiB/s), whichever is longer
+    (`util::send_budget`, `socket_send_allv`'s `deadline`), giving large images
+    a larger finite allowance on slow links; past it the
+    connection is closed, as is one that makes no progress for
+    `kSocketTimeoutSeconds` (30 s, the `stall` argument); tested in
+    `test_server_socket.cpp`.
   - `Config::motion_watchdog_seconds` (open-astro#547; 30 s default, matching
     AlpacaCore's `kClientSilenceStopInterval` in `util/motion_policy.h`; 0
     disables) is settable the same way, from the config file (`server:`
