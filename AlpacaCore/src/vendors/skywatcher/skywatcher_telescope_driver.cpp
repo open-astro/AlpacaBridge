@@ -1078,21 +1078,33 @@ public:
 
     GuideRate get_guide_rate() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();  // never connected, disconnected or lost: NotConnected; faulted: DriverException
+        throw_if_link_faulted_locked();  // (decision 0009 rules 1 and 3, open-astro#1786)
         return guide_rate_;
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
-        }
+        validate_guide_rate(rate.ra);
+        validate_guide_rate(rate.dec);
         StateLock lock(lock_gate_);
-        check_connected();
-        double ra_fraction = rate.ra / kSiderealDegPerSec;
-        double dec_fraction = rate.dec / kSiderealDegPerSec;
-        if (ra_fraction < 0.0 || ra_fraction > 1.0 || dec_fraction < 0.0 || dec_fraction > 1.0) {
-            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
-        }
+        check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
         guide_rate_ = rate;
+    }
+
+    // One axis under one lock: the base default reads the pair and writes it back under a second acquisition, which
+    // lets a concurrent write to the other axis be overwritten with the stale value.
+    void set_guide_rate_right_ascension(double value) override {
+        validate_guide_rate(value);
+        StateLock lock(lock_gate_);
+        check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
+        guide_rate_.ra = value;
+    }
+
+    void set_guide_rate_declination(double value) override {
+        validate_guide_rate(value);
+        StateLock lock(lock_gate_);
+        check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
+        guide_rate_.dec = value;
     }
 
     double get_right_ascension() const override {
@@ -1390,6 +1402,7 @@ public:
     double get_target_declination() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
+        throw_if_link_faulted_locked();  // decision 0009 rule 1: commanded state, not a wire read
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -1399,6 +1412,7 @@ public:
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
         StateLock lock(lock_gate_);
+        check_writable_locked();  // connection, then the fault gate; a refused write keeps the value and its set flag
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
@@ -1406,6 +1420,7 @@ public:
     double get_target_right_ascension() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
+        throw_if_link_faulted_locked();  // decision 0009 rule 1: commanded state, not a wire read
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -1415,6 +1430,7 @@ public:
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
         StateLock lock(lock_gate_);
+        check_writable_locked();  // connection, then the fault gate; a refused write keeps the value and its set flag
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
@@ -2916,6 +2932,17 @@ private:
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
+        }
+    }
+
+    // One axis of a guide-rate write: finite and 0 to 1x sidereal, checked before the connection (open-astro#1786).
+    static void validate_guide_rate(double deg_per_sec) {
+        if (!std::isfinite(deg_per_sec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
+        const double fraction = deg_per_sec / kSiderealDegPerSec;
+        if (fraction < 0.0 || fraction > 1.0) {
+            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
         }
     }
 
