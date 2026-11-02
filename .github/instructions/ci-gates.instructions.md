@@ -51,11 +51,12 @@ author must do. Read the docstring before changing a gate.
   rebase or update a PR because `main` moved, only to resolve a real conflict. `sanitizers-tsan`
   and `package-deb` skip a PR into `main` and run in the queue (and on a PR into `stable/**`,
   which has no queue): a failure there removes the PR from the queue rather than reddening the
-  PR. Run them on a branch before queueing with `gh workflow run ci.yml --ref <branch>`.
+  PR. Run them on a branch before queueing with `gh workflow run ci.yml --ref <branch>`; that
+  works only for a branch in this repository, so for a fork PR the queue is their first run.
   `format`, `clang-tidy`, `conformu-reports` and cppcheck's check step diff against
   `$GITHUB_BASE_REF`, which a `merge_group` run does not set, so they stay `pull_request` only; a
-  job skipped by its `if:` still satisfies a required check. Keep `cancel-in-progress` limited
-  to `pull_request`, so a run the queue waits on is never cancelled.
+  job skipped by its `if:` still satisfies a required check. Keep `cancel-in-progress` off for
+  `merge_group`, so a run the queue waits on is never cancelled.
 - **PR body gates** (`.github/workflows/pr-body.yml`, not required checks): `falsified-by`
   (`scripts/check_falsified_by.py`, pre-flight gate 2b2) needs a `## Falsified by` line for
   every test case the PR adds or renames (see the [testing rules](testing.instructions.md#new-test-cases-name-their-falsifying-mutation));

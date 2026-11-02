@@ -78,8 +78,8 @@ Checks to make before waiting on anything:
    **`QUEUE=true` and the base is `main`: being behind is not a reason to act.** The queue tests the
    PR merged with the current `main` itself (`ci-gates`, "Merge queue"), so never `update-branch`
    or merge `main` in: it only re-runs CI and the bot. Act only on a real conflict
-   (`gh pr view <N> --json mergeable --jq .mergeable` is `CONFLICTING`): resolve it locally with
-   the Step 3 mechanics in the `CONFLICTING` case below, then go to Step 2.
+   (`gh pr view <N> --json mergeable --jq .mergeable` is `CONFLICTING`): resolve it locally as
+   the `CONFLICTING` case at the end of this step says, then go to Step 2.
    **`QUEUE=false`, or a `stable/X.Y` base** (no queue there): branch protection is strict, so a
    branch whose `gh api "repos/open-astro/AlpacaBridge/compare/main...$OWNER:$BRANCH" --jq .behind_by`
    is non-zero (`$OWNER`/`$BRANCH` validated in Step 0) must be updated before it can merge, and
@@ -468,13 +468,17 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
   `ci.yml` on the merged commit, including `sanitizers-tsan` and `package-deb`, which a PR into
   `main` skips. Wait in the background until the PR merges or leaves the queue:
   ```bash
-  PR=<N>; for i in $(seq 1 150); do   # up to 75 min: the queue runs the full ci.yml
+  PR=<N>; SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  for i in $(seq 1 150); do   # up to 75 min: the queue runs the full ci.yml
     R=$(gh api graphql -F n="$PR" -f query='query($n:Int!){repository(owner:"open-astro",name:"AlpacaBridge"){pullRequest(number:$n){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{... on RemovedFromMergeQueueEvent{reason createdAt}}}}}}' \
-      --jq '.data.repository.pullRequest | "\(.state) \(.isInMergeQueue) \(.autoMergeRequest != null) \(.timelineItems.nodes[0].reason // "-")"')
-    case "$R" in
-      MERGED*) echo "merged"; exit 0 ;;
-      "OPEN false false"*) echo "left the merge queue: ${R##* }" >&2; exit 6 ;;
-    esac
+      --jq '.data.repository.pullRequest | "\(.state) \(.isInMergeQueue) \(.autoMergeRequest != null) \(.timelineItems.nodes[0].createdAt // "-") \(.timelineItems.nodes[0].reason // "-")"')
+    read -r ST INQ AUTO AT REASON <<<"$R"
+    [ "$ST" = MERGED ] && { echo "merged"; exit 0; }
+    # Out of the queue with no auto-merge waiting, or removed after this wait began
+    # (a removal that leaves auto-merge on would otherwise wait out the budget).
+    if [ "$ST $INQ" = "OPEN false" ] && { [ "$AUTO" = false ] || { [ "$AT" != - ] && [[ "$AT" > "$SINCE" ]]; }; }; then
+      echo "left the merge queue: $REASON" >&2; exit 6
+    fi
     sleep 30
   done; echo "still queued after 75 min: $R" >&2; exit 1
   ```

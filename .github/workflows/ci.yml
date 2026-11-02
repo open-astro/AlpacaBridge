@@ -33,8 +33,9 @@
 # (merge_group) runs them on the merge commit before it lands, so they gate the
 # merge without running on every push. They still run on a PR into stable/**
 # (no queue there), on a push to main or stable/**, and on workflow_dispatch
-# (`gh workflow run ci.yml --ref <branch>` runs them on a PR branch before it
-# is queued). format, clang-tidy, conformu-reports and cppcheck's check step run
+# (`gh workflow run ci.yml --ref <branch>` runs them on a PR branch in this
+# repository before it is queued; a fork PR's branch is not here, so the queue
+# is its first run). format, clang-tidy, conformu-reports and cppcheck's check step run
 # on pull_request only: they diff against $GITHUB_BASE_REF, which a merge_group
 # run does not set, and a job skipped by its `if:` still satisfies a required
 # check.
@@ -56,13 +57,13 @@ on:
       - "stable/**"
   workflow_dispatch:
 
-# A newer push to the same PR makes in-flight runs obsolete — cancel them so
-# we don't burn two arm64 builds racing each other. Only PR runs cancel: each
-# merge-queue group has its own ref, and the queue itself cancels a group it
-# drops, so cancelling here could only kill a run the queue is waiting on.
+# A newer push to the same ref makes in-flight runs obsolete — cancel them so
+# we don't burn two arm64 builds racing each other. A merge-queue run is never
+# cancelled here: each queued group has its own ref, and the queue itself
+# cancels a group it drops, so cancelling could only kill a run it waits on.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 # Single source of truth for the vendored libgpiod build dependency — the
 # build-vendors, sanitizers-tsan and clang-tidy jobs consume these,
