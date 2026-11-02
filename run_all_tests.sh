@@ -73,25 +73,7 @@ check_http_floor() {
   require_floor "${label}" "$(( total - core ))" "${floor}"
 }
 
-# CTEST_COST_DATA=<file> keeps ctest's test timings between runs, so `ctest -j`
-# starts the slowest tests first instead of in the order they were added. In the
-# all-vendors suite the slowest case ("OnStep telescope - Park and FindHome race
-# the getters and a reconnect", 266 s) was added late enough to start about 7
-# minutes into a 679 s ctest run (CI run 41386637294). ctest's own record of
-# timings cannot do this (see scripts/ctest_cost.py), so ctest writes a JUnit
-# report, save_cost_data turns it into <file> when the script exits, pass or
-# fail, and AlpacaCore/cmake/CTestCost.cmake reads <file> on the next run.
-# Needs CMake >= 3.21 (--output-junit) and python3. Unset, nothing changes. A
-# failure only costs the ordering, so it warns and never fails the run.
-# save_cost_data <junit report>
-save_cost_data() {
-  [[ -n "${CTEST_COST_DATA:-}" && -f "$1" ]] || return 0
-  if ! python3 "${ROOT_DIR}/scripts/ctest_cost.py" "$1" "${CTEST_COST_DATA}"; then
-    echo "WARNING: could not save the ctest timings to ${CTEST_COST_DATA}"
-  fi
-}
-
-# Sourced with RUN_ALL_TESTS_LIB=1 to expose the floor and cost-data helpers for a demonstration.
+# Sourced with RUN_ALL_TESTS_LIB=1 to expose the floor checks for a demonstration.
 if [[ "${RUN_ALL_TESTS_LIB:-}" == "1" ]]; then
   # shellcheck disable=SC2317
   return 0 2>/dev/null || exit 0
@@ -181,19 +163,7 @@ check_http_floor "AlpacaHTTP (vendors ${CORE_VENDORS})" "${BUILD_DIR}" "${CORE_B
 # ci_preflight.sh alike (issue #586). Requires CMake >= 3.18. It catches only an
 # EMPTY tree; the floors above catch a shrunken suite (issue #592). One ctest
 # over the whole tree runs both suites in one parallel pool.
-# With CTEST_COST_DATA set, the first run's JUnit report records the timings;
-# the serial rerun below writes none, so its times never replace the parallel ones.
-JUNIT_ARGS=()
-if [[ -n "${CTEST_COST_DATA:-}" ]]; then
-  if [[ -f "${CTEST_COST_DATA}" ]]; then
-    echo "ctest timings: read from ${CTEST_COST_DATA}"
-  else
-    echo "ctest timings: none at ${CTEST_COST_DATA} yet; tests start in the order they were added"
-  fi
-  JUNIT_ARGS=(--output-junit "${BUILD_DIR}/ctest-junit.xml")
-  trap 'save_cost_data "${BUILD_DIR}/ctest-junit.xml"' EXIT
-fi
-if ! ctest --test-dir "${BUILD_DIR}" --output-on-failure --no-tests=error --timeout "${CTEST_TIMEOUT}" -j "${CTEST_PARALLEL}" ${JUNIT_ARGS[@]+"${JUNIT_ARGS[@]}"}; then
+if ! ctest --test-dir "${BUILD_DIR}" --output-on-failure --no-tests=error --timeout "${CTEST_TIMEOUT}" -j "${CTEST_PARALLEL}"; then
   # CTEST_RERUN_FAILED=1 (the nightly jobs set it): the failed cases run once
   # more, alone and serially, and that run is the verdict. The all-vendors
   # suite is ~3800 cases that wait on fake hardware in real time; at 2x nproc
