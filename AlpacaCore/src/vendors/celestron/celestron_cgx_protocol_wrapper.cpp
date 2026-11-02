@@ -101,8 +101,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
                 throw_link_error("cannot clear stale AUX input before recovery");
             }
             receive_buffer_.clear();
-            desynchronized_ = false;
-            healthy_.store(true);
+            desynchronized_ = false;  // healthy_ stays false until a reply (decision 0009 rule 1)
         }
         return;
     }
@@ -154,8 +153,7 @@ void CelestronCgxProtocol::resync() {
         throw_link_error("cannot clear stale AUX input before recovery");
     }
     receive_buffer_.clear();
-    desynchronized_ = false;
-    healthy_.store(true);
+    desynchronized_ = false;  // healthy_ stays false until a reply (decision 0009 rule 1)
 }
 
 void CelestronCgxProtocol::disconnect() {
@@ -212,6 +210,7 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::mi
             response = decode_aux_frame(read_frame_locked(deadline));
             if (response.source == request.destination && response.destination == request.source &&
                 response.command == request.command) {
+                healthy_.store(true);
                 return response;
             }
             // AUX carries no transaction id. Discard traffic for another address or
