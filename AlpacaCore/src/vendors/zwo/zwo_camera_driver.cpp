@@ -341,7 +341,7 @@ public:
         // Wait for a bulk read to finish before the close. SDK-backed getters
         // now fail on the empty camera_id_, while local cached getters can still take mutex_.
         lock.unlock();
-        // A pulse in flight ends now, its turn-off sent on the open the close below drops (decision 0006 rule 8).
+        // A pulse in flight ends now, its turn-off sent on the open the close below drops (async_operation.h Rule 8).
         stop_pulse_timer();
         if (close_id.has_value()) {
             try {
@@ -994,6 +994,9 @@ public:
             // The claim (decision 0006 rule 3): the SDK write, the generation bump and the flag under pulse_mutex_,
             // which the timer body holds from taking a turn-off to sending it, so a turn-off due from the running
             // body goes out before this pulse starts, or the body sees itself superseded and leaves it to the new one.
+            // The rule's text says the bump happens under the driver mutex_; here it is pulse_mutex_, the lock the
+            // body checks its claim under, and the flags follow under mutex_. The guarantee is the same because the
+            // body never takes mutex_.
             std::lock_guard<std::mutex> plock(pulse_mutex_);
             std::uint64_t pulse_link = 0;
             const int pulse_camera_id = with_camera([&](int id) {
@@ -1393,7 +1396,7 @@ private:
         pulse_guiding_.store(false);
     }
 
-    // Decision 0006 rule 8: cancels and joins the timer, which sends every pending turn-off first. Called without
+    // async_operation.h Rule 8: cancels and joins the timer, which sends every pending turn-off first. Called without
     // mutex_ held; Disconnect and Connect call it under transition_mutex_.
     void stop_pulse_timer() {
         std::lock_guard<std::mutex> pulse_lifecycle(pulse_lifecycle_mutex_);
@@ -1447,7 +1450,7 @@ private:
         if (!link_.mark_lost(captured)) {
             return;  // a disconnect, a relink or another call got there first
         }
-        // May run with mutex_ held, so cancel only (decision 0006 rule 7); the next Disconnect, Connect or the
+        // May run with mutex_ held, so cancel only (async_operation.h Rule 7); the next Disconnect, Connect or the
         // destructor joins the timer.
         pulse_slot_.cancel();
         std::string label;

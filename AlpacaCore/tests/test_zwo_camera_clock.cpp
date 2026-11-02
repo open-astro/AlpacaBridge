@@ -108,7 +108,8 @@ TEST_CASE("ZWO camera clock - pulse guide turns off after the duration on the ta
 }
 
 // Falsified by: zwo_camera_driver.cpp set_connected(false) not cancelling and joining pulse_slot_ before the close
-// (the guide stays on until the timer runs out and the timer outlives the Disconnect). Decision 0006 rules 1 and 8.
+// (the guide stays on until the timer runs out and the timer outlives the Disconnect). Decision 0006 rule 1 and
+// async_operation.h Rule 8.
 TEST_CASE("ZWO camera clock - Disconnect mid-pulse turns the guide off at once", "[zwo][camera][unit][clock]") {
     FakeZWOSDK sdk;
     FakeTaskClock clock;

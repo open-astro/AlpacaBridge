@@ -472,7 +472,8 @@ TEST_CASE("ZWO Camera Driver - a pulled cable during an exposure loses the link 
 
 // Falsified by: zwo_camera_driver.cpp on_link() not calling note_loss() (Connected stays true). The wrapper side,
 // zwo_sdk_wrapper.cpp get_control_value() answering false on a removal code (which hid a pulled cable from every
-// temperature read): MUTATION: not runnable here: it needs the vendor library, which has no x86_64 build.
+// temperature read): MUTATION: not runnable here: it needs the real vendor library and a camera, which these tests
+// replace with the fake SDK (rig check: TODO(#1667)).
 TEST_CASE("ZWO Camera Driver - a removal error on a temperature read loses the link", "[zwo][camera][unit][link]") {
     FakeZWOSDK sdk;
     auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
