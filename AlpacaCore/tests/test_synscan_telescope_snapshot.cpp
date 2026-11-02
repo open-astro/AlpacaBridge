@@ -472,6 +472,43 @@ TEST_CASE("SynScan snapshot - a lost link refuses the getters that serve no fram
     driver->set_connected(false);
 }
 
+// Decision 0009 rule 1: while Connected stays true on a young fault, a guide-rate read or write is refused with
+// DriverException and stores nothing; a value out of range is still InvalidValue first; a good poll restores writes.
+TEST_CASE("SynScan snapshot - a faulted link refuses guide-rate writes and reads and a good poll restores them",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    driver->set_guide_rate({0.001, 0.002});
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) sc::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    REQUIRE(driver->get_connected());  // a young fault keeps Connected
+
+    const auto fault = alpacacore::AlpacaError::DriverException;
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.003); }, fault);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.003); }, fault);
+    require_alpaca_error([&] { driver->set_guide_rate({0.003, 0.003}); }, fault);
+    require_alpaca_error([&] { (void)driver->get_guide_rate(); }, fault);
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    st->mute = false;
+    sc::poll_status_now_for_testing(*driver);
+    REQUIRE(driver->get_link_fault().empty());
+    CHECK(driver->get_guide_rate().ra == 0.001);  // the refused writes stored nothing
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_guide_rate_right_ascension(0.003);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SynScan snapshot - a pointing state that is neither E nor W reads as pierUnknown, not an error",
           "[synscan][telescope][snapshot]") {
     FakeTaskClock clock;

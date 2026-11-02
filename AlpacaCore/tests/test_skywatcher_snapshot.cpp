@@ -551,4 +551,47 @@ TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked:
     driver->set_connected(false);
 }
 
+// Decision 0009 rule 1 (open-astro#1786): while Connected stays true on a young fault, a guide-rate write is
+// refused with DriverException and stores nothing (the getter is configuration and keeps answering); an out-of-range value is still InvalidValue first; a good poll
+// restores both.
+TEST_CASE("SkyWatcher snapshot - a faulted link refuses guide-rate writes and a good poll restores them",
+          "[skywatcher][snapshot][udp]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    sw::ConnectionInfo info = endpoint(mount);
+    info.response_timeout_ms = 100;
+    auto driver = sw::create_skywatcher_telescope(0, info, 39.7392, -104.9903, 1609.0, {}, {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_guide_rate({0.001, 0.002});
+
+    mount.set_silent(true);
+    for (int i = 0; i < 6 && driver->get_link_fault().empty(); ++i) {
+        step(clock, milliseconds(150));
+    }
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    REQUIRE(driver->get_connected());  // faulted, not lost
+
+    const auto fault = alpacacore::AlpacaError::DriverException;
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.003); }, fault);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.003); }, fault);
+    require_alpaca_error([&] { driver->set_guide_rate({0.003, 0.003}); }, fault);
+    CHECK_NOTHROW(driver->get_guide_rate());  // driver-side configuration keeps answering (test_skywatcher_serial)
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    mount.set_silent(false);
+    for (int i = 0; i < 6 && !driver->get_link_fault().empty(); ++i) {
+        step(clock, milliseconds(150));
+    }
+    REQUIRE(driver->get_link_fault().empty());
+    CHECK(driver->get_guide_rate().ra == 0.001);  // the refused writes stored nothing
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_guide_rate_declination(0.003);
+    CHECK(driver->get_guide_rate().ra == 0.001);
+    CHECK(driver->get_guide_rate().dec == 0.003);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

@@ -1085,7 +1085,7 @@ public:
         validate_guide_rate(rate.ra);
         validate_guide_rate(rate.dec);
         StateLock lock(lock_gate_);
-        check_connected();
+        check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
         guide_rate_ = rate;
     }
 
@@ -1094,14 +1094,14 @@ public:
     void set_guide_rate_right_ascension(double value) override {
         validate_guide_rate(value);
         StateLock lock(lock_gate_);
-        check_connected();
+        check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
         guide_rate_.ra = value;
     }
 
     void set_guide_rate_declination(double value) override {
         validate_guide_rate(value);
         StateLock lock(lock_gate_);
-        check_connected();
+        check_writable_locked();  // connection, then the fault gate (decision 0009 rule 1)
         guide_rate_.dec = value;
     }
 

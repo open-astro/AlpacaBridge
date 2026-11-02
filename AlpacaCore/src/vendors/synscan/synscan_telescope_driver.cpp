@@ -691,14 +691,17 @@ public:
         validate_guide_rate(rate.dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();  // decision 0009 rule 1: a faulted link refuses a write
         guide_rate_ = rate;
     }
 
-    // One axis under one lock: the base default reads the pair first, and that read refuses a faulted link.
+    // One axis under one lock: the base default reads the pair first; here the connection and fault gates run in the
+    // same lock as the store.
     void set_guide_rate_right_ascension(double value) override {
         validate_guide_rate(value);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();  // decision 0009 rule 1: a faulted link refuses a write
         guide_rate_.ra = value;
     }
 
@@ -706,6 +709,7 @@ public:
         validate_guide_rate(value);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();  // decision 0009 rule 1: a faulted link refuses a write
         guide_rate_.dec = value;
     }
 
