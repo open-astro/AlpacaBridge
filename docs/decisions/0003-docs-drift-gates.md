@@ -15,7 +15,7 @@ Several repo facts were written twice and silently diverged: build options and t
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
 1. A fact written in two places has one owner, or a check in `scripts/check_docs_drift.py` that compares the copies. Scope: `AGENTS.md`, `CONTEXT.md`, `.github/instructions/*.md`, `docs/**/*.md`. Checked by: review.
-2. A change to a drift check adds a self-test fixture that fails for the drift it catches. Scope: `scripts/check_docs_drift.py`, `scripts/check_instruction_structure.py`. Checked by: `scripts/check_docs_drift.py --self-test` (CI `docs-drift` job).
+2. A change to a drift check adds a self-test fixture that fails for the drift it catches. Scope: `scripts/check_docs_drift.py`, `scripts/check_instruction_structure.py`. Checked by: `scripts/check_docs_drift.py --self-test` (CI `static-checks` job).
 3. Every repo path named in an instruction file, a memory record or a first-party code comment that cites a record resolves. Scope: `AGENTS.md`, `.github/instructions/*.md`, `docs/failures/*.md`, `docs/decisions/*.md`, `AlpacaCore/**`, `AlpacaHTTP/**`. Checked by: `scripts/check_docs_drift.py` check 7.
 
 ## Alternatives rejected

@@ -36,7 +36,7 @@
 #
 # Exit status: 0 only if every mandatory check passed.
 #
-# --self-test (issue #1453, run by the CI shellcheck job) re-runs the script under
+# --self-test (issue #1453, run by the CI static-checks job) re-runs the script under
 # /bin/bash -u and checks that: read_lines keeps lines literal and gives 0 elements
 # on empty input; the script has no bash 4 construct; an empty diff (PREFLIGHT_BASE=HEAD)
 # makes every change-scoped gate record SKIP, aborts nowhere and lists every gate; and
@@ -389,7 +389,7 @@ read_lines SRC_CPP_FILES < <(
     | grep -E '\.(c|cc|cpp|cxx|h|hpp|hxx)$' || true
 )
 
-# Shell scripts we author (mirrors the shellcheck job's selection).
+# Shell scripts we author (mirrors the static-checks job's ShellCheck selection).
 read_lines SH_FILES < <(
   {
     printf '%s\n' ${CHANGED[@]+"${CHANGED[@]}"} | grep -E '\.sh$' | grep -v '^AlpacaCore/external/'
