@@ -26,7 +26,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -294,11 +296,14 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::u
 // Steps the fake clock one `step` at a time, once the driver's task is parked
 // on it, until `pred` holds or `max_steps` steps pass. Each step waits for the
 // woken task to settle, so no step lands between two of its waits.
-bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred,
+// Each step first waits for `waiters` tasks on the clock (the status poll and
+// the task under test): on the poll alone, a task that reaches the clock late
+// finds the steps used up (#1949). Returns pred() when they do not come in 5 s.
+bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred, std::size_t waiters,
                    std::chrono::milliseconds step = std::chrono::milliseconds(250), int max_steps = 200) {
     for (int i = 0; i < max_steps; ++i) {
         if (pred()) return true;
-        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        if (!clock.wait_for_waiters(waiters, std::chrono::seconds(5))) break;
         clock.advance(step);
         clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
@@ -330,11 +335,12 @@ TEST_CASE("Celestron async - Park returns immediately, AtPark flips when the sle
     driver->park();
     REQUIRE(driver->get_slewing());
     REQUIRE_FALSE(driver->get_at_park());
-    // The task is parked on its first 250 ms poll: a second GOTO would be on the wire by now.
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    // The task is parked on its first 250 ms poll (the status poll is the other waiter): a second GOTO would be on the
+    // wire by now.
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     CHECK(st->goto_count.load() == 1);
 
-    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
+    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }, 2));
     REQUIRE_FALSE(driver->get_slewing());
     REQUIRE_FALSE(driver->get_tracking());  // park stops tracking
 
@@ -363,7 +369,7 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
     // The cancelled park task must never flip AtPark afterwards.
     // Virtual time well past the GOTO and the start grace.
-    CHECK_FALSE(advance_until(clock, [&] { return driver->get_at_park(); }, std::chrono::milliseconds(250), 12));
+    CHECK_FALSE(advance_until(clock, [&] { return driver->get_at_park(); }, 1, std::chrono::milliseconds(250), 12));
     REQUIRE_FALSE(driver->get_at_park());
 
     // A park in flight gates motion members like a completed park does, so a
@@ -415,7 +421,7 @@ TEST_CASE("Celestron FindHome - refuses during Park without replacing the park t
     }
     CHECK(st->level_start_count.load() == 0);
     CHECK(driver->get_slewing());
-    CHECK(advance_until(clock, [&] { return driver->get_at_park(); }));
+    CHECK(advance_until(clock, [&] { return driver->get_at_park(); }, 2));
     CHECK(st->goto_count.load() == 1);
     driver->unpark();
     driver->set_connected(false);
@@ -561,7 +567,7 @@ TEST_CASE("Celestron async - Park completion poll failure persists through Slewi
             return read_slewing_error(*driver, &message) &&
                    message.find("Park slew status polling failed") != std::string::npos;
         },
-        std::chrono::milliseconds(250), 48));
+        2, std::chrono::milliseconds(250), 48));
     CHECK(read_slewing_error(*driver));
     // The failed polls also latched the link fault (decision 0009 rule 1): AtPark refuses with its text.
     CHECK_THROWS_AS(driver->get_at_park(), alpacacore::AlpacaException);
@@ -680,8 +686,13 @@ TEST_CASE("Celestron sync slew - superseded by AbortSlew, Park or MoveAxis throw
         c.supersede(*driver);
         const int t_after_supersede = st->t_count.load();
         // The slewer sleeps on the task clock between polls; step it until it has noticed.
-        REQUIRE(advance_until(clock, [&] { return done.load(); }));
+        const bool finished = advance_until(clock, [&] { return done.load(); }, 2);
+        if (!finished &&
+            !clock.drain_until([&] { return done.load(); }, std::chrono::seconds(1), std::chrono::seconds(10))) {
+            std::terminate();  // the slewer is stuck off the clock: joining it would hang
+        }
         slewer.join();
+        REQUIRE(finished);
         CHECK(code.load() == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
         CHECK(t_at_exit.load() == t_after_supersede);  // no tracking restore after the supersede
         driver->set_connected(false);
@@ -709,7 +720,11 @@ TEST_CASE("Celestron sync slew - uncontended slew returns and runs the tracking 
         }
         done.store(true);
     });
-    const bool finished = advance_until(clock, [&] { return done.load(); });
+    const bool finished = advance_until(clock, [&] { return done.load(); }, 2);
+    if (!finished &&
+        !clock.drain_until([&] { return done.load(); }, std::chrono::seconds(1), std::chrono::seconds(10))) {
+        std::terminate();  // the slewer is stuck off the clock: joining it would hang
+    }
     slewer.join();
     REQUIRE(finished);
     REQUIRE_FALSE(threw.load());
@@ -1338,7 +1353,8 @@ TEST_CASE("Celestron initiator supersede - a superseded slew body does not learn
     constexpr double kTargetRa = 1.750129 + 0.0003;  // 0.0003 h from what the fake mount reports: within the 30" limit
     const auto finish = [&](int bodies) {
         for (int i = 0; i < 60 && rig.bodies_done.load() < bodies; ++i) {
-            rig.clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+            // The paused poll and the body: the poll alone lets the steps run out before a late body (#1949).
+            if (!rig.clock.wait_for_waiters(2, std::chrono::seconds(5))) break;
             rig.clock.advance(std::chrono::milliseconds(250));
             rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
         }
@@ -1353,7 +1369,7 @@ TEST_CASE("Celestron initiator supersede - a superseded slew body does not learn
     const std::string after_learning = rig.st->goto_text();
     CHECK(after_learning != before_learning);
     // Slew 2: hold its learning read (the first position read after the tail starts), take the slot with MoveAxis.
-    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the paused poll and slew 2's body (#1949)
     rig.st->e_hold_ms.store(1500);
     std::thread stepper([&] {  // steps the clock to the tail; its settle wait outlasts the hold, so it runs apart
         for (int i = 0; i < 60 && rig.st->e_hold_ms.load() != 0; ++i) {
@@ -1385,7 +1401,7 @@ TEST_CASE("Celestron case A - refused park GOTO must not report AtPark", "[park]
     st->pos_variant.store(1);  // mount now reads 3 h of RA away from it
     st->no_motion.store(true);
     driver->park();
-    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }, 2));
     const bool err = read_slewing_error(*driver);
     bool at_park = false;
     try {
@@ -1410,7 +1426,7 @@ TEST_CASE("Celestron case B - already at park target still parks", "[park][celes
     driver->set_park();
     st->no_motion.store(true);
     driver->park();
-    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }, 2));
     bool at_park = false;
     try {
         at_park = driver->get_at_park();
