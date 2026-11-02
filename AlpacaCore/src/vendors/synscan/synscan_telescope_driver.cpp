@@ -682,7 +682,8 @@ public:
 
     GuideRate get_guide_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        throw_if_link_lost_or_faulted();
+        check_connected();  // a driver that never connected has no rate to answer; lost is NotConnected too
+        throw_if_link_faulted();
         return guide_rate_;
     }
 
@@ -871,6 +872,8 @@ public:
 
     double get_target_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();  // decision 0009 rules 1 and 3: commanded state, refused on a lost or faulted link
+        throw_if_link_faulted();
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -880,12 +883,16 @@ public:
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        throw_if_link_faulted();  // decision 0009 rule 1: a refused write keeps the value and its set flag
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();  // decision 0009 rules 1 and 3: commanded state, refused on a lost or faulted link
+        throw_if_link_faulted();
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -895,6 +902,8 @@ public:
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        throw_if_link_faulted();  // decision 0009 rule 1: a refused write keeps the value and its set flag
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }

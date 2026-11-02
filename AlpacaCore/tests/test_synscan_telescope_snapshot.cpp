@@ -509,6 +509,80 @@ TEST_CASE("SynScan snapshot - a faulted link refuses guide-rate writes and reads
     driver->set_connected(false);
 }
 
+// Decision 0009 rules 1 and 3 (open-astro#1786): the target pair is commanded state. A young fault refuses a read of
+// a set target and a write with DriverException while Connected stays true; a lost link and an explicit disconnect are
+// NotConnected; an out-of-range write is InvalidValue first; a refused write changes neither the value nor its flag.
+TEST_CASE("SynScan snapshot - a faulted or lost link refuses the targets and the guide rate like the other reads",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    driver->set_target_right_ascension(5.0);  // declination stays unset
+    driver->set_guide_rate({0.001, 0.002});
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) sc::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    REQUIRE(driver->get_connected());  // a young fault keeps Connected
+
+    const auto fault = alpacacore::AlpacaError::DriverException;
+    const auto invalid = alpacacore::AlpacaError::InvalidValue;
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, fault);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, fault);
+    require_alpaca_error([&] { driver->set_target_right_ascension(6.0); }, fault);
+    require_alpaca_error([&] { driver->set_target_declination(10.0); }, fault);
+    require_alpaca_error([&] { driver->set_target_right_ascension(25.0); }, invalid);
+    require_alpaca_error([&] { driver->set_target_declination(95.0); }, invalid);
+
+    st->mute = false;
+    sc::poll_status_now_for_testing(*driver);
+    REQUIRE(driver->get_link_fault().empty());
+    CHECK(driver->get_target_right_ascension() == 5.0);  // the refused writes stored nothing
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    driver->set_target_declination(10.0);
+    CHECK(driver->get_target_declination() == 10.0);
+    CHECK(driver->get_target_right_ascension() == 5.0);
+
+    lose_link(*driver, *st, clock);
+    const auto lost = alpacacore::AlpacaError::NotConnected;
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, lost);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, lost);
+    require_alpaca_error([&] { driver->set_target_right_ascension(6.0); }, lost);
+    require_alpaca_error([&] { driver->set_target_declination(11.0); }, lost);
+    require_alpaca_error([&] { driver->set_target_right_ascension(25.0); }, invalid);
+    st->mute = false;
+    driver->set_connected(false);
+}
+
+// A connected driver answers; after an explicit disconnect the guide rate and the targets are NotConnected, and the
+// rate written while connected is what the next connect serves.
+TEST_CASE("SynScan snapshot - an explicit disconnect refuses the guide rate and the targets",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    driver->set_guide_rate({0.001, 0.002});
+    driver->set_target_right_ascension(5.0);
+    CHECK(driver->get_guide_rate().ra == 0.001);
+    CHECK(driver->get_target_right_ascension() == 5.0);
+
+    driver->set_connected(false);
+    const auto lost = alpacacore::AlpacaError::NotConnected;
+    require_alpaca_error([&] { (void)driver->get_guide_rate(); }, lost);
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, lost);
+    require_alpaca_error([&] { driver->set_target_declination(10.0); }, lost);
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.003); }, lost);
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+}
+
 TEST_CASE("SynScan snapshot - a pointing state that is neither E nor W reads as pierUnknown, not an error",
           "[synscan][telescope][snapshot]") {
     FakeTaskClock clock;

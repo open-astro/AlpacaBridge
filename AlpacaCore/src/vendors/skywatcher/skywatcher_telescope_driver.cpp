@@ -1078,10 +1078,8 @@ public:
 
     GuideRate get_guide_rate() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
-        if (connected_) {  // a driver that never connected still answers; once linked, lost is NotConnected, faulted
-            check_connected();  // is DriverException (decision 0009 rules 1 and 3, open-astro#1786)
-            throw_if_link_faulted_locked();
-        }
+        check_connected();  // never connected, disconnected or lost: NotConnected; faulted: DriverException
+        throw_if_link_faulted_locked();  // (decision 0009 rules 1 and 3, open-astro#1786)
         return guide_rate_;
     }
 
@@ -1404,6 +1402,7 @@ public:
     double get_target_declination() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
+        throw_if_link_faulted_locked();  // decision 0009 rule 1: commanded state, not a wire read
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -1413,6 +1412,7 @@ public:
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
         StateLock lock(lock_gate_);
+        check_writable_locked();  // connection, then the fault gate; a refused write keeps the value and its set flag
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
@@ -1420,6 +1420,7 @@ public:
     double get_target_right_ascension() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
+        throw_if_link_faulted_locked();  // decision 0009 rule 1: commanded state, not a wire read
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -1429,6 +1430,7 @@ public:
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
         StateLock lock(lock_gate_);
+        check_writable_locked();  // connection, then the fault gate; a refused write keeps the value and its set flag
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
