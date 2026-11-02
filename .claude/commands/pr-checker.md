@@ -458,7 +458,8 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
 - `state=BEHIND` with `QUEUE=false` (or a `stable/X.Y` base) -> `update-branch` (Step 1.3) and go
   back to Step 2; the merge commit re-runs the bot. With `QUEUE=true` and base `main`, `BEHIND` is
   not a blocker: merge.
-- `state=BLOCKED` with checks still running -> wait for `gh pr checks <N> --watch`, then merge.
+- `state=BLOCKED` with checks still running -> wait for `gh pr checks <N> --watch`, then merge. An
+  `enqueuePullRequest` error while a required check is still pending means the same: wait, then retry.
 - otherwise merge. With `QUEUE=false`, or a `stable/X.Y` base:
   ```bash
   gh pr merge <N> --merge
@@ -470,9 +471,10 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
   read -r ID HEAD < <(gh pr view <N> --json id,headRefOid --jq '"\(.id) \(.headRefOid)"')
   # The one-pass Step 2 check prints the verdict only when it belongs to the head now,
   # and exits 0 for an Issues-found verdict too, so the approval is checked on its last
-  # line. HEAD is read first, so a push between the two fails one of them.
+  # line. HEAD is read first, so a push between the two fails one of them. poll.sh is
+  # the Step 2 block saved with this PR's number in its first line.
   V=$(mktemp)
-  PR=<N> BUDGET=0 bash poll.sh > "$V" \
+  BUDGET=0 bash poll.sh > "$V" \
     && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] \
     && gh api graphql -f query='mutation($id:ID!,$sha:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$sha}){mergeQueueEntry{position state}}}' \
     -f id="$ID" -f sha="$HEAD" --jq .data.enqueuePullRequest.mergeQueueEntry
@@ -504,7 +506,7 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
   (`gh run list --workflow=ci.yml --event=merge_group --limit 10`; its branch is
   `gh-readonly-queue/main/pr-<N>-<sha>`). A failure on the merged commit, typically
   `sanitizers-tsan` or `package-deb`, is fixed on the head branch like any CI failure: run the step 5
-  gates, push, poll for the fresh verdict, merge again. A job that failed in code the PR does not
+  gates, push, poll for the fresh verdict, queue it again. A job that failed in code the PR does not
   touch gets the flake treatment under "Keep looping" before you queue it again. A conflict with a PR
   that merged ahead of it (`CONFLICTING`) is resolved as in Step 1.3.
   The repo has `delete_branch_on_merge` enabled (2026-09-10), so an `origin` head branch is

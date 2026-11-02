@@ -563,7 +563,7 @@ auto-merge and fails here because the repository has auto-merge off. The queue r
 the merged commit, including `sanitizers-tsan` and `package-deb`, which a PR into `main` skips.
 Never pass `--admin` to `gh pr merge`: it bypasses the queue. Wait for the PR to merge or leave the queue with the background block in
 `/pr-checker`'s Step 3, and treat a removal like a red CI check: fix, push, poll for the fresh
-verdict, merge again. Never update or rebase the branch because `main` moved.
+verdict, queue it again. Never update or rebase the branch because `main` moved.
 
 ### Follow-up issue format
 
