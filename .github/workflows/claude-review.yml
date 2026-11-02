@@ -46,7 +46,9 @@ jobs:
       # and /pr-checker and /submit-pr read that as "fix CI", not as a broken
       # review workflow. Only `success` is green: a job that was skipped,
       # neutral or ended any other way counts as red, so a needs: or if: that
-      # skips one cannot let the review run on a red head.
+      # skips one cannot let the review run on a red head. So the list holds
+      # only jobs that run on every PR into main: sanitizers-tsan and
+      # package-deb skip those (the merge queue runs them), and are left out.
       - name: Wait for the CI build and test jobs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,7 +59,6 @@ jobs:
             "Build + test (arm64)"
             "Build + test (all vendors, arm64)"
             "Sanitizers (ASan + UBSan, arm64)"
-            "Sanitizers (TSan concurrency stress, arm64)"
           )
           deadline=$(( $(date +%s) + 45 * 60 ))
           while :; do
