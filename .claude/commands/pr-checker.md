@@ -584,7 +584,9 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   (`poll` = the Step 2 block saved to a file, run as `bash poll.sh`):
   `V=$(mktemp); bash poll.sh > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && <merge>`,
   where `<merge>` is the Step 3 command for the mode: `gh pr merge <N> --merge` with `QUEUE=false`,
-  the `enqueuePullRequest` call followed by the queue wait with `QUEUE=true`.
+  the `enqueuePullRequest` block followed by the queue wait with `QUEUE=true`. That block runs
+  `poll.sh` once more: the first run waits for the verdict, the second checks it is still an
+  approval of the head being queued, so keep both.
 - **A Defect you disagree with** is still fixed or wired into the skill/docs when there is any
   reasonable change that satisfies it. Only a Defect that would require a wrong or unsafe change
   becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.

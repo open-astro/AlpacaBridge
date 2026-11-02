@@ -554,7 +554,7 @@ approval carries are listed in Step 10; open a follow-up issue for one only when
 Then ask the user for approval to merge; on yes, for a PR into `stable/X.Y` (no queue there):
 
 ```bash
-gh pr merge <number> --merge
+gh pr merge <number> --merge   # stable/X.Y only; for main, see below
 ```
 
 A PR into `main` goes through the merge queue (`ci-gates`, "Merge queue"): add it with the
