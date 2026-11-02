@@ -166,6 +166,15 @@ that rerun is the verdict. The nightly jobs set it: the all-vendors suite under 
 scheduler race in a different case most nights, while a real finding fails again alone. PR CI
 does not set it, so an assertion that depends on the scheduler still surfaces there.
 
+With `CTEST_COST_DATA=<file>` (CMake 3.21 or later, and `python3`), the script keeps each test's
+time from the last run in that file and ctest starts the slowest tests first; without it ctest
+starts them in the order they were added. `scripts/ctest_cost.py` writes the file from ctest's
+JUnit report when the script exits, and `AlpacaCore/cmake/CTestCost.cmake` turns it into each
+test's `COST` on the next run. ctest's own `CTestCostData.txt` cannot be used: it splits each
+line at the first space, so no Catch2 case ever matches its timing. The `build-vendors` CI job
+sets the variable and caches the file, saved on each push to `main`; a test with no timing yet
+(a new one) starts last.
+
 `run_all_tests.sh` also guards against a shrunken suite. `ctest --no-tests=error` fails only a
 run that finds zero tests, so a vendor target that silently stops configuring would still pass
 with most of its cases gone. After the build the script counts the tests with `ctest -N`
