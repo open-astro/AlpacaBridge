@@ -468,17 +468,21 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
   queue** with the GraphQL mutation, pinned to the head the bot approved:
   ```bash
   read -r ID HEAD < <(gh pr view <N> --json id,headRefOid --jq '"\(.id) \(.headRefOid)"')
-  # The one-pass Step 2 check exits non-zero unless the verdict belongs to the head now;
-  # read HEAD first, so a push between the two fails one of them.
-  PR=<N> BUDGET=0 bash poll.sh > /dev/null && \
-  gh api graphql -f query='mutation($id:ID!,$sha:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$sha}){mergeQueueEntry{position state}}}' \
+  # The one-pass Step 2 check prints the verdict only when it belongs to the head now,
+  # and exits 0 for an Issues-found verdict too, so the approval is checked on its last
+  # line. HEAD is read first, so a push between the two fails one of them.
+  V=$(mktemp)
+  PR=<N> BUDGET=0 bash poll.sh > "$V" \
+    && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] \
+    && gh api graphql -f query='mutation($id:ID!,$sha:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$sha}){mergeQueueEntry{position state}}}' \
     -f id="$ID" -f sha="$HEAD" --jq .data.enqueuePullRequest.mergeQueueEntry
   ```
   Not `gh pr merge`: with the queue required, gh turns on auto-merge instead of queueing, and this
   repository has auto-merge off, so it fails with "Auto merge is not allowed for this repository"
   (PR #1961). Do not turn auto-merge on to get around it: an auto-merge PR can land before the
-  review verdict. The pre-check ties the verdict to `HEAD`, and `expectedHeadOid` makes the call
-  fail if a push moved the head after `HEAD` was read. Never pass `--admin` to `gh pr merge`: it bypasses the queue. The queue then runs
+  review verdict. The pre-check requires an approval on `HEAD` itself (a push after the approval
+  leaves `HEAD` with no verdict, or with that push's own, which may reject it), and
+  `expectedHeadOid` makes the call fail if a push moved the head after `HEAD` was read. Never pass `--admin` to `gh pr merge`: it bypasses the queue. The queue then runs
   `ci.yml` on the merged commit, including `sanitizers-tsan` and `package-deb`, which a PR into
   `main` skips. Wait in the background until the PR merges or leaves the queue:
   ```bash
