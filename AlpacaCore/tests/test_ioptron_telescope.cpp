@@ -1776,6 +1776,426 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
     driver->set_connected(false);
 }
 
+// ── Decision 0022: the slew and pulse windows are util::HoldWindows on the task clock (issue #1831) ─────────
+//
+// HEM27 (0025): no GOTO trim, so Slewing past the window is the mount's status alone (1, tracking, unless set).
+namespace {
+
+namespace io = alpacacore::vendor::ioptron;
+using alpacacore::test::FakeIoptronMount;
+using alpacacore::test::FakeTaskClock;
+
+std::unique_ptr<alpacacore::TelescopeDriver> hold_driver(FakeIoptronMount& mount, FakeTaskClock& clock) {
+    auto driver = io::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()), std::nullopt, std::nullopt,
+                                                         std::nullopt,
+                                                         /*sync_time_on_connect=*/false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    return driver;
+}
+
+// Holds the async slew body before it takes mutex_ until release() (or destruction), so a case can act in the
+// gap between SlewToCoordinatesAsync returning and its :MS1# going out.
+struct HeldSlewBody {
+    std::promise<void> released;
+    std::shared_future<void> gate = released.get_future().share();
+    bool done = false;
+    std::function<void()> hook() {
+        return [gate = gate] { gate.wait(); };
+    }
+    void release() {
+        if (!done) released.set_value();
+        done = true;
+    }
+    ~HeldSlewBody() { release(); }
+};
+
+// Past the driver's 30 s post-connect cache, so reads after a 1 s cache age reach the mount.
+void pass_connect_cache(FakeTaskClock& clock) { clock.advance(std::chrono::seconds(31)); }
+
+constexpr double kGuideRateDegPerSec = 0.5 * 360.0 / 86164.0905;  // the driver's default guide rate
+
+}  // namespace
+
+// Rule 2: armed before the command goes out. The body has not taken mutex_ yet, so nothing has been sent; Slewing
+// is true from the moment the call returns.
+TEST_CASE("iOptron hold window - Slewing is true as soon as SlewToCoordinatesAsync returns",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    HeldSlewBody body;  // released before the driver joins its slot
+    driver = io::create_ioptron_telescope_with_slew_worker_hook(0, loopback_endpoint(mount.port()), body.hook(),
+                                                                std::nullopt, std::nullopt, {}, {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    CHECK(mount.count(":MS1#") == 0);
+    CHECK(driver->get_slewing());
+    body.release();
+    REQUIRE(wait_for_goto_dispatch(mount));
+    CHECK(driver->get_slewing());
+    driver->abort_slew();
+    driver->set_connected(false);
+}
+
+// The Alt/Az form arms the same window in its initiator (the mount is stopped: an Alt/Az slew needs Tracking off).
+TEST_CASE("iOptron hold window - Slewing is true as soon as SlewToAltAzAsync returns",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(0);
+    FakeTaskClock clock;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    HeldSlewBody body;  // released before the driver joins its slot
+    driver = io::create_ioptron_telescope_with_slew_worker_hook(0, loopback_endpoint(mount.port()), body.hook(),
+                                                                std::nullopt, std::nullopt, {}, {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_alt_az_async(45.0, 180.0);
+    CHECK(mount.count(":MS1#") == 0);
+    CHECK(driver->get_slewing());
+    body.release();
+    REQUIRE(wait_for_goto_dispatch(mount));
+    driver->abort_slew();
+    driver->set_connected(false);
+}
+
+// Rule 2: the dispatch arms the window again before its :MS1#, so it runs 5 s from the GOTO, not from an
+// initiator whose body waited for mutex_.
+TEST_CASE("iOptron hold window - the GOTO's window runs 5 s from its :MS1#",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    HeldSlewBody body;  // released before the driver joins its slot
+    driver = io::create_ioptron_telescope_with_slew_worker_hook(0, loopback_endpoint(mount.port()), body.hook(),
+                                                                std::nullopt, std::nullopt, {}, {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    clock.advance(std::chrono::seconds(4));
+    body.release();
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::milliseconds(4900));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(100));
+    CHECK_FALSE(driver->get_slewing());  // the mount reports tracking
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron hold window - AbortSlew inside the hold clears Slewing at once",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    REQUIRE(driver->get_slewing());
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(500));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron hold window - a reconnect inside the hold leaves Slewing false",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    REQUIRE(driver->get_slewing());
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// MoveAxis starts no GOTO: it ends the window of the GOTO it supersedes, and Slewing then follows the axis flags
+// and the mount.
+TEST_CASE("iOptron hold window - MoveAxis inside a GOTO's hold ends the window",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    REQUIRE(driver->get_slewing());
+    driver->move_axis(0, 15.0 / 3600.0);
+    CHECK(driver->get_slewing());
+    driver->move_axis(0, 0.0);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Rule 2: a failed dispatch clears the window. The link is reset, so the synchronous slew's :SRA# write fails;
+// Slewing reads the status cached at connect instead of the 5 s window.
+TEST_CASE("iOptron hold window - a synchronous SlewToCoordinates whose dispatch fails leaves Slewing false",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    mount.reset_link();
+    CHECK_THROWS(driver->slew_to_coordinates(12.0, 20.0));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// A synchronous slew whose dispatch throws also ends slew_in_progress_. Left true, it would stop the #843 mask: the
+// mount's system status 2 during a guide pulse would read as Slewing. The status 2 is the one cached at connect, and
+// the link is reset after the pulse, so no read goes to it.
+TEST_CASE("iOptron hold window - a failed synchronous slew does not unmask a guide pulse",
+          "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->pulse_guide(0, 2000);
+    REQUIRE(driver->get_is_pulse_guiding());
+    mount.reset_link();
+    CHECK_THROWS(driver->slew_to_coordinates(12.0, 20.0));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Rule 2: a Park whose :MP1# cannot be written takes its window back.
+TEST_CASE("iOptron hold window - a Park whose command fails leaves Slewing false",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    mount.reset_link();
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Hold lengths are unchanged: FindHome and Park 5 s, Unpark 2 s, each from its command. Past the 1 s status cache
+// the mount reports tracking, so only the window keeps Slewing true.
+TEST_CASE("iOptron hold window - FindHome, Park and Unpark hold Slewing for 5 s, 5 s and 2 s",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+
+    driver->find_home();
+    REQUIRE(mount.count(":MH#") == 1);
+    clock.advance(std::chrono::milliseconds(4900));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(100));
+    CHECK_FALSE(driver->get_slewing());
+
+    driver->park();
+    REQUIRE(mount.count(":MP1#") == 1);
+    clock.advance(std::chrono::milliseconds(4900));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(100));
+    CHECK_FALSE(driver->get_slewing());
+
+    driver->unpark();
+    REQUIRE(mount.count(":MP0#") == 1);
+    clock.advance(std::chrono::milliseconds(1900));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(100));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// The GOTO trim (HAE16 EQ, a 12 arcsec settle) holds Slewing for its pulse plus 500 ms: about 1.6 s at the
+// default guide rate, so true at 2.0 s and false at 2.2 s.
+TEST_CASE("iOptron hold window - the GOTO trim holds Slewing for its pulse",
+          "[ioptron][telescope][unit][fake][hold-window]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::seconds(5));
+    CHECK(driver->get_slewing());  // the trim goes out
+    REQUIRE(mount.count(":ZQ") == 1);
+    clock.advance(std::chrono::milliseconds(2000));
+    CHECK(driver->get_slewing());
+    clock.advance(std::chrono::milliseconds(200));
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(mount.count(":ZQ") == 1);
+    driver->set_connected(false);
+}
+
+// Rule 4: a North pulse of 2 s. IsPulseGuiding is true until 2 s plus the 1 s completion delay of virtual time;
+// RA is held at its last read until 2 s + 1 s + 2 s; the first Dec read serves the predicted position.
+TEST_CASE("iOptron hold window - a pulse keeps its axis while virtual time has not reached its end",
+          "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_position(10.0, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    REQUIRE(driver->get_right_ascension() == Catch::Approx(10.0));
+    REQUIRE(driver->get_declination() == Catch::Approx(20.0));
+    mount.set_position(11.0, 21.0);
+
+    const auto sent = clock.now();
+    driver->pulse_guide(0, 2000);
+    clock.advance(std::chrono::milliseconds(1100));
+    CHECK(driver->get_right_ascension() == Catch::Approx(10.0));                          // held
+    CHECK(driver->get_declination() == Catch::Approx(20.0 + 2.0 * kGuideRateDegPerSec));  // predicted, once
+    CHECK(driver->get_declination() == Catch::Approx(21.0));                              // then live
+    clock.advance(sent + std::chrono::milliseconds(2999) - clock.now());
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(std::chrono::milliseconds(1));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    clock.advance(sent + std::chrono::milliseconds(4999) - clock.now());
+    CHECK(driver->get_right_ascension() == Catch::Approx(10.0));
+    clock.advance(std::chrono::milliseconds(1));
+    CHECK(driver->get_right_ascension() == Catch::Approx(11.0));
+    driver->set_connected(false);
+}
+
+// Each pulse holds the axis it does not move and ends the hold a pulse on the other axis set; a zero-length pulse
+// ends both holds and IsPulseGuiding.
+TEST_CASE("iOptron hold window - each pulse holds the other axis and ends the earlier hold",
+          "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_position(10.0, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    REQUIRE(driver->get_right_ascension() == Catch::Approx(10.0));
+    REQUIRE(driver->get_declination() == Catch::Approx(20.0));
+    mount.set_position(11.0, 21.0);
+
+    SECTION("an East pulse holds Dec, predicts RA and ends a North pulse's RA hold") {
+        driver->pulse_guide(0, 2000);    // North: holds RA
+        driver->pulse_guide(2, 2000);    // East: holds Dec, ends the RA hold
+        mount.set_position(11.0, 21.0);  // the fake's :ZS models a GOTO trim and moved RA; the ack came after it
+        clock.advance(std::chrono::milliseconds(1100));
+        CHECK(driver->get_right_ascension() == Catch::Approx(10.0 + 2.0 * kGuideRateDegPerSec / 15.0));
+        CHECK(driver->get_right_ascension() == Catch::Approx(11.0));
+        (void)driver->get_declination();  // the North pulse's prediction, once
+        CHECK(driver->get_declination() == Catch::Approx(20.0));
+    }
+    SECTION("a North pulse ends an East pulse's Dec hold") {
+        driver->pulse_guide(2, 2000);
+        driver->pulse_guide(0, 2000);
+        clock.advance(std::chrono::milliseconds(1100));
+        (void)driver->get_declination();      // the North pulse's prediction, once
+        (void)driver->get_right_ascension();  // the East pulse's prediction, once
+        CHECK(driver->get_declination() == Catch::Approx(21.0));
+        CHECK(driver->get_right_ascension() == Catch::Approx(10.0));
+    }
+    SECTION("a zero-length pulse ends both holds and IsPulseGuiding") {
+        driver->pulse_guide(0, 2000);
+        driver->pulse_guide(0, 0);
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+        (void)driver->get_declination();  // the North pulse's prediction, once
+        clock.advance(std::chrono::milliseconds(1100));
+        CHECK(driver->get_right_ascension() == Catch::Approx(11.0));
+        driver->pulse_guide(2, 2000);
+        driver->pulse_guide(2, 0);
+        (void)driver->get_right_ascension();  // the East pulse's prediction, once
+        clock.advance(std::chrono::milliseconds(1100));
+        CHECK(driver->get_declination() == Catch::Approx(21.0));
+    }
+    driver->set_connected(false);
+}
+
+// Rule 2: a PulseGuide whose command cannot be written leaves no pulse window: IsPulseGuiding is false and the next
+// Dec read is the cached position, not a prediction. Inside the 30 s connect cache, so no read goes to the reset link.
+TEST_CASE("iOptron hold window - a PulseGuide whose command fails leaves no pulse window",
+          "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_position(10.0, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    REQUIRE(driver->get_declination() == Catch::Approx(20.0));
+
+    driver->pulse_guide(2, 3000);
+    REQUIRE(driver->get_is_pulse_guiding());
+    mount.reset_link();
+    CHECK_THROWS(driver->pulse_guide(0, 2000));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(driver->get_declination() == Catch::Approx(20.0));
+    driver->set_connected(false);
+}
+
+// Rule 2: a reconnect starts with no pulse window: IsPulseGuiding is false and RA and Dec are the mount's.
+TEST_CASE("iOptron hold window - a reconnect inside a pulse leaves no pulse window",
+          "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_position(10.0, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->pulse_guide(0, 2000);
+    REQUIRE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(driver->get_right_ascension() == Catch::Approx(10.0));
+    CHECK(driver->get_declination() == Catch::Approx(20.0));
+    driver->set_connected(false);
+}
+
+// Rule 2, the connect itself: a Connect over a lost link runs no Disconnect first (decision 0009 rule 4), and the
+// new session still starts with no window.
+TEST_CASE("iOptron hold window - a Connect over a lost link inside the holds leaves no window",
+          "[ioptron][telescope][unit][fake][hold-window][link-lost]") {
+    FakeTaskClock clock;
+    auto first = std::make_unique<alpacacore::test::PtyIoptronMount>();
+    first->model().set_position(10.0, 20.0);
+    alpacacore::test::ReplugPort port(*first);
+    auto driver = link_driver(serial_endpoint(port.path.string()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(12.0, 20.0);
+    REQUIRE(wait_until([&] { return first->model().count(":MS1#") == 1; }));
+    driver->pulse_guide(0, 2000);
+    first->unplug_on(on_command(":GEP#"));
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 20.0); }, AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+
+    alpacacore::test::PtyIoptronMount second;
+    second.model().set_position(11.0, 21.0);
+    port.replug(second);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(driver->get_declination() == Catch::Approx(21.0));
+    driver->set_connected(false);
+}
+
 // open-astro#1223: the clock-sync body's 250 ms start delay is a cancellable wait on the driver's clock, so
 // a disconnect that lands inside it joins at once. On a FakeTaskClock nobody advances, an uncancellable sleep
 // would park the join forever.

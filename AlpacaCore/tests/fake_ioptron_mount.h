@@ -68,6 +68,12 @@ public:
     /// firmware say "moving" with no GOTO issued, as during a pulse-guide or a slew started from the handset.
     void set_system_status(int status) { system_status_.store(status); }
 
+    /// Where the ":GEP" read says the mount points, until a GOTO or a trim pulse moves it.
+    void set_position(double ra_hours, double dec_degrees) {
+        ra_units_.store(std::llround(ra_hours * 15.0 * 3600.0 * 100.0));
+        dec_units_.store(std::llround(dec_degrees * 3600.0 * 100.0));
+    }
+
     void set_utc_reply(std::string reply) {
         std::lock_guard<std::mutex> lock(mutex_);
         utc_reply_ = std::move(reply);
