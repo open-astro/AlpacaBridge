@@ -1046,8 +1046,9 @@ TEST_CASE("ToupTek Camera Driver - a StartExposure wakes a body the watchdog lef
     driver->set_connected(false);
 }
 
-// Decision 0020 rule 5. Falsified by: a disconnect that leaves StartExposure open between its SDK stop and the
-// session close, so a start landing there parks a body in the SDK wait and the join blocks until the SDK timeout.
+// Decision 0020 rule 5. A smoke guard, NOT a regression test for the driver's closing_ check: the window between
+// the disconnect's mutex_ release and session_.disconnect_and_join() cannot be held open from outside the driver,
+// so this case also passes with that check removed. It pins the outcome (NotConnected, prompt return, no trigger).
 TEST_CASE("ToupTek Camera Driver - a StartExposure during a disconnect is refused and the disconnect returns promptly",
           "[touptek][camera][unit][capture-session]") {
     auto fake = make_fake_camera();
