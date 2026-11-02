@@ -28,6 +28,17 @@
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
 #
+# Where each job runs: every job runs on a pull_request push except
+# sanitizers-tsan and package-deb, which skip a PR into main: main's merge queue
+# (merge_group) runs them on the merge commit before it lands, so they gate the
+# merge without running on every push. They still run on a PR into stable/**
+# (no queue there), on a push to main or stable/**, and on workflow_dispatch
+# (`gh workflow run ci.yml --ref <branch>` runs them on a PR branch before it
+# is queued). format, clang-tidy, conformu-reports and cppcheck's check step run
+# on pull_request only: they diff against $GITHUB_BASE_REF, which a merge_group
+# run does not set, and a job skipped by its `if:` still satisfies a required
+# check.
+#
 # The vendor-neutral build (ALPACACORE_ENABLE_ALL_VENDORS=OFF) does not depend
 # on the bundled vendor SDK .so / firmware blobs; the vendor-ON job stages
 # those libraries from the in-tree external/ trees before building.
@@ -36,17 +47,22 @@ name: CI
 
 on:
   pull_request:
+  # The merge queue builds each queued group's merge commit here before it lands.
+  merge_group:
+    types: [checks_requested]
   push:
     branches:
       - main
       - "stable/**"
   workflow_dispatch:
 
-# A newer push to the same ref makes in-flight runs obsolete — cancel them so
-# we don't burn two arm64 builds racing each other.
+# A newer push to the same PR makes in-flight runs obsolete — cancel them so
+# we don't burn two arm64 builds racing each other. Only PR runs cancel: each
+# merge-queue group has its own ref, and the queue itself cancels a group it
+# drops, so cancelling here could only kill a run the queue is waiting on.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Single source of truth for the vendored libgpiod build dependency — the
 # build-vendors, sanitizers-tsan and clang-tidy jobs consume these,
@@ -416,6 +432,9 @@ jobs:
 
   sanitizers-tsan:
     name: Sanitizers (TSan concurrency stress, arm64)
+    # Skips a PR into main, where the merge queue runs it instead (see the
+    # header): off the per-push PR loop, but still gating every merge.
+    if: github.event_name != 'pull_request' || github.base_ref != 'main'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -784,6 +803,8 @@ jobs:
     # installs it and runs the bundled-libgphoto2 acceptance checks, so a change
     # that breaks the packaged loader path fails before release.
     name: package-deb
+    # Skips a PR into main, as sanitizers-tsan.
+    if: github.event_name != 'pull_request' || github.base_ref != 'main'
     runs-on: ubuntu-24.04-arm
     container: debian:trixie
     timeout-minutes: 40

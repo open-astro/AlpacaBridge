@@ -71,8 +71,18 @@ Checks to make before waiting on anything:
    gh api -X DELETE repos/open-astro/AlpacaBridge/issues/<N>/labels/safe-to-review
    gh api -X POST   repos/open-astro/AlpacaBridge/issues/<N>/labels -f 'labels[]=safe-to-review'
    ```
-3. **Branch is behind main** (`gh api "repos/open-astro/AlpacaBridge/compare/main...$OWNER:$BRANCH" --jq .behind_by`
-   is non-zero; `$OWNER`/`$BRANCH` validated in Step 0). Branch protection is strict, so it must be updated before it can merge, and
+3. **Branch is behind main.** First check whether `main` lands PRs through the merge queue:
+   ```bash
+   QUEUE=$(gh api repos/open-astro/AlpacaBridge/rules/branches/main --jq '[.[].type] | index("merge_queue") != null')
+   ```
+   **`QUEUE=true` and the base is `main`: being behind is not a reason to act.** The queue tests the
+   PR merged with the current `main` itself (`ci-gates`, "Merge queue"), so never `update-branch`
+   or merge `main` in: it only re-runs CI and the bot. Act only on a real conflict
+   (`gh pr view <N> --json mergeable --jq .mergeable` is `CONFLICTING`): resolve it locally with
+   the Step 3 mechanics in the `CONFLICTING` case below, then go to Step 2.
+   **`QUEUE=false`, or a `stable/X.Y` base** (no queue there): branch protection is strict, so a
+   branch whose `gh api "repos/open-astro/AlpacaBridge/compare/main...$OWNER:$BRANCH" --jq .behind_by`
+   is non-zero (`$OWNER`/`$BRANCH` validated in Step 0) must be updated before it can merge, and
    updating re-runs CI + the bot. Do this **now** rather than after the verdict so you do not pay
    for two bot rounds:
    ```bash
@@ -215,8 +225,8 @@ non-zero exit prints nothing on stdout, so a chained `poll && merge` never reach
 `date -d` is GNU; the skills run on the Linux dev VM.
 
 When several PRs are queued, poll them all in one background loop and act on whichever verdict
-lands first, but **merge strictly in ascending number order** so the update-branch dance is
-predictable.
+lands first, but **merge strictly in ascending number order**: with `QUEUE=true` that is the order
+they enter the merge queue, and with `QUEUE=false` it keeps the update-branch dance predictable.
 
 On exit `3`, or a timeout: open the run URL (or `gh run list --workflow=claude-review.yml
 --limit 5`) and read the failing job. Known stalls: the workflow triggers only on `opened`, `synchronize` and `labeled` (closing and
@@ -443,13 +453,38 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
 ```
 
 - `draft=true` -> `gh pr ready <N>` first (contributors often open drafts; `gh pr merge` refuses them).
-- `state=BEHIND` -> `update-branch` (Step 1.3) and go back to Step 2; the merge commit re-runs the bot.
+- `state=BEHIND` with `QUEUE=false` (or a `stable/X.Y` base) -> `update-branch` (Step 1.3) and go
+  back to Step 2; the merge commit re-runs the bot. With `QUEUE=true` and base `main`, `BEHIND` is
+  not a blocker: merge.
 - `state=BLOCKED` with checks still running -> wait for `gh pr checks <N> --watch`, then merge.
 - otherwise merge:
   ```bash
   gh pr merge <N> --merge
   ```
-  (merge commit, not squash, matching the repo history). Confirm `state=MERGED` afterwards.
+  (merge commit, not squash, matching the repo history and the queue's merge method). Never pass
+  `--admin`: it bypasses the queue. With `QUEUE=false` it merges at once; confirm `state=MERGED`.
+  **With `QUEUE=true` it only adds the PR to the merge queue** (or, while a required check is still
+  running, turns on auto-merge, which queues it when the check passes). The queue then runs
+  `ci.yml` on the merged commit, including `sanitizers-tsan` and `package-deb`, which a PR into
+  `main` skips. Wait in the background until the PR merges or leaves the queue:
+  ```bash
+  PR=<N>; for i in $(seq 1 150); do   # up to 75 min: the queue runs the full ci.yml
+    R=$(gh api graphql -F n="$PR" -f query='query($n:Int!){repository(owner:"open-astro",name:"AlpacaBridge"){pullRequest(number:$n){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{... on RemovedFromMergeQueueEvent{reason createdAt}}}}}}' \
+      --jq '.data.repository.pullRequest | "\(.state) \(.isInMergeQueue) \(.autoMergeRequest != null) \(.timelineItems.nodes[0].reason // "-")"')
+    case "$R" in
+      MERGED*) echo "merged"; exit 0 ;;
+      "OPEN false false"*) echo "left the merge queue: ${R##* }" >&2; exit 6 ;;
+    esac
+    sleep 30
+  done; echo "still queued after 75 min: $R" >&2; exit 1
+  ```
+  Exit `6` means the queue removed the PR: read the failed run
+  (`gh run list --workflow=ci.yml --event=merge_group --limit 10`; its branch is
+  `gh-readonly-queue/main/pr-<N>-<sha>`). A failure on the merged commit, typically
+  `sanitizers-tsan` or `package-deb`, is fixed on the head branch like any CI failure: run the step 5
+  gates, push, poll for the fresh verdict, merge again. A job that failed in code the PR does not
+  touch gets the flake treatment under "Keep looping" before you queue it again. A conflict with a PR
+  that merged ahead of it (`CONFLICTING`) is resolved as in Step 1.3.
   The repo has `delete_branch_on_merge` enabled (2026-09-10), so an `origin` head branch is
   deleted by GitHub on merge; verify with `git fetch --prune origin && git branch -r`. A fork
   head branch belongs to the contributor and is never deleted from here.
@@ -464,8 +499,10 @@ and can interrupt at any round. The guardrails that keep it safe are the ones ab
 input validated, every finding fixed in-PR rather than waived, every adopted contributor diff
 read in full, and the **Hard stops** below, which override this authorization.
 
-After a merge, every remaining PR in the queue is now behind main: run Step 1.3 on the **next** PR
-right away so its refresh round starts while you tidy up.
+After a merge with `QUEUE=false`, every remaining PR in the list is now behind main: run Step 1.3
+on the **next** PR right away so its refresh round starts while you tidy up. With `QUEUE=true` there
+is no refresh: move on to the next PR's verdict, and queue it as soon as it is clean, without
+waiting for the one ahead of it to land.
 
 **Contributor pushes during the loop are read, not just merged.** Whenever a fork head moves
 between the verdict you acted on and the merge, diff it against the last reviewed head
@@ -515,7 +552,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   run the step 5 gates, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
 - **Waiting is never a stopping point.** Every wait (step 5 gates, verdict poll, CI checks,
   update-branch) runs as ONE background chain that continues into the next action on its own:
-  `run_gates && push && poll` for a fix round, `update-branch && poll && merge` for a refresh.
+  `run_gates && push && poll` for a fix round, `update-branch && poll && merge` for a refresh
+  (`QUEUE=false` only), and `merge && wait-for-queue` once the PR is queued (`QUEUE=true`).
   Never end the turn with "I'll push when pre-flight finishes"; chain it. Every poll exit
   other than a verdict is non-zero (Step 2), so `poll && merge` cannot merge on an empty
   verdict; a refresh verdict can still carry new Defects, so the merge half gates on the
