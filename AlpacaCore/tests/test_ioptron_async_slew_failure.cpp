@@ -267,6 +267,8 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
 
     mount.set_reject_goto(false);
+    mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377)
+    clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
     gate.arm();
     REQUIRE_NOTHROW(driver->slew_to_alt_az_async(30.0, 90.0));
     const bool worker_paused = gate.wait_until_entered();
