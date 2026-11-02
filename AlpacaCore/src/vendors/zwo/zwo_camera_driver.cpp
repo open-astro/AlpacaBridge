@@ -996,12 +996,10 @@ public:
         // lands before a Disconnect's join, which turns it off, or finds the camera closed.
         std::lock_guard<std::mutex> pulse_lifecycle(pulse_lifecycle_mutex_);
         {
-            // The claim (decision 0006 rule 3): the SDK write, the generation bump and the flag under pulse_mutex_,
+            // The claim (decision 0006 rule 3): the SDK write, the generation bump and the flags under pulse_mutex_,
             // which the timer body holds from taking a turn-off to sending it, so a turn-off due from the running
             // body goes out before this pulse starts, or the body sees itself superseded and leaves it to the new one.
-            // The rule's text says the bump happens under the driver mutex_; here it is pulse_mutex_, the lock the
-            // body checks its claim under, and the flags follow under mutex_. The guarantee is the same because the
-            // body never takes mutex_.
+            // The bump then the flags under the driver mutex_, as the rule says.
             std::lock_guard<std::mutex> plock(pulse_mutex_);
             std::uint64_t pulse_link = 0;
             const int pulse_camera_id = with_camera([&](int id) {
@@ -1009,16 +1007,16 @@ public:
                 pulse_link = open_link_.load();
                 return id;
             });
-            const auto end = clock_.now() + std::chrono::milliseconds(duration);
+            std::lock_guard<std::mutex> lock(mutex_);
             pulse_generation_.bump();
-            pending_offs_.push_back({end, pulse_camera_id, pulse_link, guide_direction});
+            pending_offs_.push_back(
+                {clock_.now() + std::chrono::milliseconds(duration), pulse_camera_id, pulse_link, guide_direction});
             // End timestamp BEFORE the flag: a reader that observes the flag as
             // true must never see a stale end time from the previous pulse (or
             // epoch), or the self-clearing getter would clear this pulse
             // immediately. Pre-existing ordering, swept in the PR #119 round-2
             // fix alongside the Player One instance.
-            std::lock_guard<std::mutex> lock(mutex_);
-            pulse_guiding_end_ = end;
+            pulse_guiding_end_ = latest_pending_deadline();
             pulse_guiding_.store(true);
         }
         // The new body supersedes the running one (decision 0006 rule 2) and takes over its pending turn-offs, so a
@@ -1328,8 +1326,9 @@ private:
     mutable bool exposure_failed_{false};
     mutable util::TaskClock::clock::time_point last_exposure_retry_{};
 
-    // Cleared by the timer after each turn-off, so a fire-and-forget client that never polls IsPulseGuiding does
-    // not leave it latched true (round 9); the getter also self-clears at pulse_guiding_end_.
+    // Cleared by the timer after the last pending turn-off, so a fire-and-forget client that never polls
+    // IsPulseGuiding does not leave it latched true (round 9); the getter also self-clears at pulse_guiding_end_, the
+    // last pending deadline. Both written under mutex_.
     mutable std::atomic<bool> pulse_guiding_;
     util::TaskClock::clock::time_point pulse_guiding_end_;
     // A started pulse's turn-off: sent at `deadline` on the open it was started on, so it never reaches a camera
@@ -1341,10 +1340,10 @@ private:
         ZWOGuideDirection direction;
     };
     // Serialises pulse_guide() with stop_pulse_timer(). Lock order: transition_mutex_, pulse_lifecycle_mutex_,
-    // pulse_mutex_, mutex_; the timer body takes pulse_mutex_ only.
+    // pulse_mutex_, mutex_; the timer body takes pulse_mutex_, then mutex_ for the flag.
     std::mutex pulse_lifecycle_mutex_;
     // The claim lock for pulse_slot_ (decision 0006 rule 3): guards pending_offs_, and pulse_guide() bumps
-    // pulse_generation_ under it.
+    // pulse_generation_ under it and mutex_.
     std::mutex pulse_mutex_;
     std::vector<PendingOff> pending_offs_;
     util::OperationGeneration pulse_generation_;
@@ -1375,8 +1374,19 @@ private:
         }
     }
 
-    // Sends the turn-off of every pending pulse due by `due_by`, on its own link, and clears the flag. From a body,
-    // only while the body is not superseded (decision 0006 rule 6). Takes pulse_mutex_ and no driver lock.
+    // IsPulseGuiding's end time: the last deadline of all pending pulses, so a short pulse on one axis never ends the
+    // reported state of a longer one on the other. Caller holds pulse_mutex_.
+    util::TaskClock::clock::time_point latest_pending_deadline() const {
+        util::TaskClock::clock::time_point latest{};
+        for (const auto& off : pending_offs_) {
+            latest = std::max(latest, off.deadline);
+        }
+        return latest;
+    }
+
+    // Sends the turn-off of every pending pulse due by `due_by`, on its own link, and clears the flag once no pulse is
+    // pending. From a body, only while the body is not superseded (decision 0006 rule 6). Takes pulse_mutex_, then
+    // mutex_ for the flag.
     void end_pulses(util::TaskClock::clock::time_point due_by, const util::OperationContext* ctx) {
         std::lock_guard<std::mutex> plock(pulse_mutex_);
         if (ctx != nullptr && ctx->stop_reason() == util::StopReason::Superseded) {
@@ -1399,7 +1409,11 @@ private:
                 ALPACA_LOG_WARN("ZWO", "pulse guide off failed: " + printable(e.what()));
             }
         }
-        pulse_guiding_.store(false);
+        if (pending_offs_.empty()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pulse_guiding_.store(false);
+            pulse_guiding_end_ = {};
+        }
     }
 
     // async_operation.h Rule 8: cancels and joins the timer, which sends every pending turn-off first. Called without
