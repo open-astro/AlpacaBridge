@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/focuser_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/zwo/zwo_eaf_sdk.h>
 
 #include <memory>
@@ -43,19 +44,22 @@ std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number
                                                                std::optional<int> max_step = std::nullopt);
 
 /**
- * @brief Test seam: as create_zwo_eaf_focuser(), over an injected EAF SDK.
+ * @brief Test seam: as create_zwo_eaf_focuser(), over an injected EAF SDK and task clock.
  *
- * @p sdk must outlive the driver.
+ * @p sdk and @p clock must outlive the driver. @p clock is the TaskClock the status-cache age and its fault stamp
+ * run on (decision 0005; the decision 0009 staleness bound): real by default, a FakeTaskClock in tests.
  */
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, ZWOEAFSDK& sdk,
-                                                      std::optional<int> max_step = std::nullopt);
+                                                      std::optional<int> max_step = std::nullopt,
+                                                      util::TaskClock& clock = util::default_task_clock());
 
 /**
- * @brief Test seam: as create_zwo_eaf_focuser_by_index(), over an injected EAF SDK.
+ * @brief Test seam: as create_zwo_eaf_focuser_by_index(), over an injected EAF SDK and task clock.
  *
- * @p sdk must outlive the driver.
+ * @p sdk and @p clock must outlive the driver (see the id overload for @p clock).
  */
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index, ZWOEAFSDK& sdk,
-                                                               std::optional<int> max_step = std::nullopt);
+                                                               std::optional<int> max_step = std::nullopt,
+                                                               util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::zwo

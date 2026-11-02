@@ -25,6 +25,8 @@
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/link_health.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
@@ -33,9 +35,14 @@
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
 #include <atomic>
+#include <chrono>
+#include <string>
+#include <string_view>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_task_clock.h"
 #include "fake_zwo_caa_sdk.h"
 #include "fake_zwo_eaf_sdk.h"
 #include "fake_zwo_efw_sdk.h"
@@ -288,6 +295,77 @@ TEST_CASE("ZWO EAF focuser - connected lifecycle stress behind LockedZWOEAFSDK",
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
     CHECK(fake.position_calls > 0);
+}
+
+// Issue #1666: the staleness loss under contention. Every status read fails with a generic error (the unit stays
+// attached), so each session latches the fault after three reads; a clock thread keeps pushing the fake task clock
+// past util::kLinkStalenessBound while readers, moves and the lifecycle threads race. A loss found by one read closes
+// the open under io_mutex_ while a Connect may be reopening it: TSan checks the open bookkeeping, and the counts check
+// that no loss closed a session it did not belong to (every open is closed exactly once).
+TEST_CASE("ZWO EAF focuser - staleness losses race connects and reads behind LockedZWOEAFSDK",
+          "[zwo][focuser][stress]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    alpacacore::test::FakeZWOEAFSDK fake;
+    fake.fail_reads = true;
+    alpacacore::test::LockedZWOEAFSDK sdk(fake);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0, sdk, std::nullopt, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    std::atomic<int> losses{0};
+    const auto previous = alpacacore::logging::get_log_sink();
+    alpacacore::logging::set_log_sink(
+        [&losses](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("lost: status fault stood") != std::string_view::npos) {
+                losses.fetch_add(1);
+            }
+        });
+
+    std::atomic<bool> stop_clock{false};
+    std::thread ager([&] {
+        while (!stop_clock.load()) {
+            // Each step is the whole bound: a fault latched before it is stale after it, so sessions far shorter
+            // than 30 s of real time still reach the loss.
+            clock.advance(alpacacore::util::kLinkStalenessBound);
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    });
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::DriverException,
+                                            alpacacore::AlpacaError::InvalidValue};
+    alpacacore::test::run_lifecycle_stress(
+        *driver,
+        [&guard](AlpacaDriver& d) {
+            auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
+            guard([&] { static_cast<void>(focuser.get_position()); });
+            guard([&] { static_cast<void>(focuser.get_is_moving()); });
+            guard([&] { static_cast<void>(focuser.get_link_fault()); });
+            guard([&] { static_cast<void>(focuser.get_device_state()); });
+            guard([&] { focuser.move(100); });
+            guard([&] { focuser.halt(); });
+        },
+        alpacacore::test::StressOptions{2, 4, std::chrono::milliseconds{750}});
+
+    stop_clock.store(true);
+    ager.join();
+    alpacacore::logging::set_log_sink(previous);
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_calls == fake.close_calls);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(losses.load() > 0);
+
+    // Still coherent afterwards: a healthy unit connects and reads.
+    fake.fail_reads = false;
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    CHECK(driver->get_link_fault().empty());
+    clock.advance(std::chrono::milliseconds(150));
+    CHECK(static_cast<alpacacore::FocuserDriver&>(*driver).get_position() >= 0);
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_calls == fake.close_calls);
 }
 
 TEST_CASE("ZWO CAA rotator - connected lifecycle stress behind LockedZWOCAASDK", "[zwo][rotator][stress]") {
