@@ -762,9 +762,9 @@ int main() {
         }
 
         // The deadline is the greater of base 500 ms and the body at
-        // 1 MiB/s (about 4 s for 4 MiB). A reader taking 64 KiB every 50 ms
-        // (about 3.2 s in all, past the base) gets the whole body; one taking
-        // 4 KiB every 50 ms is still cut off at the extended deadline.
+        // 1 MiB/s (about 4 s for 4 MiB). A reader taking 64 KiB every 20 ms
+        // has margin for short socket reads and gets the whole body past the
+        // base; one taking 4 KiB every 50 ms is cut off at the deadline.
         for (const bool fast_reader : {true, false}) {
             // case: send deadline scales with body size for a reader above the minimum rate
             Watchdog watchdog(std::chrono::seconds(30), "send deadline scaled by body size");
@@ -796,9 +796,10 @@ int main() {
                 if (last > 0) {
                     drained += static_cast<std::size_t>(last);
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(fast_reader ? 20 : 50));
             }
             if (fast_reader) {
+                EXPECT(std::chrono::steady_clock::now() - read_start > std::chrono::milliseconds(500));
                 EXPECT(drained == payload_size);
             } else {
                 EXPECT(last == 0);  // EOF from the server at the extended deadline
