@@ -22,8 +22,8 @@
 # the file proves it was built here, by this workflow, from the named commit.
 #
 # The .deb is also installed and scripts/check_bundled_gphoto.sh runs against
-# it before anything is published, as ci.yml's package-deb job does on every
-# pull request, so a nightly .deb that fails the check is never published.
+# it before anything is published, as ci.yml's package-deb job does before
+# every merge, so a nightly .deb that fails the check is never published.
 #
 # The same run also builds all vendors optimized and runs the full suite
 # (issue #1313): CI's build-vendors job is instrumented (-O0 --coverage), so
