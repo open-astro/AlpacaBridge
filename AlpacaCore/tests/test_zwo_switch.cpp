@@ -557,3 +557,100 @@ TEST_CASE("ZWO camera and dew heater - a camera removal error stops the switch b
         CHECK(std::string(ex.what()).find("stale link") != std::string::npos);
     }
 }
+
+// ---- A camera loss and replug with the dew heater on the same open (issue #1667, decision 0009) ----
+
+namespace {
+
+using alpacacore::AlpacaError::NotConnected;
+
+// Both connected on one id; then the camera's temperature read meets the pulled cable.
+struct SharedCameraLost : SharedCamera {
+    SharedCameraLost() {
+        camera->set_connected(true);
+        heater->set_connected(true);
+        sdk.removed = true;
+        require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, NotConnected);
+    }
+};
+
+// The camera comes back on @p new_id with the same serial and reconnects; the switch still holds its link from
+// before the loss.
+void check_stale_switch_after_camera_reconnect(int new_id) {
+    SharedCameraLost rig;
+    rig.sdk.replug({{new_id, "FAKE-ZWO-17"}});
+
+    rig.camera->set_connected(false);  // a lost camera reads as disconnected: completes at once
+    rig.camera->set_connected(true);
+    REQUIRE(rig.camera->get_connected());
+    CHECK(rig.sdk.holders(new_id) == 1);
+
+    // The switch's link names the handle that died: refused before the SDK, the camera's new open untouched.
+    const int touches = rig.sdk.unit_touches();
+    require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, NotConnected);
+    CHECK(rig.sdk.unit_touches() == touches);
+
+    rig.heater->set_connected(false);  // the stale close must not close what the camera reopened
+    CHECK(rig.sdk.open_count() == 1);
+    CHECK(rig.camera->get_ccd_temperature() == Catch::Approx(15.0));
+    rig.camera->set_connected(false);
+    CHECK(rig.sdk.open_count() == 0);
+}
+
+}  // namespace
+
+// Falsified by: zwo_camera_driver.cpp on_link() not latching the loss (the camera stays Connected), or
+// shared_open_table.h call() running the switch's call on the retired open (the call reaches the unit).
+TEST_CASE("ZWO camera loss and dew heater - the switch gets NotConnected before the SDK is touched",
+          "[zwo][switch][camera][unit][link]") {
+    SharedCameraLost rig;
+    CHECK_FALSE(rig.camera->get_connected());
+    CHECK(rig.sdk.open_count() == 0);  // the dead handle is closed
+
+    const int touches = rig.sdk.unit_touches();
+    require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, NotConnected);
+    require_alpaca_error([&] { rig.heater->set_switch_value(0, 10.0); }, NotConnected);
+    CHECK(rig.sdk.unit_touches() == touches);
+}
+
+// Falsified by: SharedOpenTable::close() closing a newer open of the id on a stale link (the camera loses the handle
+// it reopened), or the switch's pre-loss link passing the check on the reopened id.
+TEST_CASE("ZWO camera reconnect on the same id - a stale close from the switch does not close the new handle",
+          "[zwo][switch][camera][unit][link]") {
+    check_stale_switch_after_camera_reconnect(17);
+}
+
+// Falsified by: zwo_camera_driver.cpp resolve_camera_id() binding the configured id after the first connect (the
+// Connect fails with "ZWO camera ID 17 not found").
+TEST_CASE("ZWO camera reconnect on a new id - a stale close from the switch does not close the new handle",
+          "[zwo][switch][camera][unit][link]") {
+    check_stale_switch_after_camera_reconnect(23);
+}
+
+// Falsified by: zwo_camera_driver.cpp on_link() not latching the loss when the table refuses its stale link (the
+// camera stays Connected after the switch met the removal), or a camera call that skips the link check.
+TEST_CASE("ZWO dew heater meets the loss first - the camera gets NotConnected before the SDK is touched",
+          "[zwo][switch][camera][unit][link]") {
+    SharedCamera rig;
+    rig.camera->set_connected(true);
+    rig.heater->set_connected(true);
+    rig.sdk.removed = true;
+    require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, NotConnected);
+
+    const int touches = rig.sdk.unit_touches();
+    require_alpaca_error([&] { (void)rig.camera->get_ccd_temperature(); }, NotConnected);
+    CHECK(rig.sdk.unit_touches() == touches);
+    CHECK_FALSE(rig.camera->get_connected());
+
+    // The cable is back: the camera reconnects; the switch latches no loss, so it reads again after its own
+    // Disconnect and Connect, through the camera's new open.
+    rig.sdk.replug({{17, "FAKE-ZWO-17"}});
+    rig.camera->set_connected(true);
+    rig.heater->set_connected(false);
+    rig.heater->set_connected(true);
+    CHECK(rig.sdk.holders(17) == 2);
+    CHECK(rig.heater->get_switch_value(0) == Catch::Approx(0.0));
+    rig.heater->set_connected(false);
+    rig.camera->set_connected(false);
+    CHECK(rig.sdk.open_count() == 0);
+}
