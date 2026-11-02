@@ -551,16 +551,17 @@ bot marks "out of scope, open an issue" is listed for the user in Step 10, never
 
 **Do NOT push anything further to this branch — approval is the stopping point.** The Notes an
 approval carries are listed in Step 10; open a follow-up issue for one only when the user asks.
-Then ask the user for approval to merge; on yes:
+Then ask the user for approval to merge; on yes, for a PR into `stable/X.Y` (no queue there):
 
 ```bash
 gh pr merge <number> --merge
 ```
 
-When `main` requires a merge queue (`ci-gates`, "Merge queue"), this adds the PR to the queue
-instead of merging it, and the queue runs `ci.yml` on the merged commit, including
-`sanitizers-tsan` and `package-deb`, which a PR into `main` skips. Never pass `--admin`: it
-bypasses the queue. Wait for the PR to merge or leave the queue with the background block in
+A PR into `main` goes through the merge queue (`ci-gates`, "Merge queue"): add it with the
+`enqueuePullRequest` call in `/pr-checker`'s Step 3, not `gh pr merge`, which tries to turn on
+auto-merge and fails here because the repository has auto-merge off. The queue runs `ci.yml` on
+the merged commit, including `sanitizers-tsan` and `package-deb`, which a PR into `main` skips.
+Never pass `--admin` to `gh pr merge`: it bypasses the queue. Wait for the PR to merge or leave the queue with the background block in
 `/pr-checker`'s Step 3, and treat a removal like a red CI check: fix, push, poll for the fresh
 verdict, merge again. Never update or rebase the branch because `main` moved.
 
