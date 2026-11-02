@@ -337,14 +337,24 @@ public:
     // Lock-free on purpose: the router polls this getter from the PUT connected wait and from every GET connected in
     // between, so it takes no lock a connect or a getter could hold (issue #130: 25 s measured against a silent hand
     // controller when it took mutex_). The connect sets connected_ last, after the first frame is held, and a lost link
-    // reads false through the poll's loss latch (decision 0009). Same atomic-flag pattern as every other
-    // AsyncConnectable driver except the telescopes and the wrapper-backed switches named in async_connectable.h.
-    // Stated as the rule rather than as a count: a bare number in a comment has nothing tying it to the code it
-    // describes, and every new driver invalidates it silently (open-astro#381).
-    bool get_connected() const override { return connected_.load() && !polled_.link_lost(); }
+    // reads false through the poll's loss latch or the wrapper's (decision 0009, link_lost()). Same atomic-flag pattern
+    // as every other AsyncConnectable driver except the telescopes and the wrapper-backed switches named in
+    // async_connectable.h. Stated as the rule rather than as a count: a bare number in a comment has nothing tying it
+    // to the code it describes, and every new driver invalidates it silently (open-astro#381).
+    bool get_connected() const override { return connected_.load() && !link_lost(); }
 
-    // The poll's latched fault text, read under the module's own leaf mutex; never mutex_.
-    std::string get_link_fault() const override { return polled_.fault(); }
+    // The poll's latched fault text, read under the module's own leaf mutex; never mutex_. A serial link lost at once
+    // (decision 0009 rule 5) reports the wrapper's loss reason, which the wrapper keeps until the next Connect; a
+    // Disconnect hides it with connected_. Preferring it whenever connected_ is true is correct only because the
+    // wrapper's connect() clears the text before connected_ can turn true, so a reason from an earlier session never
+    // shows in this one.
+    std::string get_link_fault() const override {
+        if (connected_.load()) {
+            std::string lost = SynScanProtocolWrapper::instance().link_fault();
+            if (!lost.empty()) return lost;
+        }
+        return polled_.fault();
+    }
 
     void connect() override {
         start_connection_task(true);
@@ -366,7 +376,7 @@ public:
         ClosingScope closing(*this);
         // Decision 0009 point 4: a lost link is relinked only by the client's Connected=true, which tears the dead
         // session down (slew bodies included) and connects afresh.
-        const bool relink = connected && connected_.load() && polled_.link_lost();
+        const bool relink = connected && connected_.load() && link_lost();
         if (!connected || relink) {
             // closing_ before the initiator wait: the poll already stops at its next exchange boundary, and a probe
             // waiting on the hunt's hold wakes, while the disconnect waits for an initiator in flight.
@@ -648,7 +658,7 @@ public:
         }
         // The cache is written after the send: a motion owner ahead in the queue restores the mode it found.
         if (!send_in_turn(
-                lock, [this] { return connected_ && !polled_.link_lost(); },
+                lock, [this] { return connected_ && !link_lost(); },
                 [&protocol, mode] { protocol.set_tracking_mode(mode); })) {
             check_connected();
             return;
@@ -2105,6 +2115,7 @@ private:
             site_elevation_m_ = pending_site_elevation_;
         }
         if (sync_time_on_connect_) {
+            fail_if_link_released(protocol);  // set_time() on a released port would throw a plain DriverException
             sync_mount_time(lock);
         }
         ensure_utc_cached(lock);
@@ -2127,10 +2138,20 @@ private:
         seeding_ = true;
         const bool started = polled_.start();
         seeding_ = false;
+        fail_if_link_released(protocol);  // a pull the seed or an earlier query swallowed
         if (!started) {
             throw AlpacaException("SynScan status poll did not start", AlpacaError::DriverException);
         }
         connected_ = true;
+    }
+
+    // Decision 0009 rule 2a: a pulled cable during a connect exchange whose failure the connect swallows released the
+    // port. The Connect fails with NotConnected; set_connected()'s catch joins the poll and clears the session.
+    static void fail_if_link_released(const SynScanProtocolWrapper& protocol) {
+        if (!protocol.link_alive()) {
+            throw AlpacaException("Failed to connect to SynScan mount: " + protocol.link_fault(),
+                                  AlpacaError::NotConnected);
+        }
     }
 
     // Everything the session owns, back to its idle value. Caller holds mutex_. connected_ and the poll's frame and
@@ -2213,7 +2234,7 @@ private:
     };
 
     void check_connected() const {
-        if (!connected_ || polled_.link_lost()) {
+        if (!connected_ || link_lost()) {
             throw AlpacaException("Not connected to SynScan mount", AlpacaError::NotConnected);
         }
     }
@@ -2221,7 +2242,7 @@ private:
     // For a getter with no connection check: a lost link is NotConnected (decision 0009 rule 3), ahead of the fault
     // text that outlives the loss (rule 5).
     void throw_if_link_lost_or_faulted() const {
-        if (polled_.link_lost()) {
+        if (link_lost()) {
             throw AlpacaException("Not connected to SynScan mount", AlpacaError::NotConnected);
         }
         throw_if_link_faulted();
@@ -2238,6 +2259,10 @@ private:
             throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
         }
     }
+
+    // Decision 0009: lost when the poll latched it (a fault past the staleness bound, or the probe's lose_link()), or
+    // at once on positive evidence: the wrapper saw the serial port gone and released it. Lock-free.
+    bool link_lost() const { return polled_.link_lost() || !SynScanProtocolWrapper::instance().link_alive(); }
 
     // The connection check for a member that then sends with mutex_ released.
     void require_connected() const {
@@ -2321,6 +2346,7 @@ private:
             std::unique_lock<std::mutex> turn_lock(driver_.turn_mutex_);
             const uint64_t ticket = driver_.turn_next_++;
             lock.unlock();
+            driver_.notify_wire_turn_wait_for_testing(turn_lock);
             driver_.turn_cv_.wait(turn_lock, [&] { return driver_.turn_serving_ == ticket; });
             turn_lock.unlock();
             lock.lock();
@@ -2338,6 +2364,19 @@ private:
     private:
         SynScanTelescopeDriver& driver_;
     };
+
+    void notify_wire_turn_wait_for_testing(std::unique_lock<std::mutex>& turn_lock) {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(turn_hook_mutex_);
+            hook = turn_wait_hook_;
+        }
+        if (hook) {
+            turn_lock.unlock();
+            hook();
+            turn_lock.lock();
+        }
+    }
 
     // One command in its turn: takes the ticket, waits, and sends `fn` with mutex_ released only while `owns()`
     // (evaluated at the turn, under mutex_) still holds. Returns whether it sent. `lock` is held on entry and on
@@ -2428,6 +2467,14 @@ public:
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(probe_hook_mutex_);
         probe_after_sample_hook_ = std::move(hook);
+    }
+
+    // Called by each sender right after it takes its wire-turn ticket and before it waits for its turn, with no
+    // driver lock held (turn_mutex_ is released around the call): a case that holds the wire in one exchange learns
+    // that a second sender is queued behind it without sleeping. An empty function (the default) does nothing.
+    void set_wire_turn_wait_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(turn_hook_mutex_);
+        turn_wait_hook_ = std::move(hook);
     }
 
     // Replaces the wall time every local-sidereal-time read uses; an empty function restores system_clock.
@@ -3011,6 +3058,24 @@ private:
     // The polled frame (decision 0010), on the poll thread (or the connect thread for the first call) with no driver
     // lock held. The module publishes it, counts a throw as a failed probe and latches the fault and the loss.
     PolledFrame probe() {
+        try {
+            PolledFrame frame = sample_frame();
+            // The slow fields and the site read swallow their own failures, so a hangup there returns normally. The
+            // wrapper has released the port: throw so the frame is not published and the catch below ends the poll in
+            // this tick, not on the next one.
+            if (!SynScanProtocolWrapper::instance().link_alive()) {
+                throw AlpacaException("SynScan mount link lost during the poll", AlpacaError::NotConnected);
+            }
+            return frame;
+        } catch (...) {
+            // Positive evidence (decision 0009 rule 2a): the wrapper saw the serial port gone, in this probe or in an
+            // earlier exchange. The poll's loss latch is set at once, so the poll ends after this tick.
+            if (!SynScanProtocolWrapper::instance().link_alive()) polled_.lose_link();
+            throw;
+        }
+    }
+
+    PolledFrame sample_frame() {
         const bool seeding = seeding_.exchange(false);
         {
             // Waits out the readback-tick hunt, which owns the line while it runs. The hunt takes its hold under
@@ -3810,6 +3875,8 @@ private:
     // The ordered wire turn (see WireTurn). A leaf mutex: held only to move the two counters or to wait on the cv.
     std::mutex turn_mutex_;
     std::condition_variable turn_cv_;
+    std::mutex turn_hook_mutex_;
+    std::function<void()> turn_wait_hook_;  // test seam, see set_wire_turn_wait_hook_for_testing()
     uint64_t turn_next_ = 0;     // next ticket to hand out
     uint64_t turn_serving_ = 0;  // ticket whose sender may send now
     double park_ra_hours_ = 0.0;
@@ -3901,6 +3968,12 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_wire_turn_wait_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_wire_turn_wait_hook_for_testing(std::move(hook));
     }
 }
 

@@ -18,7 +18,9 @@
 #ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <atomic>
@@ -29,6 +31,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -42,6 +45,7 @@
 #include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
+#include "pty_responder.h"
 
 namespace {
 
@@ -990,6 +994,350 @@ TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with two p
     REQUIRE(st->transactions.load() > before);
     const auto elapsed = timed([&] { driver->set_connected(false); });
     CHECK(elapsed < seconds(5));
+}
+
+// Decision 0009 rule 2a (issue #1723): a pulled cable loses a serial link at once. The handset answers on a pty behind
+// a by-id style link (ReplugPort), so a case pulls the cable mid-exchange (PtyResponder::unplug_on) or while idle
+// (unplug) and plugs a new handset in under the same name. The driver runs on a FakeTaskClock, as above.
+namespace {
+
+namespace err = alpacacore::AlpacaError;
+using alpacacore::test::require_alpaca_error;
+
+// Long enough that a read which waited it out could not pass for a hangup (each such case checks the call returned in
+// under half of it).
+constexpr int kLinkReadTimeoutMs = 1000;
+constexpr auto kAtOnce = milliseconds(kLinkReadTimeoutMs / 2);
+
+struct SerialLinkRig {
+    FakeTaskClock clock;
+    std::shared_ptr<Handset> st = std::make_shared<Handset>();
+    std::unique_ptr<alpacacore::test::PtyResponder> handset = plug();
+    alpacacore::test::ReplugPort port{*handset};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    explicit SerialLinkRig(bool sync_time = false) {
+        sc::ConnectionInfo info;
+        info.type = sc::ConnectionType::Serial;
+        info.port_path = port.path.string();
+        info.response_timeout_ms = kLinkReadTimeoutMs;
+        driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                        sync_time, sc::SynScanAlignmentSetting::Auto, clock);
+    }
+    ~SerialLinkRig() {
+        if (driver) driver->set_connected(false);  // the wrapper is a process-wide singleton
+    }
+    SerialLinkRig(const SerialLinkRig&) = delete;
+    SerialLinkRig& operator=(const SerialLinkRig&) = delete;
+
+    std::unique_ptr<alpacacore::test::PtyResponder> plug() const {
+        const auto state = st;
+        return std::make_unique<alpacacore::test::PtyResponder>(
+            [state](const std::string& c) { return reply(*state, c); }, "SynScan handset");
+    }
+    // A new handset on a new pty, under the configured name.
+    void replug() {
+        handset = plug();
+        port.replug(*handset);
+    }
+    // Connects and parks the poll body on the clock, so only the case's own calls reach the handset.
+    void connect() {
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        sc::set_status_poll_paused_for_testing(*driver, true);
+        REQUIRE(clock.wait_for_waiters(1, kSettle));
+    }
+    // Moves the task clock and waits until every woken body has parked on it again or ended.
+    void advance(std::chrono::milliseconds by) {
+        clock.advance(by);
+        REQUIRE(clock.wait_for_woken_settled(kSettle));
+    }
+};
+
+std::function<bool(const std::string&)> on_command(char command) {
+    return [command](const std::string& chunk) { return !chunk.empty() && chunk[0] == command; };
+}
+
+// The first exchange after a GOTO (`r`) that is not itself one: the motion body's first completion read.
+std::function<bool(const std::string&)> after_goto() {
+    auto seen = std::make_shared<bool>(false);
+    return [seen](const std::string& chunk) {
+        if (!chunk.empty() && chunk[0] == 'r') {
+            *seen = true;
+            return false;
+        }
+        return *seen;
+    };
+}
+
+// Rule 3: Connected false, operations NotConnected, DeviceState empty, the port released.
+void check_lost(alpacacore::TelescopeDriver& driver) {
+    CHECK_FALSE(driver.get_connected());
+    CHECK_FALSE(sc::SynScanProtocolWrapper::instance().is_connected());
+    CHECK(driver.get_device_state().empty());
+    require_alpaca_error([&] { (void)driver.get_right_ascension(); }, err::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_slewing(); }, err::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_at_park(); }, err::NotConnected);
+    require_alpaca_error([&] { (void)driver.get_tracking(); }, err::NotConnected);
+}
+
+}  // namespace
+
+TEST_CASE("SynScan Link - a cable pulled during a command loses the link at once and Connect reopens it",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    const double ra_at_connect = driver.get_right_ascension();
+
+    rig.handset->unplug_on(on_command('T'));  // the tracking write's '#' never comes: the cable is pulled first
+    const auto took = timed([&] { require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected); });
+    CHECK(took < kAtOnce);
+    check_lost(driver);
+    const std::string reason = driver.get_link_fault();
+    CHECK(reason.find("serial link lost (hangup)") != std::string::npos);
+
+    // Rule 4: nothing relinks on its own. The poll body ends at its next tick and time reopens nothing.
+    rig.replug();
+    sc::set_status_poll_paused_for_testing(driver, false);
+    rig.advance(seconds(10));
+    CHECK(rig.clock.waiter_count() == 0);  // the poll body has ended
+    CHECK(rig.handset->received().empty());
+    CHECK_FALSE(driver.get_connected());
+    CHECK(driver.get_link_fault() == reason);  // rule 5: kept until the next Connect or Disconnect
+
+    // The client's Connect reopens the replugged port without a Disconnect first, and clears the reason.
+    driver.set_connected(true);
+    CHECK(driver.get_connected());
+    CHECK(driver.get_link_fault().empty());
+    CHECK(std::abs(driver.get_right_ascension() - ra_at_connect) < 1e-9);
+}
+
+TEST_CASE("SynScan Link - a write to a pulled mount loses the link at once and Disconnect clears the reason",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    rig.handset->unplug();  // idle: the next command's write meets the dead port (EIO)
+
+    SECTION("a command that waits for its reply") {
+        require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    }
+    SECTION("a fire-and-forget command") {
+        require_alpaca_error([&] { (void)driver.command_blind("M", true); }, err::NotConnected);
+    }
+    check_lost(driver);
+    CHECK(driver.get_link_fault().find("serial link lost (write)") != std::string::npos);
+    driver.set_connected(false);
+    CHECK(driver.get_link_fault().empty());
+}
+
+TEST_CASE("SynScan Link - a hangup in a fire-and-forget command's reply drain fails that call and Connect reopens it",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    rig.handset->unplug_on(on_command('M'));  // the drain after the write hangs up instead of going quiet
+    require_alpaca_error([&] { (void)driver.command_blind("M", true); }, err::NotConnected);
+    check_lost(driver);
+    // The paused poll has not run since, so only the wrapper knows the link is lost: Connect still relinks.
+    rig.replug();
+    driver.set_connected(true);
+    CHECK(driver.get_connected());
+}
+
+TEST_CASE("SynScan Link - a cable pulled during the status poll ends the poll in that tick",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    sc::set_status_poll_paused_for_testing(driver, false);
+    SECTION("the position read") { rig.handset->unplug_on(on_command('e')); }
+    SECTION("the pier-side read of a full tick, whose failure the sample does without") {
+        for (int short_tick = 1; short_tick < 4; ++short_tick) rig.advance(kPollPeriod);
+        rig.handset->unplug_on(on_command('p'));  // tick 4 is a full one
+    }
+    rig.advance(kPollPeriod);
+    REQUIRE(rig.handset->unplugged());
+    CHECK(rig.clock.waiter_count() == 0);  // the poll body ended in the tick that met the pull
+    check_lost(driver);
+    CHECK(driver.get_link_fault().find("serial link lost (hangup)") != std::string::npos);
+}
+
+TEST_CASE("SynScan Link - a cable pulled during the connect fails the Connect with NotConnected",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    const bool sync_time = GENERATE(false, true);  // with the time write, set_time() would meet the released port
+    CAPTURE(sync_time);
+    SerialLinkRig rig(sync_time);
+    auto& driver = *rig.driver;
+    rig.handset->unplug_on(on_command('V'));  // the first handshake query; the connect swallows its failure
+    require_alpaca_error([&] { driver.set_connected(true); }, err::NotConnected);
+    CHECK_FALSE(driver.get_connected());
+    CHECK_FALSE(sc::SynScanProtocolWrapper::instance().is_connected());
+    rig.replug();
+    driver.set_connected(true);
+    CHECK(driver.get_connected());
+}
+
+TEST_CASE("SynScan Link - a cable pulled mid-slew loses the link and the slew body ends",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    const auto idle = rig.clock.waiter_count();  // the paused poll body
+    rig.handset->unplug_on(after_goto());
+    driver.slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, kSettle));  // the GOTO is out, the body waits
+    rig.advance(milliseconds(8250));  // past the slew's forced-Slewing window: its completion read meets the pull
+    REQUIRE(rig.handset->unplugged());
+    check_lost(driver);
+    CHECK(rig.clock.waiter_count() == idle);  // the body ended on its connection check
+}
+
+TEST_CASE("SynScan Link - a cable pulled mid-park loses the link and the park body ends on its own",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    const auto idle = rig.clock.waiter_count();
+    rig.handset->unplug_on(after_goto());
+    driver.park();
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, kSettle));
+    rig.advance(milliseconds(8250));  // past the park's forced-Slewing window: it reads the handset
+    REQUIRE(rig.handset->unplugged());
+    check_lost(driver);
+    // Each further completion read fails at once on the released port; the third in a row ends the body.
+    for (int i = 0; i < 4 && rig.clock.waiter_count() > idle; ++i) rig.advance(milliseconds(250));
+    CHECK(rig.clock.waiter_count() == idle);
+    CHECK_FALSE(driver.get_connected());
+}
+
+TEST_CASE("SynScan Link - a cable pulled at a pulse's end loses the link and the pulse body ends",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+    const auto idle = rig.clock.waiter_count();
+    rig.handset->unplug_on(on_command('T'));  // an RA pulse on a tracking mount ends with the tracking write
+    driver.pulse_guide(2, 5000);
+    REQUIRE(rig.clock.wait_for_waiters(idle + 1, kSettle));
+    rig.advance(milliseconds(5000));
+    REQUIRE(rig.handset->unplugged());
+    check_lost(driver);
+    require_alpaca_error([&] { (void)driver.get_is_pulse_guiding(); }, err::NotConnected);
+    // The two retries fail at once on the released port, 100 ms apart; then the body ends.
+    for (int i = 0; i < 4 && rig.clock.waiter_count() > idle; ++i) rig.advance(milliseconds(100));
+    CHECK(rig.clock.waiter_count() == idle);
+}
+
+// A Tracking write queued behind the exchange that meets the pull: its turn comes after the wrapper has latched the
+// loss and disconnected, so it must read NotConnected, not send and surface the wrapper's "Not connected" as a
+// DriverException. No sleeps: the holder's pull waits on a latch until the second writer reports (the wire-turn seam)
+// that it has taken its ticket.
+TEST_CASE("SynScan Link - a Tracking write waiting its turn when the cable is pulled gets NotConnected",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    SerialLinkRig rig;
+    auto& driver = *rig.driver;
+    rig.connect();
+
+    std::promise<void> on_wire;
+    std::promise<void> release;
+    auto release_future = release.get_future().share();
+    auto fired = std::make_shared<std::atomic<bool>>(false);
+    rig.handset->unplug_on([&on_wire, release_future, fired](const std::string& chunk) {
+        if (chunk.empty() || chunk[0] != 'T' || fired->exchange(true)) return false;
+        on_wire.set_value();  // the holder's tracking write is on the wire
+        release_future.wait();
+        return true;
+    });
+
+    std::promise<void> queued;
+    std::atomic<bool> queued_set{false};
+    std::atomic<int> holder_code{-1};
+    std::atomic<int> waiter_code{-1};
+    const auto run = [&](std::atomic<int>& code) {
+        try {
+            driver.set_tracking(false);
+            code = 0;
+        } catch (const alpacacore::AlpacaException& e) {
+            code = e.error_code();
+        }
+    };
+    std::thread holder([&] { run(holder_code); });
+    std::thread waiter;
+    // A failed REQUIRE unwinds the case: free the latch and join, so no joinable thread reaches std::terminate.
+    struct Cleanup {
+        std::promise<void>& release;
+        std::atomic<bool>& released;
+        std::thread& holder;
+        std::thread& waiter;
+        ~Cleanup() {
+            if (!released.exchange(true)) release.set_value();
+            if (holder.joinable()) holder.join();
+            if (waiter.joinable()) waiter.join();
+        }
+    };
+    std::atomic<bool> released{false};
+    Cleanup cleanup{release, released, holder, waiter};
+
+    REQUIRE(on_wire.get_future().wait_for(kSettle) == std::future_status::ready);
+    sc::set_wire_turn_wait_hook_for_testing(driver, [&] {
+        if (!queued_set.exchange(true)) queued.set_value();
+    });
+    waiter = std::thread([&] { run(waiter_code); });
+    REQUIRE(queued.get_future().wait_for(kSettle) == std::future_status::ready);
+    sc::set_wire_turn_wait_hook_for_testing(driver, nullptr);
+
+    released = true;
+    release.set_value();
+    holder.join();
+    waiter.join();
+    REQUIRE(rig.handset->unplugged());
+    CHECK(holder_code == err::NotConnected);
+    CHECK(waiter_code == err::NotConnected);
+    CHECK_FALSE(driver.get_connected());
+}
+
+// Over TCP (SynScan Wi-Fi) a hangup is not a pulled cable: it stays a DriverException and the fault latch and the
+// staleness bound decide, as before.
+TEST_CASE("SynScan Link - over TCP a hangup is a failed exchange, not a lost link",
+          "[synscan][telescope][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = slow_link_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+
+    st->mute = true;
+    const int before = st->transactions.load();
+    int code = 0;
+    std::thread call([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const alpacacore::AlpacaException& e) {
+            code = e.error_code();
+        }
+    });
+    // A failed REQUIRE below unwinds the case; joining here keeps a joinable thread from reaching std::terminate.
+    struct JoinOnExit {
+        std::thread& t;
+        ~JoinOnExit() {
+            if (t.joinable()) t.join();
+        }
+    } join_call{call};
+    const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+    while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() > before);
+    REQUIRE(server.drop_connections());  // the read in flight meets the reset
+    call.join();
+    CHECK(code == err::DriverException);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
 }
 
 #endif

@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -417,6 +418,8 @@ public:
         connection_type_ = info.type;
         connection_info_ = info;
         last_connect_error_.clear();
+        link_lost_.store(false);
+        set_fault("");
 
         bool success = false;
         if (info.type == ConnectionType::Serial) {
@@ -460,6 +463,13 @@ public:
         return last_connect_error_;
     }
 
+    bool link_alive() const noexcept { return !link_lost_.load(); }
+
+    std::string link_fault() const {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        return fault_;
+    }
+
     std::string send_command(const std::string& command, bool require_hash_terminator, int timeout_ms_override,
                              int binary_bytes = 0) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -468,6 +478,7 @@ public:
         }
 
         if (!write_data(command)) {
+            fail_link_if_gone_locked(errno);
             throw AlpacaException("Failed to send command to mount");
         }
 
@@ -506,6 +517,7 @@ public:
             throw AlpacaException("Not connected to mount");
         }
         if (!write_data(command)) {
+            fail_link_if_gone_locked(errno);
             throw AlpacaException("Failed to send command to mount");
         }
         // Some firmware responds to binary motion commands while others do not.
@@ -514,7 +526,9 @@ public:
         try {
             drained = read_response(false, 40);
         } catch (...) {
-            // Ignore optional response drain errors for fire-and-forget commands.
+            // Ignore optional response drain errors for fire-and-forget commands, but not a lost link: the port is
+            // already released, and the caller learns it in this call.
+            if (link_lost_.load()) throw;
         }
         // Same TRACE-only wire log as send_command(): moves, pulse guides and
         // landing nudges are all blind P commands, and without this line a rig
@@ -575,6 +589,8 @@ public:
                     break;
                 }
                 try {
+                    // Under mutex_ like every exchange: a hangup here releases the port (fail_link_locked()).
+                    std::lock_guard<std::mutex> lock(mutex_);
                     reply = read_response(true, static_cast<int>(remaining.count()), 0);
                 } catch (const AlpacaException&) {
                     break;  // nothing else queued behind the stale token
@@ -1176,10 +1192,41 @@ private:
 #endif
     }
 
-    [[noreturn]] void throw_link_lost(int err) const {
-        throw AlpacaException(std::string("SynScan ") +
-                              (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
-                              " link lost (hangup): " + util::errno_string(err));
+    // A hangup on a read. Over serial the port is gone (decision 0009 rule 2a): the link is lost at once. Over TCP it
+    // stays a DriverException, and the driver's fault latch and staleness bound decide.
+    [[noreturn]] void throw_link_lost(int err) {
+        const std::string reason = std::string("SynScan ") +
+                                   (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
+                                   " link lost (hangup): " + util::errno_string(err);
+        if (connection_type_ == ConnectionType::Serial) fail_link_locked(reason);
+        throw AlpacaException(reason);
+    }
+
+    // A failed write with EIO/ENXIO/ENODEV (`err`, the write's errno) is the serial port gone: the link is lost at
+    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout. Serial only: a TCP
+    // send fails with a socket errno, and whatever it returns the network link keeps its fault latch.
+    void fail_link_if_gone_locked(int err) {
+        if (connection_type_ == ConnectionType::Serial && (err == EIO || err == ENXIO || err == ENODEV)) {
+            fail_link_locked("SynScan serial link lost (write): " + util::errno_string(err));
+        }
+    }
+
+    // Decision 0009 rule 2a: release the port so a replugged mount can be reopened, latch link_lost_ for the driver
+    // (its Connected getter, its poll and its connect) and fail with NotConnected. Caller holds mutex_ inside an
+    // exchange, so the link is connected; the driver calls the wrapper with its own mutexes free, so no driver lock is
+    // taken under this one.
+    [[noreturn]] void fail_link_locked(const std::string& reason) {
+        ALPACA_LOG_ERROR("SynScan", "Mount link lost on " + connection_info_.port_path + ": " + reason +
+                                        " (port released; reconnect to resume)");
+        set_fault(reason);
+        link_lost_.store(true);
+        disconnect_locked();
+        throw AlpacaException(reason, AlpacaError::NotConnected);
+    }
+
+    void set_fault(const std::string& text) {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        fault_ = text;
     }
 
     // The read slice of the byte-at-a-time loop: 100 ms over serial, the
@@ -1278,6 +1325,11 @@ private:
 private:
     mutable std::mutex mutex_;
     bool connected_;
+    std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect()
+    // The loss reason for the driver's get_link_fault() (decision 0009 rule 5), cleared by the next connect(). Its own
+    // leaf mutex, never held across an exchange, so a getter never waits on the wire.
+    mutable std::mutex fault_mutex_;
+    std::string fault_;
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
 
@@ -1313,6 +1365,10 @@ bool SynScanProtocolWrapper::is_connected() const {
 }
 
 std::string SynScanProtocolWrapper::last_connect_error() const { return pimpl_->last_connect_error(); }
+
+bool SynScanProtocolWrapper::link_alive() const noexcept { return pimpl_->link_alive(); }
+
+std::string SynScanProtocolWrapper::link_fault() const { return pimpl_->link_fault(); }
 
 std::string SynScanProtocolWrapper::send_command(const std::string& command,
                                                  bool require_hash_terminator,
