@@ -288,7 +288,7 @@ CI runs a strict set of gates on every PR (`.github/workflows/ci.yml`), and the 
 The script prints a `[PASS]/[FAIL]/[SKIP]` summary. The quick set, in order:
 
 1. **clang-format** changed lines (CI `format`)
-2. **Python gates**: Unicode / Trojan-Source scan (CI `static-checks`), stress registration, `Falsified by` and PR template (when `PR_BODY_FILE` is set), ConformU reports, docs drift, connect-error hook, layering, contract sweep (each its CI job of the same name)
+2. **Python gates**: Unicode / Trojan-Source scan, stress registration, `Falsified by` and PR template (when `PR_BODY_FILE` is set), ConformU reports, docs drift, connect-error hook, layering, contract sweep (each a step of CI `static-checks`, named after its gate; `Falsified by` and the PR template run in `pr-body.yml`)
 3. **Beta VERSION split** (`cmake -P` only, no configure; CI `build-test` step)
 4. **cppcheck** changed files (CI `cppcheck`)
 5. **shellcheck** — only if shell scripts changed (CI `static-checks`)
