@@ -1723,6 +1723,7 @@ public:
                 }
             }
             ensure_not_parked_locked("SlewToAltAzAsync");
+            refuse_alt_az_slew_while_tracking_locked("SlewToAltAzAsync");
             previous_slew_error = last_slew_error_;
             supersede_slew_dispatch_locked();
             generation = slew_operation_generation_;
@@ -1760,6 +1761,8 @@ public:
                 throw AlpacaException("Site information unavailable for Alt/Az slew",
                                       AlpacaError::ValueNotSet);
             }
+            ensure_not_parked_locked("SlewToAltAz");
+            refuse_alt_az_slew_while_tracking_locked("SlewToAltAz");
             auto converted = alt_az_to_ra_dec(
                 altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
             ra_hours = converted.first;
@@ -2048,6 +2051,19 @@ private:
         }
         refresh_status_cache_locked();
         return cached_status_.is_tracking;
+    }
+
+    // ITelescopeV4: SlewToAltAz and SlewToAltAzAsync throw InvalidOperation while Tracking is true (#1377), since a
+    // tracking mount drifts off the requested Alt/Az. Reads the same value as get_tracking(), from the status cache
+    // under mutex_: the same TTL-gated status read the equatorial slews' guard makes (it may send one `:GLS#`
+    // when the cache has expired; the parked check does not refresh a valid, unparked cache), or the tracking
+    // write's read-back window. Runs after the argument, connected and parked checks and before anything is sent or
+    // superseded.
+    void refuse_alt_az_slew_while_tracking_locked(const char* label) const {
+        if (get_tracking_locked()) {
+            throw AlpacaException(std::string(label) + " is not allowed while Tracking is true",
+                                  AlpacaError::InvalidOperation);
+        }
     }
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation

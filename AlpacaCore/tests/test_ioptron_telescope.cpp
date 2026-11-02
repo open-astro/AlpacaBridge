@@ -1887,6 +1887,8 @@ TEST_CASE("iOptron slot - a GOTO the mount rejects after SlewToAltAzAsync return
         0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+    mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377), as ConformU does
+    clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_alt_az_async(30.0, 90.0));
     std::string message;
@@ -1915,6 +1917,8 @@ TEST_CASE("iOptron slot - a refused slew thread throws and Slewing still reports
     });
     require_alpaca_error([&] { driver->slew_to_coordinates_async(6.5, 25.0); },
                          alpacacore::AlpacaError::DriverException);
+    mount.set_system_status(0);               // an Alt/Az slew needs Tracking off (#1377)
+    clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
     require_alpaca_error([&] { driver->slew_to_alt_az_async(30.0, 90.0); }, alpacacore::AlpacaError::DriverException);
 
     // The refused starts rolled back: the earlier failure is still the one Slewing reports, and no GOTO was sent.
@@ -1923,6 +1927,80 @@ TEST_CASE("iOptron slot - a refused slew thread throws and Slewing still reports
     CHECK(after == earlier);
     CHECK(mount.count(":MS1#") == gotos_before);
     driver->set_connected(false);
+}
+
+// Issue #1377 (ITelescopeV4): SlewToAltAz and SlewToAltAzAsync throw InvalidOperation while Tracking is true, before
+// anything is sent. Tracking off, the slew goes out as before.
+TEST_CASE("iOptron Telescope Driver - an Alt/Az slew is refused while Tracking is true",
+          "[ioptron][telescope][unit][fake]") {
+    for (const bool async : {false, true}) {
+        CAPTURE(async);
+        const char* name = async ? "SlewToAltAzAsync" : "SlewToAltAz";
+        alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+        REQUIRE(mount.ok());
+        alpacacore::test::FakeTaskClock clock;
+        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
+            0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+        // Runs the slew on another thread and advances the fake clock until it returns (a synchronous slew waits
+        // on it), so a regression that lets the slew through fails instead of hanging. Returns the call's future.
+        auto run_slew = [&] {
+            auto call = std::async(std::launch::async, [&] {
+                if (async) {
+                    driver->slew_to_alt_az_async(30.0, 90.0);
+                } else {
+                    driver->slew_to_alt_az(30.0, 90.0);
+                }
+            });
+            for (int i = 0; i < 400; ++i) {
+                if (call.wait_for(std::chrono::milliseconds(5)) == std::future_status::ready) break;
+                clock.advance(std::chrono::seconds(1));
+            }
+            return call;
+        };
+
+        // Tracking on (the fake's default status 1): refused under its own name, and no GOTO is sent.
+        REQUIRE(driver->get_tracking());
+        auto refused = run_slew();
+        REQUIRE(refused.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+        try {
+            refused.get();
+            FAIL("the Alt/Az slew was not refused");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(std::string(e.what()) == std::string(name) + " is not allowed while Tracking is true");
+        }
+        CHECK(mount.count(":MS1#") == 0);
+        CHECK(mount.count(":MS2#") == 0);
+
+        // Tracking off: the slew goes out.
+        mount.set_system_status(0);
+        clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
+        REQUIRE_FALSE(driver->get_tracking());
+        auto accepted = run_slew();
+        REQUIRE(accepted.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+        CHECK_NOTHROW(accepted.get());
+        CHECK(wait_until([&] { return mount.count(":MS") >= 1; }));  // the async GOTO goes out from the slot's thread
+
+        // Parked (status 6): refused under its own name with InvalidWhileParked, and nothing more is sent (the
+        // synchronous form used to report this as SlewToCoordinates).
+        const auto gotos_before_park = mount.count(":MS");
+        mount.set_system_status(6);
+        clock.advance(std::chrono::seconds(31));  // past the status TTL
+        REQUIRE(driver->get_at_park());           // a client's AtPark poll refreshes the cache, as it would in use
+        auto parked = run_slew();
+        REQUIRE(parked.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+        try {
+            parked.get();
+            FAIL("the Alt/Az slew of a parked mount was not refused");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
+            CHECK(std::string(e.what()) == std::string(name) + " is not allowed while parked");
+        }
+        CHECK(mount.count(":MS") == gotos_before_park);
+        driver->set_connected(false);
+    }
 }
 
 // #1298: the LST helper cut UTC to whole seconds.
