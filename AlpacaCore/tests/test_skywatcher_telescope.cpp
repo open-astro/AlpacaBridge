@@ -15,10 +15,12 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <limits>
 #include <numbers>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
@@ -134,9 +136,9 @@ TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][tele
     // covered on a connected driver in test_skywatcher_async.cpp.
     require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
-    // The setters only validate and store, so they are usable before connect.
-    driver->set_target_right_ascension(12.5);
-    driver->set_target_declination(-30.25);
+    // The setters validate first, then refuse while disconnected (decision 0009 rule 3, open-astro#1786).
+    require_alpaca_error([&] { driver->set_target_right_ascension(12.5); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_target_declination(-30.25); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
 
     // Site properties validate their documented ranges (disconnected OK).
@@ -157,16 +159,21 @@ TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][tele
 
 TEST_CASE("SkyWatcher Telescope Driver - half-set target refuses the target-based motions",
           "[skywatcher][telescope][unit]") {
-    auto driver = make_driver(0);
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
 
     // SlewToTarget and SyncToTarget need both halves, so a half-set pair
-    // still reports ValueNotSet rather than slewing to a default Dec. The
-    // target snapshot is checked before the connection, so this holds on a
-    // disconnected driver too.
+    // still reports ValueNotSet rather than slewing to a default Dec. A
+    // target write needs the connection (decision 0009 rule 3), so this
+    // runs on a connected driver.
     driver->set_target_right_ascension(7.25);
     require_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
     require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
     require_alpaca_error([&] { driver->sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - Value range validation", "[skywatcher][telescope][unit]") {
@@ -222,11 +229,9 @@ TEST_CASE("SkyWatcher Telescope Driver - State machine", "[skywatcher][telescope
     CHECK(lst >= 0.0);
     CHECK(lst < 24.0);
 
-    // Guide rate defaults to a sane sub-sidereal value.
-    auto guide_rate = driver->get_guide_rate();
-    CHECK(guide_rate.ra > 0.0);
-    CHECK(guide_rate.dec > 0.0);
-    CHECK(guide_rate.ra <= 360.0 / 86164.0905);
+    // The guide rate is mount configuration but still a property of a connected device (open-astro#1786). Its
+    // default is checked on a connected driver in test_skywatcher_snapshot.cpp.
+    require_alpaca_error([&] { (void)driver->get_guide_rate(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - Axis rate ranges", "[skywatcher][telescope][unit]") {
@@ -303,6 +308,89 @@ TEST_CASE("SkyWatcher Telescope Driver - non-finite guide rate is rejected",
     require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// open-astro#1786: the guide-rate range check (0 to 1x sidereal, per axis) ran
+// after the connection check, so a disconnected mount answered an out-of-range
+// GuideRateRightAscension or GuideRateDeclination write with NotConnected.
+TEST_CASE("SkyWatcher Telescope Driver - guide-rate range errors precede NotConnected",
+          "[skywatcher][telescope][unit]") {
+    auto driver = make_driver();
+    const double two_sidereal = 2.0 * 360.0 / 86164.0905;
+
+    for (const double bad : {two_sidereal, -1.0, 99999.0}) {
+        require_alpaca_error([&] { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+
+    // An in-range value still reaches the connection check and is not stored.
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.002); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.002); }, alpacacore::AlpacaError::NotConnected);
+    // A driver that never connected has no guide rate to read, and no target to read or write.
+    require_alpaca_error([&] { (void)driver->get_guide_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_target_right_ascension(5.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_target_declination(10.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_target_right_ascension(25.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(95.0); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// open-astro#1786: Sky-Watcher stores one rate per axis, so writing one axis
+// keeps the other, and a refused write keeps both.
+TEST_CASE("SkyWatcher Telescope Driver - individual guide-rate writes keep the other axis",
+          "[skywatcher][telescope][unit]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    driver->set_guide_rate({0.001, 0.002});
+    driver->set_guide_rate_right_ascension(0.003);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_guide_rate_declination(0.004);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.004);
+
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(99999.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.004);
+
+    driver->set_connected(false);
+}
+
+// open-astro#1786 review note: the base per-axis setters read the pair and then wrote it under two lock
+// acquisitions, so a concurrent single-axis write could be overwritten by the stale pair. One thread keeps
+// rewriting RA while the other writes Dec once; the Dec value must survive.
+TEST_CASE("SkyWatcher Telescope Driver - concurrent individual guide-rate writes both land",
+          "[skywatcher][telescope][unit]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    for (int round = 0; round < 200; ++round) {
+        driver->set_guide_rate({0.001, 0.001});
+        std::atomic<bool> dec_done{false};
+        std::thread ra_writer([&] {
+            for (int i = 0; i < 100 || !dec_done.load(); ++i) {
+                driver->set_guide_rate_right_ascension(0.002);
+            }
+        });
+        std::thread dec_writer([&] {
+            driver->set_guide_rate_declination(0.003);
+            dec_done = true;
+        });
+        dec_writer.join();
+        ra_writer.join();
+        REQUIRE(driver->get_guide_rate().ra == 0.002);
+        REQUIRE(driver->get_guide_rate().dec == 0.003);
+    }
+
+    driver->set_connected(false);
 }
 
 // ── #1478 spec-audit items ───────────────────────────────────────────────────
