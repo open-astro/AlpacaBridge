@@ -1447,7 +1447,8 @@ private:
     // snapshot from before a reconnect (or any id after Disconnect): refused without touching the new link. A
     // NotConnected from the call (a removal code; the table already retired the open and closed the dead handle, or
     // refused a link it retired) drops the link at once, per decision 0009 rule 2a and #1656; any other error
-    // surfaces as itself. Takes no driver lock but the leaf lost_mutex_, so it may run with mutex_ held.
+    // surfaces as itself. Takes no driver lock but the leaves lost_mutex_ and the loss stamp's, one after the other, so
+    // it may run with mutex_ held.
     template <typename Fn>
     auto on_link(int camera_id, Fn&& fn) const {
         using Result = decltype(fn());
