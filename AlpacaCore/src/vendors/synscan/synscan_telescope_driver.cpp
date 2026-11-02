@@ -345,7 +345,9 @@ public:
 
     // The poll's latched fault text, read under the module's own leaf mutex; never mutex_. A serial link lost at once
     // (decision 0009 rule 5) reports the wrapper's loss reason, which the wrapper keeps until the next Connect; a
-    // Disconnect hides it with connected_.
+    // Disconnect hides it with connected_. Preferring it whenever connected_ is true is correct only because the
+    // wrapper's connect() clears the text before connected_ can turn true, so a reason from an earlier session never
+    // shows in this one.
     std::string get_link_fault() const override {
         if (connected_.load()) {
             std::string lost = SynScanProtocolWrapper::instance().link_fault();

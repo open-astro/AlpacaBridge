@@ -1203,10 +1203,10 @@ private:
     }
 
     // A failed write with EIO/ENXIO/ENODEV (`err`, the write's errno) is the serial port gone: the link is lost at
-    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout; a TCP send fails with
-    // a socket errno instead, so the network link keeps its fault latch.
+    // once. EBADF is not one (a write meets it only on an fd we closed), nor is a write timeout. Serial only: a TCP
+    // send fails with a socket errno, and whatever it returns the network link keeps its fault latch.
     void fail_link_if_gone_locked(int err) {
-        if (err == EIO || err == ENXIO || err == ENODEV) {
+        if (connection_type_ == ConnectionType::Serial && (err == EIO || err == ENXIO || err == ENODEV)) {
             fail_link_locked("SynScan serial link lost (write): " + util::errno_string(err));
         }
     }
