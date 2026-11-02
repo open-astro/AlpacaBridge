@@ -270,6 +270,20 @@ public:
         return tracker_->cv.wait_for(guard, real_timeout, [this] { return tracker_->woken.empty(); });
     }
 
+    /// The cleanup after a stepping loop failed its rendezvous: advance()s by `step`, each time waiting up to 100 ms
+    /// for the woken threads to settle, until `done()` holds or `real_timeout` of real time passes; returns done().
+    /// It steps without a rendezvous, so a thread that reaches this clock late still wakes and the test can join it
+    /// instead of hanging in join() (open-astro#1949).
+    bool drain_until(const std::function<bool()>& done, std::chrono::nanoseconds step,
+                     std::chrono::milliseconds real_timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + real_timeout;
+        while (!done() && std::chrono::steady_clock::now() < deadline) {
+            advance(step);
+            wait_for_woken_settled(std::chrono::milliseconds(100));
+        }
+        return done();
+    }
+
     /// Blocks the test thread until at least `n` waiters (wait_for and
     /// sleep_for together) are registered, or until `real_timeout` of real
     /// time passes; returns whether `n` was reached. The rendezvous that
