@@ -15,8 +15,8 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <alpacacore/version.h>
 
-#include <cmath>
 #include <atomic>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <numbers>
