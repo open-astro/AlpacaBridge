@@ -52,9 +52,8 @@ using alpacacore::test::require_alpaca_error;
 
 using FakeEAFSDK = alpacacore::test::FakeZWOEAFSDK;
 
-// The drivers these cases build run on the real default task clock, so the 100 ms status TTL is real time. The
-// staleness cases at the end of the file use a FakeTaskClock instead (decision 0005 rule 2).
-void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
+// Ages a frame out of the 100 ms status TTL on the driver's fake task clock (decision 0005 rule 2: no real waits).
+void wait_past_status_ttl(alpacacore::test::FakeTaskClock& clock) { clock.advance(std::chrono::milliseconds(150)); }
 
 } // namespace
 
@@ -146,8 +145,9 @@ TEST_CASE("ZWO EAF Focuser Driver - Unique IDs", "[zwo][focuser][unit]") {
 // read instead of through status_cache_.get() (position_calls 2, not 1).
 TEST_CASE("ZWO EAF Focuser Driver - DeviceState is one device read, served from the TTL cache",
           "[zwo][focuser][unit][fake-sdk]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
 
     CHECK(driver->get_device_state().size() == 4);  // IsMoving, Position, Temperature, TimeStamp
@@ -159,7 +159,7 @@ TEST_CASE("ZWO EAF Focuser Driver - DeviceState is one device read, served from 
     CHECK(driver->get_position() == 500);
     CHECK(sdk.position_calls == 1);  // inside the TTL: no device I/O
 
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     (void)driver->get_device_state();
     CHECK(sdk.position_calls == 2);
 }
@@ -209,13 +209,14 @@ TEST_CASE("ZWO EAF Focuser Driver - A move invalidates the cached frame", "[zwo]
 // (the third failure reports the raw SDK error, not "communications compromised").
 TEST_CASE("ZWO EAF Focuser Driver - A dead link refuses reads instead of serving the cache",
           "[zwo][focuser][unit][fake-sdk]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
     CHECK(driver->get_position() == 500);
 
     sdk.fail_reads = true;
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     for (int i = 0; i < 2; ++i) {
         CHECK_THROWS(driver->get_position());
     }
@@ -550,13 +551,14 @@ TEST_CASE("ZWO EAF Focuser Driver - A disconnect during queued status reads is n
 // Falsified by: the status refill counting a NotConnected SDK error as one more failed poll.
 TEST_CASE("ZWO EAF Focuser Driver - A focuser removed from USB reads Connected false",
           "[zwo][focuser][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
     CHECK(driver->get_position() == 500);
 
     sdk.remove();
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     CHECK_THROWS(driver->get_position());
     CHECK_FALSE(driver->get_connected());
     require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
@@ -566,11 +568,12 @@ TEST_CASE("ZWO EAF Focuser Driver - A focuser removed from USB reads Connected f
 // Falsified by: connect opening the id the driver was created with.
 TEST_CASE("ZWO EAF Focuser Driver - A replugged focuser is reopened by one Connect",
           "[zwo][focuser][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
     sdk.remove();
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     CHECK_THROWS(driver->get_position());
     sdk.replug(9);
 
@@ -578,7 +581,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A replugged focuser is reopened by one Conne
     CHECK(driver->get_connected());
     CHECK(sdk.open_calls == 2);
     CHECK(sdk.last_open_id == 9);
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     CHECK(driver->get_position() == 500);
 }
 
@@ -608,9 +611,10 @@ TEST_CASE("ZWO EAF Focuser Driver - A Connected toggle across a replug reopens t
 // the first candidate it opened.
 TEST_CASE("ZWO EAF Focuser Driver - Two focusers swapped while disconnected are told apart by serial",
           "[zwo][focuser][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
     sdk.second_id = 4;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
     driver->set_connected(false);
 
@@ -621,7 +625,7 @@ TEST_CASE("ZWO EAF Focuser Driver - Two focusers swapped while disconnected are 
     driver->set_connected(true);
     CHECK(driver->get_connected());
     CHECK(sdk.last_open_id == 4);
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     CHECK(driver->get_position() == 500);
     CHECK(sdk.last_read_id == 4);
 }
@@ -630,11 +634,12 @@ TEST_CASE("ZWO EAF Focuser Driver - Two focusers swapped while disconnected are 
 // Falsified by: Disconnect rethrowing the NotConnected close of a removed focuser.
 TEST_CASE("ZWO EAF Focuser Driver - Disconnect after a removal does not throw",
           "[zwo][focuser][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
     sdk.remove();
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     CHECK_THROWS(driver->get_position());
 
     CHECK_NOTHROW(driver->set_connected(false));
@@ -647,10 +652,11 @@ TEST_CASE("ZWO EAF Focuser Driver - Disconnect after a removal does not throw",
 // Falsified by: the wrapper serving a holder whose id now names another unit (no serial check at the shared open).
 TEST_CASE("ZWO EAF Focuser Driver - An idle focuser does not drive the unit that took its id",
           "[zwo][focuser][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
     sdk.second_id = 4;
-    auto y = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, 3, sdk);  // EAF-SN-1
-    auto x = alpacacore::vendor::zwo::create_zwo_eaf_focuser(1, 4, sdk);  // EAF-SN-2
+    auto y = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, 3, sdk, std::nullopt, clock);  // EAF-SN-1
+    auto x = alpacacore::vendor::zwo::create_zwo_eaf_focuser(1, 4, sdk, std::nullopt, clock);  // EAF-SN-2
     y->set_connected(true);
     x->set_connected(true);
 
@@ -660,13 +666,13 @@ TEST_CASE("ZWO EAF Focuser Driver - An idle focuser does not drive the unit that
     x->set_connected(false);
     x->set_connected(true);
     REQUIRE(x->get_connected());
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     CHECK(x->get_position() == 500);
     CHECK(sdk.last_read_id == 3);
 
     sdk.last_read_id = -1;
     sdk.last_move_id = -1;
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     // Every check runs, so a red run shows each of Y's calls that reached X's unit.
     const auto error_of = [](const std::function<void()>& fn) -> int {
         try {
@@ -722,13 +728,14 @@ TEST_CASE("ZWO EAF Focuser Driver - A held focuser with no serial is not shared 
 // Falsified by: the status refill counting a NotConnected SDK error as one more failed poll.
 TEST_CASE("ZWO EAF Focuser Driver - A read on an id the SDK no longer holds is a lost link",
           "[zwo][focuser][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
     CHECK(driver->get_position() == 500);
 
     sdk.replug(9);  // between two polls the unit came back on id 9; id 3 answers EAF_ERROR_INVALID_ID
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
 }
@@ -739,13 +746,14 @@ TEST_CASE("ZWO EAF Focuser Driver - A read on an id the SDK no longer holds is a
 // accepting a NotConnected step range read as "range unavailable".
 TEST_CASE("ZWO EAF Focuser Driver - A removed unit seen by an optional read is a lost link",
           "[zwo][focuser][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
     CHECK(driver->get_position() == 500);
 
     sdk.temperature_removed = true;
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
 
@@ -761,15 +769,16 @@ TEST_CASE("ZWO EAF Focuser Driver - A removed unit seen by an optional read is a
 // Falsified by: a WARN per failed read instead of one at the loss, or the serial logged unescaped.
 TEST_CASE("ZWO EAF Focuser Driver - A lost link is logged once with its serial escaped",
           "[zwo][focuser][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeEAFSDK sdk;
     sdk.serial = "EAF\nSN-1";
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
     driver->set_connected(true);
     CHECK(driver->get_position() == 500);
 
     WarnCapture capture;
     sdk.remove();
-    wait_past_status_ttl();
+    wait_past_status_ttl(clock);
     for (int i = 0; i < 3; ++i) {
         CHECK_THROWS(driver->get_position());
     }
@@ -907,4 +916,26 @@ TEST_CASE("ZWO EAF Focuser Driver - A Disconnect after a staleness loss clears t
     CHECK(eaf.sdk.close_calls == 1);
     CHECK(eaf.driver->get_link_fault().empty());
     require_alpaca_error([&] { (void)eaf.driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Decision 0009 rule 1: while the fault is latched a move is refused with the fault text and never reaches the unit;
+// Halt still does, so a runaway can always be stopped.
+// Falsified by: zwo_focuser_driver.cpp move() without its status_cache_.fault() check (the move reaches the SDK and
+// the position becomes 900).
+TEST_CASE("ZWO EAF Focuser Driver - A latched fault refuses a move but not a Halt",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FaultedEaf eaf;
+    try {
+        eaf.driver->move(900);
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find(eaf.driver->get_link_fault()) != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(eaf.sdk.position == 500);
+
+    eaf.sdk.moving = true;
+    CHECK_NOTHROW(eaf.driver->halt());
+    CHECK_FALSE(eaf.sdk.moving);
+    CHECK(eaf.driver->get_connected());
 }

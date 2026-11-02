@@ -316,6 +316,10 @@ public:
         if (position < 0 || position > max_step) {
             throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
         }
+        // Decision 0009 rule 1: a latched fault refuses the move with its text; halt() stays allowed.
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException("ZWO EAF communications compromised: " + fault, AlpacaError::DriverException);
+        }
         {
             std::lock_guard<std::mutex> io(io_mutex_);
             call_locked([&] { sdk_.move(open_id_, position); });
