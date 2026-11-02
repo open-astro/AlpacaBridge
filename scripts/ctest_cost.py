@@ -15,7 +15,9 @@ AlpacaCore/cmake/CTestCost.cmake includes <file> on the next run, after the
 Catch2 cases are discovered. Each name is a CMake bracket argument, so spaces,
 quotes, semicolons and brackets in it need no escaping. A test that was not run
 or is disabled has no meaningful time and is left out; a test with no line
-(a new one) keeps COST 0 and starts last.
+(a new one) keeps COST 0 and starts last. A report with no timed test (no
+`status` attribute, or nothing ran) is refused with an error and <file> is left
+as it was, so it never replaces good timings with none.
 
 Usage: python3 scripts/ctest_cost.py <junit.xml> <out.cmake>
 Self-test: python3 scripts/ctest_cost.py --self-test
@@ -54,7 +56,10 @@ def render(pairs):
 
 def write(junit_path, out_path):
     with open(junit_path, encoding="utf-8") as f:
-        text = render(costs(f.read()))
+        pairs = costs(f.read())
+    if not pairs:
+        raise ValueError("%s has no test that ran (status run or fail); %s left as it was" % (junit_path, out_path))
+    text = render(pairs)
     out_dir = os.path.dirname(os.path.abspath(out_path))
     os.makedirs(out_dir, exist_ok=True)
     # Written beside the target and renamed, so a failure never leaves half a file.
@@ -106,6 +111,15 @@ def self_test():
         with open(out, encoding="utf-8") as f:
             check("write() creates the directory and the file", f.read() == text)
         check("write() leaves no temporary file", sorted(os.listdir(os.path.dirname(out))) == ["costs.cmake"])
+        with open(src, "w", encoding="utf-8") as f:
+            f.write('<testsuite><testcase name="a" time="5"/></testsuite>')
+        try:
+            write(src, out)
+            failures.append("wrote a report with no timed test")
+        except ValueError:
+            pass
+        with open(out, encoding="utf-8") as f:
+            check("a report with no timed test keeps the earlier file", f.read() == text)
     try:
         costs("<testsuite><testcase")
         failures.append("accepted a truncated report")
