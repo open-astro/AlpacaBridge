@@ -365,6 +365,9 @@ jobs:
           key: ccache-all-vendors-coverage-${{ github.sha }}
 
       - name: Collect this shard's coverage data
+        # Not in the merge queue, which needs pass or fail, not a report (the
+        # PR's own run already published it); about 30 s per shard.
+        if: github.event_name != 'merge_group'
         # Over the one tree run_all_tests.sh builds: AlpacaHTTP/build holds
         # AlpacaCore as a subdirectory, and both suites write the same .gcda
         # files there (issue #1251). Raw JSON only: build-vendors merges the
@@ -387,6 +390,7 @@ jobs:
             AlpacaHTTP/build
 
       - name: Upload this shard's coverage data
+        if: github.event_name != 'merge_group'
         # Kept a week: re-running one failed shard re-runs build-vendors, which
         # reads the other shards' files from the earlier attempt.
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -417,18 +421,23 @@ jobs:
             exit 1
           fi
 
+      # The rest builds the coverage report, which the merge queue skips (see
+      # "Collect this shard's coverage data"); there the job only checks the shards.
       - name: Checkout
         # gcovr reads the sources for the HTML report.
+        if: github.event_name != 'merge_group'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install gcovr
+        if: github.event_name != 'merge_group'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcovr
 
       - name: Download the shards' coverage data
+        if: github.event_name != 'merge_group'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           pattern: coverage-raw-*
@@ -436,6 +445,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate coverage report
+        if: github.event_name != 'merge_group'
         # The shards ran gcov over their own trees with the same filters and
         # excludes; adding their JSON (-a) sums each line's hits, so this is the
         # report one runner running every test would write. The combined JSON
@@ -490,6 +500,7 @@ jobs:
           PY
 
       - name: Upload coverage report
+        if: github.event_name != 'merge_group'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage
