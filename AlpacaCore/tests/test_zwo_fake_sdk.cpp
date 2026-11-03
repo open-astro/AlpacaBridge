@@ -1382,3 +1382,27 @@ TEST_CASE("ZWO fake SDK - a close that throws still lets the next open initialis
     CHECK(sdk.holders(id) == 1);
     sdk.close_camera_link(id, again.link);
 }
+
+// Falsified by: fake_zwo_sdk.h get_control_value() checking the enumeration after every not-readable answer (the
+// unreadable bandwidth control asks it too), where the wrapper checks only after a generic code (issue #1667).
+TEST_CASE("FakeZWOSDK - only a generic not-readable control answer asks the enumeration",
+          "[zwo][camera][unit][fake-sdk]") {
+    FakeZWOSDK sdk;
+    const int id = sdk.camera.camera_id;
+    const auto opened = sdk.open_camera_link(id);
+    long value = 0;
+    bool is_auto = false;
+
+    sdk.fail_bandwidth_read = true;  // a control the camera cannot read: no evidence of a pull
+    sdk.with_link(id, opened.link, [&] {
+        CHECK_FALSE(sdk.get_control_value(id, FakeZWOSDK::ControlType::BandwidthOverload, value, is_auto));
+    });
+    CHECK(sdk.call_count("listed") == 0);
+
+    sdk.fail_heater_read = true;  // a generic code: the camera list is asked, and still lists it
+    sdk.with_link(id, opened.link, [&] {
+        CHECK_FALSE(sdk.get_control_value(id, FakeZWOSDK::ControlType::AntiDewHeater, value, is_auto));
+    });
+    CHECK(sdk.call_count("listed") == 1);
+    sdk.close_camera_link(id, opened.link);
+}

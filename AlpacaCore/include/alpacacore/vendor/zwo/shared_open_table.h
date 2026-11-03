@@ -44,6 +44,14 @@ namespace alpacacore::vendor::zwo {
  * DriverException, a retired link (or link 0) is NotConnected, both refused before the SDK is touched, and
  * a loss code from the call retires the entry.
  *
+ * Ops::listed, when set, is the check for a pull the SDK does not report (issue #1667: ASI SDK 1.41 answered a bare
+ * cable pull with ASI_ERROR_GENERAL_ERROR or with success, never a removal code). A per-device call whose body throws
+ * a DriverException (a generic SDK code, or any DriverException the wrapper's body throws itself), or whose result the
+ * caller's `failed` predicate rejects (an ASI_EXP_FAILED status), asks whether the SDK still enumerates the id; one
+ * it no longer lists retires the entry and the call throws NotConnected. A check on a unit that is still listed
+ * changes nothing.
+ * A call that succeeds is never checked, so a pull that the SDK answers with success is found by the next failure.
+ *
  * call_unserialised() is the one per-device call that must not hold the mutex (a blocking bulk
  * download): it checks the link in one hold, runs with no lock, and counts as in flight. A loss
  * retires the entry at once for every later caller, but the dead handle is closed only when the
@@ -59,6 +67,8 @@ public:
         std::function<void(int)> real_open;
         std::function<void(int)> real_close;
         std::function<std::string(int)> read_serial;
+        /// True while the SDK still enumerates the id. Empty: no enumeration check (a removal code is the only loss).
+        std::function<bool(int)> listed{};
     };
     struct Opened {
         std::uint64_t link{};
@@ -107,14 +117,21 @@ public:
     decltype(auto) call(int id, Fn&& fn) {
         std::lock_guard<std::mutex> lock(mutex_);
         checked_entry(id);
-        try {
-            return std::forward<Fn>(fn)();
-        } catch (const std::exception& e) {
-            if (util::is_link_loss(e)) {
-                retire(id);
-            }
-            throw;
+        return run_locked(id, std::forward<Fn>(fn));
+    }
+
+    /// As call(), for a body that reports a failure in its result, not by throwing: when @p failed holds for the
+    /// result and the SDK no longer enumerates @p id, the entry is retired and the call throws NotConnected.
+    template <class Fn, class Failed>
+    auto call(int id, Fn&& fn, Failed&& failed) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        checked_entry(id);
+        auto result = run_locked(id, std::forward<Fn>(fn));
+        if (std::forward<Failed>(failed)(result) && unlisted_locked(id)) {
+            retire(id);
+            throw_unlisted(id, "the call failed");
         }
+        return result;
     }
 
     /// As call(), but @p fn runs with no lock held, so a blocking transfer stalls no other SDK call. The caller's
@@ -132,11 +149,17 @@ public:
         try {
             return std::forward<Fn>(fn)();
         } catch (const std::exception& e) {
-            if (util::is_link_loss(e)) {
+            const bool loss = util::is_link_loss(e);
+            if (loss || is_generic_failure(e)) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 const auto it = entries_.find(id);
                 if (it != entries_.end() && it->second.link == link) {
-                    retire(id);
+                    if (loss) {
+                        retire(id);
+                    } else if (unlisted_locked(id)) {
+                        retire(id);  // this call is still in flight, so its guard closes the handle
+                        throw_unlisted(id, e.what());
+                    }
                 }
             }
             throw;
@@ -223,6 +246,46 @@ private:
             throw AlpacaException("stale link for id " + std::to_string(id), AlpacaError::NotConnected);
         }
         return it;
+    }
+
+    // Caller holds mutex_. Runs a checked call's body; a loss code retires the entry, and a DriverException from the
+    // body (a generic SDK code, or one the wrapper throws itself) on an id the SDK no longer enumerates is a loss too.
+    template <class Fn>
+    decltype(auto) run_locked(int id, Fn&& fn) {
+        try {
+            return std::forward<Fn>(fn)();
+        } catch (const std::exception& e) {
+            if (util::is_link_loss(e)) {
+                retire(id);
+            } else if (is_generic_failure(e) && unlisted_locked(id)) {
+                retire(id);
+                throw_unlisted(id, e.what());
+            }
+            throw;
+        }
+    }
+
+    static bool is_generic_failure(const std::exception& e) {
+        const auto* alpaca = dynamic_cast<const AlpacaException*>(&e);
+        return alpaca != nullptr && alpaca->error_code() == AlpacaError::DriverException;
+    }
+
+    // Caller holds mutex_, so the enumeration is serialised with every other SDK call. A check that cannot run is
+    // no evidence of a pull: the id counts as listed.
+    bool unlisted_locked(int id) const {
+        if (!ops_.listed) {
+            return false;
+        }
+        try {
+            return !ops_.listed(id);
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
+    [[noreturn]] static void throw_unlisted(int id, const std::string& failure) {
+        throw AlpacaException(failure + "; id " + std::to_string(id) + " is no longer enumerated",
+                              AlpacaError::NotConnected);
     }
 
     static std::vector<Expected>& expected_stack() {

@@ -74,6 +74,7 @@ Symbol: `TaskClock`
 | iOptron iEAF focuser | `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_focuser_driver.cpp` | adopted | #1590 | status cache age |
 | iOptron iEFW filter wheel | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted | #1723 | status cache age and its fault stamp (the decision 0009 staleness bound) |
 | ZWO EAF focuser | `AlpacaCore/src/vendors/zwo/zwo_focuser_driver.cpp` | adopted | #1666 | status cache age and its fault stamp (the decision 0009 staleness bound) |
+| ZWO dew heater switch | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted | #1667 | heater read cache age and its fault stamp (the decision 0009 staleness bound) |
 
 ## Links
 

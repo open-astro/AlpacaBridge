@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 
@@ -119,13 +120,15 @@ private:
     ZWOSDK& sdk_;
 };
 
-/// Test overload: the driver keeps a reference, `sdk` must outlive it.
-std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id, ZWODewHeaterSdk& sdk);
+/// Test overload: the driver keeps references, `sdk` and `clock` must outlive it. `clock` is the TaskClock the heater
+/// read cache's age and its fault stamp run on (decision 0005; the decision 0009 staleness bound).
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id, ZWODewHeaterSdk& sdk,
+                                                           util::TaskClock& clock = util::default_task_clock());
 
 /// Test overload binding by SDK slot index (or Auto, or `camera_serial`, as
-/// above); `sdk` must outlive the driver.
-std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
-                                                                    ZWODewHeaterSdk& sdk,
-                                                                    const std::string& camera_serial = {});
+/// above); `sdk` and `clock` must outlive the driver.
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(
+    int device_number, int camera_index, ZWODewHeaterSdk& sdk, const std::string& camera_serial = {},
+    util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::zwo

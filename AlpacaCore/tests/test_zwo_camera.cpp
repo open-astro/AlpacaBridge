@@ -649,6 +649,151 @@ TEST_CASE("ZWO Camera Driver - two cameras swapped while disconnected are told a
     camera->set_connected(false);
 }
 
+// ---- A bare cable pull: no removal code, only a camera the SDK no longer enumerates (issue #1667) ----
+
+namespace {
+
+std::vector<std::string> lost_warnings(const WarnCapture& log) {
+    std::vector<std::string> lost;
+    for (const auto& message : log.messages) {
+        if (message.find(" lost (") != std::string::npos) lost.push_back(message);
+    }
+    return lost;
+}
+
+}  // namespace
+
+// Falsified by: shared_open_table.h call(id, fn, failed) skipping the failed() check (the ASI_EXP_FAILED status
+// starts the retry burst, whose stop finds the pull one SDK call later).
+// Decision 0009 rule 2a: ASI SDK 1.41 answered a bare pull with ASI_EXP_FAILED and generic errors on the rig; the
+// failed status on a camera that no longer enumerates is the evidence, so no retry stop, register write or re-trigger
+// is sent.
+TEST_CASE("ZWO Camera Driver - a bare cable pull during an exposure loses the link at the failed status",
+          "[zwo][camera][unit][link]") {
+    WarnCapture log;
+    ExposingCamera rig;
+    const int starts = rig.sdk.call_count("start_exposure");
+    const int stops = rig.sdk.call_count("stop_exposure");
+    const int writes = rig.sdk.call_count("set_control_value");
+    rig.sdk.pulled = true;
+
+    require_alpaca_error([&] { (void)rig.camera->get_image_ready(); }, NotConnected);
+
+    CHECK_FALSE(rig.camera->get_connected());
+    CHECK(rig.sdk.call_count("stop_exposure") == stops);
+    CHECK(rig.sdk.call_count("start_exposure") == starts);
+    CHECK(rig.sdk.call_count("set_control_value") == writes);
+    CHECK(rig.camera->get_device_state().empty());
+    CHECK(rig.camera->get_link_fault().find("was removed from USB") != std::string::npos);
+    const auto lost = lost_warnings(log);
+    REQUIRE(lost.size() == 1);
+    CHECK(lost.front().find(kSerial) != std::string::npos);
+}
+
+// Falsified by: shared_open_table.h call(id, fn, failed) skipping the failed() check (the not-readable answer
+// leaves Connected true).
+// Falsified by: zwo_camera_driver.cpp get_camera_state() not checking the link after poll_exposure_status() (the read
+// that finds the pull answers Idle, as on the rig at fa99a25e).
+TEST_CASE("ZWO Camera Driver - the CameraState read that finds a bare cable pull answers NotConnected",
+          "[zwo][camera][unit][link]") {
+    ExposingCamera rig;
+    rig.sdk.pulled = true;
+
+    require_alpaca_error([&] { (void)rig.camera->get_camera_state(); }, NotConnected);
+    CHECK_FALSE(rig.camera->get_connected());
+}
+
+// Falsified by: zwo_camera_driver.cpp get_image_array() not checking the link in its failed-status branch (the read
+// that finds the pull answers the latched DriverException).
+TEST_CASE("ZWO Camera Driver - the ImageArray read that finds a bare cable pull answers NotConnected",
+          "[zwo][camera][unit][link]") {
+    ExposingCamera rig;
+    rig.sdk.pulled = true;
+
+    require_alpaca_error([&] { (void)rig.camera->get_image_array(); }, NotConnected);
+    CHECK_FALSE(rig.camera->get_connected());
+}
+
+// The idle case: a temperature read the SDK answers as not readable, on a camera it no longer enumerates. A replug
+// and the client's Disconnect and Connect bring it back by serial.
+TEST_CASE("ZWO Camera Driver - a bare cable pull on an idle camera is found by the next temperature read",
+          "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    CHECK(camera->get_ccd_temperature() == Catch::Approx(15.0));
+    sdk.pulled = true;
+
+    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, NotConnected);
+    CHECK_FALSE(camera->get_connected());
+    CHECK(sdk.open_count() == 0);  // the dead handle is closed
+
+    sdk.replug({{23, kSerial}});
+    camera->set_connected(false);
+    camera->set_connected(true);
+    REQUIRE(camera->get_connected());
+    CHECK(sdk.holders(23) == 1);
+    CHECK(camera->get_ccd_temperature() == Catch::Approx(15.0));
+    camera->set_connected(false);
+}
+
+// Falsified by: shared_open_table.h unlisted_locked() ignoring what Ops::listed answers.
+// A generic error is not evidence on its own: a camera the SDK still enumerates keeps its link and its open.
+TEST_CASE("ZWO Camera Driver - a generic SDK error on a camera that still enumerates keeps the link",
+          "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    const int listings = sdk.call_count("listed");
+    sdk.fail_exposure_start = true;
+
+    require_alpaca_error([&] { camera->start_exposure(0.001, true); }, alpacacore::AlpacaError::DriverException);
+
+    CHECK(sdk.call_count("listed") == listings + 1);  // the enumeration was asked, and answered "still there"
+    CHECK(camera->get_connected());
+    CHECK(camera->get_link_fault().empty());
+    CHECK(sdk.holders(sdk.camera.camera_id) == 1);
+    camera->start_exposure(0.001, true);
+    CHECK(camera->get_image_ready());
+    camera->set_connected(false);
+}
+
+// Falsified by: shared_open_table.h call_unserialised() rethrowing a generic failure without asking Ops::listed.
+// The download runs with no table lock (call_unserialised()); a generic failure from it on a pulled camera is a loss,
+// the download answers NotConnected as every member does while lost, and the dead handle is closed only after the
+// download returned.
+TEST_CASE("ZWO Camera Driver - a bare cable pull during the image download loses the link",
+          "[zwo][camera][unit][link]") {
+    FakeZWOSDK sdk;
+    sdk.stop_releases_download = false;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    camera->start_exposure(0.001, true);
+    REQUIRE(camera->get_image_ready());
+    sdk.hold_download();
+
+    std::atomic<int> code{0};
+    std::thread download([&] {
+        try {
+            (void)camera->get_image_array();
+        } catch (const alpacacore::AlpacaException& e) {
+            code = e.error_code();
+        }
+    });
+    const bool started = sdk.wait_for_download(std::chrono::seconds(2));
+    sdk.download_error = "ASIGetDataAfterExp: ASI_ERROR_GENERAL_ERROR";
+    sdk.pulled = true;
+    sdk.release_download();
+    download.join();
+
+    REQUIRE(started);
+    CHECK(code.load() == NotConnected);
+    CHECK_FALSE(camera->get_connected());
+    require_alpaca_error([&] { (void)camera->get_image_ready(); }, NotConnected);
+    CHECK_FALSE(sdk.closed_during_download());
+    CHECK(sdk.open_count() == 0);
+}
+
 // Falsified by: zwo_camera_driver.cpp set_connected() taking exposure_trigger_mutex_ before it publishes the closed
 // state (a retry burst stuck in a hung SDK call keeps Connected true through every Disconnect, as on the rig).
 TEST_CASE("ZWO Camera Driver - Disconnect reads false while a retry burst is stuck in the SDK",

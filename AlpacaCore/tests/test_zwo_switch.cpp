@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/version.h>
@@ -27,6 +28,7 @@
 #include "../src/vendors/zwo/zwo_fields.h"
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_task_clock.h"
 #include "fake_zwo_sdk.h"
 #include "getter_stall_probe.h"
 
@@ -549,13 +551,15 @@ TEST_CASE("ZWO camera and dew heater - a camera removal error stops the switch b
     CHECK(rig.sdk.open_count() == 0);  // the dead handle is closed at once
 
     rig.sdk.removed = false;  // a read that reached the SDK now gets the fake's "not open" DriverException
+    const int touches = rig.sdk.unit_touches();
     try {
         (void)rig.heater->get_switch_value(0);
         FAIL("Expected AlpacaException");
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
-        CHECK(std::string(ex.what()).find("stale link") != std::string::npos);
+        CHECK(std::string(ex.what()).find("removed from USB") != std::string::npos);
     }
+    CHECK(rig.sdk.unit_touches() == touches);  // refused by the table, before the SDK
 }
 
 // ---- A camera loss and replug with the dew heater on the same open (issue #1667, decision 0009) ----
@@ -577,24 +581,37 @@ struct SharedCameraLost : SharedCamera {
 // The camera comes back on @p new_id with the same serial and reconnects; the switch still holds its link from
 // before the loss.
 void check_stale_switch_after_camera_reconnect(int new_id) {
-    SharedCameraLost rig;
-    rig.sdk.replug({{new_id, "FAKE-ZWO-17"}});
+    {
+        SharedCameraLost rig;
+        rig.sdk.replug({{new_id, "FAKE-ZWO-17"}});
+        rig.camera->set_connected(false);  // a lost camera reads as disconnected: completes at once
+        rig.camera->set_connected(true);
+        REQUIRE(rig.camera->get_connected());
+        CHECK(rig.sdk.holders(new_id) == 1);
 
-    rig.camera->set_connected(false);  // a lost camera reads as disconnected: completes at once
-    rig.camera->set_connected(true);
-    REQUIRE(rig.camera->get_connected());
-    CHECK(rig.sdk.holders(new_id) == 1);
+        // The switch's link names the handle that died: refused before the SDK, the camera's new open untouched, and
+        // the switch now reads the loss.
+        const int touches = rig.sdk.unit_touches();
+        require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, NotConnected);
+        CHECK(rig.sdk.unit_touches() == touches);
+        CHECK_FALSE(rig.heater->get_connected());
+        CHECK(rig.sdk.holders(new_id) == 1);
+    }
+    {
+        // The switch has not called since the loss, so its Disconnect closes on the link that died: that stale
+        // close must not close what the camera reopened.
+        SharedCameraLost rig;
+        rig.sdk.replug({{new_id, "FAKE-ZWO-17"}});
+        rig.camera->set_connected(false);
+        rig.camera->set_connected(true);
+        REQUIRE(rig.camera->get_connected());
 
-    // The switch's link names the handle that died: refused before the SDK, the camera's new open untouched.
-    const int touches = rig.sdk.unit_touches();
-    require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, NotConnected);
-    CHECK(rig.sdk.unit_touches() == touches);
-
-    rig.heater->set_connected(false);  // the stale close must not close what the camera reopened
-    CHECK(rig.sdk.open_count() == 1);
-    CHECK(rig.camera->get_ccd_temperature() == Catch::Approx(15.0));
-    rig.camera->set_connected(false);
-    CHECK(rig.sdk.open_count() == 0);
+        rig.heater->set_connected(false);
+        CHECK(rig.sdk.open_count() == 1);
+        CHECK(rig.camera->get_ccd_temperature() == Catch::Approx(15.0));
+        rig.camera->set_connected(false);
+        CHECK(rig.sdk.open_count() == 0);
+    }
 }
 
 }  // namespace
@@ -642,8 +659,10 @@ TEST_CASE("ZWO dew heater meets the loss first - the camera gets NotConnected be
     CHECK(rig.sdk.unit_touches() == touches);
     CHECK_FALSE(rig.camera->get_connected());
 
-    // The cable is back: the camera reconnects; the switch latches no loss, so it reads again after its own
-    // Disconnect and Connect, through the camera's new open.
+    CHECK_FALSE(rig.heater->get_connected());  // the switch met the loss: it reads disconnected too
+
+    // The cable is back: the camera reconnects, and the switch reads again after its own Disconnect and Connect,
+    // through the camera's new open.
     rig.sdk.replug({{17, "FAKE-ZWO-17"}});
     rig.camera->set_connected(true);
     rig.heater->set_connected(false);
@@ -653,4 +672,158 @@ TEST_CASE("ZWO dew heater meets the loss first - the camera gets NotConnected be
     rig.heater->set_connected(false);
     rig.camera->set_connected(false);
     CHECK(rig.sdk.open_count() == 0);
+}
+
+// ---- The dew heater reads the camera's loss (issue #1667, decision 0009 rules 3 and 5) ----
+
+// Falsified by: zwo_switch_driver.cpp get_switch_value() not calling note_loss_locked() on a NotConnected from its
+// read; set_connected(false) on a lost switch keeping the loss reason.
+// The camera met the removal first: the switch's next read finds its open retired and reads Connected false from
+// then on, with the reason in LinkFault until its own Disconnect; its Connect after the replug opens afresh.
+TEST_CASE("ZWO dew heater - a camera loss reads Connected false on the switch", "[zwo][switch][camera][unit][link]") {
+    SharedCameraLost rig;
+    REQUIRE(rig.heater->get_connected());  // nothing told the switch yet
+
+    try {
+        (void)rig.heater->get_switch_value(0);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == NotConnected);
+        CHECK(std::string(ex.what()).find("removed from USB") != std::string::npos);
+    }
+    CHECK_FALSE(rig.heater->get_connected());
+    CHECK(rig.heater->get_device_state().empty());
+    CHECK(rig.heater->get_link_fault().find("removed from USB") != std::string::npos);
+    require_alpaca_error([&] { (void)rig.heater->get_max_switch_value(0); }, NotConnected);
+
+    rig.heater->set_connected(false);  // a lost switch reads as disconnected: completes and clears the reason
+    CHECK(rig.heater->get_link_fault().empty());
+    CHECK(rig.sdk.open_count() == 0);
+
+    rig.sdk.replug({{17, "FAKE-ZWO-17"}});
+    rig.heater->set_connected(true);
+    REQUIRE(rig.heater->get_connected());
+    CHECK(rig.heater->get_switch_value(0) == Catch::Approx(0.0));
+    rig.heater->set_connected(false);
+    CHECK(rig.sdk.open_count() == 0);
+}
+
+// Falsified by: zwo_switch_driver.cpp get_switch_value() not calling note_loss_locked(), or shared_open_table.h
+// call(id, fn, failed) skipping the failed() check.
+// A bare pull met by the switch first: its heater read is not readable on a camera that no longer enumerates, so the
+// switch and then the camera read the loss, and the camera's call never reaches the SDK.
+TEST_CASE("ZWO dew heater - a bare cable pull met by the switch drops the switch and the camera",
+          "[zwo][switch][camera][unit][link]") {
+    SharedCamera rig;
+    rig.camera->set_connected(true);
+    rig.heater->set_connected(true);
+    rig.sdk.pulled = true;
+
+    require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, NotConnected);
+    CHECK_FALSE(rig.heater->get_connected());
+    CHECK(rig.sdk.open_count() == 0);
+
+    const int touches = rig.sdk.unit_touches();
+    require_alpaca_error([&] { (void)rig.camera->get_ccd_temperature(); }, NotConnected);
+    CHECK(rig.sdk.unit_touches() == touches);
+    CHECK_FALSE(rig.camera->get_connected());
+}
+
+// Falsified by: zwo_switch_driver.cpp set_switch_value() not calling note_loss_locked() on a NotConnected from its
+// write.
+// A heater write that meets the pull is the same loss as a read.
+TEST_CASE("ZWO dew heater - a heater write that meets a bare cable pull drops the switch",
+          "[zwo][switch][camera][unit][link]") {
+    SharedCamera rig;
+    rig.heater->set_connected(true);
+    rig.sdk.pulled = true;
+
+    require_alpaca_error([&] { rig.heater->set_switch_value(0, 10.0); }, NotConnected);
+    CHECK_FALSE(rig.heater->get_connected());
+    CHECK(rig.heater->get_link_fault().find("removed from USB") != std::string::npos);
+    CHECK(rig.sdk.open_count() == 0);
+}
+
+// ---- The dew heater's own fault latch and the staleness bound (decision 0009 rules 1 and 2b) ----
+
+namespace {
+
+// The camera and the switch on one fake camera, the switch's heater read cache on a fake clock.
+struct ClockedSharedCamera {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the drivers
+    FakeZWOSDK sdk;
+    ZWOSdkDewHeaterSdk dew_sdk{sdk};
+    std::unique_ptr<alpacacore::CameraDriver> camera =
+        alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    std::unique_ptr<alpacacore::SwitchDriver> heater =
+        alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, sdk.camera.camera_id, dew_sdk, clock);
+
+    ClockedSharedCamera() {
+        camera->set_connected(true);
+        heater->set_connected(true);
+    }
+
+    // Three failed heater reads, one TTL apart: the cache latches its fault.
+    void latch_heater_fault() {
+        sdk.fail_heater_read = true;
+        for (int i = 0; i < 3; ++i) {
+            clock.advance(std::chrono::milliseconds(150));
+            require_alpaca_error([&] { (void)heater->get_switch_value(0); }, alpacacore::AlpacaError::DriverException);
+        }
+    }
+};
+
+}  // namespace
+
+// Falsified by: zwo_switch_driver.cpp get_link_fault() returning only the loss reason (the latched heater fault
+// reads empty); set_switch_value() not refusing a write while the fault is latched.
+TEST_CASE("ZWO dew heater - LinkFault reports the latched heater read fault", "[zwo][switch][camera][unit][link]") {
+    ClockedSharedCamera rig;
+    REQUIRE(rig.heater->get_link_fault().empty());
+
+    rig.latch_heater_fault();
+
+    CHECK(rig.heater->get_connected());  // a fault, not a loss: the camera still enumerates
+    CHECK_FALSE(rig.heater->get_link_fault().empty());
+    rig.clock.advance(std::chrono::milliseconds(150));
+    require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, alpacacore::AlpacaError::DriverException);
+    const int writes = rig.sdk.call_count("set_control_value");
+    require_alpaca_error([&] { rig.heater->set_switch_value(0, 1.0); }, alpacacore::AlpacaError::DriverException);
+    CHECK(rig.sdk.call_count("set_control_value") == writes);  // refused before the SDK
+
+    rig.sdk.fail_heater_read = false;  // the next good read clears it
+    rig.clock.advance(std::chrono::milliseconds(150));
+    CHECK(rig.heater->get_switch_value(0) == Catch::Approx(0.0));
+    CHECK(rig.heater->get_link_fault().empty());
+}
+
+// Falsified by: zwo_switch_driver.cpp get_switch_value() not calling lose_link_if_fault_stale_locked() after a
+// failed read (the fault stands for ever with Connected true); set_connected(false) on a lost switch not resetting
+// the cache (LinkFault keeps the latched fault after the Disconnect).
+TEST_CASE("ZWO dew heater - a heater fault standing past the staleness bound loses the link",
+          "[zwo][switch][camera][unit][link]") {
+    ClockedSharedCamera rig;
+    rig.latch_heater_fault();
+
+    rig.clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::seconds(1));
+    require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, alpacacore::AlpacaError::DriverException);
+    CHECK(rig.heater->get_connected());  // inside the bound: still a fault
+
+    rig.clock.advance(std::chrono::seconds(2));
+    require_alpaca_error([&] { (void)rig.heater->get_switch_value(0); }, NotConnected);
+    CHECK_FALSE(rig.heater->get_connected());
+    CHECK(rig.heater->get_device_state().empty());
+    CHECK(rig.heater->get_link_fault().find("did not answer") != std::string::npos);
+    // Only the switch's open is dropped: the camera still holds the camera and reads it.
+    CHECK(rig.sdk.holders(rig.sdk.camera.camera_id) == 1);
+    CHECK(rig.camera->get_connected());
+    CHECK(rig.camera->get_ccd_temperature() == Catch::Approx(15.0));
+
+    // The client's Connect brings it back once the heater answers; nothing reopened on its own.
+    rig.sdk.fail_heater_read = false;
+    rig.heater->set_connected(false);
+    CHECK(rig.heater->get_link_fault().empty());
+    rig.heater->set_connected(true);
+    REQUIRE(rig.heater->get_connected());
+    CHECK(rig.heater->get_switch_value(0) == Catch::Approx(0.0));
 }

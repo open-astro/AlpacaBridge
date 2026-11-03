@@ -425,6 +425,7 @@ public:
     CameraState get_camera_state() const override {
         ensure_connected();
         auto status = poll_exposure_status();
+        ensure_connected();  // the poll may have found the camera gone (decision 0009 rule 3, issue #1667)
         switch (status) {
             case ZWOExposureStatus::Working:
                 return CameraState::Exposing;
@@ -618,6 +619,7 @@ public:
             const auto status = poll_exposure_status();
             if (status == ZWOExposureStatus::Failed) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                ensure_connected();  // the poll may have found the camera gone (decision 0009 rule 3, issue #1667)
                 // A failed retry bumps the generation but keeps its acquisition error.
                 if (!image_failure_.empty()) throw_image_failure_locked();
                 if (acquisition_valid_ && exposure_seq_ == download_seq) {
@@ -688,6 +690,7 @@ public:
                 throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
             }
             latch_image_failure_locked(e.what());
+            ensure_connected();  // a pulled camera: NotConnected, as every member while lost (decision 0009 rule 3)
             throw_image_failure_locked();
         }
         // Recorded before the image lock is released (mutex_ must not be taken under it), so a

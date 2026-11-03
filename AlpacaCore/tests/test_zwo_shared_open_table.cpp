@@ -533,3 +533,125 @@ TEST_CASE("ZWO shared open table - A close that throws still drops the entry", "
     CHECK(again.link != y.link);
     CHECK(units.opens == 2);  // really opened (and, for a camera, initialised) again
 }
+
+// ---- Ops::listed: a pull the SDK reports only as a generic failure (issue #1667) ----
+
+namespace {
+
+// A unit whose presence in the SDK's enumeration the test sets; counts every check.
+struct ListedUnits : CountingUnits {
+    std::atomic<bool> present{true};
+    std::atomic<bool> check_throws{false};
+    std::atomic<int> checks{0};
+
+    SharedOpenTable::Ops ops() {
+        auto ops = CountingUnits::ops();
+        ops.listed = [this](int) {
+            ++checks;
+            if (check_throws) throw AlpacaException("ASIGetNumOfConnectedCameras failed", AlpacaError::DriverException);
+            return present.load();
+        };
+        return ops;
+    }
+};
+
+int call_error(SharedOpenTable& table, int id, std::uint64_t link, int code) {
+    return error_of([&] {
+        table.with_link(id, link,
+                        [&] { table.call(id, [&] { throw AlpacaException("ASI_ERROR_GENERAL_ERROR", code); }); });
+    });
+}
+
+}  // namespace
+
+// Falsified by: shared_open_table.h run_locked() rethrowing a generic failure without asking Ops::listed.
+TEST_CASE("ZWO shared open table - A generic failure on an id no longer enumerated retires the open", "[zwo][link]") {
+    ListedUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    units.present = false;
+
+    std::string message;
+    try {
+        table.with_link(3, y.link, [&] {
+            table.call(3, [] { throw AlpacaException("ASIGetExpStatus: ASI_ERROR_GENERAL_ERROR"); });
+        });
+    } catch (const AlpacaException& e) {
+        CHECK(e.error_code() == AlpacaError::NotConnected);
+        message = e.what();
+    }
+    CHECK(message.find("ASI_ERROR_GENERAL_ERROR") != std::string::npos);
+    CHECK(message.find("no longer enumerated") != std::string::npos);
+    CHECK(units.closes.load() == 1);
+    CHECK(table.open_count(3) == 0);
+    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+}
+
+// Falsified by: shared_open_table.h unlisted_locked() taking an enumeration check that throws as evidence of a pull.
+TEST_CASE("ZWO shared open table - A generic failure on a listed id keeps the open", "[zwo][link]") {
+    ListedUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+
+    CHECK(call_error(table, 3, y.link, AlpacaError::DriverException) == AlpacaError::DriverException);
+    CHECK(units.checks.load() == 1);
+
+    units.present = false;
+    units.check_throws = true;  // a check that cannot run is no evidence
+    CHECK(call_error(table, 3, y.link, AlpacaError::DriverException) == AlpacaError::DriverException);
+    CHECK(units.closes.load() == 0);
+    CHECK(call_reaches(table, 3, y.link));
+}
+
+// Falsified by: shared_open_table.h is_generic_failure() accepting every AlpacaException code.
+TEST_CASE("ZWO shared open table - Only a generic failure asks the enumeration", "[zwo][link]") {
+    ListedUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    units.present = false;
+
+    CHECK(call_reaches(table, 3, y.link));
+    CHECK(call_error(table, 3, y.link, AlpacaError::InvalidValue) == AlpacaError::InvalidValue);
+    CHECK(call_error(table, 3, y.link, AlpacaError::InvalidOperation) == AlpacaError::InvalidOperation);
+    CHECK(units.checks.load() == 0);
+    CHECK(units.closes.load() == 0);
+}
+
+// Falsified by: shared_open_table.h call(id, fn, failed) returning the result without the failed() check.
+TEST_CASE("ZWO shared open table - A failed result on an id no longer enumerated retires the open", "[zwo][link]") {
+    ListedUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    const auto failed = [](bool ok) { return !ok; };
+    bool result = true;
+
+    table.with_link(3, y.link, [&] { result = table.call(3, [] { return false; }, failed); });
+    CHECK_FALSE(result);  // still enumerated: the failure is the caller's to report
+    CHECK(units.checks.load() == 1);
+    table.with_link(3, y.link, [&] { result = table.call(3, [] { return true; }, failed); });
+    CHECK(units.checks.load() == 1);  // a good result asks nothing
+
+    units.present = false;
+    CHECK(error_of([&] { table.with_link(3, y.link, [&] { (void)table.call(3, [] { return false; }, failed); }); }) ==
+          AlpacaError::NotConnected);
+    CHECK(units.closes.load() == 1);
+    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+}
+
+// Falsified by: shared_open_table.h call_unserialised() rethrowing a generic failure without asking Ops::listed.
+TEST_CASE("ZWO shared open table - A generic unserialised failure on an unlisted id retires the open", "[zwo][link]") {
+    ListedUnits units;
+    SharedOpenTable table(units.ops());
+    const auto y = table.open(3);
+    {
+        HeldDownload download(table, 3, y.link, AlpacaError::DriverException);
+        REQUIRE(wait_until([&] { return download.inside.load(); }));
+        units.present = false;
+        download.release = true;
+        download.thread.join();
+        CHECK(download.code.load() == AlpacaError::NotConnected);
+    }
+    CHECK(units.closes.load() == 1);  // by the download's own guard, after it returned
+    CHECK(table.open_count(3) == 0);
+    CHECK(error_of([&] { table.with_link(3, y.link, [&] { table.call(3, [] {}); }); }) == AlpacaError::NotConnected);
+}

@@ -12,7 +12,10 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_epoch.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/zwo/zwo_camera_identity.h>
@@ -39,9 +42,16 @@ constexpr util::ThermalSwitchLabels kDewHeaterLabels{"ZWO", "dew heater"};
 constexpr std::chrono::milliseconds kStatusTtl{100};
 
 struct DewStatus {
-    bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
+    bool closed{};  // a disconnect won the I/O lock, or the camera is gone: not a frame, not a link failure
     long value{};
 };
+
+// CWE-117: the serial and SDK error texts are device text; control characters never reach the log or a client.
+std::string printable(std::string text) {
+    std::replace_if(
+        text.begin(), text.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f; }, '?');
+    return text;
+}
 
 // Production SDK access: the process-wide wrapper.
 ZWODewHeaterSdk& production_sdk() {
@@ -120,10 +130,11 @@ public:
     // camera_index: an SDK slot, or util::kAutoThermalCamera for the one camera
     // with a heater. bound_serial, when set, names the camera and wins over both.
     ZWODewHeaterSwitchDriver(int device_number, std::optional<int> camera_id, std::optional<int> camera_index,
-                             std::string bound_serial, ZWODewHeaterSdk& sdk)
+                             std::string bound_serial, ZWODewHeaterSdk& sdk, util::TaskClock& clock)
         : AsyncConnectable("ZWO"),
           sdk_(sdk),
-          status_cache_("ZWO dew heater", kStatusTtl, 3, "ZWO"),
+          // The TTL and the fault stamp read the injected clock (decision 0005), so a test ages both with advance().
+          status_cache_("ZWO dew heater", kStatusTtl, 3, "ZWO", clock),
           device_number_(device_number),
           camera_id_(camera_id),
           camera_index_(camera_index),
@@ -186,6 +197,18 @@ public:
         return connected_.load();
     }
 
+    // Decision 0009 rule 5: the one fault text. While lost, the loss reason, kept until the next Connect or
+    // Disconnect; otherwise the heater read cache's latched fault (rule 1), empty while healthy.
+    std::string get_link_fault() const override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!lost_reason_.empty()) {
+                return lost_reason_;
+            }
+        }
+        return status_cache_.fault();
+    }
+
     void connect() override {
         start_connection_task(true);
     }
@@ -211,11 +234,26 @@ public:
             return;
         }
         if (connected == connected_.load()) {
+            // A lost camera reads as disconnected, so a Disconnect after a loss lands here and completes: it clears
+            // the loss text and the cache's latched fault (decision 0009 rule 5) and what a Disconnect forgets; the
+            // loss already dropped the open.
+            if (!connected) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    lost_reason_.clear();
+                    forget_camera_locked();
+                }
+                status_cache_.reset();  // after mutex_: the cache lock is never taken under it
+            }
             return;
         }
 
         auto& sdk = sdk_;
         if (connected) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                lost_reason_.clear();
+            }
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 std::vector<ZwoDewHeaterCamera> listing;
@@ -254,12 +292,9 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             close_id = camera_id_;
-            if (!camera_bound_by_id_only()) {
-                camera_id_.reset();
-                camera_name_ = "ZWO Camera";
-                serial_number_.clear();
-            }
+            forget_camera_locked();
             dew_caps_.reset();
+            lost_reason_.clear();
             connected_.store(false);
         }
         status_cache_.reset();
@@ -338,7 +373,28 @@ public:
         const int camera_id = camera_id_value();
         // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
         // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
-        const DewStatus status = status_cache_.get([this, camera_id] {
+        DewStatus status;
+        try {
+            status = fetch_status(camera_id);
+        } catch (const std::exception&) {
+            // Decision 0009 rule 2(b): a heater fault that has stood past the staleness bound is a lost link, found
+            // here by the next failed read (the switch has no poll of its own), as the ZWO EAF does (#1666).
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                lose_link_if_fault_stale_locked();
+            }
+            ensure_connected();  // lost, here or by another caller: NotConnected, not the cache's DriverException
+            throw;
+        }
+        if (status.closed) {
+            throw_not_connected();
+        }
+        return static_cast<double>(status.value);
+    }
+
+    // One heater frame from the cache, refilled under the I/O lock when it has aged out. Caller holds no driver lock.
+    DewStatus fetch_status(int camera_id) const {
+        return status_cache_.get([this, camera_id] {
             std::lock_guard<std::mutex> io(io_mutex_);
             DewStatus fresh;
             if (!connected_.load()) {
@@ -349,18 +405,24 @@ public:
             }
             bool is_auto = false;
             bool read = false;
-            sdk_.with_link(camera_id, open_link_, [&] {
-                read = sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto);
-            });
+            try {
+                sdk_.with_link(camera_id, open_link_, [&] {
+                    read = sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto);
+                });
+            } catch (const std::exception& e) {
+                if (!util::is_link_loss(e)) {
+                    throw;
+                }
+                // The camera is gone: a lost link, not a failed read for the link-health count.
+                note_loss_locked(e);
+                fresh.closed = true;
+                return fresh;
+            }
             if (!read) {
                 throw AlpacaException("Failed to read dew heater value", AlpacaError::DriverException);
             }
             return fresh;
         });
-        if (status.closed) {
-            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
-        }
-        return static_cast<double>(status.value);
     }
 
     void set_switch_value(int id, double value) override {
@@ -379,13 +441,25 @@ public:
         if (value_long < caps.min_value || value_long > caps.max_value) {
             throw AlpacaException("Dew heater value out of range", AlpacaError::InvalidValue);
         }
+        // Decision 0009 rule 1: a latched heater read fault refuses the write with its text.
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException("ZWO dew heater communications compromised: " + fault, AlpacaError::DriverException);
+        }
         {
             std::lock_guard<std::mutex> io(io_mutex_);
             ensure_connected();  // a disconnect that won the I/O lock has closed the camera
             const int camera_id = camera_id_value();
-            sdk_.with_link(camera_id, open_link_, [&] {
-                sdk_.set_control_value(camera_id, ZWOControlType::AntiDewHeater, value_long, false);
-            });
+            try {
+                sdk_.with_link(camera_id, open_link_, [&] {
+                    sdk_.set_control_value(camera_id, ZWOControlType::AntiDewHeater, value_long, false);
+                });
+            } catch (const std::exception& e) {
+                if (!util::is_link_loss(e)) {
+                    throw;
+                }
+                note_loss_locked(e);
+                throw_not_connected();
+            }
         }
         status_cache_.invalidate();
     }
@@ -444,7 +518,84 @@ public:
 private:
     void ensure_connected() const {
         if (!connected_.load()) {
-            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
+            throw_not_connected();
+        }
+    }
+
+    // The loss reason while the camera link is lost, else the plain refusal. Takes mutex_.
+    [[noreturn]] void throw_not_connected() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        throw AlpacaException(lost_reason_.empty() ? "Dew heater not connected" : lost_reason_,
+                              AlpacaError::NotConnected);
+    }
+
+    // Decision 0009 rules 2a and 3 (issue #1667): a NotConnected from a call on the open means the camera is gone (the
+    // camera driver met the removal first, or this call did; either way the shared open table retired the open and
+    // closed the dead handle). Connected reads false from here, the next Connect lists and opens afresh, and nothing
+    // reopens on its own; the camera binding is forgotten by the Disconnect or Connect that follows. Caller holds
+    // io_mutex_, so a Connect or Disconnect cannot interleave; one that already published disconnected wins. No loss
+    // stamp: a heater times no motion (#521).
+    void note_loss_locked(const std::exception& e) const {
+        std::string label;
+        {
+            // Checked under mutex_, where a Disconnect publishes false and clears the reason: a loss that lost that
+            // race must not write a reason after the Disconnect cleared it (rule 5).
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load()) {
+                return;
+            }
+            label = unit_label_locked();
+            lost_reason_ = label + ": the camera was removed from USB; Connect again when it is back";
+            dew_caps_.reset();
+            connected_.store(false);
+        }
+        open_link_ = 0;  // retired by the table: nothing left to close
+        ALPACA_LOG_WARN("ZWO", label + " lost (" + printable(e.what()) + ")");
+    }
+
+    // Decision 0009 rule 2(b): a heater read fault that has stood past util::kLinkStalenessBound on the task clock,
+    // with no good read since it latched, is a lost link (rule 3): Connected false, members NotConnected, DeviceState
+    // empty, this switch's open closed, the reason kept for get_link_fault() until the next Connect or Disconnect,
+    // one WARN. Caller holds io_mutex_ (no device call is in flight), so a Connect cannot interleave; a Connect
+    // since the failed read reset the cache, so its fault is not stale. The camera driver's open is not touched:
+    // the camera may still answer.
+    void lose_link_if_fault_stale_locked() const {
+        const std::string fault = status_cache_.fault();
+        if (!status_cache_.fault_stale()) {
+            return;
+        }
+        std::string label;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load()) {
+                return;
+            }
+            label = unit_label_locked();
+            lost_reason_ = label + ": the heater did not answer for " +
+                           std::to_string(util::kLinkStalenessBound.count()) + " s (" + printable(fault) +
+                           "); Connect again when it answers";
+            dew_caps_.reset();
+            connected_.store(false);
+        }
+        ALPACA_LOG_WARN("ZWO", label + " lost: heater read fault stood for " +
+                                   std::to_string(util::kLinkStalenessBound.count()) + " s");
+        // Best effort: the loss stands whatever the close does.
+        release_open_locked(true);
+    }
+
+    // Caller holds mutex_.
+    std::string unit_label_locked() const {
+        return "ZWO dew heater on " + printable(camera_name_) +
+               (serial_number_.empty() ? std::string() : " " + printable(serial_number_));
+    }
+
+    // Caller holds mutex_. What a Disconnect forgets: a camera resolved by index or serial (an id-only binding keeps
+    // its id).
+    void forget_camera_locked() {
+        if (!camera_bound_by_id_only()) {
+            camera_id_.reset();
+            camera_name_ = "ZWO Camera";
+            serial_number_.clear();
         }
     }
 
@@ -459,9 +610,10 @@ private:
     // same fix as the camera's control-caps accessor (issue #116).
     ZWOControlCaps dew_caps_or_throw() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        // A disconnect racing past ensure_connected() clears dew_caps_ and connected_ together under mutex_.
+        // A disconnect or a loss racing past ensure_connected() clears dew_caps_ and connected_ together under mutex_.
         if (!connected_.load()) {
-            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
+            throw AlpacaException(lost_reason_.empty() ? "Dew heater not connected" : lost_reason_,
+                                  AlpacaError::NotConnected);
         }
         if (!dew_caps_.has_value()) {
             throw AlpacaException("Dew heater not supported", AlpacaError::NotImplemented);
@@ -511,8 +663,9 @@ private:
     }
 
     // Caller holds io_mutex_. Drops this driver's open, if any; a link the camera driver's loss retired is a no-op.
-    // A failed connect passes quiet (the connect's own error wins); a disconnect lets a close error surface.
-    void release_open_locked(bool quiet = false) {
+    // A failed connect and a staleness loss pass quiet (their own error or loss wins); a disconnect lets a close error
+    // surface.
+    void release_open_locked(bool quiet = false) const {
         if (open_link_ == 0) {
             return;
         }
@@ -524,7 +677,7 @@ private:
             if (!quiet) {
                 throw;
             }
-            ALPACA_LOG_WARN("ZWO", "close_camera_link after failed dew heater connect: " + std::string(e.what()));
+            ALPACA_LOG_WARN("ZWO", "dew heater close_camera_link failed: " + printable(e.what()));
         }
     }
 
@@ -598,11 +751,14 @@ private:
     std::string bound_serial_;
     std::string serial_number_;
     std::string camera_name_;
-    std::optional<ZWOControlCaps> dew_caps_;
-    std::atomic<bool> connected_;
+    // dew_caps_, lost_reason_, connected_ and open_link_ are mutable: a getter's refill can find the camera gone.
+    mutable std::optional<ZWOControlCaps> dew_caps_;
+    // Under mutex_: why the camera link was lost; cleared by the next Connect or Disconnect.
+    mutable std::string lost_reason_;
+    mutable std::atomic<bool> connected_;
     // Under io_mutex_: the open this driver holds (open_link_ 0 = none) and the id it is for.
     int open_id_{0};
-    std::uint64_t open_link_{0};
+    mutable std::uint64_t open_link_{0};
     // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
     // short state reads and writes, never held across an SDK call), then the SDK wrapper's own mutex.
     // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
@@ -617,23 +773,27 @@ private:
 
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id) {
     return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt, std::string(),
-                                                      production_sdk());
+                                                      production_sdk(), util::default_task_clock());
 }
 
-std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id, ZWODewHeaterSdk& sdk) {
-    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt, std::string(), sdk);
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id, ZWODewHeaterSdk& sdk,
+                                                           util::TaskClock& clock) {
+    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt, std::string(), sdk,
+                                                      clock);
 }
 
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
                                                                     ZWODewHeaterSdk& sdk,
-                                                                    const std::string& camera_serial) {
-    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index, camera_serial, sdk);
+                                                                    const std::string& camera_serial,
+                                                                    util::TaskClock& clock) {
+    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index, camera_serial, sdk,
+                                                      clock);
 }
 
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
                                                                     const std::string& camera_serial) {
     return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index, camera_serial,
-                                                      production_sdk());
+                                                      production_sdk(), util::default_task_clock());
 }
 
 std::vector<util::ThermalCameraCandidate> list_zwo_dew_heater_cameras() {
