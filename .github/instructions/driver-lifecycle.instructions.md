@@ -381,7 +381,7 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`). The ZWO EAF follows it since #1500 for its
   SDK: `NotConnected` from a per-device call (`EAF_ERROR_REMOVED`, `CLOSED`, BLE disconnect, `INVALID_ID`) drops `Connected`
   at once, and the next Connect rebinds by serial ([ZWO](zwo.instructions.md)); since #1666 a status fault standing past
-  `util::kLinkStalenessBound` is a lost link too. The ZWO camera drops `Connected` at once the same way since #1667
+  `util::kLinkStalenessBound` is a lost link too; the ZWO EFW filter wheel and CAA rotator have the same shape since #1668. The ZWO camera drops `Connected` at once the same way since #1667
   (`ASI_ERROR_CAMERA_REMOVED`, `ASI_ERROR_CAMERA_CLOSED`, `ASI_ERROR_INVALID_ID`, a status or temperature read included; its
   exposure retry stops at the first one), and on a generic failure from a camera the SDK no longer enumerates (a bare
   cable pull, which ASI SDK 1.41 answers with no removal code), with no staleness bound; its dew heater switch drops

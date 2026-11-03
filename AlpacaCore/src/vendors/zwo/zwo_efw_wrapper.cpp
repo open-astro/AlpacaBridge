@@ -16,9 +16,7 @@
 #include <alpacacore/vendor/zwo/zwo_slots.h>
 
 #include <iomanip>
-#include <mutex>
 #include <sstream>
-#include <unordered_map>
 
 namespace alpacacore::vendor::zwo {
 
@@ -72,11 +70,25 @@ int map_error_code(EFW_ERROR_CODE code) {
     }
 }
 
-void throw_on_error(EFW_ERROR_CODE code, const std::string& context) {
+// Issue #1668, as the EAF (issue #1500): the bridge passes only enumerated ids, so EFW_ERROR_INVALID_ID on a
+// per-device call means the id is gone (NotConnected, a lost link). EFWOpen and EFWGetID keep InvalidValue for an id
+// or index not found.
+void throw_on_error(EFW_ERROR_CODE code, const std::string& context, int invalid_id_code = AlpacaError::NotConnected) {
     if (code == EFW_SUCCESS) {
         return;
     }
-    throw AlpacaException(context + ": " + error_code_to_string(code), map_error_code(code));
+    const int mapped = code == EFW_ERROR_INVALID_ID ? invalid_id_code : map_error_code(code);
+    throw AlpacaException(context + ": " + error_code_to_string(code), mapped);
+}
+
+std::string read_serial_number(int wheel_id) {
+    EFW_SN sn{};
+    throw_on_error(EFWGetSerialNumber(wheel_id, &sn), "EFWGetSerialNumber");
+    std::ostringstream oss;
+    for (unsigned char byte : sn.id) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+    }
+    return oss.str();
 }
 
 ZWOEFWInfo convert_wheel_info(const EFW_INFO& info) {
@@ -89,13 +101,15 @@ ZWOEFWInfo convert_wheel_info(const EFW_INFO& info) {
 
 } // namespace
 
+// Every SDK call runs under the table's one mutex: per-device calls in table_.call(), enumeration and info under
+// table_.lock_unchecked(). EFWGetSDKVersion returns a static string and takes no lock.
 class ZWOEFWSDKWrapper::Impl {
 public:
-    std::mutex mutex_;
-    struct WheelUsage {
-        int open_count = 0;
-    };
-    std::unordered_map<int, WheelUsage> usage_;
+    SharedOpenTable table_{SharedOpenTable::Ops{
+        [](int id) { throw_on_error(EFWOpen(id), "EFWOpen", AlpacaError::InvalidValue); },
+        [](int id) { throw_on_error(EFWClose(id), "EFWClose"); },
+        [](int id) { return read_serial_number(id); },
+    }};
 };
 
 ZWOEFWSDKWrapper::ZWOEFWSDKWrapper()
@@ -109,9 +123,11 @@ ZWOEFWSDKWrapper& ZWOEFWSDKWrapper::instance() {
 }
 
 std::vector<ZWOEFWInfo> ZWOEFWSDKWrapper::enumerate_wheels() {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    const auto slots =
-        read_zwo_accessory_slots<EFW_INFO>(EFWGetNum(), "EFW", EFWGetID, EFWGetProperty, error_code_to_string);
+    const auto lock = pimpl_->table_.lock_unchecked();
+    // A wheel that refuses EFWGetProperty before its open is listed by id (issue #1668, zwo_slots.h).
+    const auto slots = read_zwo_efw_slots<EFW_INFO>(
+        EFWGetNum(), EFWGetID, EFWGetProperty, error_code_to_string,
+        [](EFW_ERROR_CODE code) { return code == EFW_ERROR_REMOVED || code == EFW_ERROR_INVALID_ID; });
     std::vector<ZWOEFWInfo> result;
     result.reserve(slots.size());
     for (const auto& slot : slots) {
@@ -122,7 +138,7 @@ std::vector<ZWOEFWInfo> ZWOEFWSDKWrapper::enumerate_wheels() {
 }
 
 bool ZWOEFWSDKWrapper::get_wheel_info_by_id(int wheel_id, ZWOEFWInfo& info) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    const auto lock = pimpl_->table_.lock_unchecked();
     EFW_INFO sdk_info{};
     EFW_ERROR_CODE code = EFWGetProperty(wheel_id, &sdk_info);
     if (code != EFW_SUCCESS) {
@@ -133,7 +149,7 @@ bool ZWOEFWSDKWrapper::get_wheel_info_by_id(int wheel_id, ZWOEFWInfo& info) {
 }
 
 bool ZWOEFWSDKWrapper::get_wheel_info_by_index(int wheel_index, ZWOEFWInfo& info) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    const auto lock = pimpl_->table_.lock_unchecked();
     int wheel_id = 0;
     EFW_ERROR_CODE code = EFWGetID(wheel_index, &wheel_id);
     if (code != EFW_SUCCESS) {
@@ -150,94 +166,60 @@ bool ZWOEFWSDKWrapper::get_wheel_info_by_index(int wheel_index, ZWOEFWInfo& info
     return true;
 }
 
-void ZWOEFWSDKWrapper::open_wheel(int wheel_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    auto& usage = pimpl_->usage_[wheel_id];
-    if (usage.open_count == 0) {
-        try {
-            throw_on_error(EFWOpen(wheel_id), "EFWOpen");
-        } catch (...) {
-            // Nothing was opened — drop the zero-count entry inserted by
-            // operator[] above rather than leaving a stale map node.
-            pimpl_->usage_.erase(wheel_id);
-            throw;
-        }
-    }
-    ++usage.open_count;
+SharedOpenTable::Opened ZWOEFWSDKWrapper::open_wheel_link(int wheel_id) { return pimpl_->table_.open(wheel_id); }
+
+std::optional<SharedOpenTable::Opened> ZWOEFWSDKWrapper::open_wheel_candidate(int wheel_id) {
+    return pimpl_->table_.open_candidate(wheel_id);
 }
 
-void ZWOEFWSDKWrapper::close_wheel(int wheel_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    auto it = pimpl_->usage_.find(wheel_id);
-    if (it == pimpl_->usage_.end() || it->second.open_count <= 0) {
-        return;
-    }
-    --it->second.open_count;
-    if (it->second.open_count == 0) {
-        // Erase the bookkeeping first: a failing SDK close (e.g. device
-        // unplugged) must not leave a zero-count entry that turns every
-        // later close into a no-op and leaks the handle. This assumes an
-        // SDK close error means the handle is unusable on the SDK side —
-        // a later open performs a fresh SDK open instead of reusing
-        // half-closed state.
-        pimpl_->usage_.erase(it);
-        throw_on_error(EFWClose(wheel_id), "EFWClose");
-    }
+void ZWOEFWSDKWrapper::close_wheel_link(int wheel_id, std::uint64_t link) { pimpl_->table_.close(wheel_id, link); }
+
+void ZWOEFWSDKWrapper::with_link(int wheel_id, std::uint64_t link, const std::function<void()>& fn) {
+    pimpl_->table_.with_link(wheel_id, link, fn);
 }
 
 int ZWOEFWSDKWrapper::get_position(int wheel_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     int position = 0;
-    throw_on_error(EFWGetPosition(wheel_id, &position), "EFWGetPosition");
+    pimpl_->table_.call(wheel_id, [&] { throw_on_error(EFWGetPosition(wheel_id, &position), "EFWGetPosition"); });
     return position;
 }
 
 void ZWOEFWSDKWrapper::set_position(int wheel_id, int position) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(EFWSetPosition(wheel_id, position), "EFWSetPosition");
+    pimpl_->table_.call(wheel_id, [&] { throw_on_error(EFWSetPosition(wheel_id, position), "EFWSetPosition"); });
 }
 
 void ZWOEFWSDKWrapper::set_unidirectional(int wheel_id, bool enabled) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(EFWSetDirection(wheel_id, enabled), "EFWSetDirection");
+    pimpl_->table_.call(wheel_id, [&] { throw_on_error(EFWSetDirection(wheel_id, enabled), "EFWSetDirection"); });
 }
 
 bool ZWOEFWSDKWrapper::get_unidirectional(int wheel_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     bool enabled = false;
-    throw_on_error(EFWGetDirection(wheel_id, &enabled), "EFWGetDirection");
+    pimpl_->table_.call(wheel_id, [&] { throw_on_error(EFWGetDirection(wheel_id, &enabled), "EFWGetDirection"); });
     return enabled;
 }
 
 void ZWOEFWSDKWrapper::calibrate(int wheel_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(EFWCalibrate(wheel_id), "EFWCalibrate");
+    pimpl_->table_.call(wheel_id, [&] { throw_on_error(EFWCalibrate(wheel_id), "EFWCalibrate"); });
 }
 
 int ZWOEFWSDKWrapper::get_hardware_error_code(int wheel_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     int error_code = 0;
-    throw_on_error(EFWGetHWErrorCode(wheel_id, &error_code), "EFWGetHWErrorCode");
+    pimpl_->table_.call(wheel_id,
+                        [&] { throw_on_error(EFWGetHWErrorCode(wheel_id, &error_code), "EFWGetHWErrorCode"); });
     return error_code;
 }
 
 std::string ZWOEFWSDKWrapper::get_serial_number(int wheel_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    EFW_SN sn{};
-    throw_on_error(EFWGetSerialNumber(wheel_id, &sn), "EFWGetSerialNumber");
-    std::ostringstream oss;
-    for (unsigned char byte : sn.id) {
-        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
-    }
-    return oss.str();
+    return pimpl_->table_.call(wheel_id, [&] { return read_serial_number(wheel_id); });
 }
 
 std::string ZWOEFWSDKWrapper::get_firmware_version(int wheel_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     unsigned char major = 0;
     unsigned char minor = 0;
     unsigned char build = 0;
-    throw_on_error(EFWGetFirmwareVersion(wheel_id, &major, &minor, &build), "EFWGetFirmwareVersion");
+    pimpl_->table_.call(wheel_id, [&] {
+        throw_on_error(EFWGetFirmwareVersion(wheel_id, &major, &minor, &build), "EFWGetFirmwareVersion");
+    });
     std::ostringstream oss;
     oss << static_cast<int>(major) << "." << static_cast<int>(minor) << "." << static_cast<int>(build);
     return oss.str();

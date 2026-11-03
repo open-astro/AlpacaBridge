@@ -329,7 +329,7 @@ TEST_CASE("ZWO CAA Rotator Driver - A tiny negative target stays below the wrap"
 }
 
 // Falsified by: zwo_rotator_driver.cpp set_connected() dropping the
-// close_rotator() in its catch(...) (open_calls 1, close_calls 0).
+// close_rotator_link() in its catch(...) (open_calls 1, close_calls 0).
 TEST_CASE("ZWO CAA Rotator Driver - Failed connect closes the handle", "[zwo][rotator][unit][fake-sdk]") {
     alpacacore::test::TempSyncOffsetDir dir;
     FakeCAASDK sdk;
@@ -525,7 +525,7 @@ TEST_CASE("ZWO CAA Rotator Driver - A mechanical move drops the cached frame", "
 }
 
 // Decision 0016: Name and UniqueID need no device access, so a connect that holds the SDK open must not park them.
-// Falsified by: zwo_rotator_driver.cpp set_connected(true) holding mutex_ across open_rotator() (get_name() then
+// Falsified by: zwo_rotator_driver.cpp set_connected(true) holding mutex_ across open_rotator_link() (get_name() then
 // waits the whole 300 ms open).
 TEST_CASE("ZWO CAA Rotator Driver - Name and UniqueID answer while a connect holds the SDK open",
           "[zwo][rotator][unit][fake-sdk][getter-stall]") {
@@ -577,7 +577,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Identity answers while a status read is in f
 }
 
 // A disconnect must wait for the exchange in flight, never close the handle under it (the I/O lock).
-// Falsified by: zwo_rotator_driver.cpp set_connected(false) calling close_rotator() without io_mutex_, or
+// Falsified by: zwo_rotator_driver.cpp set_connected(false) calling close_rotator_link() without io_mutex_, or
 // move_absolute()/move()/move_mechanical()/set_reverse()/halt() reading the id and then calling the SDK without
 // it (closed_while_busy is set; one section per write).
 TEST_CASE("ZWO CAA Rotator Driver - A disconnect waits for the exchange in flight instead of closing under it",

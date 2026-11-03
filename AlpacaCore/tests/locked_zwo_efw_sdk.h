@@ -14,7 +14,10 @@
 
 #include <alpacacore/vendor/zwo/zwo_efw_sdk.h>
 
+#include <cstdint>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,8 +29,12 @@ namespace alpacacore::test {
  * serialises its entry points. Same shape as LockedZWOSDK; a per-SDK class
  * rather than a shared template, because the interfaces share no signatures.
  *
- * Wraps all 14 entry points; the mutex is a leaf (the inner SDK never calls back into
- * this interface). No EFW call blocks, so there is no blocking-mode caveat.
+ * Wraps all 16 entry points, each under the mutex (decision 0015 rule 2). The mutex is recursive
+ * because with_link() holds it across its body, which calls back into this decorator's per-device
+ * methods on the same thread (issue #1668, as the EAF); the body may also take the driver's leaf
+ * mutex_, which the driver never holds across an SDK call, so no order inverts. Every other entry
+ * point holds the mutex across the inner call only (the inner SDK never calls back into this
+ * interface). No EFW call blocks, so there is no blocking-mode caveat.
  */
 class LockedZWOEFWSDK final : public vendor::zwo::ZWOEFWSDK {
 public:
@@ -44,11 +51,17 @@ public:
     bool get_wheel_info_by_index(int wheel_index, Info& info) override {
         return locked([&] { return inner_.get_wheel_info_by_index(wheel_index, info); });
     }
-    void open_wheel(int wheel_id) override {
-        locked([&] { inner_.open_wheel(wheel_id); });
+    vendor::zwo::SharedOpenTable::Opened open_wheel_link(int wheel_id) override {
+        return locked([&] { return inner_.open_wheel_link(wheel_id); });
     }
-    void close_wheel(int wheel_id) override {
-        locked([&] { inner_.close_wheel(wheel_id); });
+    std::optional<vendor::zwo::SharedOpenTable::Opened> open_wheel_candidate(int wheel_id) override {
+        return locked([&] { return inner_.open_wheel_candidate(wheel_id); });
+    }
+    void close_wheel_link(int wheel_id, std::uint64_t link) override {
+        locked([&] { inner_.close_wheel_link(wheel_id, link); });
+    }
+    void with_link(int wheel_id, std::uint64_t link, const std::function<void()>& fn) override {
+        locked([&] { inner_.with_link(wheel_id, link, fn); });
     }
     int get_position(int wheel_id) override {
         return locked([&] { return inner_.get_position(wheel_id); });
@@ -81,12 +94,12 @@ public:
 private:
     template <typename Fn>
     auto locked(Fn&& fn) -> decltype(fn()) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         return fn();
     }
 
     ZWOEFWSDK& inner_;
-    std::mutex mutex_;
+    std::recursive_mutex mutex_;
 };
 
 }  // namespace alpacacore::test

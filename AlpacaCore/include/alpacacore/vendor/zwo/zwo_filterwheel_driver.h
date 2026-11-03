@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/zwo/zwo_efw_sdk.h>
 
 #include <memory>
@@ -38,18 +39,20 @@ std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel(int device_number,
 std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel_by_index(int device_number, int wheel_index);
 
 /**
- * @brief Test seam: as create_zwo_efw_filterwheel(), over an injected EFW SDK.
+ * @brief Test seam: as create_zwo_efw_filterwheel(), over an injected EFW SDK and task clock.
  *
- * @p sdk must outlive the driver.
+ * @p sdk and @p clock must outlive the driver. @p clock is the TaskClock the Position cache age and its fault stamp
+ * run on (decision 0005; the decision 0009 staleness bound): real by default, a FakeTaskClock in tests.
  */
-std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel(int device_number, int wheel_id, ZWOEFWSDK& sdk);
+std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel(int device_number, int wheel_id, ZWOEFWSDK& sdk,
+                                                              util::TaskClock& clock = util::default_task_clock());
 
 /**
- * @brief Test seam: as create_zwo_efw_filterwheel_by_index(), over an injected EFW SDK.
+ * @brief Test seam: as create_zwo_efw_filterwheel_by_index(), over an injected EFW SDK and task clock.
  *
- * @p sdk must outlive the driver.
+ * @p sdk and @p clock must outlive the driver.
  */
-std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel_by_index(int device_number, int wheel_index,
-                                                                       ZWOEFWSDK& sdk);
+std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel_by_index(
+    int device_number, int wheel_index, ZWOEFWSDK& sdk, util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::zwo

@@ -113,6 +113,53 @@ TEST_CASE("ZWO accessory enumeration - failed ID and property reads skip only th
     }
 }
 
+// Falsified by: zwo_slots.h read_zwo_efw_slots() skipping every slot whose property read fails (the wheel that
+// refuses EFWGetProperty before its open disappears, as on the rig in issue #1668), or keeping a slot whose code
+// says the wheel is gone.
+TEST_CASE("ZWO EFW enumeration - a wheel that refuses its property before the open is listed by its id",
+          "[zwo][filterwheel][unit][enumeration]") {
+    struct Info {
+        int ID{};
+        std::string name;
+    };
+    constexpr int kUnknown = -7;  // a code outside EFW_ERROR_CODE, as the rig's EFW answered
+    constexpr int kRemoved = 4;   // EFW_ERROR_REMOVED
+    std::vector<std::string> warnings;
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } guard;
+    alpacacore::logging::set_log_sink([&](auto level, auto, auto message) {
+        if (level == alpacacore::logging::LogLevel::Warn) warnings.emplace_back(message);
+    });
+
+    const auto slots = zwo::read_zwo_efw_slots<Info>(
+        4,
+        [](int slot, int* id) {
+            *id = 10 + slot;
+            return slot == 3 ? 1 : 0;  // slot 3: the id read fails
+        },
+        [](int id, Info* info) {
+            info->ID = id;
+            info->name = "EFW";
+            if (id == 11) return kUnknown;  // slot 1: unreadable before the open
+            if (id == 12) return kRemoved;  // slot 2: gone
+            return 0;
+        },
+        [](int code) { return "code " + std::to_string(code); }, [](int code) { return code == kRemoved; });
+
+    REQUIRE(slots.size() == 2);
+    CHECK(slots[0].slot == 0);
+    CHECK(slots[0].info.ID == 10);
+    CHECK(slots[0].info.name == "EFW");
+    CHECK(slots[1].slot == 1);
+    CHECK(slots[1].info.ID == 11);  // listed by its id; the connect reads its property after the open
+    CHECK(slots[1].info.name.empty());
+    REQUIRE(warnings.size() == 2);  // the gone wheel and the unreadable id are still skipped and logged
+    CHECK(warnings[0] == "Skipping EFW slot 2: EFWGetProperty: code 4");
+    CHECK(warnings[1] == "Skipping EFW slot 3: EFWGetID: code 1");
+}
+
 TEST_CASE("ZWO accessory enumeration - empty and unreadable buses return no placeholder devices",
           "[zwo][unit][enumeration]") {
     struct Info {
@@ -321,7 +368,7 @@ TEST_CASE("ZWO EFW seam - no wheel attached refuses the connect with NotConnecte
     CHECK(sdk.open_calls == 0);
 }
 
-// Falsified by: zwo_filterwheel_driver.cpp set_connected() storing connected_ before open_wheel()
+// Falsified by: zwo_filterwheel_driver.cpp set_connected() publishing the open link before open_wheel_link()
 // returns (get_connected() reads true after the scripted open failure).
 TEST_CASE("ZWO EFW seam - a failed connect leaves the wheel closed", "[zwo][filterwheel][unit][fake-sdk]") {
     FakeZWOEFWSDK sdk;
@@ -347,19 +394,27 @@ TEST_CASE("FakeZWOEFWSDK, FakeZWOEAFSDK and FakeZWOCAASDK behind their Locked de
     zwo::ZWOEFWInfo by_index;
     REQUIRE(locked_efw.get_wheel_info_by_index(0, by_index));
     CHECK(by_index.wheel_id == efw.id);
-    locked_efw.open_wheel(efw.id);
-    locked_efw.set_position(efw.id, 3);
-    CHECK(locked_efw.get_position(efw.id) == 3);
-    CHECK_FALSE(locked_efw.get_unidirectional(efw.id));
-    locked_efw.set_unidirectional(efw.id, true);
-    CHECK(locked_efw.get_unidirectional(efw.id));
-    locked_efw.calibrate(efw.id);
-    CHECK(efw.calibrate_calls == 1);
-    CHECK(locked_efw.get_hardware_error_code(efw.id) == 7);
-    CHECK(locked_efw.get_serial_number(efw.id) == "EFW-SN-1");
-    CHECK(locked_efw.get_firmware_version(efw.id) == "1.0.0");
+    const auto efw_open = locked_efw.open_wheel_link(efw.id);
+    CHECK(efw_open.serial == "EFW-SN-1");
+    const auto efw_shared = locked_efw.open_wheel_candidate(efw.id);
+    REQUIRE(efw_shared.has_value());
+    CHECK(efw_shared->link == efw_open.link);
+    locked_efw.with_link(efw.id, efw_open.link, [&] {
+        locked_efw.set_position(efw.id, 3);
+        CHECK(locked_efw.get_position(efw.id) == 3);
+        CHECK_FALSE(locked_efw.get_unidirectional(efw.id));
+        locked_efw.set_unidirectional(efw.id, true);
+        CHECK(locked_efw.get_unidirectional(efw.id));
+        locked_efw.calibrate(efw.id);
+        CHECK(efw.calibrate_calls == 1);
+        CHECK(locked_efw.get_hardware_error_code(efw.id) == 7);
+        CHECK(locked_efw.get_serial_number(efw.id) == "EFW-SN-1");
+        CHECK(locked_efw.get_firmware_version(efw.id) == "1.0.0");
+    });
     CHECK(locked_efw.get_sdk_version() == "1, 7, 0, 0");
-    locked_efw.close_wheel(efw.id);
+    locked_efw.close_wheel_link(efw.id, efw_shared->link);
+    CHECK(efw.close_calls == 0);
+    locked_efw.close_wheel_link(efw.id, efw_open.link);
     CHECK(efw.open_calls == 1);
     CHECK(efw.close_calls == 1);
 
@@ -412,32 +467,40 @@ TEST_CASE("FakeZWOEFWSDK, FakeZWOEAFSDK and FakeZWOCAASDK behind their Locked de
     FakeZWOCAASDK::Info caa_by_index;
     REQUIRE(locked_caa.get_rotator_info_by_index(0, caa_by_index));
     CHECK(caa_by_index.rotator_id == caa.id);
-    locked_caa.open_rotator(caa.id);
+    const auto caa_open = locked_caa.open_rotator_link(caa.id);
+    CHECK(caa_open.serial == "CAA-SN-1");
+    const auto caa_shared = locked_caa.open_rotator_candidate(caa.id);
+    REQUIRE(caa_shared.has_value());
+    CHECK(caa_shared->link == caa_open.link);
     CHECK(caa.open_calls == 1);
-    locked_caa.move_absolute(caa.id, 45.0);
-    CHECK(locked_caa.get_degree(caa.id) == 45.0);
-    CHECK(caa.last_move_absolute == 45.0);
-    locked_caa.move_relative(caa.id, 5.0);
-    CHECK(locked_caa.get_degree(caa.id) == 50.0);
-    locked_caa.move_mechanical(caa.id, 90.0);
-    CHECK(caa.last_move_mechanical == 90.0);
-    locked_caa.sync_degree(caa.id, 12.0);
-    CHECK(caa.degree == 12.0);
-    CHECK(locked_caa.get_max_degree(caa.id) == 360.0);
-    CHECK(locked_caa.get_temperature(caa.id) == 20.0);
-    CHECK_FALSE(locked_caa.get_reverse(caa.id));
-    locked_caa.set_reverse(caa.id, true);
-    CHECK(locked_caa.get_reverse(caa.id));
-    CHECK_FALSE(locked_caa.get_motion_status(caa.id).is_moving);
-    caa.moving = true;
-    CHECK(locked_caa.get_motion_status(caa.id).is_moving);
-    locked_caa.stop(caa.id);
-    CHECK_FALSE(caa.moving);
-    CHECK(locked_caa.get_serial_number(caa.id) == "CAA-SN-1");
-    CHECK(locked_caa.get_firmware_version(caa.id) == "1.0");
-    CHECK(locked_caa.get_rotator_type(caa.id) == "CAA");
+    locked_caa.with_link(caa.id, caa_open.link, [&] {
+        locked_caa.move_absolute(caa.id, 45.0);
+        CHECK(locked_caa.get_degree(caa.id) == 45.0);
+        CHECK(caa.last_move_absolute == 45.0);
+        locked_caa.move_relative(caa.id, 5.0);
+        CHECK(locked_caa.get_degree(caa.id) == 50.0);
+        locked_caa.move_mechanical(caa.id, 90.0);
+        CHECK(caa.last_move_mechanical == 90.0);
+        locked_caa.sync_degree(caa.id, 12.0);
+        CHECK(caa.degree == 12.0);
+        CHECK(locked_caa.get_max_degree(caa.id) == 360.0);
+        CHECK(locked_caa.get_temperature(caa.id) == 20.0);
+        CHECK_FALSE(locked_caa.get_reverse(caa.id));
+        locked_caa.set_reverse(caa.id, true);
+        CHECK(locked_caa.get_reverse(caa.id));
+        CHECK_FALSE(locked_caa.get_motion_status(caa.id).is_moving);
+        caa.moving = true;
+        CHECK(locked_caa.get_motion_status(caa.id).is_moving);
+        locked_caa.stop(caa.id);
+        CHECK_FALSE(caa.moving);
+        CHECK(locked_caa.get_serial_number(caa.id) == "CAA-SN-1");
+        CHECK(locked_caa.get_firmware_version(caa.id) == "1.0");
+        CHECK(locked_caa.get_rotator_type(caa.id) == "CAA");
+    });
     CHECK(locked_caa.get_sdk_version() == "1, 7, 0, 0");
-    locked_caa.close_rotator(caa.id);
+    locked_caa.close_rotator_link(caa.id, caa_shared->link);
+    CHECK(caa.close_calls == 0);
+    locked_caa.close_rotator_link(caa.id, caa_open.link);
     CHECK(caa.close_calls == 1);
 }
 
@@ -478,12 +541,14 @@ TEST_CASE("FakeZWOEAFSDK behind LockedZWOEAFSDK - with_link holds the decorator 
 TEST_CASE("FakeZWOEFWSDK - refuses an out-of-range slot and honours its scripted open delay",
           "[zwo][filterwheel][unit][fake-sdk]") {
     FakeZWOEFWSDK sdk;
-    CHECK(error_code([&] { sdk.set_position(sdk.id, sdk.slot_count); }) == alpacacore::AlpacaError::InvalidValue);
-
     sdk.open_delay = std::chrono::milliseconds(60);
     const auto start = std::chrono::steady_clock::now();
-    sdk.open_wheel(sdk.id);
+    const auto opened = sdk.open_wheel_link(sdk.id);
     CHECK(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(50));
+
+    CHECK(error_code([&] { sdk.with_link(sdk.id, opened.link, [&] { sdk.set_position(sdk.id, sdk.slot_count); }); }) ==
+          alpacacore::AlpacaError::InvalidValue);
+    sdk.close_wheel_link(sdk.id, opened.link);
 }
 
 // --- Position served through util::TtlStatusCache (issue #1072) ---

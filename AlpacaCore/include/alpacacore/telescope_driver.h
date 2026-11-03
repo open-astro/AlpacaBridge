@@ -78,6 +78,9 @@ public:
         // TimeStamp names when it was measured (decision 0010).
         const auto age = device_state_age();
         std::vector<DeviceState> state;
+        // One allocation for every field: GCC 14 -O2 reports -Werror=stringop-overflow in std::variant when the
+        // vector grows by push_back (the rotator build, #1668; the filter wheel and focuser bases reserve too).
+        state.reserve(14);
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});

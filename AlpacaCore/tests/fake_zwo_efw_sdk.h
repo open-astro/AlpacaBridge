@@ -17,7 +17,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -26,12 +29,17 @@
 namespace alpacacore::test {
 
 // Scripted ZWO EFW SDK: one wheel (id 5, 7 slots), shared by the filter wheel unit
-// tests, the connected stress case and the contract sweep.
-// Every override runs under one internal mutex, so the fake is race-free under a
+// tests, the connected stress case and the contract sweep. second_id >= 0 adds a second
+// wheel (serial second_serial) to enumeration, open and the serial read.
+// The fake models only the library: raw per-id units behind the product's SharedOpenTable
+// (issue #1668), composed as the real wrapper composes it, so opens are shared and checked by
+// serial, and a per-device call outside with_link() is refused. A per-device call on an id the
+// units do not hold fails as EFW_ERROR_INVALID_ID does through the wrapper (NotConnected).
+// Every raw call runs under one internal mutex, so the fake is race-free under a
 // concurrent storm (the ZWO driver tests run it through lifecycle stress and TSan);
 // the public knobs and counters are plain fields for single-threaded tests, set before
 // the driver starts and read after it stops. No call blocks except the explicit
-// open_delay, which holds a connect open (contract sweep tier 2).
+// open_delay, which holds a connect open (contract sweep tier 2), and position_delay.
 //
 // KNOWN PARITY GAPS (the real EFW SDK is harsher here; prefer closing a gap):
 // - With moving_reads at 0 (the default) a move settles at once. On hardware
@@ -39,7 +47,7 @@ namespace alpacacore::test {
 //   fails with EFW_ERROR_MOVING; set moving_reads to script that window.
 // - The moving window ends after a number of reads, not after a time, and calibrate()
 //   opens none, though the real wheel turns while it calibrates.
-// - Serial number, firmware and SDK version are fixed strings.
+// - Firmware and SDK version are fixed strings.
 
 class FakeZWOEFWSDK final : public vendor::zwo::ZWOEFWSDK {
 public:
@@ -49,14 +57,18 @@ public:
     int slot_index{0};
     int slot_count{7};
     int position{0};
+    std::string serial{"EFW-SN-1"};
+    // A second wheel on the same SDK (issue #1668 id swap); -1 = none.
+    int second_id{-1};
+    std::string second_serial{"EFW-SN-2"};
     bool unidirectional{false};
     // Atomic: the contract sweep sets and clears it while the driver polls (tier 3).
     std::atomic<bool> fail_reads{false};
     // No wheel attached: enumeration is empty and the id lookups fail.
     bool no_wheels{false};
-    // The next open_wheel() throws (a connect that must fail).
+    // Every real open throws while set (a connect that must fail).
     bool fail_open{false};
-    // open_wheel() sleeps this long before returning (a connect held open).
+    // A real open sleeps this long before returning (a connect held open).
     std::chrono::milliseconds open_delay{0};
     // After a set_position(), get_position() reads -1 (moving) this many times, and a
     // set_position() inside that window throws InvalidOperation (EFW_ERROR_MOVING).
@@ -67,60 +79,151 @@ public:
     int last_open_id{-1};
     int close_calls{0};
     int position_calls{0};
+    // The SDK id of the last position read and of the last move (issue #1668: which wheel a driver talks to).
+    int last_read_id{-1};
     int set_position_calls{0};
     int last_set_position{-1};
+    int last_move_id{-1};
     int calibrate_calls{0};
     int moving_refusals{0};
     // get_position() sleeps this long, outside the fake's mutex, before answering (a slow Position refill).
     // position_entered counts the calls that have started, so a test knows the refill is in flight.
     std::chrono::milliseconds position_delay{0};
     std::atomic<int> position_entered{0};
-    // open_wheel() calls that have started (counted before open_delay), so a test knows a connect is in flight.
+    // Real opens that have started (counted before open_delay), so a test knows a connect is in flight.
     std::atomic<int> open_entered{0};
     // set_position() throws a DriverException after it is counted (a refused or failed move command).
     bool fail_set_position{false};
+    // Issue #1668: a USB drop. remove() makes the open and every per-device call throw what the wrapper throws
+    // for EFW_ERROR_REMOVED (NotConnected) and the wheels vanish from enumeration; replug(id) brings this one
+    // back under a new SDK id.
+    bool removed{false};
+
+    void remove() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        removed = true;
+    }
+    void replug(int new_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        removed = false;
+        id = new_id;
+    }
+    /// Holders of the table's open for @p wheel_id.
+    std::size_t holders(int wheel_id) const { return table_.open_count(wheel_id); }
 
     std::vector<Info> enumerate_wheels() override {
+        const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels) return {};
-        return {Info{id, "EFW", slot_count, slot_index}};
+        if (no_wheels || removed) return {};
+        std::vector<Info> wheels{Info{id, "EFW", slot_count, slot_index}};
+        if (second_id >= 0) {
+            wheels.insert(second_id < id ? wheels.begin() : wheels.end(), Info{second_id, "EFW", slot_count});
+            for (std::size_t i = 0; i < wheels.size(); ++i) wheels[i].slot_index = static_cast<int>(i);
+        }
+        return wheels;
     }
     bool get_wheel_info_by_id(int wheel_id, Info& info) override {
+        const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels || wheel_id != id) {
+        if (no_wheels || removed || (wheel_id != id && wheel_id != second_id)) {
             return false;
         }
-        info = Info{id, "EFW", slot_count};
+        info = Info{wheel_id, "EFW", slot_count};
         return true;
     }
     bool get_wheel_info_by_index(int wheel_index, Info& info) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels || wheel_index != slot_index) {
-            return false;
+        for (const auto& entry : enumerate_wheels()) {
+            if (entry.slot_index == wheel_index) {
+                info = entry;
+                return true;
+            }
         }
-        info = Info{id, "EFW", slot_count, slot_index};
-        return true;
+        return false;
     }
-    void open_wheel(int wheel_id) override {
+    vendor::zwo::SharedOpenTable::Opened open_wheel_link(int wheel_id) override { return table_.open(wheel_id); }
+    std::optional<vendor::zwo::SharedOpenTable::Opened> open_wheel_candidate(int wheel_id) override {
+        return table_.open_candidate(wheel_id);
+    }
+    void close_wheel_link(int wheel_id, std::uint64_t link) override { table_.close(wheel_id, link); }
+    void with_link(int wheel_id, std::uint64_t link, const std::function<void()>& fn) override {
+        table_.with_link(wheel_id, link, fn);
+    }
+    // Per-device calls: the table checks the caller's link, then the raw unit answers in the same hold.
+    int get_position(int wheel_id) override {
+        ++position_entered;
+        // Outside the table and the fake's mutex, as the real refill's USB wait is outside every driver lock.
+        if (position_delay.count() > 0) std::this_thread::sleep_for(position_delay);
+        return table_.call(wheel_id, [&] { return raw_position(wheel_id); });
+    }
+    void set_position(int wheel_id, int slot) override {
+        table_.call(wheel_id, [&] { raw_set_position(wheel_id, slot); });
+    }
+    void set_unidirectional(int wheel_id, bool enabled) override {
+        table_.call(wheel_id, [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_unit(wheel_id);
+            unidirectional = enabled;
+        });
+    }
+    bool get_unidirectional(int wheel_id) override {
+        return table_.call(wheel_id, [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_unit(wheel_id);
+            return unidirectional;
+        });
+    }
+    void calibrate(int wheel_id) override {
+        table_.call(wheel_id, [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_unit(wheel_id);
+            ++calibrate_calls;
+        });
+    }
+    int get_hardware_error_code(int wheel_id) override {
+        return table_.call(wheel_id, [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_unit(wheel_id);
+            return hardware_error_code;
+        });
+    }
+    std::string get_serial_number(int wheel_id) override {
+        return table_.call(wheel_id, [&] { return raw_serial(wheel_id); });
+    }
+    std::string get_firmware_version(int wheel_id) override {
+        return table_.call(wheel_id, [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_unit(wheel_id);
+            return std::string("1.0.0");
+        });
+    }
+    std::string get_sdk_version() override { return "1, 7, 0, 0"; }
+
+private:
+    // The library under the table: EFWOpen, EFWClose and the per-device calls on the raw units.
+    void raw_open(int wheel_id) {
         ++open_entered;
         if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
         std::lock_guard<std::mutex> lock(mutex_);
-        check_id(wheel_id);
+        if (removed) throw AlpacaException("EFWOpen: EFW_ERROR_REMOVED", AlpacaError::NotConnected);
+        if (no_wheels || (wheel_id != id && wheel_id != second_id)) {
+            // EFWOpen of an id it does not know: EFW_ERROR_INVALID_ID, InvalidValue through the wrapper's open.
+            throw AlpacaException("EFWOpen: EFW_ERROR_INVALID_ID", AlpacaError::InvalidValue);
+        }
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         ++open_calls;
         last_open_id = wheel_id;
     }
-    void close_wheel(int wheel_id) override {
+    void raw_close(int wheel_id) {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_id(wheel_id);
         ++close_calls;
+        // The table erases its bookkeeping, then EFWClose fails on a removed wheel or a vanished id.
+        check_unit(wheel_id);
     }
-    int get_position(int wheel_id) override {
-        ++position_entered;
-        if (position_delay.count() > 0) std::this_thread::sleep_for(position_delay);
+    int raw_position(int wheel_id) {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_id(wheel_id);
         ++position_calls;
+        last_read_id = wheel_id;
+        check_unit(wheel_id);
         if (fail_reads) {
             throw AlpacaException("link down", AlpacaError::DriverException);
         }
@@ -130,12 +233,13 @@ public:
         }
         return position;
     }
-    void set_position(int wheel_id, int slot) override {
+    void raw_set_position(int wheel_id, int slot) {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_id(wheel_id);
+        check_unit(wheel_id);
         ++set_position_calls;
         if (fail_set_position) throw AlpacaException("scripted set_position failure", AlpacaError::DriverException);
         last_set_position = slot;
+        last_move_id = wheel_id;
         if (slot < 0 || slot >= slot_count) {
             throw AlpacaException("EFWSetPosition: EFW_ERROR_INVALID_VALUE", AlpacaError::InvalidValue);
         }
@@ -146,44 +250,34 @@ public:
         position = slot;
         moving_left_ = moving_reads;
     }
-    void set_unidirectional(int wheel_id, bool enabled) override {
+    std::string raw_serial(int wheel_id) {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_id(wheel_id);
-        unidirectional = enabled;
+        check_unit(wheel_id);
+        const std::string& unit_serial = wheel_id == second_id ? second_serial : serial;
+        // An empty serial is a wheel that reports none (the wrapper maps EFW_ERROR_NOT_SUPPORTED to NotImplemented).
+        if (unit_serial.empty()) {
+            throw AlpacaException("EFWGetSerialNumber: EFW_ERROR_NOT_SUPPORTED", AlpacaError::NotImplemented);
+        }
+        return unit_serial;
     }
-    bool get_unidirectional(int wheel_id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_id(wheel_id);
-        return unidirectional;
-    }
-    void calibrate(int wheel_id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_id(wheel_id);
-        ++calibrate_calls;
-    }
-    int get_hardware_error_code(int wheel_id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_id(wheel_id);
-        return hardware_error_code;
-    }
-    std::string get_serial_number(int wheel_id) override {
-        check_id(wheel_id);
-        return "EFW-SN-1";
-    }
-    std::string get_firmware_version(int wheel_id) override {
-        check_id(wheel_id);
-        return "1.0.0";
-    }
-    std::string get_sdk_version() override { return "1, 7, 0, 0"; }
 
-private:
-    // A wrong id is EFW_ERROR_INVALID_ID on hardware, which the wrapper maps to InvalidValue.
-    void check_id(int wheel_id) const {
-        if (wheel_id != id) throw AlpacaException("EFW: EFW_ERROR_INVALID_ID", AlpacaError::InvalidValue);
+    // A per-device call on an id the library does not hold: EFW_ERROR_INVALID_ID, which the wrapper maps to
+    // NotConnected on a per-device call (issue #1668, as the EAF: the bridge passes only enumerated ids).
+    void check_unit(int wheel_id) const {
+        if (removed) throw AlpacaException("EFW_ERROR_REMOVED", AlpacaError::NotConnected);
+        if (wheel_id != id && wheel_id != second_id) {
+            throw AlpacaException("EFW: EFW_ERROR_INVALID_ID", AlpacaError::NotConnected);
+        }
     }
 
     mutable std::mutex mutex_;
     int moving_left_{0};
+    // The product's open bookkeeping over the raw units, as the real wrapper composes it over the SDK.
+    vendor::zwo::SharedOpenTable table_{vendor::zwo::SharedOpenTable::Ops{
+        [this](int wheel_id) { raw_open(wheel_id); },
+        [this](int wheel_id) { raw_close(wheel_id); },
+        [this](int wheel_id) { return raw_serial(wheel_id); },
+    }};
 };
 
 }  // namespace alpacacore::test

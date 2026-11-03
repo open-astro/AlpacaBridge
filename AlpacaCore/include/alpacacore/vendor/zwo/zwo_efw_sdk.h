@@ -12,6 +12,11 @@
 
 #pragma once
 
+#include <alpacacore/vendor/zwo/shared_open_table.h>
+
+#include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,6 +37,10 @@ struct ZWOEFWInfo {
  * fake through the factory overloads in zwo_filterwheel_driver.h, so the driver
  * runs without the vendor SDK. Same shape as ZWOEAFSDK and ZWOCAASDK: the
  * destructor is protected and non-virtual, the driver holds a reference.
+ *
+ * Opens are shared through SharedOpenTable (issue #1668, as the EAF since issue #1500): an open
+ * returns a link, and every per-device method below runs only inside with_link() for that id and
+ * link. Enumeration, info and the SDK version need no link.
  */
 class ZWOEFWSDK {
 public:
@@ -39,8 +48,14 @@ public:
     virtual bool get_wheel_info_by_id(int wheel_id, ZWOEFWInfo& info) = 0;
     virtual bool get_wheel_info_by_index(int wheel_index, ZWOEFWInfo& info) = 0;
 
-    virtual void open_wheel(int wheel_id) = 0;
-    virtual void close_wheel(int wheel_id) = 0;
+    /// Opens the wheel, or shares a held open of the same unit; returns the link and the serial read at the open.
+    virtual SharedOpenTable::Opened open_wheel_link(int wheel_id) = 0;
+    /// As open_wheel_link(), but nullopt for a held unit that reports no serial (it is not shared).
+    virtual std::optional<SharedOpenTable::Opened> open_wheel_candidate(int wheel_id) = 0;
+    /// Drops this holder's open; a retired link is a no-op.
+    virtual void close_wheel_link(int wheel_id, std::uint64_t link) = 0;
+    /// Runs @p fn with @p link as this thread's link for @p wheel_id; the wrapper takes no lock across @p fn.
+    virtual void with_link(int wheel_id, std::uint64_t link, const std::function<void()>& fn) = 0;
 
     virtual int get_position(int wheel_id) = 0;
     virtual void set_position(int wheel_id, int position) = 0;

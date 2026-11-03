@@ -56,6 +56,10 @@ public:
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // MaxSwitch itself unavailable -- no operational values can be collected.
         }
+        // One allocation for every field (three per id and TimeStamp): GCC 14 -O2 reports -Werror=stringop-overflow
+        // in std::variant when the vector grows by push_back (the rotator build, #1668; the filter wheel #1595 and
+        // focuser bases already reserve).
+        state.reserve(count > 0 ? static_cast<std::size_t>(count) * 3 + 1 : 0);
         for (int id = 0; id < count; ++id) {
             try {
                 // Read all three before pushing: the getters acquire the driver
