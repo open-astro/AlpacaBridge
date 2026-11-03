@@ -228,8 +228,8 @@ int map_error_code(ASI_ERROR_CODE code) {
 // InvalidValue for an id it does not know.
 // Rig result (#1667): on an ASI6200MM Pro with ASI SDK 1.41.0.0 on an arm64 single-board computer, the first per-device
 // call after a physical unplug returned ASI_ERROR_GENERAL_ERROR (error 1280) in one attempt and success in another,
-// never one of these removal codes. A bare cable pull is not yet recognised; #1667 stays open for detection by
-// non-enumeration. GENERAL_ERROR stays DriverException.
+// never one of these removal codes. GENERAL_ERROR stays DriverException; the table then asks camera_listed(), so a
+// generic failure on a camera the SDK no longer enumerates is a loss (below).
 void throw_on_error(ASI_ERROR_CODE code, const std::string& context, int invalid_id_code = AlpacaError::NotConnected) {
     if (code == ASI_SUCCESS) {
         return;
@@ -250,6 +250,28 @@ std::string read_serial_number(int camera_id) {
         oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
     }
     return oss.str();
+}
+
+// Whether the SDK still enumerates @p camera_id (issue #1667). ASIGetNumOfConnectedCameras rescans the bus, so a pulled
+// camera is gone from it while its stale handle still answers a generic error. A slot the SDK cannot read may be this
+// camera, so it proves nothing: the camera counts as listed.
+// TODO(#1667): confirm on a rig that this rescan leaves the other open cameras' handles and ids alone; the camera
+// picker and every Connect already enumerate with cameras open, but not mid-exposure on another camera.
+bool camera_listed(int camera_id) {
+    const int count = ASIGetNumOfConnectedCameras();
+    for (int slot = 0; slot < count; ++slot) {
+        ASI_CAMERA_INFO info{};
+        if (ASIGetCameraProperty(&info, slot) != ASI_SUCCESS || info.CameraID == camera_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A failure code that names no cause (ASI_ERROR_GENERAL_ERROR and the other DriverException codes): the table checks
+// the enumeration after one.
+bool is_generic_code(ASI_ERROR_CODE code) {
+    return code != ASI_SUCCESS && map_error_code(code) == AlpacaError::DriverException;
 }
 
 // The SDK needs ASIInitCamera once after every ASIOpenCamera, so the table's real open does both: a handle that
@@ -299,6 +321,8 @@ ZWOCameraInfo convert_camera_info(const ASI_CAMERA_INFO& info) {
 
 } // namespace
 
+// A per-device call that fails with a generic error, or reports ASI_EXP_FAILED, is checked against the enumeration
+// (camera_listed()) inside the same hold: a pulled camera is a lost link though the SDK gave no removal code (#1667).
 // Every SDK call runs under the table's one mutex: per-device calls in table_.call(), enumeration and info under
 // table_.lock_unchecked(). The one exception is ASIGetDataAfterExp, a blocking bulk download:
 // table_.call_unserialised() checks the link, then runs with no lock held. ASIGetSDKVersion returns a static string and
@@ -309,6 +333,7 @@ public:
         [](int id) { open_and_init(id); },
         [](int id) { throw_on_error(ASICloseCamera(id), "ASICloseCamera"); },
         [](int id) { return read_serial_number(id); },
+        [](int id) { return camera_listed(id); },
     }};
 };
 
@@ -450,21 +475,26 @@ std::vector<ZWOControlCaps> ZWOSDKWrapper::get_control_caps(int camera_id) {
     });
 }
 
-// false: the control is not readable on this camera. A removal code throws (a lost link), so a temperature or status
-// read cannot hide a pulled cable behind "not readable" (issue #1667, decision 0009 rule 2a).
+// false: the control is not readable on this camera. A removal code throws (a lost link), and so does a generic code
+// on a camera the SDK no longer enumerates, so a temperature or status read cannot hide a pulled cable behind "not
+// readable" (issue #1667, decision 0009 rule 2a).
 bool ZWOSDKWrapper::get_control_value(int camera_id, ZWOControlType type, long& value, bool& is_auto) {
-    return pimpl_->table_.call(camera_id, [&] {
-        ASI_BOOL auto_flag = ASI_FALSE;
-        const ASI_ERROR_CODE code = ASIGetControlValue(camera_id, to_asi_control_type(type), &value, &auto_flag);
-        if (is_removal_code(code)) {
-            throw_on_error(code, "ASIGetControlValue");
-        }
-        if (code != ASI_SUCCESS) {
-            return false;
-        }
-        is_auto = (auto_flag == ASI_TRUE);
-        return true;
-    });
+    ASI_ERROR_CODE code = ASI_SUCCESS;
+    return pimpl_->table_.call(
+        camera_id,
+        [&] {
+            ASI_BOOL auto_flag = ASI_FALSE;
+            code = ASIGetControlValue(camera_id, to_asi_control_type(type), &value, &auto_flag);
+            if (is_removal_code(code)) {
+                throw_on_error(code, "ASIGetControlValue");
+            }
+            if (code != ASI_SUCCESS) {
+                return false;
+            }
+            is_auto = (auto_flag == ASI_TRUE);
+            return true;
+        },
+        [&](bool) { return is_generic_code(code); });
 }
 
 void ZWOSDKWrapper::set_control_value(int camera_id, ZWOControlType type, long value, bool is_auto) {
@@ -522,12 +552,16 @@ void ZWOSDKWrapper::stop_exposure(int camera_id) {
     pimpl_->table_.call(camera_id, [&] { throw_on_error(ASIStopExposure(camera_id), "ASIStopExposure"); });
 }
 
+// ASI_EXP_FAILED on a camera the SDK no longer enumerates is a pulled cable (NotConnected), not a retryable failure.
 ZWOExposureStatus ZWOSDKWrapper::get_exposure_status(int camera_id) {
-    return pimpl_->table_.call(camera_id, [&] {
-        ASI_EXPOSURE_STATUS status = ASI_EXP_IDLE;
-        throw_on_error(ASIGetExpStatus(camera_id, &status), "ASIGetExpStatus");
-        return from_asi_exposure_status(status);
-    });
+    return pimpl_->table_.call(
+        camera_id,
+        [&] {
+            ASI_EXPOSURE_STATUS status = ASI_EXP_IDLE;
+            throw_on_error(ASIGetExpStatus(camera_id, &status), "ASIGetExpStatus");
+            return from_asi_exposure_status(status);
+        },
+        [](ZWOExposureStatus status) { return status == ZWOExposureStatus::Failed; });
 }
 
 void ZWOSDKWrapper::get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) {

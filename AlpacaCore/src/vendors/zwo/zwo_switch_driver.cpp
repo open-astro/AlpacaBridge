@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/util/ttl_status_cache.h>
@@ -39,9 +40,16 @@ constexpr util::ThermalSwitchLabels kDewHeaterLabels{"ZWO", "dew heater"};
 constexpr std::chrono::milliseconds kStatusTtl{100};
 
 struct DewStatus {
-    bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
+    bool closed{};  // a disconnect won the I/O lock, or the camera is gone: not a frame, not a link failure
     long value{};
 };
+
+// CWE-117: the serial and SDK error texts are device text; control characters never reach the log or a client.
+std::string printable(std::string text) {
+    std::replace_if(
+        text.begin(), text.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f; }, '?');
+    return text;
+}
 
 // Production SDK access: the process-wide wrapper.
 ZWODewHeaterSdk& production_sdk() {
@@ -186,6 +194,12 @@ public:
         return connected_.load();
     }
 
+    // Decision 0009 rule 5: why the camera link was lost, until the next Connect or Disconnect.
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lost_reason_;
+    }
+
     void connect() override {
         start_connection_task(true);
     }
@@ -211,11 +225,22 @@ public:
             return;
         }
         if (connected == connected_.load()) {
+            // A lost camera reads as disconnected, so a Disconnect after a loss lands here and completes: it clears
+            // the loss text (decision 0009 rule 5) and what a Disconnect forgets; the loss already dropped the open.
+            if (!connected) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                lost_reason_.clear();
+                forget_camera_locked();
+            }
             return;
         }
 
         auto& sdk = sdk_;
         if (connected) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                lost_reason_.clear();
+            }
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 std::vector<ZwoDewHeaterCamera> listing;
@@ -254,12 +279,9 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             close_id = camera_id_;
-            if (!camera_bound_by_id_only()) {
-                camera_id_.reset();
-                camera_name_ = "ZWO Camera";
-                serial_number_.clear();
-            }
+            forget_camera_locked();
             dew_caps_.reset();
+            lost_reason_.clear();
             connected_.store(false);
         }
         status_cache_.reset();
@@ -349,16 +371,26 @@ public:
             }
             bool is_auto = false;
             bool read = false;
-            sdk_.with_link(camera_id, open_link_, [&] {
-                read = sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto);
-            });
+            try {
+                sdk_.with_link(camera_id, open_link_, [&] {
+                    read = sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto);
+                });
+            } catch (const std::exception& e) {
+                if (!util::is_link_loss(e)) {
+                    throw;
+                }
+                // The camera is gone: a lost link, not a failed read for the link-health count.
+                note_loss_locked(e);
+                fresh.closed = true;
+                return fresh;
+            }
             if (!read) {
                 throw AlpacaException("Failed to read dew heater value", AlpacaError::DriverException);
             }
             return fresh;
         });
         if (status.closed) {
-            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
+            throw_not_connected();
         }
         return static_cast<double>(status.value);
     }
@@ -383,9 +415,17 @@ public:
             std::lock_guard<std::mutex> io(io_mutex_);
             ensure_connected();  // a disconnect that won the I/O lock has closed the camera
             const int camera_id = camera_id_value();
-            sdk_.with_link(camera_id, open_link_, [&] {
-                sdk_.set_control_value(camera_id, ZWOControlType::AntiDewHeater, value_long, false);
-            });
+            try {
+                sdk_.with_link(camera_id, open_link_, [&] {
+                    sdk_.set_control_value(camera_id, ZWOControlType::AntiDewHeater, value_long, false);
+                });
+            } catch (const std::exception& e) {
+                if (!util::is_link_loss(e)) {
+                    throw;
+                }
+                note_loss_locked(e);
+                throw_not_connected();
+            }
         }
         status_cache_.invalidate();
     }
@@ -444,7 +484,47 @@ public:
 private:
     void ensure_connected() const {
         if (!connected_.load()) {
-            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
+            throw_not_connected();
+        }
+    }
+
+    // The loss reason while the camera link is lost, else the plain refusal. Takes mutex_.
+    [[noreturn]] void throw_not_connected() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        throw AlpacaException(lost_reason_.empty() ? "Dew heater not connected" : lost_reason_,
+                              AlpacaError::NotConnected);
+    }
+
+    // Decision 0009 rules 2a and 3 (issue #1667): a NotConnected from a call on the open means the camera is gone (the
+    // camera driver met the removal first, or this call did; either way the shared open table retired the open and
+    // closed the dead handle). Connected reads false from here, the next Connect lists and opens afresh, and nothing
+    // reopens on its own; the camera binding is forgotten by the Disconnect or Connect that follows. Caller holds
+    // io_mutex_, so a Connect or Disconnect cannot interleave; one that already published disconnected wins. No loss
+    // stamp: a heater times no motion (#521).
+    void note_loss_locked(const std::exception& e) const {
+        if (!connected_.load()) {
+            return;
+        }
+        open_link_ = 0;  // retired by the table: nothing left to close
+        std::string label;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            label = "ZWO dew heater on " + printable(camera_name_) +
+                    (serial_number_.empty() ? std::string() : " " + printable(serial_number_));
+            lost_reason_ = label + ": the camera was removed from USB; Connect again when it is back";
+            dew_caps_.reset();
+            connected_.store(false);
+        }
+        ALPACA_LOG_WARN("ZWO", label + " lost (" + printable(e.what()) + ")");
+    }
+
+    // Caller holds mutex_. What a Disconnect forgets: a camera resolved by index or serial (an id-only binding keeps
+    // its id).
+    void forget_camera_locked() {
+        if (!camera_bound_by_id_only()) {
+            camera_id_.reset();
+            camera_name_ = "ZWO Camera";
+            serial_number_.clear();
         }
     }
 
@@ -459,9 +539,10 @@ private:
     // same fix as the camera's control-caps accessor (issue #116).
     ZWOControlCaps dew_caps_or_throw() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        // A disconnect racing past ensure_connected() clears dew_caps_ and connected_ together under mutex_.
+        // A disconnect or a loss racing past ensure_connected() clears dew_caps_ and connected_ together under mutex_.
         if (!connected_.load()) {
-            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
+            throw AlpacaException(lost_reason_.empty() ? "Dew heater not connected" : lost_reason_,
+                                  AlpacaError::NotConnected);
         }
         if (!dew_caps_.has_value()) {
             throw AlpacaException("Dew heater not supported", AlpacaError::NotImplemented);
@@ -598,11 +679,14 @@ private:
     std::string bound_serial_;
     std::string serial_number_;
     std::string camera_name_;
-    std::optional<ZWOControlCaps> dew_caps_;
-    std::atomic<bool> connected_;
+    // dew_caps_, lost_reason_, connected_ and open_link_ are mutable: a getter's refill can find the camera gone.
+    mutable std::optional<ZWOControlCaps> dew_caps_;
+    // Under mutex_: why the camera link was lost; cleared by the next Connect or Disconnect.
+    mutable std::string lost_reason_;
+    mutable std::atomic<bool> connected_;
     // Under io_mutex_: the open this driver holds (open_link_ 0 = none) and the id it is for.
     int open_id_{0};
-    std::uint64_t open_link_{0};
+    mutable std::uint64_t open_link_{0};
     // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
     // short state reads and writes, never held across an SDK call), then the SDK wrapper's own mutex.
     // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the

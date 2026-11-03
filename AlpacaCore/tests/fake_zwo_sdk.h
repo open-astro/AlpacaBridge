@@ -66,6 +66,10 @@ public:
     // ASI_ERROR_CAMERA_REMOVED, except the exposure status read, which answers Failed (ASI_EXP_FAILED, what the SDK
     // gave on the rig). A close still drops the handle and then throws the same; no unit enumerates or opens.
     std::atomic<bool> removed{false};
+    // A bare cable pull as ASI SDK 1.41 answered it on the rig (#1667): no removal code. Every per-device call on an
+    // open camera throws a generic DriverException (ASI_ERROR_GENERAL_ERROR), the exposure status read answers Failed,
+    // a control read answers not readable, and the camera no longer enumerates or opens. replug() clears it.
+    std::atomic<bool> pulled{false};
     // The serial the one camera reports, read at every open (a different unit behind the same id changes it).
     std::string serial{"FAKE-ZWO-17"};
     bool stop_releases_download{true};
@@ -186,6 +190,7 @@ public:
         units_ = std::move(units);
         open_ids_.clear();
         removed = false;
+        pulled = false;
     }
 
     /// Per-device calls that reached a unit (a raw_* body); one the table refused first is not counted.
@@ -209,7 +214,7 @@ public:
         hit("enumerate_cameras");
         std::vector<CameraInfo> cameras;
         std::lock_guard lock(mutex_);
-        for (const auto& [id, unit_serial] : units_locked()) {
+        for (const auto& [id, unit_serial] : listed_units_locked()) {
             cameras.push_back(camera);
             cameras.back().camera_id = id;
         }
@@ -222,7 +227,7 @@ public:
         if (!only_model_name.empty() && only_model_name != camera.name) return {};
         std::vector<vendor::zwo::ZwoEnumeratedCamera> found;
         std::lock_guard lock(mutex_);
-        for (const auto& [id, unit_serial] : units_locked()) {
+        for (const auto& [id, unit_serial] : listed_units_locked()) {
             found.push_back({static_cast<int>(found.size()), id, camera.name, unit_serial});
         }
         return found;
@@ -232,7 +237,7 @@ public:
         hit("get_camera_info_by_id");
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard lock(mutex_);
-        if (units_locked().count(camera_id) == 0) return false;
+        if (listed_units_locked().count(camera_id) == 0) return false;
         require_open_locked(camera_id);
         info = camera;
         info.camera_id = camera_id;
@@ -243,7 +248,7 @@ public:
         hit("get_camera_info_by_index");
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard lock(mutex_);
-        const auto units = units_locked();
+        const auto units = listed_units_locked();
         if (camera_index < 0 || camera_index >= static_cast<int>(units.size())) return false;
         info = camera;
         info.camera_id = std::next(units.begin(), camera_index)->first;
@@ -282,6 +287,10 @@ public:
 
     bool raw_get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) {
         std::lock_guard lock(mutex_);
+        if (pulled && open_ids_.count(camera_id) != 0) {
+            ++unit_touches_;
+            return false;  // the wrapper answers a generic code on this read as not readable
+        }
         require_open_locked(camera_id);
         value = controls_[type];
         if (type == ControlType::Temperature && temperature_reads_since_open_++ < zero_temperature_reads_after_open) {
@@ -370,7 +379,7 @@ public:
 
     ExposureStatus raw_get_exposure_status(int camera_id) {
         std::lock_guard lock(mutex_);
-        if (removed) {
+        if (removed || pulled) {
             ++unit_touches_;
             return ExposureStatus::Failed;
         }
@@ -445,9 +454,13 @@ public:
         hit("get_control_caps");
         return table_.call(camera_id, [&] { return raw_get_control_caps(camera_id); });
     }
+    // Harsher than the wrapper, which checks the enumeration after a generic code only: every not-readable answer is
+    // checked here.
     bool get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) override {
         hit("get_control_value");
-        return table_.call(camera_id, [&] { return raw_get_control_value(camera_id, type, value, is_auto); });
+        return table_.call(
+            camera_id, [&] { return raw_get_control_value(camera_id, type, value, is_auto); },
+            [](bool read) { return !read; });
     }
     void set_control_value(int camera_id, ControlType type, long value, bool is_auto) override {
         hit("set_control_value");
@@ -479,7 +492,9 @@ public:
     }
     ExposureStatus get_exposure_status(int camera_id) override {
         hit("get_exposure_status");
-        return table_.call(camera_id, [&] { return raw_get_exposure_status(camera_id); });
+        return table_.call(
+            camera_id, [&] { return raw_get_exposure_status(camera_id); },
+            [](ExposureStatus status) { return status == ExposureStatus::Failed; });
     }
     void get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) override {
         hit("get_data_after_exposure");
@@ -526,13 +541,18 @@ private:
         return units_.value_or(std::map<int, std::string>{{camera.camera_id, serial}});
     }
 
+    // The units the SDK enumerates: none once the cable is pulled.
+    std::map<int, std::string> listed_units_locked() const {
+        return pulled ? std::map<int, std::string>{} : units_locked();
+    }
+
     // The table's real open (ASIOpenCamera, then ASIInitCamera) and close. An id that is not attached is
     // InvalidValue on the open (the wrapper's ASIOpenCamera mapping).
     void real_open(int camera_id) {
         hit("open_camera");
         {
             std::lock_guard lock(mutex_);
-            if (removed || units_locked().count(camera_id) == 0) {
+            if (removed || listed_units_locked().count(camera_id) == 0) {
                 throw AlpacaException("fake ZWO camera id not attached", AlpacaError::InvalidValue);
             }
         }
@@ -556,7 +576,7 @@ private:
         if (open_ids_.erase(camera_id) == 0) {
             throw AlpacaException("fake ZWO camera is not open", AlpacaError::DriverException);
         }
-        if (removed) throw AlpacaException("fake ZWO camera removed", AlpacaError::NotConnected);
+        if (removed || pulled) throw AlpacaException("fake ZWO camera removed", AlpacaError::NotConnected);
         if (fail_close) throw AlpacaException("scripted close failure", AlpacaError::DriverException);
     }
 
@@ -572,6 +592,9 @@ private:
         }
         if (removed) {
             throw AlpacaException("fake ZWO camera removed", AlpacaError::NotConnected);
+        }
+        if (pulled) {
+            throw AlpacaException("fake ZWO camera: ASI_ERROR_GENERAL_ERROR", AlpacaError::DriverException);
         }
     }
 
@@ -603,6 +626,11 @@ private:
         [this](int id) { real_open(id); },
         [this](int id) { real_close(id); },
         [this](int id) { return raw_get_serial_number(id); },
+        [this](int id) {
+            count_call("listed");  // under the table's mutex: no before_call hook
+            std::lock_guard lock(mutex_);
+            return listed_units_locked().count(id) != 0;
+        },
     }};
 };
 
