@@ -932,6 +932,7 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
     let listError = '';
     let saved = null;
     let loaded = false;
+    let loading = false;
     let loadSeq = 0;
 
     function taken() {
@@ -946,7 +947,9 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
 
     function updateHint() {
         if (hint) {
-            hint.textContent = thermalCameraHint(cameras, select.value, controls, listError, saved, taken());
+            // Until the first listing lands, `cameras` is [] and would read as "none attached".
+            hint.textContent = loading ? 'Listing attached cameras...'
+                                       : thermalCameraHint(cameras, select.value, controls, listError, saved, taken());
         }
     }
 
@@ -969,9 +972,8 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
     async function load() {
         const seq = ++loadSeq;
         loaded = true;
-        if (hint) {
-            hint.textContent = 'Listing attached cameras...';
-        }
+        loading = true;
+        updateHint();
         try {
             const response = await fetch(API_BASE + '/management/v1/thermalcameras?vendor=' +
                                          encodeURIComponent(vendor), { cache: 'no-store' });
@@ -993,6 +995,7 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
             cameras = null;
             listError = e.message;
         }
+        loading = false;
         render();
     }
 
@@ -1064,6 +1067,7 @@ function createZwoCameraPicker() {
     let listError = '';
     let saved = null;
     let loaded = false;
+    let loading = false;
     let loadSeq = 0;
 
     // Serials the other ZWO camera entries hold; an edited entry's own is not taken.
@@ -1079,7 +1083,9 @@ function createZwoCameraPicker() {
 
     function update() {
         if (hint && select) {
-            hint.textContent = zwoCameraHint(cameras, select.value, listError, saved);
+            // Until the first listing lands, `cameras` is [] and would read as "none attached".
+            hint.textContent = loading ? 'Listing attached cameras...'
+                                       : zwoCameraHint(cameras, select.value, listError, saved);
         }
         if (manualFields && select) {
             manualFields.style.display = select.value === 'manual' ? 'block' : 'none';
@@ -1105,9 +1111,8 @@ function createZwoCameraPicker() {
     async function load() {
         const seq = ++loadSeq;
         loaded = true;
-        if (hint) {
-            hint.textContent = 'Listing attached cameras...';
-        }
+        loading = true;
+        update();
         try {
             const response = await fetch(API_BASE + '/management/v1/attachedcameras?vendor=zwo', { cache: 'no-store' });
             const data = await response.json();
@@ -1128,6 +1133,7 @@ function createZwoCameraPicker() {
             cameras = null;
             listError = e.message;
         }
+        loading = false;
         render();
     }
 

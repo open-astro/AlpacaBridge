@@ -663,9 +663,14 @@ function thermalCameraHint(cameras, value, controls, listError, saved, taken) {
 // each), or null when the listing failed. `saved` is the edited entry's
 // {cameraIndex, cameraId, serialNumber, cameraName}, or null for a new one.
 // `taken` lists the serials the other ZWO camera entries hold. Option values: ''
-// (nothing picked yet), 'cam:<index>' (an attached camera), 'saved' (the saved
-// binding, sent back unchanged), 'manual' (the index and ID boxes, for a camera
-// that is not attached yet).
+// (nothing picked yet), 'sn:<serial>' (an attached camera, so a Refresh after the
+// SDK slots reorder keeps the same body picked), 'cam:<index>' (an attached
+// camera with no serial), 'saved' (the saved binding, sent back unchanged),
+// 'manual' (the index and ID boxes, for a camera that is not attached yet).
+function zwoCameraValue(camera) {
+    return camera.Serial ? 'sn:' + camera.Serial : 'cam:' + camera.Index;
+}
+
 function zwoCameraTaken(camera, taken) {
     return Boolean(camera.Serial) && (taken || []).includes(String(camera.Serial));
 }
@@ -686,7 +691,7 @@ function zwoSavedValue(cameras, saved) {
     const serial = saved.serialNumber ? String(saved.serialNumber) : '';
     if (serial && Array.isArray(cameras)) {
         const match = cameras.find(c => c.Serial === serial);
-        if (match) return 'cam:' + match.Index;
+        if (match) return zwoCameraValue(match);
     }
     return 'saved';
 }
@@ -695,7 +700,7 @@ function zwoCameraOptions(cameras, saved, current, taken) {
     const options = [{ value: '', label: 'Choose the camera', disabled: true }];
     if (Array.isArray(cameras)) {
         cameras.forEach(c => options.push({
-            value: 'cam:' + c.Index, label: zwoCameraLabel(c, taken), disabled: zwoCameraTaken(c, taken),
+            value: zwoCameraValue(c), label: zwoCameraLabel(c, taken), disabled: zwoCameraTaken(c, taken),
         }));
     }
     const savedValue = zwoSavedValue(cameras, saved);
@@ -722,11 +727,10 @@ function zwoCameraSelection(value, cameras, saved) {
         }
         return result;
     }
-    if (typeof value === 'string' && value.startsWith('cam:') && Array.isArray(cameras)) {
-        const index = Number.parseInt(value.slice(4), 10);
-        const camera = cameras.find(c => c.Index === index);
+    if (typeof value === 'string' && value !== '' && Array.isArray(cameras)) {
+        const camera = cameras.find(c => zwoCameraValue(c) === value);
         if (!camera) return null;
-        const result = { cameraIndex: index };
+        const result = { cameraIndex: camera.Index };
         if (camera.Serial) result.serialNumber = String(camera.Serial);
         if (camera.Name) result.cameraName = String(camera.Name);
         return result;

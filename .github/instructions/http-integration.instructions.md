@@ -82,7 +82,9 @@ vendor that ignores either ships a silently broken form:
   else its `PortPath` field, that has the same `appliesWhen`: a value typed there pins a
   specific unit, so no index is imposed. The index is scoped per `(vendor, deviceType)` — each
   SDK enumerates from 0 independently, so a ZWO camera and a Player One camera are both
-  index 0. This is distinct from the Alpaca **device number** (auto-assigned per device
+  index 0. An index box that sits behind a camera picker opts out of auto-numbering with
+  `data-auto-number="off"` (`maybeAutoFillIndexFields`; the ZWO camera form, #1970): a count of
+  saved devices says nothing about which cameras are plugged in. This is distinct from the Alpaca **device number** (auto-assigned per device
   type, vendor-agnostic, and what clients address). Serial/network devices (port path or
   host) have no index and belong in neither place.
 - **Declare EVERY persisted field in the vendor's catalog schema, per device type (`sanitize_device_config` in `router.cpp` keeps exactly the declared fields)**

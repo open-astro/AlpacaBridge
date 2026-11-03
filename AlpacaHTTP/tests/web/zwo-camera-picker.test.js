@@ -35,16 +35,16 @@ test('one attached camera beside two configured entries is offered at its own in
     const model = zwoCameraOptions([MM432], null, '', taken);
     assert.strictEqual(model.selected, '');
     assert.deepStrictEqual(model.options.map(o => [o.value, o.disabled]),
-                           [['', true], ['cam:0', false], ['manual', false]]);
+                           [['', true], ['sn:1a2b3c4d5e6f7081', false], ['manual', false]]);
     assert.strictEqual(model.options[1].label, 'ZWO ASI432MM (index 0), serial 1a2b3c4d5e6f7081');
-    assert.deepStrictEqual(zwoCameraSelection('cam:0', [MM432], null),
+    assert.deepStrictEqual(zwoCameraSelection('sn:1a2b3c4d5e6f7081', [MM432], null),
                            { cameraIndex: 0, serialNumber: '1a2b3c4d5e6f7081', cameraName: 'ZWO ASI432MM' });
     assert.strictEqual(zwoCameraSelection(model.selected, [MM432], null), null);
 });
 
 test('a camera another entry holds by serial is shown but cannot be picked', () => {
     const taken = ['0f0e0d0c0b0a0908'];
-    const model = zwoCameraOptions([MINI174, { ...MM432, Index: 1 }], null, 'cam:0', taken);
+    const model = zwoCameraOptions([MINI174, { ...MM432, Index: 1 }], null, 'sn:0f0e0d0c0b0a0908', taken);
     assert.strictEqual(model.options[1].label,
                        'ZWO ASI174MM Mini (index 0), serial 0f0e0d0c0b0a0908, used by another camera entry');
     assert.strictEqual(model.options[1].disabled, true);
@@ -62,7 +62,16 @@ test('a camera with no serial is saved by index and model name', () => {
 
 test('editing selects the saved camera by serial even after it moved index', () => {
     const saved = { cameraIndex: 2, serialNumber: '1a2b3c4d5e6f7081', cameraName: 'ZWO ASI432MM' };
-    assert.strictEqual(zwoCameraOptions([MM432], saved, '', []).selected, 'cam:0');
+    assert.strictEqual(zwoCameraOptions([MM432], saved, '', []).selected, 'sn:1a2b3c4d5e6f7081');
+});
+
+test('a Refresh that moves the picked camera to another slot keeps that camera picked', () => {
+    // Plugging the ASI174MM Mini in puts it at slot 0 and moves the ASI432MM to slot 1.
+    const moved = [MINI174, { ...MM432, Index: 1 }];
+    const model = zwoCameraOptions(moved, null, 'sn:1a2b3c4d5e6f7081', []);
+    assert.strictEqual(model.selected, 'sn:1a2b3c4d5e6f7081');
+    assert.deepStrictEqual(zwoCameraSelection(model.selected, moved, null),
+                           { cameraIndex: 1, serialNumber: '1a2b3c4d5e6f7081', cameraName: 'ZWO ASI432MM' });
 });
 
 test('an edited entry whose camera is not attached keeps its saved binding', () => {
@@ -84,7 +93,7 @@ test('an entry that never learned a serial says so and can be rebound by picking
                        "This entry never learned its camera's serial, so it binds whichever camera sits at index 1. " +
                        'Pick the camera to bind it by serial.');
     assert.deepStrictEqual(zwoCameraSelection('saved', [MM432], saved), { cameraIndex: 1 });
-    assert.strictEqual(zwoCameraOptions([MM432], saved, 'cam:0', []).selected, 'cam:0');
+    assert.strictEqual(zwoCameraOptions([MM432], saved, 'sn:1a2b3c4d5e6f7081', []).selected, 'sn:1a2b3c4d5e6f7081');
     assert.strictEqual(zwoCameraOptions([MM432], { cameraId: 4 }, '', []).options.find(o => o.value === 'saved').label,
                        'Saved entry, camera ID 4, no serial learned');
 });
@@ -110,3 +119,4 @@ test('configureWarning reads the warning out of a configuredevice reply', () => 
     assert.strictEqual(configureWarning('Device registered successfully'), '');
     assert.strictEqual(configureWarning(undefined), '');
 });
+
