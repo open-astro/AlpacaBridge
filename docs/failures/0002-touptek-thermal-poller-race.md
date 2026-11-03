@@ -10,7 +10,7 @@ Disconnect joined the poller while a concurrent connect could assign a new `std:
 
 ## Prevention
 
-Serialize poller spawn and join with `exposure_lifecycle_mutex_` across both `set_connected()` directions, and join outside the driver mutex. Preserve the poller on a redundant connect. Skip SDK thermal reads during exposure; the SDK can return `E_UNEXPECTED` when those control transfers overlap a pending image wait.
+Serialize poller start and stop with `transition_mutex_`, which spans both `set_connected()` directions (the poller runs in an `AsyncOperation` slot, decision 0006), and stop it outside the driver mutex. Preserve the poller on a redundant connect. Skip SDK thermal reads during exposure; the SDK can return `E_UNEXPECTED` when those control transfers overlap a pending image wait.
 
 ## Evidence
 
