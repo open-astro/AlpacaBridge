@@ -17,6 +17,9 @@ if(ALPACACORE_ENABLE_IOPTRON)
         ioptron_ieaf_focuser_driver.cpp
         ioptron_iefw_protocol_wrapper.cpp
         ioptron_filterwheel_driver.cpp
+        ioptron_ifr_protocol_wrapper.cpp
+        ioptron_ifr_focuser_driver.cpp
+        ioptron_ifr_rotator_driver.cpp
         # iGuider guide camera: UVC over V4L2 (<linux/videodev2.h>), no vendor
         # SDK and no shared library to package.
         ioptron_iguider_v4l2_wrapper.cpp

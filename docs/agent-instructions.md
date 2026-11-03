@@ -42,7 +42,7 @@ These hold the cross-vendor rules. Read every one the task touches.
 | Player One cameras, Phoenix wheels, thermal switch, iCAM camera backend | [Player One](../.github/instructions/playerone.instructions.md) |
 | SynScan handset path | [SynScan](../.github/instructions/synscan.instructions.md) |
 | SkyWatcher direct motor controller, Wave, EQ-class Synta | [SkyWatcher](../.github/instructions/skywatcher.instructions.md) |
-| iOptron mounts, iEAF/iAFS, iEFW, iMate, or iCAM configuration | [iOptron](../.github/instructions/ioptron.instructions.md) |
+| iOptron mounts, iEAF/iAFS, iEFW, iFR focuser-rotator, iMate, or iCAM configuration | [iOptron](../.github/instructions/ioptron.instructions.md) |
 | Celestron NexStar | [Celestron](../.github/instructions/celestron.instructions.md) |
 | Bisque, Paramount, TheSkyX | [Bisque](../.github/instructions/bisque.instructions.md) |
 | Astroasis Oasis | [Astroasis](../.github/instructions/astroasis.instructions.md) |

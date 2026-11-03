@@ -153,6 +153,39 @@ inline std::optional<std::string> iguider_camera_refusal(const DeviceConfig& con
     return std::nullopt;
 }
 
+// ---- iFR focuser-rotator (USB-serial, fixed baud; its own "ifr" catalog vendor) ---------------------------
+
+// The iFR is one unit seen as two devices, a focuser and a rotator, on one serial link. Both descriptors carry the
+// same fields: "auto" (or unset) scans at connect for the ifrIndex-th iFR, "serial" names its port. The focuser and
+// the rotator of one unit share the port, so both take index 0 on a box with one iFR.
+inline const Field<std::int64_t> kIfrIndex{.key = "ifrIndex", .default_value = 0, .role = Role::EnumerationIndex};
+// "ifr2", "ifr3" (default) or "ifr4": names the unit and sets the focuser's travel. The user picks it (the iEAF
+// lesson); the unit's own size register is only compared at connect.
+inline const Field<std::string> kIfrModel{.key = "model", .default_value = "ifr3"};
+
+inline const std::vector<FieldRef>& ifr_fields() {
+    static const std::vector<FieldRef> fields{kIoptronConnectionType.ref(), kIoptronPortPath.ref(), kIfrIndex.ref(),
+                                              kIfrModel.ref()};
+    return fields;
+}
+
+inline std::optional<std::string> ifr_refusal(const DeviceConfig& config) {
+    const std::string type = config.get(kIoptronConnectionType);
+    if (type != "" && type != "auto" && type != "serial") {
+        return "Invalid connection type. Use 'auto' or 'serial'.";
+    }
+    if (type == "serial") {
+        if (config.get(kIoptronPortPath).empty()) return kIoptronSerialPortRequired;
+    } else if (config.get(kIfrIndex) < 0) {
+        return "ifrIndex must be >= 0.";
+    }
+    const std::string model = config.get(kIfrModel);
+    if (model != "ifr2" && model != "ifr3" && model != "ifr4") {
+        return "model must be 'ifr2', 'ifr3' or 'ifr4'.";
+    }
+    return std::nullopt;
+}
+
 // ---- iMate PowerBox switch (local GPIO, libgpiod) -------------------------
 
 inline const Field<std::string> kIoptronGpioChip{.key = "gpioChip", .default_value = "/dev/gpiochip1"};

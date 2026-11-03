@@ -3094,6 +3094,9 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('altair-config').style.display = 'block';
     } else if (vendor === 'iguider') {
         document.getElementById('iguider-config').style.display = 'block';
+    } else if (vendor === 'ifr') {
+        document.getElementById('ifr-config').style.display = 'block';
+        updateIfrConfigFields();
     } else if (vendor === 'gphoto') {
         document.getElementById('gphoto-config').style.display = 'block';
     } else if (vendor === 'touptek') {
@@ -3226,6 +3229,33 @@ function updateIoptronConfigFields() {
     filterwheelSection.style.display = isFilterWheel ? 'block' : 'none';
     cameraSection.style.display = isCamera ? 'block' : 'none';
 }
+
+// The iFR offers a Focuser and a Rotator from one vendor block: show the one the Device Type names, and disable
+// the other's inputs so its values cannot leak into this device's config.
+function updateIfrConfigFields() {
+    const focuserSection = document.getElementById('ifr-focuser-config');
+    const rotatorSection = document.getElementById('ifr-rotator-config');
+    if (!focuserSection || !rotatorSection) {
+        return;
+    }
+    const deviceTypeSelect = document.getElementById('device-type');
+    const isRotator = deviceTypeSelect && normalizeDeviceType(deviceTypeSelect.value) === 'rotator';
+    focuserSection.style.display = isRotator ? 'none' : 'block';
+    rotatorSection.style.display = isRotator ? 'block' : 'none';
+    setFieldGroupEnabled(focuserSection, !isRotator);
+    setFieldGroupEnabled(rotatorSection, isRotator);
+}
+
+['focuser', 'rotator'].forEach(kind => {
+    const select = document.getElementById(`ifr-${kind}-connection-type`);
+    if (select) {
+        select.addEventListener('change', function() {
+            const serial = this.value === 'serial';
+            document.getElementById(`ifr-${kind}-auto-config`).style.display = serial ? 'none' : 'block';
+            document.getElementById(`ifr-${kind}-serial-config`).style.display = serial ? 'block' : 'none';
+        });
+    }
+});
 
 const ioptronConnectionType = document.getElementById('ioptron-connection-type');
 if (ioptronConnectionType) {
@@ -4555,6 +4585,17 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'altair') {
         const altairCameraIndex = readOptionalNumber(formData, 'altairCameraIndex');
         deviceData.cameraIndex = altairCameraIndex !== null ? altairCameraIndex : 0;
+    } else if (deviceData.vendor === 'ifr') {
+        // Both halves carry the same fields under their own prefixed names (the FormData collision rule).
+        const prefix = normalizeDeviceType(deviceData.deviceType) === 'rotator' ? 'ifrRotator' : 'ifrFocuser';
+        deviceData.connectionType = formData.get(`${prefix}ConnectionType`) || 'auto';
+        deviceData.model = formData.get(`${prefix}Model`) || 'ifr3';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = (formData.get(`${prefix}PortPath`) || '').trim();
+        } else {
+            const ifrIndex = readOptionalNumber(formData, `${prefix}Index`);
+            deviceData.ifrIndex = ifrIndex !== null ? ifrIndex : 0;
+        }
     } else if (deviceData.vendor === 'iguider') {
         // Blank means auto-detect: omit the key so the saved config stays clean.
         const iguiderDevicePath = (formData.get('iguiderDevicePath') || '').trim();

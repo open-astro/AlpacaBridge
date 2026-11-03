@@ -103,11 +103,14 @@
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ifr_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ifr_rotator_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
 #include "fake_iguider_v4l2.h"
 #include "fake_ioptron_ieaf.h"
+#include "fake_ioptron_ifr.h"
 #include "fake_ioptron_mount.h"
 #include "locked_iguider_v4l2.h"
 #endif
@@ -1694,6 +1697,41 @@ Tier2Host tier2_host_ioptron_focuser() {
     };
     return h;
 }
+// The iFR focuser-rotator: both rows over FakeIoptronIfr, each device on its own fake (one session per fake).
+Tier2Host tier2_host_ifr_focuser() {
+    Tier2Host h{"ifr_focuser", "ifr", "focuser", "fake_ioptron_ifr.h", DeviceType::Focuser, "ifr_focuser", {},
+                true,          {},    ""};
+    h.connectable = [](bool hold) {
+        auto fake = std::make_shared<alpacacore::test::FakeIoptronIfr>();
+        if (hold) fake->hold_next_reply(kHold);  // the handshake read waits 2 s
+        return host_over(fake, [](const alpacacore::test::FakeIoptronIfr& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::ioptron::create_ifr_focuser(0, f.slave_path());
+        });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::ioptron::create_ifr_focuser(0, kAbsentPort);
+        return hosted;
+    };
+    return h;
+}
+Tier2Host tier2_host_ifr_rotator() {
+    Tier2Host h{"ifr_rotator", "ifr", "rotator", "fake_ioptron_ifr.h", DeviceType::Rotator, "ifr_rotator", {},
+                true,          {},    ""};
+    h.connectable = [](bool hold) {
+        auto fake = std::make_shared<alpacacore::test::FakeIoptronIfr>();
+        if (hold) fake->hold_next_reply(kHold);
+        return host_over(fake, [](const alpacacore::test::FakeIoptronIfr& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::ioptron::create_ifr_rotator(0, f.slave_path());
+        });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::ioptron::create_ifr_rotator(0, kAbsentPort);
+        return hosted;
+    };
+    return h;
+}
 // FakeIGuiderV4L2 behind LockedIGuiderV4L2 (recipe of test_ioptron_iguider_camera.cpp), both in one holder: the
 // driver keeps a reference to the seam.
 struct IGuiderV4L2Hold {
@@ -2351,7 +2389,8 @@ Tier2Host tier2_host_wandererastro_switch() {
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #define CS2_IOPTRON(X) \
-    X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(iguider_camera, CAM) CS2_IOPTRON_POWERBOX(X)
+    X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(iguider_camera, CAM) X(ifr_focuser, NPR) \
+    X(ifr_rotator, PRB) CS2_IOPTRON_POWERBOX(X)
 #else
 #define CS2_IOPTRON(X)
 #endif
@@ -2864,6 +2903,29 @@ Tier3Recipe tier3_recipe_ioptron_focuser() {
                        DeviceType::Focuser, clock);
 }
 
+// iFR: a move the fake never finishes (it keeps reporting the motor running), then the unit stops answering with
+// the port open. Falsified by: get_is_moving() answering false, or the move hold, on a failed status read.
+Tier3Recipe tier3_recipe_ifr_focuser() {
+    using Fake = alpacacore::test::FakeIoptronIfr;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).set_focuser_polls(1 << 30);
+                t3_start_focuser_move(hosted, 500);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_silent(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_silent(false); },
+            "FakeIoptronIfr::set_silent(true) mid-move"};
+}
+Tier3Recipe tier3_recipe_ifr_rotator() {
+    using Fake = alpacacore::test::FakeIoptronIfr;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).set_rotator_polls(1 << 30);
+                dynamic_cast<alpacacore::RotatorDriver&>(*hosted.driver).move_absolute(90.0);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_silent(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_silent(false); },
+            "FakeIoptronIfr::set_silent(true) mid-move"};
+}
+
 // The iGuider fake for tier 3. From `start` on, before_frame_return holds each finished frame until `fail` claims it
 // (then until `recover`) or, with no fault, for kHealthyDelay. `fail` sets `stalled` before it moves kHolding to
 // kFaulted, and the hook moves kHolding to kReleased, so exactly one of them wins: a frame already past read_frame()'s
@@ -3374,7 +3436,8 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_SKYWATCHER(X)
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CT3_IOPTRON(X) X(ioptron_telescope, OK) X(ioptron_focuser, OK) X(iguider_camera, OK)
+#define CT3_IOPTRON(X) \
+    X(ioptron_telescope, OK) X(ioptron_focuser, OK) X(iguider_camera, OK) X(ifr_focuser, OK) X(ifr_rotator, OK)
 #else
 #define CT3_IOPTRON(X)
 #endif
@@ -3669,6 +3732,7 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #ifdef ALPACACORE_ENABLE_IOPTRON
     CS2_ENABLED("ioptron")
     CS2_ENABLED("iguider")  // the iGuider camera's own catalog vendor, built by the iOptron option
+    CS2_ENABLED("ifr")      // the iFR focuser-rotator's own catalog vendor, built by the iOptron option
 #endif
 #ifdef ALPACACORE_ENABLE_ASTROASIS
     CS2_ENABLED("astroasis")

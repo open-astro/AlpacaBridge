@@ -49,6 +49,8 @@ Symbol: `transition_mutex_`
 | gphoto camera | `exposure_lifecycle_mutex_` | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | partial | #1845 | `mutex_` held across the SDK connect |
 | iOptron filter wheel |  | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted |  |  |
 | iOptron iEAF focuser |  | `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_focuser_driver.cpp` | adopted |  |  |
+| iOptron iFR focuser |  | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_focuser_driver.cpp` | adopted | #2002 | the I/O lock is the shared `IfrLink` session's, under the status cache |
+| iOptron iFR rotator |  | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_rotator_driver.cpp` | adopted | #2002 | the I/O lock is the shared `IfrLink` session's, under the status cache |
 | iOptron iGuider camera |  | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted |  |  |
 | iOptron switch |  | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp` | adopted |  |  |
 | iOptron telescope |  | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | partial | #1829 | `mutex_` held across connect, getter refills and commands |

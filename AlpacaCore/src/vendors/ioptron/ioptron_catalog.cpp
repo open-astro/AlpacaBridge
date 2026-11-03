@@ -11,7 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // The iOptron factories (telescope, iMate PowerBox switch, iEAF focuser, iEFW
-// filter wheel, and the iGuider guide camera under its own "iguider" key),
+// filter wheel, the iGuider guide camera under its own "iguider" key, and the
+// iFR focuser and rotator under their own "ifr" key),
 // doing what the router arms they replace did. Every auto-detect
 // path goes through a create_*_auto / create_*_by_index factory, which is
 // hardware-free (the scan runs at connect, #659) -- never a resolve_* scan
@@ -24,6 +25,8 @@
 
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ifr_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ifr_rotator_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #ifdef ALPACACORE_IOPTRON_POWERBOX
@@ -163,6 +166,25 @@ std::unique_ptr<AlpacaDriver> create_iguider(const DeviceConfig& config, int dev
     return vendor::ioptron::create_iguider_camera(device_number, config.get(kIguiderDevicePath));
 }
 
+// The iFR's two halves: the same fields, the same port choice, one shared serial session at connect.
+std::unique_ptr<AlpacaDriver> create_ifr_focuser(const DeviceConfig& config, int device_number) {
+    if (const auto refusal = ifr_refusal(config)) throw AlpacaException(*refusal, AlpacaError::InvalidValue);
+    const std::string model = config.get(kIfrModel);
+    if (config.get(kIoptronConnectionType) == "serial") {
+        return vendor::ioptron::create_ifr_focuser(device_number, config.get(kIoptronPortPath), model);
+    }
+    return vendor::ioptron::create_ifr_focuser_by_index(device_number, static_cast<int>(config.get(kIfrIndex)), model);
+}
+
+std::unique_ptr<AlpacaDriver> create_ifr_rotator(const DeviceConfig& config, int device_number) {
+    if (const auto refusal = ifr_refusal(config)) throw AlpacaException(*refusal, AlpacaError::InvalidValue);
+    const std::string model = config.get(kIfrModel);
+    if (config.get(kIoptronConnectionType) == "serial") {
+        return vendor::ioptron::create_ifr_rotator(device_number, config.get(kIoptronPortPath), model);
+    }
+    return vendor::ioptron::create_ifr_rotator_by_index(device_number, static_cast<int>(config.get(kIfrIndex)), model);
+}
+
 }  // namespace
 
 void register_ioptron_factory(DeviceCatalog& catalog) {
@@ -183,6 +205,16 @@ void register_ioptron_factory(DeviceCatalog& catalog) {
     iguider.key = DeviceKey{"iguider", DeviceType::Camera};
     iguider.create = create_iguider;
     catalog.add(std::move(iguider));
+    const struct {
+        DeviceType type;
+        std::unique_ptr<AlpacaDriver> (*create)(const DeviceConfig&, int);
+    } ifr_factories[] = {{DeviceType::Focuser, create_ifr_focuser}, {DeviceType::Rotator, create_ifr_rotator}};
+    for (const auto& entry : ifr_factories) {
+        Factory ifr;
+        ifr.key = DeviceKey{"ifr", entry.type};
+        ifr.create = entry.create;
+        catalog.add(std::move(ifr));
+    }
 }
 
 }  // namespace alpacacore::catalog

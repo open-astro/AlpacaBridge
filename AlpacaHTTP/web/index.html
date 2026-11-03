@@ -81,6 +81,7 @@
                         <option value="gphoto">DSLR / Mirrorless</option>
                         <option value="ioptron">iOptron</option>
                         <option value="iguider">iOptron iGuider</option>
+                        <option value="ifr">iOptron iFR</option>
                         <option value="playerone">Player One</option>
                         <option value="onstep">OnStep</option>
                         <option value="qhy">QHY</option>
@@ -1297,6 +1298,87 @@
                         <small>Leave blank to use the first iGuider found. To pin one, enter its /dev/v4l/by-id/... link (survives a replug) or /dev/videoN.</small>
                     </div>
 
+                </div>
+
+                <!-- iOptron iFR Focuser-Rotator Configuration: one unit, two devices on one USB link -->
+                <div id="ifr-config" data-vendor="ifr" class="vendor-config" style="display: none;">
+                  <div id="ifr-focuser-config" data-device-type="focuser" style="display: none;">
+                    <h3>iOptron iFR Focuser Configuration</h3>
+                    <small style="color: #666;">The iFR is a focuser and a camera rotator in one unit, on one USB link. Add it twice, once as a Focuser and once as a Rotator: both connect over the same port and can be used independently. Either of its two Type-C ports works; plug in one. Fixed 115200 baud; auto-detect checks the unit's handshake.</small>
+
+                    <div class="form-group">
+                        <label for="ifr-focuser-model">Model:</label>
+                        <select id="ifr-focuser-model" name="ifrFocuserModel" data-config-key="model">
+                            <option value="ifr2">iFR 2"</option>
+                            <option value="ifr3" selected>iFR 3"</option>
+                            <option value="ifr4">iFR 4"</option>
+                        </select>
+                        <small>Sets the device name and the focuser travel. Use the same size for the focuser and the rotator of one unit.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ifr-focuser-connection-type">Connection Type:</label>
+                        <select id="ifr-focuser-connection-type" name="ifrFocuserConnectionType" data-config-key="connectionType">
+                            <option value="auto">Auto-Detect (Recommended)</option>
+                            <option value="serial">Serial Port</option>
+                        </select>
+                    </div>
+
+                    <div id="ifr-focuser-auto-config" class="connection-config">
+                        <div class="form-group">
+                            <label for="ifr-focuser-index">iFR Index:</label>
+                            <input type="number" id="ifr-focuser-index" name="ifrFocuserIndex" data-config-key="ifrIndex" value="0" min="0">
+                            <small>0-based index when more than one iFR is plugged in. The focuser and the rotator of one unit use the same index.</small>
+                        </div>
+                    </div>
+
+                    <div id="ifr-focuser-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="ifr-focuser-port-path">Serial Port:</label>
+                            <input type="text" id="ifr-focuser-port-path" name="ifrFocuserPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
+                            <small>Either of the iFR's two USB ports. Give the focuser and the rotator the same port.</small>
+                        </div>
+                    </div>
+                  </div>
+
+                  <div id="ifr-rotator-config" data-device-type="rotator" style="display: none;">
+                    <h3>iOptron iFR Rotator Configuration</h3>
+                    <small style="color: #666;">The rotator (CAA) half of the iFR. It shares the unit's USB link with the iFR Focuser. Sync is stored in the iFR itself and survives a power cycle.</small>
+
+                    <div class="form-group">
+                        <label for="ifr-rotator-model">Model:</label>
+                        <select id="ifr-rotator-model" name="ifrRotatorModel" data-config-key="model">
+                            <option value="ifr2">iFR 2"</option>
+                            <option value="ifr3" selected>iFR 3"</option>
+                            <option value="ifr4">iFR 4"</option>
+                        </select>
+                        <small>Sets the device name and the focuser travel. Use the same size for the focuser and the rotator of one unit.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ifr-rotator-connection-type">Connection Type:</label>
+                        <select id="ifr-rotator-connection-type" name="ifrRotatorConnectionType" data-config-key="connectionType">
+                            <option value="auto">Auto-Detect (Recommended)</option>
+                            <option value="serial">Serial Port</option>
+                        </select>
+                    </div>
+
+                    <div id="ifr-rotator-auto-config" class="connection-config">
+                        <div class="form-group">
+                            <label for="ifr-rotator-index">iFR Index:</label>
+                            <input type="number" id="ifr-rotator-index" name="ifrRotatorIndex" data-config-key="ifrIndex" value="0" min="0">
+                            <small>0-based index when more than one iFR is plugged in. Use the same index as this unit's focuser.</small>
+                        </div>
+                    </div>
+
+                    <div id="ifr-rotator-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="ifr-rotator-port-path">Serial Port:</label>
+                            <input type="text" id="ifr-rotator-port-path" name="ifrRotatorPortPath" data-config-key="portPath" placeholder="/dev/ttyUSB0">
+                            <small>Either of the iFR's two USB ports. Give the focuser and the rotator the same port.</small>
+                        </div>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- libgphoto2 DSLR/Mirrorless Camera Configuration -->

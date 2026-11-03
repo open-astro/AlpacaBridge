@@ -490,6 +490,7 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | iEAF Electronic Focuser | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iEAF/) |
 | iAFS2/3 Automatic Focuser (2" and 3" models) | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iAFS2/) |
+| iFR 3" Focuser-Rotator, focuser (2" and 4" not validated) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iFR%203%20Focuser/) |
 
 <details>
 <summary><strong>iOptron Focuser Driver Notes</strong></summary>
@@ -500,6 +501,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested models**: iEAF (model code 2, firmware 100) and iAFS2 (model code 3) on Raspberry Pi, Linux arm64, ConformU 4.5.0: 0 errors, 0 issues, all members within timing targets for both
 - **Not supported**: `StepSize` (hardware does not expose microns), temperature compensation
 - **Protocol quirks**: `:FM`/`:FQ`/`:FZ` reply with a single `1` ack byte (no `#`), which the wrapper consumes so it cannot prefix the next `:FI#` frame. Status reads are served from a 100 ms cache so `DeviceState` costs one serial round trip.
+- **iFR focuser-rotator**: its own web UI vendor, "iOptron iFR", which adds a Focuser and a Rotator for the one unit; both share its single USB link (either Type-C port; plug in one). Model selector iFR 2"/3"/4" names the unit and sets `MaxStep` (62,500 steps of 0.4 um on the 2"/3", 65,000 on the 4"). `StepSize` 0.4 um and the internal temperature are reported; no temperature compensation. Handshake model code 05; see the Rotator section for the rotator half and `AlpacaCore/external/iOptron/iFR-protocol.md` for the protocol.
+- **iFR tested model**: iFR 3" (model code 05, focuser and CAA firmware 260324), USB through VMware Fusion passthrough to a Debian 13 arm64 VM on Apple Silicon, ConformU 4.6.0-rc.1 run in the VM against localhost: 0 errors, 0 issues, 0 timing issues. Zeroed at the inner end of its travel first (the unit arrived reading outside the firmware's 0..99999 range, where every move is refused).
 
 </details>
 
@@ -581,6 +584,23 @@ This document lists all hardware vendors and device types that are verified to w
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Rotator Drivers
+
+### iOptron
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| iFR 3" Focuser-Rotator, rotator (2" and 4" not validated) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iFR%203%20Rotator/) |
+
+<details>
+<summary><strong>iOptron Rotator Driver Notes</strong></summary>
+
+- **Protocol**: iFR CAA serial commands (`:RI#`, `:RM`, `:RQ#`, `:RY`, `:RR0#`/`:RR1#`), no SDK. Protocol summary and sources (rig captures, INDI `iafscaa.cpp`, iOptron Commander 10.0.2): `AlpacaCore/external/iOptron/iFR-protocol.md`.
+- **Connection**: USB via the unit's Prolific bridge (067b:23a3), fixed 115200 baud, shared with the iFR focuser: add the unit as both an iFR Focuser and an iFR Rotator under the "iOptron iFR" vendor; either can connect first. Auto-detection supported (handshake model code 05).
+- **Capabilities**: absolute, relative and mechanical moves, Halt, hardware Reverse, IRotatorV4 Sync stored in the unit (survives a power cycle). StepSize 0.004 deg.
+- **Moves never cross 0/360**: the firmware turns the long way rather than through 0 (360 deg in about 82 s at 4.4 deg/s), so a client's move timeout must allow about 90 s. The ConformU runs here used `RotatorTimeout` 120 s; at the 60 s default, `MoveAbsolute 405` (315 to 45 deg, the long way) times out at 61 s.
+- **Tested model**: iFR 3" (model code 05, CAA firmware 260324), USB through VMware Fusion passthrough to a Debian 13 arm64 VM on Apple Silicon, ConformU 4.6.0-rc.1 run in the VM against localhost: 0 errors, 0 issues, 0 timing issues.
+
+</details>
 
 ### ZWO
 

@@ -170,6 +170,9 @@ if(TARGET alpacacore_ioptron)
         test_ioptron_filterwheel.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
+    # iFR focuser-rotator: two devices over one shared serial session.
+    list(APPEND TEST_SOURCES test_ioptron_ifr_focuser.cpp test_ioptron_ifr_rotator.cpp
+        test_ioptron_ifr_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
     # Clock-sync body runs on an operation slot (issue #1368).

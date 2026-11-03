@@ -73,6 +73,8 @@ Symbol: `TaskClock`
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433 | telemetry, GOTO, pulse and control deadlines; UTC/LST and protocol timeouts stay off the clock |
 | iOptron iEAF focuser | `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_focuser_driver.cpp` | adopted | #1590 | status cache age |
 | iOptron iEFW filter wheel | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted | #1723 | status cache age and its fault stamp (the decision 0009 staleness bound) |
+| iOptron iFR focuser | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_focuser_driver.cpp` | adopted | #2002 | status cache age, its fault stamp (the decision 0009 staleness bound) and the move hold |
+| iOptron iFR rotator | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_rotator_driver.cpp` | adopted | #2002 | status cache age, its fault stamp (the decision 0009 staleness bound) and the move hold |
 | ZWO EAF focuser | `AlpacaCore/src/vendors/zwo/zwo_focuser_driver.cpp` | adopted | #1666 | status cache age and its fault stamp (the decision 0009 staleness bound) |
 | ZWO dew heater switch | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted | #1667 | heater read cache age and its fault stamp (the decision 0009 staleness bound) |
 | ZWO EFW filter wheel | `AlpacaCore/src/vendors/zwo/zwo_filterwheel_driver.cpp` | adopted | #1668 | Position cache age and its fault stamp (the decision 0009 staleness bound) |
