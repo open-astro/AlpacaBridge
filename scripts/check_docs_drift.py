@@ -1276,7 +1276,8 @@ def check_rule_file_paths_exist(root=ROOT):
 # pre-flight would stop being a faithful mirror of CI. Issue #341.
 #
 # Matches both spellings of the invocation: bare in ci.yml
-# (`./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log`)
+# (`./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log`,
+# and the sharded [stress] run below)
 # and quoted-path in ci_preflight.sh
 # (`"${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log"`).
 # The trailing quoted tag is what distinguishes a real run from the `test -x`
@@ -1320,9 +1321,9 @@ def _tsan_events(block):
     """The filtered runs and zero-test greps of one TSan block, in file order.
 
     Each run is ("run", tag, build_dir, tee_log) and each grep is
-    ("grep", pattern, log), all paths reduced to their basename so ci.yml's
-    literal `stress-run.log` pairs with ci_preflight.sh's
-    `"${TSAN_BUILD_DIR}/stress-run.log"` without expanding the variable.
+    ("grep", pattern, log), all paths reduced to their basename so a bare
+    log name pairs with ci_preflight.sh's `"${TSAN_BUILD_DIR}/stress-run.log"`
+    without expanding the variable.
     A run with no `| tee` has tee_log None: it is still a run, and the
     pairing below reports it, because no grep can guard a log never written.
     """
