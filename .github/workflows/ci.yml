@@ -245,40 +245,52 @@ jobs:
             libcurl4-openssl-dev \
             gcovr
 
-      - name: Build libgpiod v2 from source
-        # The ZWO switch drivers require libgpiod >= 2.0 (gpiod_chip_request_lines),
-        # which the runner's apt does not provide. Install the upstream release
-        # into /usr/local so CMake's find_library picks it up ahead of any system
-        # copy.
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
-          # README there): kernel.org removed old libgpiod point releases on
-          # 2026-07-01 and every mirror synced the deletion within hours,
-          # 404-ing this step twice in one day. No network fetch remains. The
-          # pinned checksum (kernel.org's published sha256, workflow env so
-          # both jobs share one pin) guards against corruption — not
-          # adversarial modification; see the README beside the tarball.
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
       - name: Stage vendor SDK shared libraries
         # Mirrors run_system_setup() in build_and_run.sh: copy the in-tree
@@ -592,31 +604,52 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
-      - name: Build libgpiod v2 from source
-        # Same vendored tarball + pinned checksum as the build-vendors-shard job
-        # (see the README beside the tarball).
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
       - name: Stage vendor SDK shared libraries
         # Mirrors the build-vendors-shard job: the vendor-ON build links the in-tree
@@ -699,11 +732,38 @@ jobs:
           # (issue #322 review finding). Keep it that way: anything tagged
           # [stress] that is not a vendor registration makes this gate vacuous
           # again.
-          ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log
-          # The test binary's own exit code (via pipefail) is the pass/fail gate;
-          # this grep only guards the zero-test case, so it deliberately matches
-          # both Catch2 summary forms without distinguishing pass from fail.
-          grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-run.log
+          #
+          # The [stress] cases run as Catch2 shards (--shard-count/--shard-index)
+          # in parallel processes, one per core: run serially they took about
+          # 7.75 min of a 9.4 min job, mostly waiting on fakes in real time,
+          # and the all-vendors ctest already runs them in parallel processes.
+          # Each shard's exit code is the pass/fail gate and its log is shown in
+          # its own group; the grep guards the zero-test case per shard, so it
+          # deliberately matches both Catch2 summary forms.
+          shards="$(nproc)"
+          pids=()
+          for ((i = 0; i < shards; i++)); do
+            ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" \
+              --shard-count "${shards}" --shard-index "${i}" > "stress-run-${i}.log" 2>&1 &
+            pids+=("$!")
+          done
+          failed=()
+          for ((i = 0; i < shards; i++)); do
+            wait "${pids[i]}" || failed+=("${i}")
+          done
+          for ((i = 0; i < shards; i++)); do
+            echo "::group::[stress] shard $((i + 1)) of ${shards}"
+            cat "stress-run-${i}.log"
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::[stress] shard index(es) ${failed[*]} failed; see their groups above"
+            exit 1
+          fi
+          for ((i = 0; i < shards; i++)); do
+            grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "stress-run-${i}.log" \
+              || { echo "::error::[stress] shard index ${i} ran no tests"; exit 1; }
+          done
           # Core/harness self-tests that need TSan but aren't a vendor
           # registration -- StressCallGuard's concurrency case and the
           # AsyncConnectable lifecycle case -- run under their own tag,
@@ -801,39 +861,52 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
-      - name: Build libgpiod v2 from source
-        # Mirrors the build-vendors-shard job: install the upstream release into
-        # /usr/local so clang's default search path resolves the v2 <gpiod.h>
-        # ahead of any system copy.
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
-          # README there): kernel.org removed old libgpiod point releases on
-          # 2026-07-01 and every mirror synced the deletion within hours,
-          # 404-ing this step twice in one day. No network fetch remains. The
-          # pinned checksum (kernel.org's published sha256, workflow env so
-          # both jobs share one pin) guards against corruption — not
-          # adversarial modification; see the README beside the tarball.
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
       - name: Wrap the compilers like build-vendors-shard
         # Keep paired with CCACHE_COMPILERCHECK=content and the restore below:
