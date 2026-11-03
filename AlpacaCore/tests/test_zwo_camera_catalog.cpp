@@ -18,9 +18,12 @@
 
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "../src/catalog/builtin_descriptors.h"
@@ -69,6 +72,33 @@ std::optional<std::string> learned(const BindResult& result, const char* key) {
 BindResult bind(Rig& rig, const DeviceConfig& config, int number, Source source, const std::vector<PeerEntry>& peers) {
     return rig.catalog.bind(kCameraKey, config, number, BindContext{source, peers});
 }
+
+// Every ZWO line logged at INFO or above while it lives; restores the sink and level on any exit.
+struct LogCapture {
+    std::vector<std::pair<logging::LogLevel, std::string>> lines;
+    logging::LogSink previous_sink = logging::get_log_sink();
+    logging::LogLevel previous_level = logging::get_log_level();
+    LogCapture() {
+        logging::set_log_level(logging::LogLevel::Info);
+        logging::set_log_sink([this](logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (component == "ZWO") lines.emplace_back(level, std::string(message));
+        });
+    }
+    ~LogCapture() {
+        logging::set_log_sink(previous_sink);
+        logging::set_log_level(previous_level);
+    }
+    LogCapture(const LogCapture&) = delete;
+    LogCapture& operator=(const LogCapture&) = delete;
+
+    std::vector<logging::LogLevel> levels_of(const std::string& prefix) const {
+        std::vector<logging::LogLevel> levels;
+        for (const auto& [level, message] : lines) {
+            if (message.rfind(prefix, 0) == 0) levels.push_back(level);
+        }
+        return levels;
+    }
+};
 
 }  // namespace
 
@@ -270,6 +300,18 @@ TEST_CASE("ZWO camera catalog - an index hint that matches no camera warns with 
     DeviceConfig unplugged = camera_config(2);
     unplugged.set("serialNumber", std::string("5555666677778888"));
     CHECK(bind(rig, unplugged, 4, Source::Persisted, {}).warnings.empty());
+}
+
+TEST_CASE("ZWO camera catalog - the unbound line logs at INFO for an API call and WARN for a stored entry",
+          "[catalog][zwo][camera][unit]") {
+    // Decision 0007 rule 9: a configuredevice call is client-triggered, so it must not log at WARN.
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}});
+    LogCapture capture;
+    REQUIRE(bind(rig, camera_config(2), 2, Source::Api, {}).warnings.size() == 1);
+    REQUIRE(bind(rig, camera_config(2), 3, Source::Persisted, {}).warnings.size() == 1);
+    CHECK(capture.levels_of("Camera #2: ") == std::vector<logging::LogLevel>{logging::LogLevel::Info});
+    CHECK(capture.levels_of("Camera #3: ") == std::vector<logging::LogLevel>{logging::LogLevel::Warn});
 }
 
 TEST_CASE("ZWO camera catalog - a failed enumeration warns for an entry with no identity",
