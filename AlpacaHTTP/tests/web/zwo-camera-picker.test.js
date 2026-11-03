@@ -238,3 +238,53 @@ test('the by-hand ZWO camera choice sends the index and ID boxes, and no pick re
     assert.strictEqual(refused.posts.length, 0);
 });
 
+// createZwoCameraPicker over element stubs, with a listing the test answers itself.
+function zwoPickerRig({ form, deviceNumber, devices }) {
+    const select = {
+        options: [], current: '', listeners: {},
+        get value() { return this.current; },
+        // As the HTML setter: a value no option has selects none.
+        set value(v) { this.current = this.options.some(o => o.value === v) ? v : ''; },
+        replaceChildren(...options) { this.options = options; },
+        addEventListener(type, fn) { this.listeners[type] = fn; },
+        focus() {},
+    };
+    const elements = {
+        'zwo-camera-picker': select,
+        'zwo-camera-picker-hint': { textContent: '' },
+        'zwo-camera-picker-refresh': { addEventListener() {} },
+        'zwo-camera-manual-fields': { style: {} },
+        'device-form': { dataset: form },
+        'device-number': { value: deviceNumber },
+    };
+    let answer;
+    const listing = new Promise(resolve => { answer = resolve; });
+    const scope = {
+        ...format, currentDevices: devices, API_BASE: '',
+        document: { getElementById: id => elements[id] ?? null, createElement: () => ({}) },
+        fetch: async () => ({ json: async () => listing }),
+    };
+    const names = ['normalizeDeviceType', 'extractDeviceConfig', 'extractDeviceType', 'extractVendor',
+                   'createZwoCameraPicker'];
+    const fns = new Function('scope', `with (scope) { ${names.map(wholeFunction).join('')} return { ${names} }; }`)(scope);
+    return { picker: fns.createZwoCameraPicker(), select, hint: elements['zwo-camera-picker-hint'], answer };
+}
+
+test('the ZWO camera picker says it is listing until the listing lands, and an edit keeps its own camera', async () => {
+    // Editing camera #1 (the ASI432MM) and renumbering it to 5 before the listing returns.
+    const camera = (n, serial) => ({ DeviceType: 'Camera', DeviceNumber: n, Vendor: 'zwo', Config: { serialNumber: serial } });
+    const rig = zwoPickerRig({
+        form: { editing: 'true', originalDeviceNumber: '1' }, deviceNumber: '5',
+        devices: [camera(0, '0f0e0d0c0b0a0908'), camera(1, '1a2b3c4d5e6f7081')],
+    });
+    rig.picker.ensureLoaded();
+    assert.strictEqual(rig.hint.textContent, 'Listing attached cameras...');
+    rig.picker.reset({ cameraIndex: 0, serialNumber: '1a2b3c4d5e6f7081' });
+    assert.strictEqual(rig.hint.textContent, 'Listing attached cameras...');
+
+    rig.answer({ ErrorNumber: 0, Value: [MM432, { ...MINI174, Index: 1 }] });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(rig.select.value, 'sn:1a2b3c4d5e6f7081');
+    assert.strictEqual(rig.select.options.find(o => o.value === 'sn:0f0e0d0c0b0a0908').disabled, true);
+    assert.strictEqual(rig.hint.textContent, '');
+});

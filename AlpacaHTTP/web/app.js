@@ -932,7 +932,6 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
     let listError = '';
     let saved = null;
     let loaded = false;
-    let loading = false;
     let loadSeq = 0;
 
     function taken() {
@@ -947,9 +946,7 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
 
     function updateHint() {
         if (hint) {
-            // Until the first listing lands, `cameras` is [] and would read as "none attached".
-            hint.textContent = loading ? 'Listing attached cameras...'
-                                       : thermalCameraHint(cameras, select.value, controls, listError, saved, taken());
+            hint.textContent = thermalCameraHint(cameras, select.value, controls, listError, saved, taken());
         }
     }
 
@@ -972,8 +969,9 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
     async function load() {
         const seq = ++loadSeq;
         loaded = true;
-        loading = true;
-        updateHint();
+        if (hint) {
+            hint.textContent = 'Listing attached cameras...';
+        }
         try {
             const response = await fetch(API_BASE + '/management/v1/thermalcameras?vendor=' +
                                          encodeURIComponent(vendor), { cache: 'no-store' });
@@ -995,7 +993,6 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
             cameras = null;
             listError = e.message;
         }
-        loading = false;
         render();
     }
 
@@ -1070,10 +1067,13 @@ function createZwoCameraPicker() {
     let loading = false;
     let loadSeq = 0;
 
-    // Serials the other ZWO camera entries hold; an edited entry's own is not taken.
+    // Serials the other ZWO camera entries hold; an edited entry's own is not taken,
+    // even after the edit changes its device number.
     function taken() {
-        const editing = document.getElementById('device-form')?.dataset.editing === 'true';
-        const editedNumber = editing ? Number(document.getElementById('device-number')?.value) : null;
+        const form = document.getElementById('device-form');
+        const editing = form?.dataset.editing === 'true';
+        const editedNumber = editing
+            ? Number(form.dataset.originalDeviceNumber ?? document.getElementById('device-number')?.value) : null;
         return currentDevices
             .filter(d => extractVendor(d) === 'zwo' && extractDeviceType(d) === 'camera')
             .filter(d => !(editing && Number(d.DeviceNumber) === editedNumber))
