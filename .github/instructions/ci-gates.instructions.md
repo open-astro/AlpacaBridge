@@ -14,7 +14,7 @@ The Claude review bot (`.github/workflows/claude-review.yml`) runs automatically
 every push to a same-repo PR branch. It skips a draft PR, so pushes to a draft spend no review
 runs, and marking the PR ready (`ready_for_review`) starts its first review. Fork PRs are gated: the bot runs only while a
 maintainer has applied the **`safe-to-review`** label — applying it triggers the
-first review immediately, later pushes keep reviewing while the label stays on, and
+first review immediately (once the PR is out of draft), later pushes keep reviewing while the label stays on, and
 removing the label stops the bot. The label is the maintainer's trust decision: the
 workflow runs with `pull_request_target` (definition always taken from `main`, so a
 fork can't alter the bot's prompt/tools), and the residual risk of the bot *reading*

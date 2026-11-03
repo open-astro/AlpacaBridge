@@ -59,8 +59,9 @@ author as `github-actions` while the REST API reports `github-actions[bot]`, so 
   starts its first review.
 
 A draft in the list is marked ready first, `gh pr ready <N>`, since running this skill on it is the
-request to review and merge it. That starts a review on the same head, so treat it like Step 1.1
-having acted: skip the Step 1.4 pre-check and go to Step 2.
+request to review and merge it. That starts a review on the same head, so still run Steps 1.1 to
+1.3 as usual (a fork draft still needs `safe-to-review`, or the `ready_for_review` run is skipped
+too) and skip only the Step 1.4 pre-check, as when Step 1.1 has acted.
 
 Checks to make before waiting on anything:
 
