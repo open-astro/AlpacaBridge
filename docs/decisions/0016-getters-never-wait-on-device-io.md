@@ -53,7 +53,7 @@ Symbol: `transition_mutex_`
 | iOptron switch |  | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp` | adopted |  |  |
 | iOptron telescope |  | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | partial | #1829 | `mutex_` held across connect, getter refills and commands |
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | | `util::LockGate` drops `mutex_` per exchange |
-| Player One camera |  | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | partial | #1841 | `mutex_` held across the SDK connect |
+| Player One camera |  | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted |  |  |
 | Player One filter wheel |  | `AlpacaCore/src/vendors/playerone/playerone_filterwheel_driver.cpp` | adopted |  |  |
 | Player One thermal switch |  | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | adopted |  |  |
 | QHY camera |  | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | adopted |  | on the I/O-lock order |

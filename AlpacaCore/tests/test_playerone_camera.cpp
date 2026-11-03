@@ -14,6 +14,7 @@
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,7 @@
 #include "driver_rig.h"
 #include "fake_playerone_sdk.h"
 #include "fake_task_clock.h"
+#include "getter_stall_probe.h"
 #include "locked_playerone_sdk.h"
 
 namespace {
@@ -1944,4 +1946,92 @@ TEST_CASE("Player One Camera Driver - A download failure after a failed AbortExp
         return false;
     }));
     driver->set_connected(false);
+}
+
+// Decision 0016 rules 1 and 4: Name and the other identity getters need no device access, so a connect that
+// holds the SDK open must not park them. The open is held on a latch; the getters run on the test thread.
+// Falsified by: playerone_camera_driver.cpp set_connected(true) holding mutex_ across open_camera() (get_name()
+// then waits until the latch is released and the timed call below fails its budget).
+TEST_CASE("Player One Camera Driver - Name and identity getters answer while a connect holds the SDK open",
+          "[playerone][camera][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakePlayerOneSDK sdk;
+    FakeTaskClock clock;
+    std::atomic<bool> open_entered{false};
+    std::atomic<bool> release_open{false};
+    std::atomic<bool> info_read_during_open{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call == "enumerate_cameras" && open_entered.load() && !release_open.load()) {
+            info_read_during_open = true;
+        }
+        if (call != "open_camera") return;
+        open_entered = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!release_open.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    auto camera = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30), clock);
+
+    std::thread connector([&] { camera->set_connected(true); });
+    const bool entered = wait_for_flag(open_entered);
+    if (entered) {
+        CHECK(timed([&] { (void)camera->get_name(); }) < kGetterBudget);
+        CHECK(timed([&] { (void)camera->get_unique_id(); }) < kGetterBudget);
+        CHECK(timed([&] { (void)camera->get_sensor_name(); }) < kGetterBudget);
+        CHECK(timed([&] { CHECK_FALSE(camera->get_connected()); }) < kGetterBudget);
+        CHECK_FALSE(info_read_during_open.load());  // the name getter does not reach the SDK behind the open
+        CHECK_FALSE(release_open.load());           // the open is still held, so the timings above are not vacuous
+    }
+
+    // Release and join before any REQUIRE: a joinable thread at scope exit would terminate the test run.
+    release_open = true;
+    connector.join();
+    REQUIRE(entered);
+    CHECK(camera->get_connected());
+    CHECK(camera->get_name() == sdk.camera_name());
+    camera->set_connected(false);
+}
+
+// Decision 0016 rule 6: a name refresh that read the SDK by index while a connect ran must not overwrite what the
+// connect published. The refresh is held inside enumerate_cameras on a latch, a connect completes, the SDK
+// then reports another name, and the refresh is released.
+// Falsified by: playerone_camera_driver.cpp refresh_cached_camera_info_if_needed() writing camera_info_ without the
+// connected_/connect_in_flight_ re-check (get_name() then returns the stale refresh name).
+TEST_CASE("Player One Camera Driver - A name refresh that overlapped a connect does not overwrite the connect's info",
+          "[playerone][camera][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakePlayerOneSDK sdk;
+    FakeTaskClock clock;
+    static thread_local bool is_refresher = false;
+    std::atomic<bool> refresh_entered{false};
+    std::atomic<bool> release_refresh{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call != "enumerate_cameras" || !is_refresher) return;
+        refresh_entered = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!release_refresh.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    auto camera = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30), clock);
+
+    std::thread refresher([&] {
+        is_refresher = true;
+        (void)camera->get_name();
+    });
+    const bool entered = wait_for_flag(refresh_entered);
+
+    const std::string connect_name = sdk.camera_name();
+    if (entered) {
+        camera->set_connected(true);
+        sdk.set_camera_name("Stale Refresh Name");
+    }
+    // Release and join before any REQUIRE: a joinable thread at scope exit would terminate the test run.
+    release_refresh = true;
+    refresher.join();
+    REQUIRE(entered);
+
+    CHECK(camera->get_name() == connect_name);
+    camera->set_connected(false);
 }
