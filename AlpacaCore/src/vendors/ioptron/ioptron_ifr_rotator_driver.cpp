@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hold_window.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/task_clock.h>
@@ -39,6 +40,7 @@ constexpr auto kMoveHold = std::chrono::milliseconds(1000);
 constexpr auto kStatusTtl = std::chrono::milliseconds(100);
 // The CAA's resolution from the iFR product page; moves land within one step of the target on the rig.
 constexpr double kStepSizeDegrees = 0.004;
+constexpr const char* kCacheLabel = "iOptron iFR rotator";  // the status cache's label, its fault text prefix
 // A frame within this of the target counts as arrived: a little over one step, the landing error measured.
 constexpr double kArrivalToleranceDegrees = 0.02;
 
@@ -80,7 +82,7 @@ public:
           device_number_(device_number),
           model_(ifr_model_for(model)),
           session_(std::move(config), std::move(resolver)),
-          status_cache_("iOptron iFR rotator", kStatusTtl, 3, "iOptron", clock) {}
+          status_cache_(kCacheLabel, kStatusTtl, 3, "iOptron", clock) {}
 
     ~IfrRotatorDriver() override {
         shutdown_connection();
@@ -111,7 +113,13 @@ public:
     }
 
     bool get_connected() const override { return connected_.load() && session_.alive(); }
-    std::string get_link_fault() const override { return session_.link_fault(); }
+    // Decision 0009 rules 1 and 5: the session's loss reason, kept after a loss, else the :RI# fault the status
+    // cache latched (Connected stays true). Both are leaf-mutex reads; neither waits on the wire.
+    std::string get_link_fault() const override {
+        std::string lost = session_.link_fault();
+        if (!lost.empty()) return lost;
+        return status_cache_.fault();
+    }
 
     void connect() override { start_connection_task(true); }
 
@@ -182,6 +190,7 @@ public:
 
     void set_reverse(bool reverse) override {
         const auto link = connected_link();
+        ensure_link_healthy(*link);
         IfrAck ack = IfrAck::Silent;
         try {
             ack = link->rotator_set_reverse(reverse);
@@ -235,10 +244,12 @@ public:
 
     void halt() override {
         const auto link = connected_link();
+        lose_link_if_fault_stale(*link);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             move_hold_.clear();
         }
+        // Sent even while a fault stands: a stop is never withheld. A latched fault still fails the call below.
         try {
             if (link->rotator_halt() == IfrAck::Refused) {
                 ALPACA_LOG_WARN("iOptron", "iFR rotator refused :RQ# (Halt)");
@@ -248,6 +259,7 @@ public:
             throw;
         }
         status_cache_.invalidate();
+        throw_if_faulted();
     }
 
     void move(double position) override {
@@ -275,6 +287,7 @@ public:
     void sync(double position) override {
         validate_angle(position);
         const auto link = connected_link();
+        ensure_link_healthy(*link);
         const double target = wrap(position);
         status_cache_.invalidate();
         const bool reversed = read_status().reversed;
@@ -337,11 +350,39 @@ private:
         try {
             return status_cache_.get([&link] { return link->rotator_status(); });
         } catch (const AlpacaException&) {
-            if (!link->link_alive()) {
-                throw AlpacaException("iFR link lost; Connect again once the unit is back", AlpacaError::NotConnected);
-            }
+            // A loss inside the refill is NotConnected however many reads failed before it (decision 0009 rule 3),
+            // and so is a fault that has now stood past the staleness bound (rule 2).
+            lose_link_if_fault_stale(*link);
             throw;
         }
+    }
+
+    // Decision 0009 rule 2: an :RI# fault that has stood past util::kLinkStalenessBound on the task clock loses the
+    // link, found by the next failed read or write (there is no poll). The loss is the session's, so the focuser
+    // of the same unit reads Connected false too. Throws NotConnected once the link is lost. Takes no driver lock;
+    // the session's I/O lock, then the cache's leaf fault mutex.
+    void lose_link_if_fault_stale(IfrLink& link) const {
+        // The text first: a stale fault was latched at least the bound ago, so it is already set here.
+        const std::string fault = status_cache_.fault();
+        if (link.lose_link_if([this] { return status_cache_.fault_stale(); },
+                              "iFR rotator status fault stood for " +
+                                  std::to_string(util::kLinkStalenessBound.count()) +
+                                  " s with no good reply: " + fault)) {
+            throw AlpacaException("iFR link lost; Connect again once the unit is back", AlpacaError::NotConnected);
+        }
+    }
+
+    // Decision 0009 rule 1: a latched fault fails a write as it fails a read. Only a good :RI# clears it.
+    void throw_if_faulted() const {
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException(std::string(kCacheLabel) + " communications compromised: " + fault,
+                                  AlpacaError::DriverException);
+        }
+    }
+
+    void ensure_link_healthy(IfrLink& link) const {
+        lose_link_if_fault_stale(link);
+        throw_if_faulted();
     }
 
     void restore_reverse(IfrLink& link) {
@@ -351,6 +392,7 @@ private:
     }
 
     void start_move(const std::shared_ptr<IfrLink>& link, double target) {
+        ensure_link_healthy(*link);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             target_position_ = target;

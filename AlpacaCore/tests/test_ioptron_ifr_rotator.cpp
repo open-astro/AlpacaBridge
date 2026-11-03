@@ -17,6 +17,8 @@
 
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
+#include <alpacacore/vendor/ioptron/ioptron_ifr_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ifr_rotator_driver.h>
 #include <alpacacore/version.h>
 
@@ -247,4 +249,34 @@ TEST_CASE("iOptron iFR Rotator Driver - Reverse mirrors Position, not the mechan
         driver->set_reverse(false);
         CHECK(driver->get_position() == Catch::Approx(35.0));
     }
+}
+
+TEST_CASE("iOptron iFR Rotator Driver - a unit that stops answering faults, then loses the link",
+          "[ioptron][ifr][rotator][link-lost]") {
+    FakeIoptronIfr fake;
+    FakeTaskClock clock;
+    auto rotator = connected_rotator(fake, clock);
+    auto focuser = ifr::create_ifr_focuser(0, fake.slave_path(), "ifr3", clock);
+    focuser->set_connected(true);
+
+    // Decision 0009 rule 1 on the rotator's own :RI# reads.
+    fake.set_silent(true);
+    for (int i = 0; i < 3; ++i) {
+        next_poll(clock);
+        require_alpaca_error([&] { (void)rotator->get_position(); }, AlpacaError::DriverException);
+    }
+    CHECK(rotator->get_connected());
+    CHECK_FALSE(rotator->get_link_fault().empty());
+    // Every write is refused while the fault stands: none may read as done on a silent ack.
+    require_alpaca_error([&] { rotator->move_absolute(90.0); }, AlpacaError::DriverException);
+    require_alpaca_error([&] { rotator->set_reverse(true); }, AlpacaError::DriverException);
+
+    // Rule 2: past the staleness bound the next refused write loses the link for both devices.
+    clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    require_alpaca_error([&] { rotator->move_absolute(90.0); }, AlpacaError::NotConnected);
+    CHECK_FALSE(rotator->get_connected());
+    CHECK_FALSE(focuser->get_connected());
+    CHECK(rotator->get_link_fault() == focuser->get_link_fault());
+    rotator->set_connected(false);
+    focuser->set_connected(false);
 }

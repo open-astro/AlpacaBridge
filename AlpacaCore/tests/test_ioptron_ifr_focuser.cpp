@@ -17,6 +17,7 @@
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/ioptron/ioptron_ifr_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ifr_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_ifr_rotator_driver.h>
@@ -268,4 +269,44 @@ TEST_CASE("iOptron iFR - a pulled cable loses the link for both devices", "[iopt
     // A Disconnect drops the kept reason (decision 0009 rule 5).
     focuser->set_connected(false);
     CHECK(focuser->get_link_fault().empty());
+}
+
+TEST_CASE("iOptron iFR - a unit that stops answering faults, then loses the link for both devices",
+          "[ioptron][ifr][focuser][link-lost]") {
+    FakeIoptronIfr fake;
+    FakeTaskClock clock;
+    auto focuser = ifr::create_ifr_focuser(0, fake.slave_path(), "ifr3", clock);
+    auto rotator = ifr::create_ifr_rotator(0, fake.slave_path(), "ifr3", clock);
+    focuser->set_connected(true);
+    rotator->set_connected(true);
+
+    // The USB node stays up; the firmware stops replying. Decision 0009 rule 1: three failed reads latch the
+    // fault, Connected stays true, and get_link_fault() is the fault's text.
+    fake.set_silent(true);
+    for (int i = 0; i < 3; ++i) {
+        next_poll(clock);
+        require_alpaca_error([&] { (void)focuser->get_position(); }, AlpacaError::DriverException);
+    }
+    CHECK(focuser->get_connected());
+    CHECK(rotator->get_connected());
+    CHECK_FALSE(focuser->get_link_fault().empty());
+    // A latched fault refuses a write as it refuses the read (a silent ack must not read as a move made).
+    require_alpaca_error([&] { focuser->move(2000); }, AlpacaError::DriverException);
+
+    // Rule 2: a fault that has stood past the staleness bound loses the link, for both devices of the unit.
+    clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    require_alpaca_error([&] { (void)focuser->get_position(); }, AlpacaError::NotConnected);
+    CHECK_FALSE(focuser->get_connected());
+    CHECK_FALSE(rotator->get_connected());
+    CHECK_FALSE(focuser->get_link_fault().empty());
+    CHECK(focuser->get_link_fault() == rotator->get_link_fault());  // rule 5: the one kept text
+
+    // Rule 4: only Connect relinks, with a fresh handshake, once the unit answers again.
+    fake.set_silent(false);
+    focuser->set_connected(true);
+    CHECK(focuser->get_connected());
+    CHECK(focuser->get_link_fault().empty());
+    CHECK(fake.handshakes() == 2);
+    focuser->set_connected(false);
+    rotator->set_connected(false);
 }

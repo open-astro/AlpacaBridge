@@ -325,6 +325,17 @@ public:
         return fault_;
     }
 
+    bool lose_link_if(const std::function<bool()>& stale, const std::string& reason) {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        if (lost_.load()) return true;
+        if (!opened_ || !stale()) return false;
+        ALPACA_LOG_ERROR("iOptron", "iFR link lost on " + port_ + ": " + reason + " (port released)");
+        set_fault(reason);
+        lost_.store(true);
+        close_locked();
+        return true;
+    }
+
     IfrFocuserStatus focuser_status() {
         std::lock_guard<std::mutex> lock(io_mutex_);
         ensure_open_locked();
@@ -543,6 +554,10 @@ IfrLink::~IfrLink() = default;
 bool IfrLink::link_alive() const noexcept { return impl_->link_alive(); }
 
 std::string IfrLink::link_fault() const { return impl_->link_fault(); }
+
+bool IfrLink::lose_link_if(const std::function<bool()>& stale, const std::string& reason) {
+    return impl_->lose_link_if(stale, reason);
+}
 
 IfrFocuserStatus IfrLink::focuser_status() { return impl_->focuser_status(); }
 

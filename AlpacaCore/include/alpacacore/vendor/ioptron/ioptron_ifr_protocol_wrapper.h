@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -121,6 +122,12 @@ public:
     bool link_alive() const noexcept;
     /// Why the link was lost ("iFR serial link lost (errno N)"), or empty. Never waits on the wire.
     std::string link_fault() const;
+    /// Decision 0009 rule 2 for a unit that stays plugged in but stops answering: when @p stale() holds, lose the
+    /// link for both devices, release the port and keep @p reason for link_fault(). @p stale runs under the I/O
+    /// lock, so no exchange is in flight, and a driver's Connect (which resets its status cache before it joins a
+    /// session) cannot interleave: a fresh session is never lost on an old fault. @p stale must take only leaf
+    /// locks. True when the link is lost, by this call or before it.
+    bool lose_link_if(const std::function<bool()>& stale, const std::string& reason);
 
     IfrFocuserStatus focuser_status();
     /// :FM%07u#. The caller range-checks; Refused means the firmware would not move that way.

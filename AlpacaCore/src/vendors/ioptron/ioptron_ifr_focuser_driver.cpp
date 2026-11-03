@@ -14,6 +14,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hold_window.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/ttl_status_cache.h>
@@ -40,6 +41,7 @@ constexpr auto kStatusTtl = std::chrono::milliseconds(100);
 // The focuser's minimum step, from the iFR product page (0.4 um); 62,822 steps measured between the 3"'s
 // limit stops over its 25 mm travel agree.
 constexpr double kStepSizeMicrons = 0.4;
+constexpr const char* kCacheLabel = "iOptron iFR focuser";  // the status cache's label, its fault text prefix
 
 }  // namespace
 
@@ -55,7 +57,7 @@ public:
           device_number_(device_number),
           model_(ifr_model_for(model)),
           session_(std::move(config), std::move(resolver)),
-          status_cache_("iOptron iFR focuser", kStatusTtl, 3, "iOptron", clock) {}
+          status_cache_(kCacheLabel, kStatusTtl, 3, "iOptron", clock) {}
 
     ~IfrFocuserDriver() override {
         // Blocks new connection tasks and joins the one in flight: first, before the members it touches go.
@@ -89,7 +91,13 @@ public:
 
     // Lock-free (decision 0016 rule 3): the flag and the session's loss latch.
     bool get_connected() const override { return connected_.load() && session_.alive(); }
-    std::string get_link_fault() const override { return session_.link_fault(); }
+    // Decision 0009 rules 1 and 5: the session's loss reason, kept after a loss, else the :FI# fault the status
+    // cache latched (Connected stays true). Both are leaf-mutex reads; neither waits on the wire.
+    std::string get_link_fault() const override {
+        std::string lost = session_.link_fault();
+        if (!lost.empty()) return lost;
+        return status_cache_.fault();
+    }
 
     void connect() override { start_connection_task(true); }
 
@@ -205,10 +213,12 @@ public:
 
     void halt() override {
         const auto link = connected_link();
+        lose_link_if_fault_stale(*link);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             move_hold_.clear();
         }
+        // Sent even while a fault stands: a stop is never withheld. A latched fault still fails the call below.
         try {
             if (link->focuser_halt() == IfrAck::Refused) {
                 ALPACA_LOG_WARN("iOptron", "iFR focuser refused :FQ# (Halt)");
@@ -218,6 +228,7 @@ public:
             throw;
         }
         status_cache_.invalidate();
+        throw_if_faulted();
     }
 
     void move(int position) override {
@@ -227,6 +238,7 @@ public:
                 AlpacaError::InvalidValue);
         }
         const auto link = connected_link();
+        ensure_link_healthy(*link);
         {
             // Armed before the command goes out (decision 0022 rule 2's shape).
             std::lock_guard<std::mutex> lock(mutex_);
@@ -274,12 +286,39 @@ private:
         try {
             return status_cache_.get([&link] { return link->focuser_status(); });
         } catch (const AlpacaException&) {
-            // A loss inside the refill is NotConnected however many reads failed before it (decision 0009).
-            if (!link->link_alive()) {
-                throw AlpacaException("iFR link lost; Connect again once the unit is back", AlpacaError::NotConnected);
-            }
+            // A loss inside the refill is NotConnected however many reads failed before it (decision 0009 rule 3),
+            // and so is a fault that has now stood past the staleness bound (rule 2).
+            lose_link_if_fault_stale(*link);
             throw;
         }
+    }
+
+    // Decision 0009 rule 2: a :FI# fault that has stood past util::kLinkStalenessBound on the task clock loses the
+    // link, found by the next failed read or write (there is no poll). The loss is the session's, so the rotator
+    // of the same unit reads Connected false too. Throws NotConnected once the link is lost. Takes no driver lock;
+    // the session's I/O lock, then the cache's leaf fault mutex.
+    void lose_link_if_fault_stale(IfrLink& link) const {
+        // The text first: a stale fault was latched at least the bound ago, so it is already set here.
+        const std::string fault = status_cache_.fault();
+        if (link.lose_link_if([this] { return status_cache_.fault_stale(); },
+                              "iFR focuser status fault stood for " +
+                                  std::to_string(util::kLinkStalenessBound.count()) +
+                                  " s with no good reply: " + fault)) {
+            throw AlpacaException("iFR link lost; Connect again once the unit is back", AlpacaError::NotConnected);
+        }
+    }
+
+    // Decision 0009 rule 1: a latched fault fails a write as it fails a read. Only a good :FI# clears it.
+    void throw_if_faulted() const {
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException(std::string(kCacheLabel) + " communications compromised: " + fault,
+                                  AlpacaError::DriverException);
+        }
+    }
+
+    void ensure_link_healthy(IfrLink& link) const {
+        lose_link_if_fault_stale(link);
+        throw_if_faulted();
     }
 
     void clear_hold() {
