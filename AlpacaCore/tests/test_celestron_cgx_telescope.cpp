@@ -70,6 +70,16 @@ bool wait_until(Predicate predicate, std::chrono::milliseconds timeout = std::ch
     return predicate();
 }
 
+// Slewing reads false. Until the first stop ACK the link fault raises (#1950), which is not done yet.
+bool stop_done(const alpacacore::TelescopeDriver& driver) {
+    try {
+        return !driver.get_slewing();
+    } catch (const alpacacore::AlpacaException& error) {
+        if (error.error_code() != alpacacore::AlpacaError::DriverException) throw;
+        return false;
+    }
+}
+
 }  // namespace
 
 TEST_CASE("Celestron CGX USB Telescope Driver - disconnect waits for an in-flight motion handoff",
@@ -880,9 +890,60 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop communication failures pers
             driver->unpark();
         else
             driver->abort_slew();
-        REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
+        REQUIRE(wait_until([&] { return stop_done(*driver); }));
         CHECK_FALSE(driver->get_at_park());
         CHECK_FALSE(driver->get_tracking());
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - Slewing raises the link fault while a stop is pending",
+          "[celestron][cgx][telescope][integration][issue1950]") {
+    for (const bool unpark : {false, true}) {
+        alpacacore::test::FakeCelestronCgxMount mount;
+        REQUIRE(mount.ok());
+        mount.set_auto_complete_motions(true);
+        auto info = test_info();
+        info.port_path = mount.slave_path();
+        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        driver->set_connected(true);
+        if (unpark) {
+            driver->park();
+            REQUIRE(wait_until([&] { return driver->get_at_park() && !driver->get_slewing(); }));
+        } else {
+            driver->find_home();
+            REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
+        }
+        const auto slewing_raises_fault = [&] {
+            require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); },
+                                 alpacacore::AlpacaError::DriverException);
+        };
+        // A lost encoder reply faults the link until the next matched reply.
+        mount.drop_next_reply(0x10, 0x01, false);
+        require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
+                             alpacacore::AlpacaError::DriverException);
+        slewing_raises_fault();
+        // The out-of-sync link refuses the first RA stop unsent, and the mount
+        // stays silent for the next three stops (Dec, RA, Dec).
+        mount.drop_next_reply(0x11, 0x24, false);
+        mount.drop_next_reply(0x10, 0x24, false);
+        mount.drop_next_reply(0x11, 0x24, false);
+        const auto stops = [&] { return mount.count_command(0x10, 0x24) + mount.count_command(0x11, 0x24); };
+        const int stops_before = stops();
+        if (unpark)
+            driver->unpark();
+        else
+            driver->abort_slew();
+        slewing_raises_fault();
+        slewing_raises_fault();
+        // Only the fourth stop request can get a reply, so both reads above ran
+        // with the stop pending and the link still faulted.
+        CHECK(stops() < stops_before + 4);
+        // The first stop ACK clears the fault, and the stop then completes.
+        REQUIRE(wait_until([&] { return stop_done(*driver); }, std::chrono::seconds(10)));
+        CHECK_FALSE(driver->get_slewing());
+        CHECK(stops() == stops_before + 5);
+        CHECK_FALSE(driver->get_at_park());
         driver->set_connected(false);
     }
 }
@@ -1958,7 +2019,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - desync and owned-link recovery r
         CHECK(mount.count_command(0x10, 0x01) == reads);
         // A verified stop recovers transport matching, not encoder calibration.
         driver->abort_slew();
-        REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
+        REQUIRE(wait_until([&] { return stop_done(*driver); }));
         REQUIRE(driver->get_connected());
         refuse_reference();
         driver->set_connected(false);
@@ -2881,7 +2942,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stops the responsive axis when t
         // owner's 3 s busy-verification budget. The held-ACK test above pins
         // intermediate Slewing without racing this worker's completion.
         // Bound that worker drain separately from the nonblocking initiator.
-        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+        REQUIRE(wait_until([&] { return stop_done(*driver); }, std::chrono::seconds(5)));
 
         CHECK(mount.count_command(silent_axis, 0x24) == silent_stops_before + 3);
         CHECK(mount.count_command(responsive_axis, 0x24) == stops_before + 3);
@@ -2924,7 +2985,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - unresolved guide failure cannot 
 
     mount.complete_axis_guide(0x11);
     driver->abort_slew();
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
+    REQUIRE(wait_until([&] { return stop_done(*driver); }));
     CHECK_FALSE(driver->get_is_pulse_guiding());
     driver->set_connected(false);
 }
