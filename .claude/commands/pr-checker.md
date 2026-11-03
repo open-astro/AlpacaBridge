@@ -65,7 +65,8 @@ too) and skip only the Step 1.4 pre-check, as when Step 1.1 has acted.
 
 Checks to make before waiting on anything:
 
-1. **`review` check skipped / no verdict comment and no `safe-to-review` label** -> add the label
+1. **`review` check skipped / no verdict comment and no `safe-to-review` label** (a draft marked ready
+   first, as above) -> add the label
    via REST (`gh pr edit --add-label` can choke on a GraphQL projects warning):
    ```bash
    gh api -X POST repos/open-astro/AlpacaBridge/issues/<N>/labels -f 'labels[]=safe-to-review'

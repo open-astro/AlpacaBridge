@@ -1,7 +1,8 @@
 name: Claude Code Review
 
 # pull_request_target so repository secrets reach fork PRs, but only once a
-# maintainer applies the `safe-to-review` label (job-level `if`). The workflow
+# maintainer applies the `safe-to-review` label (job-level `if`, which also
+# skips drafts until they are marked ready). The workflow
 # definition always comes from the default branch under this trigger, so a
 # fork cannot alter the prompt or tools; the residual risk is the agent
 # READING hostile PR content, bounded by the read-only allowedTools below.
