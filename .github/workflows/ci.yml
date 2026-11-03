@@ -11,14 +11,19 @@
 # Jobs:
 #   build-test     build vendor-neutral core + run unit tests (the base gate),
 #                  in a debian:trixie container (the distribution we ship for)
-#   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
-#                  vendors ON, instrumented for gcov; per-component + combined
-#                  line coverage in the job summary, HTML/JSON artifact (no
-#                  threshold)
+#   build-vendors-shard  stage in-tree vendor SDK .so libs, build with all
+#                  vendors ON, instrumented for gcov, and run every third test
+#                  (three shards); each uploads its raw coverage JSON, except
+#                  in the merge queue
+#   build-vendors  pass only when all three shards passed; merge their coverage
+#                  into per-component + combined line coverage in the job
+#                  summary, HTML/JSON artifact (no threshold); in the merge
+#                  queue it only checks the shards
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
 #   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
-#                  connect/disconnect/operate concurrency suite (issue #101),
-#                  plus [stress-guard] (the harness's own self-tests, issue #322)
+#                  connect/disconnect/operate concurrency suite (issue #101) as
+#                  one Catch2 shard per core in parallel processes, plus
+#                  [stress-guard] (the harness's own self-tests, issue #322)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   package-deb    build the .deb in debian:trixie, install it, run
@@ -69,7 +74,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 # Single source of truth for the vendored libgpiod build dependency — the
-# build-vendors, sanitizers-tsan and clang-tidy jobs consume these,
+# build-vendors-shard, sanitizers-tsan and clang-tidy jobs consume these,
 # so a version bump can't skew them (tarball + README in AlpacaCore/external/libgpiod/).
 env:
   LIBGPIOD_VER: "2.2.4"
@@ -188,14 +193,25 @@ jobs:
         # configure, no compile.
         run: scripts/check_beta_configure.sh
 
-  build-vendors:
-    # The all-vendors suite runs once, instrumented for coverage: the build,
-    # the tests and the gcovr report are this one job (the separate coverage
-    # job ran the same 2413 tests a second time, also at -O0). The report is
-    # informational: no --fail-under threshold.
-    name: Build + test (all vendors, arm64)
+  build-vendors-shard:
+    # The all-vendors suite runs once, instrumented for coverage, split across
+    # three runners: each shard builds the whole tree (ccache makes the build
+    # about 1.5 min) and runs every third test (`ctest -I <shard>,,3`, via
+    # CTEST_SHARD in run_all_tests.sh), so the slow driver cases, which sit
+    # next to each other in test-number order, are spread over the three. One
+    # runner took about 11.5 min of ctest for about 88 min of test time; the
+    # cases wait on fake hardware in real time, so a third of them per runner
+    # also means less contention for the ones that measure time. Each shard
+    # uploads its raw gcovr JSON; build-vendors below merges the three into
+    # the report. The report is informational: no --fail-under threshold.
+    name: Build + test (all vendors, arm64, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    strategy:
+      # Every shard runs to the end, so one red shard does not hide another's failures.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -232,40 +248,58 @@ jobs:
             libcurl4-openssl-dev \
             gcovr
 
-      - name: Build libgpiod v2 from source
-        # The ZWO switch drivers require libgpiod >= 2.0 (gpiod_chip_request_lines),
-        # which the runner's apt does not provide. Install the upstream release
-        # into /usr/local so CMake's find_library picks it up ahead of any system
-        # copy.
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
-          # README there): kernel.org removed old libgpiod point releases on
-          # 2026-07-01 and every mirror synced the deletion within hours,
-          # 404-ing this step twice in one day. No network fetch remains. The
-          # pinned checksum (kernel.org's published sha256, workflow env so
-          # both jobs share one pin) guards against corruption — not
-          # adversarial modification; see the README beside the tarball.
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
       - name: Stage vendor SDK shared libraries
         # Mirrors run_system_setup() in build_and_run.sh: copy the in-tree
@@ -318,6 +352,7 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
           CXXFLAGS: "--coverage -O0 -g"
           LDFLAGS: "--coverage"
+          CTEST_SHARD: ${{ matrix.shard }}/3
         # Zeroed first: the statistics live in the cached directory, so they
         # would otherwise add up every run since the cache was first saved.
         run: |
@@ -330,37 +365,117 @@ jobs:
         run: ccache --show-stats --verbose
 
       - name: Save the compiler cache
-        if: always() && github.event_name == 'push'
+        # Every shard compiles the same tree, so one of them saves it: a second
+        # save of the same key would be refused.
+        if: always() && github.event_name == 'push' && matrix.shard == 1
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
           key: ccache-all-vendors-coverage-${{ github.sha }}
 
-      - name: Generate coverage report
+      - name: Collect this shard's coverage data
+        # Not in the merge queue, which needs pass or fail, not a report (the
+        # PR's own run already published it); about 30 s per shard.
+        if: github.event_name != 'merge_group'
         # Over the one tree run_all_tests.sh builds: AlpacaHTTP/build holds
         # AlpacaCore as a subdirectory, and both suites write the same .gcda
-        # files there (issue #1251).
+        # files there (issue #1251). Raw JSON only: build-vendors merges the
+        # three shards' files (gcovr -a adds the hit counts) and writes the
+        # reports.
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mkdir -p coverage-raw
+          gcovr --root . -j "$(nproc)" \
+            --exclude '.*/tests/' \
+            --exclude '.*/external/' \
+            --exclude '.*/examples/' \
+            --exclude '.*/build[^/]*/' \
+            --gcov-ignore-parse-errors=all \
+            --filter 'AlpacaCore/(src|include)/' \
+            --filter 'AlpacaHTTP/(src|include)/' \
+            --json "coverage-raw/shard-${SHARD}.json" \
+            AlpacaHTTP/build
+
+      - name: Upload this shard's coverage data
+        if: github.event_name != 'merge_group'
+        # Kept a week: re-running one failed shard re-runs build-vendors, which
+        # reads the other shards' files from the earlier attempt.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: coverage-raw-${{ matrix.shard }}
+          path: coverage-raw/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-vendors:
+    # The required check and the review bot's CI wait both name this job, so
+    # it keeps the name the single all-vendors job had. It passes only when
+    # all three shards passed: `!cancelled()` runs it after a failed shard
+    # (to fail here), where a plain needs: would skip it, and a skipped job
+    # satisfies a required check. A run cancelled by a newer push skips it.
+    name: Build + test (all vendors, arm64)
+    needs: build-vendors-shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Require every shard to pass
+        env:
+          SHARDS: ${{ needs.build-vendors-shard.result }}
+        run: |
+          if [ "${SHARDS}" != "success" ]; then
+            echo "::error::An all-vendors test shard did not pass (result: ${SHARDS}); see the shard jobs."
+            exit 1
+          fi
+
+      # The rest builds the coverage report, which the merge queue skips (see
+      # "Collect this shard's coverage data"); there the job only checks the shards.
+      - name: Checkout
+        # gcovr reads the sources for the HTML report.
+        if: github.event_name != 'merge_group'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install gcovr
+        if: github.event_name != 'merge_group'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcovr
+
+      - name: Download the shards' coverage data
+        if: github.event_name != 'merge_group'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: coverage-raw-*
+          path: coverage-raw
+          merge-multiple: true
+
+      - name: Generate coverage report
+        if: github.event_name != 'merge_group'
+        # The shards ran gcov over their own trees with the same filters and
+        # excludes; adding their JSON (-a) sums each line's hits, so this is the
+        # report one runner running every test would write. The combined JSON
+        # it writes feeds the two component reports.
         run: |
           set -euo pipefail
           mkdir -p coverage/html
-          excludes=(
-            --exclude '.*/tests/'
-            --exclude '.*/external/'
-            --exclude '.*/examples/'
-            --exclude '.*/build[^/]*/'
-          )
-          # gcov runs once, for the combined report, which also writes the
-          # raw data as JSON; the two component reports are filtered from that
-          # JSON (-a) instead of running gcov over every .gcda again.
-          gcovr --root . -j "$(nproc)" "${excludes[@]}" \
-            --gcov-ignore-parse-errors=all \
+          shards=(coverage-raw/shard-*.json)
+          if [ "${#shards[@]}" -ne 3 ] || [ ! -f "${shards[0]}" ]; then
+            echo "::error::expected three shard coverage files, found: ${shards[*]}"
+            exit 1
+          fi
+          tracefiles=()
+          for f in "${shards[@]}"; do tracefiles+=(-a "$f"); done
+          gcovr --root . "${tracefiles[@]}" \
             --filter 'AlpacaCore/(src|include)/' \
             --filter 'AlpacaHTTP/(src|include)/' \
             --json coverage/combined-raw.json \
             --txt coverage/combined.txt \
             --json-summary-pretty --json-summary coverage/combined.json \
-            --html-details coverage/html/index.html \
-            AlpacaHTTP/build
+            --html-details coverage/html/index.html
           report() {
             local name="$1"
             shift
@@ -394,6 +509,7 @@ jobs:
           PY
 
       - name: Upload coverage report
+        if: github.event_name != 'merge_group'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage
@@ -484,7 +600,7 @@ jobs:
 
       - name: Install build dependencies
         # libgpiod-dev intentionally omitted (needs >= 2.0, built from source
-        # below) — mirrors the build-vendors job. catch2 is required: without
+        # below) — mirrors the build-vendors-shard job. catch2 is required: without
         # it the tests CMakeLists silently skips the suite and this job would
         # green-light while running nothing.
         run: |
@@ -508,34 +624,61 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
-      - name: Build libgpiod v2 from source
-        # Same vendored tarball + pinned checksum as the build-vendors job
-        # (see the README beside the tarball).
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
       - name: Stage vendor SDK shared libraries
-        # Mirrors the build-vendors job: the vendor-ON build links the in-tree
+        # Mirrors the build-vendors-shard job: the vendor-ON build links the in-tree
         # arm64 vendor .so files from the loader path.
         run: |
           set -euo pipefail
@@ -615,11 +758,43 @@ jobs:
           # (issue #322 review finding). Keep it that way: anything tagged
           # [stress] that is not a vendor registration makes this gate vacuous
           # again.
-          ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log
-          # The test binary's own exit code (via pipefail) is the pass/fail gate;
-          # this grep only guards the zero-test case, so it deliberately matches
-          # both Catch2 summary forms without distinguishing pass from fail.
-          grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-run.log
+          #
+          # The [stress] cases run as Catch2 shards (--shard-count/--shard-index)
+          # in parallel processes, one per core: run serially they took about
+          # 7.75 min of a 9.4 min job, mostly waiting on fakes in real time,
+          # and the all-vendors ctest already runs them in parallel processes.
+          # Each shard's exit code is the pass/fail gate and its log is shown in
+          # its own group; the grep guards the zero-test case per shard, so it
+          # deliberately matches both Catch2 summary forms.
+          shards="$(nproc)"
+          pids=()
+          # A subshell per shard, so `wait` returns the test's status through
+          # pipefail rather than tee's (a bare background pipeline's $! is tee).
+          for ((i = 0; i < shards; i++)); do
+            (
+              set -o pipefail
+              ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" \
+                --shard-count "${shards}" --shard-index "${i}" 2>&1 | tee "stress-run-${i}.log" > /dev/null
+            ) &
+            pids+=("$!")
+          done
+          failed=()
+          for ((i = 0; i < shards; i++)); do
+            wait "${pids[i]}" || failed+=("${i}")
+          done
+          for ((i = 0; i < shards; i++)); do
+            echo "::group::[stress] shard $((i + 1)) of ${shards}"
+            cat "stress-run-${i}.log"
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::[stress] shard index(es) ${failed[*]} failed; see their groups above"
+            exit 1
+          fi
+          for ((i = 0; i < shards; i++)); do
+            grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "stress-run-${i}.log" \
+              || { echo "::error::[stress] shard index ${i} ran no tests"; exit 1; }
+          done
           # Core/harness self-tests that need TSan but aren't a vendor
           # registration -- StressCallGuard's concurrency case and the
           # AsyncConnectable lifecycle case -- run under their own tag,
@@ -627,6 +802,23 @@ jobs:
           # or dropped tag doesn't silently skip them either.
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-guard-run.log
+
+      - name: Show the [stress] shard logs when the job is cancelled
+        # The run above prints the shard logs only once every shard has exited,
+        # so a shard that hangs until timeout-minutes cancels the job would
+        # otherwise leave none of its output in the job log. A failure already
+        # printed them, so this runs on a cancel only (a timeout, a newer push
+        # or a manual cancel). For a timeout that relies on the job's
+        # timeout-minutes: a step-level timeout-minutes on the run step would
+        # fail it instead of cancelling the job, and this step would not run.
+        if: cancelled()
+        run: |
+          for log in stress-run-*.log; do
+            [ -e "${log}" ] || continue
+            echo "::group::${log}"
+            cat "${log}"
+            echo "::endgroup::"
+          done
 
       - name: Compiler cache statistics
         if: always()
@@ -717,47 +909,66 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
-      - name: Build libgpiod v2 from source
-        # Mirrors the build-vendors job: install the upstream release into
-        # /usr/local so clang's default search path resolves the v2 <gpiod.h>
-        # ahead of any system copy.
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
-          # README there): kernel.org removed old libgpiod point releases on
-          # 2026-07-01 and every mirror synced the deletion within hours,
-          # 404-ing this step twice in one day. No network fetch remains. The
-          # pinned checksum (kernel.org's published sha256, workflow env so
-          # both jobs share one pin) guards against corruption — not
-          # adversarial modification; see the README beside the tarball.
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
-      - name: Wrap the compilers like build-vendors
+      - name: Wrap the compilers like build-vendors-shard
         # Keep paired with CCACHE_COMPILERCHECK=content and the restore below:
         # without the wrappers every lookup misses, silently.
         run: .github/scripts/coverage-compilers.sh
 
       - name: Restore the compiler cache
-        # Restore only, from build-vendors' cache: run_all_tests.sh configures
+        # Restore only, from build-vendors-shard's cache: run_all_tests.sh configures
         # AlpacaHTTP/build with the same options (vendors ON, tests ON), and
         # this job builds with the same wrappers and flags, so the objects
         # match. This job runs on pull requests only, and a cache saved there
@@ -793,7 +1004,7 @@ jobs:
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
           ccache --show-stats
-          # A low hit rate means this build no longer matches build-vendors'
+          # A low hit rate means this build no longer matches build-vendors-shard's
           # (wrapper step, flags or configure drifted) and the cache is dead
           # weight. Warn rather than fail: a cold main cache is legitimate.
           ccache --print-stats | awk -F'\t' '
