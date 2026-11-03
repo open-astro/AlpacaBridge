@@ -1244,6 +1244,98 @@ TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate requires an established 
     }
 }
 
+namespace {
+
+// A connected CGX on a fake task clock with an injected system time. pass() moves both clocks
+// (time passes); step() moves the system time alone (a host-clock step, decision 0001 rule 3).
+struct CgxUtcRig {
+    std::atomic<std::int64_t> epoch_ms{1800000000000};
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+
+    CgxUtcRig() {
+        REQUIRE(mount.ok());
+        auto info = test_info();
+        info.port_path = mount.slave_path();
+        driver =
+            alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock, [this] { return now(); });
+        driver->set_connected(true);
+    }
+    std::chrono::system_clock::time_point now() const {
+        return std::chrono::system_clock::time_point{std::chrono::milliseconds(epoch_ms.load())};
+    }
+    void pass(std::chrono::milliseconds elapsed) {
+        epoch_ms.fetch_add(elapsed.count());
+        clock.advance(elapsed);
+    }
+    void step(std::chrono::milliseconds jump) { epoch_ms.fetch_add(jump.count()); }
+    bool points_at(std::chrono::system_clock::time_point utc) const {
+        const auto lst = alpacacore::vendor::celestron::cgx_local_sidereal_time_hours(
+            utc, test_info().site_longitude_degrees.value());
+        return std::abs(std::remainder(driver->get_sidereal_time() - lst, 24.0)) < 1e-9;
+    }
+};
+
+struct CgxProbeGuard {
+    ~CgxProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+};
+
+}  // namespace
+
+TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate step detection reads the task clock",
+          "[celestron][cgx][telescope][unit][taskclock]") {
+    using namespace std::chrono_literals;
+    CgxProbeGuard restore_probe;
+    alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return false; });
+    CgxUtcRig rig;
+    const auto client_utc = rig.now() + 2h;
+    rig.driver->set_utc_date(client_utc);
+
+    rig.pass(60s);
+    CHECK(rig.driver->get_utc_date() == client_utc + 60s);
+
+    rig.step(10s);
+    require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - host discipline is re-checked every 30 s on the task clock",
+          "[celestron][cgx][telescope][unit][taskclock]") {
+    using namespace std::chrono_literals;
+    CgxProbeGuard restore_probe;
+    alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return false; });
+    CgxUtcRig rig;
+    const auto client_utc = rig.now() + 2h;
+    rig.driver->set_utc_date(client_utc);
+    CHECK(rig.points_at(client_utc));
+
+    alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+    rig.pass(29999ms);
+    CHECK(rig.points_at(client_utc + 29999ms));
+    rig.pass(1ms);
+    CHECK(rig.points_at(rig.now()));
+    CHECK(rig.driver->get_utc_date() == client_utc + 30s);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a UTCDate write restarts the 30 s re-check window",
+          "[celestron][cgx][telescope][unit][taskclock]") {
+    using namespace std::chrono_literals;
+    CgxProbeGuard restore_probe;
+    alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return false; });
+    CgxUtcRig rig;
+    rig.driver->set_utc_date(rig.now() + 2h);
+    rig.pass(20s);
+    const auto client_utc = rig.now() + 2h;
+    rig.driver->set_utc_date(client_utc);
+
+    alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+    rig.pass(29999ms);
+    CHECK(rig.points_at(client_utc + 29999ms));
+    rig.pass(1ms);
+    CHECK(rig.points_at(rig.now()));
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - unsupported methods use ASCOM errors",
           "[celestron][cgx][telescope][unit]") {
     auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, test_info());

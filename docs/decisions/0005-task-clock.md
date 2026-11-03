@@ -51,7 +51,7 @@ Symbol: `TaskClock`
 | SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1403 | |
 | iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1223, #1723 | the fault latch stamp (the decision 0009 staleness bound) and its probe interval |
 | Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1162 | |
-| Celestron CGX telescope | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | partial | #1409 | continuity deadline and sleeps use the clock (#1404); UTC anchor elapsed time and host-discipline resampling remain on `steady_clock` |
+| Celestron CGX telescope | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #1409, #1983 | continuity deadline and sleeps (#1404); UTC anchor elapsed time and host-discipline re-check (#1983); the UTC value stays on `system_clock` |
 | ToupTek camera | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted | #1268 | |
 | ToupTek filter wheel | `AlpacaCore/src/vendors/touptek/touptek_filterwheel_driver.cpp` | adopted | #1268 | |
 | Player One camera | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1279 | |

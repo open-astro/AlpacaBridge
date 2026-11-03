@@ -416,9 +416,9 @@ private:
     mutable bool has_utc_offset_ = false;
     mutable std::chrono::system_clock::duration utc_offset_{};
     mutable std::chrono::system_clock::time_point utc_anchor_system_{};
-    mutable std::chrono::steady_clock::time_point utc_anchor_steady_{};
+    mutable util::TaskClock::clock::time_point utc_anchor_steady_{};
     mutable bool utc_offset_host_was_synchronized_ = false;
-    mutable std::chrono::steady_clock::time_point next_utc_discipline_resample_{};
+    mutable util::TaskClock::clock::time_point next_utc_discipline_resample_{};
     GuideRate guide_rate_{0.0, 0.0};
     int tracking_rate_ = 0;
     int slew_settle_time_seconds_ = 0;
@@ -490,7 +490,7 @@ double CelestronCgxTelescopeDriver::current_utc_locked() const {
     const auto system_now = system_now_();
     const bool offset_survives = client_utc_offset_survives_locked(system_now);
     if (offset_survives && !utc_offset_host_was_synchronized_) {
-        const auto steady_now = std::chrono::steady_clock::now();
+        const auto steady_now = clock_.now();
         if (steady_now >= next_utc_discipline_resample_) {
             next_utc_discipline_resample_ = steady_now + kHostDisciplineResampleInterval;
             if (util::ClientUtcWarning::host_synchronized()) {
@@ -518,7 +518,7 @@ bool CelestronCgxTelescopeDriver::client_utc_offset_survives_locked(
     std::chrono::system_clock::time_point system_now) const {
     if (!has_utc_offset_) return false;
     const auto system_elapsed = system_now - utc_anchor_system_;
-    const auto steady_elapsed = std::chrono::steady_clock::now() - utc_anchor_steady_;
+    const auto steady_elapsed = clock_.now() - utc_anchor_steady_;
     if (util::HostClock::clock_was_stepped(system_elapsed, steady_elapsed, kUtcStepTolerance)) {
         has_utc_offset_ = false;
         utc_offset_ = {};
@@ -1351,10 +1351,10 @@ void CelestronCgxTelescopeDriver::set_utc_date(std::chrono::system_clock::time_p
     const auto system_now = system_now_();
     utc_offset_ = utc - system_now;
     utc_anchor_system_ = system_now;
-    utc_anchor_steady_ = std::chrono::steady_clock::now();
+    utc_anchor_steady_ = clock_.now();
     has_utc_offset_ = true;
     utc_offset_host_was_synchronized_ = util::ClientUtcWarning::host_synchronized();
-    next_utc_discipline_resample_ = std::chrono::steady_clock::now() + kHostDisciplineResampleInterval;
+    next_utc_discipline_resample_ = clock_.now() + kHostDisciplineResampleInterval;
 }
 int CelestronCgxTelescopeDriver::get_tracking_rate() const {
     require_connected();
