@@ -414,6 +414,9 @@ public:
             stop_failed = true;
             ALPACA_LOG_WARN("SVBONY", "stop_video_capture during disconnect failed: " + std::string(e.what()));
         }
+        // While the close runs, capture_stop_failed_ can be true with connected_ already false, as
+        // before this change. Its readers (get_camera_state, get_percent_completed) sit behind
+        // ensure_connected(), so no client sees it; it is reset after the close.
         {
             std::lock_guard<std::mutex> relock(mutex_);
             capture_stop_failed_ = stop_failed;
