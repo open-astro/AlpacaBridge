@@ -742,9 +742,14 @@ jobs:
           # deliberately matches both Catch2 summary forms.
           shards="$(nproc)"
           pids=()
+          # A subshell per shard, so `wait` returns the test's status through
+          # pipefail rather than tee's (a bare background pipeline's $! is tee).
           for ((i = 0; i < shards; i++)); do
-            ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" \
-              --shard-count "${shards}" --shard-index "${i}" > "stress-run-${i}.log" 2>&1 &
+            (
+              set -o pipefail
+              ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" \
+                --shard-count "${shards}" --shard-index "${i}" 2>&1 | tee "stress-run-${i}.log" > /dev/null
+            ) &
             pids+=("$!")
           done
           failed=()

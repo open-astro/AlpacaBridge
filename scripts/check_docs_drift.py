@@ -1291,9 +1291,14 @@ def check_rule_file_paths_exist(root=ROOT):
 # since no grep can read a log it never wrote, so the pairing reports it
 # (review finding on PR #472: with `tee` mandatory, such a run was invisible
 # to the whole check).
+# A run may also carry Catch2's shard pair between the tag and the `tee`
+# (`--shard-count N --shard-index I`, possibly after a `\` line continuation):
+# ci.yml runs the [stress] tag as one shard per core in parallel processes, and
+# a sharded run is still that tag's run, guarded by its own log's grep.
 TSAN_RUN_RE = re.compile(
     r'([^\s"]*)/tests/alpacacore_tests"?\s+"(\[[^"]+\])"'
-    r'(?:\s*(?:2>&1\s*)?\|&?\s*tee\s+"?([^\s"]+)"?)?')
+    r'(?:[\s\\]*--shard-count\s+\S+\s+--shard-index\s+\S+)?'
+    r'(?:[\s\\]*(?:2>&1\s*)?\|&?\s*tee\s+"?([^\s"]+)"?)?')
 TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'\s+(?:<\s*)?\"?([^\s\"<]+)\"?")
 # ci_preflight.sh spells the build directory through a variable; this is its
 # one assignment, so the two paths can be compared by basename.
@@ -2998,6 +3003,18 @@ def self_test():
     m = sub(ci, '"[stress]" 2>&1 | tee stress-run.log', '"[stress]"')
     check("a run without tee is reported, not skipped",
           any("does not `| tee` a log" in x for x in _tsan_findings(m, pf)))
+
+    # 7b. ci.yml's sharded form of the [stress] run: the Catch2 shard pair
+    #     after a line continuation, then the tee and the grep of that log.
+    sharded = sub(ci, '"[stress]" 2>&1 | tee stress-run.log\n          grep -qE \'test cases: *[1-9]\' stress-run.log',
+                  '"[stress]" \\\n            --shard-count "${n}" --shard-index "${i}" 2>&1 | tee "stress-run-${i}.log" > /dev/null\n'
+                  '          grep -qE \'test cases: *[1-9]\' "stress-run-${i}.log"')
+    check("a sharded [stress] run (--shard-count/--shard-index) is still a run paired with its log",
+          _tsan_findings(sharded, pf) == [])
+    m = sub(sharded, 'tee "stress-run-${i}.log" > /dev/null', 'tee "other-${i}.log" > /dev/null')
+    check("a sharded run whose grep reads another log is still reported",
+          any("writes other-${i}.log but the grep that follows it reads stress-run-${i}.log" in x
+              for x in _tsan_findings(m, pf)))
 
     # 8. scope: the unrelated grep after the TSan job and the unrelated
     #    --suppress= after the cppcheck job are outside both blocks; an
