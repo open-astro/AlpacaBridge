@@ -101,9 +101,9 @@ const OFFERED = {
     covercalibrator: ['gemini', 'wandererastro'],
     dome: [],
     filterwheel: ['ioptron', 'playerone', 'qhy', 'touptek', 'wandererastro', 'zwo'],
-    focuser: ['astroasis', 'celestron', 'gemini', 'ioptron', 'qhy', 'touptek', 'zwo'],
+    focuser: ['astroasis', 'celestron', 'gemini', 'ifr', 'ioptron', 'qhy', 'touptek', 'zwo'],
     observingconditions: ['weewx'],
-    rotator: ['wandererastro', 'zwo'],
+    rotator: ['ifr', 'wandererastro', 'zwo'],
     safetymonitor: [],
     switch: ['gemini', 'ioptron', 'playerone', 'touptek', 'wandererastro', 'zwo'],
     telescope: ['bisque', 'celestron', 'ioptron', 'onstep', 'skywatcher', 'synscan', 'zwo'],
@@ -230,6 +230,8 @@ const INDEX_FIELDS_AT_BASE = [
     { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
     { fieldId: 'wandererastro-filterwheel-index', vendor: 'wandererastro', deviceType: 'filterwheel', configKey: 'wandererFilterwheelIndex' },
     { fieldId: 'wandererastro-box-index', vendor: 'wandererastro', deviceType: 'switch', configKey: 'boxIndex' },
+    { fieldId: 'ifr-focuser-index', vendor: 'ifr', deviceType: 'focuser', configKey: 'ifrIndex' },
+    { fieldId: 'ifr-rotator-index', vendor: 'ifr', deviceType: 'rotator', configKey: 'ifrIndex' },
 ];
 
 test('the index fields derived from index.html and the catalog are the ones app.js kept by hand', () => {

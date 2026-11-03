@@ -3972,6 +3972,53 @@ int main() {
         remove_device(router, "iguider", "camera", 9625);
     }
     {
+        // case: ifr focuser and rotator configs round-trip
+        // The iOptron iFR focuser-rotator, its own catalog vendor: every field of both halves survives the
+        // sanitizer (serial with portPath for the focuser, auto with ifrIndex for the rotator).
+        const auto focuser = roundtrip_config(router,
+                                              {{"vendor", "ifr"},
+                                               {"deviceType", "focuser"},
+                                               {"deviceNumber", 9626},
+                                               {"connectionType", "serial"},
+                                               {"portPath", "/dev/ttyUSB3"},
+                                               {"ifrIndex", 1},
+                                               {"model", "ifr4"}},
+                                              "Focuser", 9626);
+        EXPECT(focuser.is_object() && !focuser.empty());
+        EXPECT(focuser.value("vendor", "") == "ifr");
+        EXPECT(focuser.value("connectionType", "") == "serial");
+        EXPECT(focuser.value("portPath", "") == "/dev/ttyUSB3");
+        EXPECT(focuser.value("ifrIndex", -1) == 1);
+        EXPECT(focuser.value("model", "") == "ifr4");
+        remove_device(router, "ifr", "focuser", 9626);
+
+        const auto rotator = roundtrip_config(router,
+                                              {{"vendor", "ifr"},
+                                               {"deviceType", "rotator"},
+                                               {"deviceNumber", 9627},
+                                               {"connectionType", "auto"},
+                                               {"ifrIndex", 2},
+                                               {"model", "ifr2"}},
+                                              "Rotator", 9627);
+        EXPECT(rotator.is_object() && !rotator.empty());
+        EXPECT(rotator.value("vendor", "") == "ifr");
+        EXPECT(rotator.value("connectionType", "") == "auto");
+        EXPECT(rotator.value("ifrIndex", -1) == 2);
+        EXPECT(rotator.value("model", "") == "ifr2");
+        remove_device(router, "ifr", "rotator", 9627);
+    }
+    {
+        // case: ifr config with an unknown model is refused
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "ifr"},
+                                           {"deviceType", "rotator"},
+                                           {"deviceNumber", 9628},
+                                           {"connectionType", "auto"},
+                                           {"model", "ifr9"}},
+                                          "Rotator", 9628);
+        EXPECT(cfg.is_null());
+    }
+    {
         // ioptron / focuser (iEAF) — serial mode persists portPath (no
         // baudRate: the iEAF runs at a fixed 115200) and auto mode persists
         // focuserIndex through sanitize_device_config.
@@ -8559,7 +8606,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 41);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 43);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -8637,6 +8684,14 @@ int main() {
             }
             if (entry.value("vendor", "") == "svbony") {
 #ifdef ALPACACORE_ENABLE_SVBONY
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "ifr") {
+                // The iOptron iFR focuser-rotator: iOptron drivers under their own vendor key.
+#ifdef ALPACACORE_ENABLE_IOPTRON
                 entry["available"] = true;
 #else
                 entry["available"] = false;

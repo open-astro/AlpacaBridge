@@ -84,6 +84,13 @@ NormalizeResult normalize_iguider_camera(const DeviceConfig& in, Source) {
     return result;
 }
 
+NormalizeResult normalize_ifr(const DeviceConfig& in, Source) {
+    NormalizeResult result;
+    result.config = in;
+    result.rejection = ifr_refusal(in);
+    return result;
+}
+
 NormalizeResult normalize_ioptron_switch(const DeviceConfig& in, Source) {
     NormalizeResult result;
     result.config = in;
@@ -126,6 +133,23 @@ void register_ioptron_schema(DeviceCatalog& catalog) {
     iguider.fields = iguider_camera_fields();
     iguider.normalize = normalize_iguider_camera;
     catalog.add(std::move(iguider));
+
+    // The iFR focuser-rotator is its own vendor entry ("iOptron iFR"), offering the two devices the one unit
+    // becomes, so the iEAF/iAFS focuser form stays as it is and both halves read as the same unit.
+    const struct {
+        DeviceType type;
+        std::string_view display_name;
+    } ifr_devices[] = {{DeviceType::Focuser, "iOptron iFR Focuser"}, {DeviceType::Rotator, "iOptron iFR Rotator"}};
+    for (const auto& device : ifr_devices) {
+        Schema ifr;
+        ifr.key = DeviceKey{"ifr", device.type};
+        ifr.display_name = device.display_name;
+        ifr.build_option = kIoptronBuildOption;
+        ifr.vendor_label = "iOptron iFR";
+        ifr.fields = ifr_fields();
+        ifr.normalize = normalize_ifr;
+        catalog.add(std::move(ifr));
+    }
 }
 
 }  // namespace alpacacore::catalog

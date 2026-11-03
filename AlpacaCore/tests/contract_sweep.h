@@ -68,6 +68,8 @@
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ifr_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ifr_rotator_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -400,6 +402,20 @@ inline ContractEntry contract_entry_ioptron_filterwheel() {
     return make_entry(
         "ioptron_filterwheel", "ioptron", "filterwheel", DeviceType::FilterWheel,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_iefw_filterwheel_by_index(n, 0); },
+        kSrcAgents);
+}
+// The iFR focuser-rotator has its own catalog vendor ("ifr"), built under the iOptron flag (GUARD_OVERRIDE in the
+// gate). Its focuser move() validates 0..MaxStep before the connection check.
+inline ContractEntry contract_entry_ifr_focuser() {
+    return with_static_focuser_range(make_entry(
+        "ifr_focuser", "ifr", "focuser", DeviceType::Focuser,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_ifr_focuser(n, "/dev/ttyUSB0"); },
+        kSrcAgents));
+}
+inline ContractEntry contract_entry_ifr_rotator() {
+    return make_entry(
+        "ifr_rotator", "ifr", "rotator", DeviceType::Rotator,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_ifr_rotator(n, "/dev/ttyUSB0"); },
         kSrcAgents);
 }
 // The iGuider guide camera has its own catalog vendor ("iguider") but is an
@@ -784,7 +800,8 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_QHY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CS_IOPTRON(X) X(ioptron_telescope) X(ioptron_focuser) X(ioptron_filterwheel) X(iguider_camera)
+#define CS_IOPTRON(X) \
+    X(ioptron_telescope) X(ioptron_focuser) X(ioptron_filterwheel) X(iguider_camera) X(ifr_focuser) X(ifr_rotator)
 #else
 #define CS_IOPTRON(X)
 #endif
@@ -951,6 +968,8 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
+    {"ifr", "focuser", "fake_ioptron_ifr.h"},
+    {"ifr", "rotator", "fake_ioptron_ifr.h"},
     // The iMate PowerBox, compiled only with libgpiod.
     {"ioptron", "switch", "fake_ioptron_gpio.h"},
     {"iguider", "camera", "fake_iguider_v4l2.h"},

@@ -73,6 +73,8 @@ ALLOWLIST: dict[tuple[str, str], str] = {}
 GUARD_OVERRIDE = {
     ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (playerone_catalog.cpp)
     ("iguider", "camera"): "IOPTRON",  # the iOptron iGuider guide camera's own catalog vendor (ioptron_catalog.cpp)
+    ("ifr", "focuser"): "IOPTRON",  # the iOptron iFR focuser-rotator's own catalog vendor (ioptron_catalog.cpp)
+    ("ifr", "rotator"): "IOPTRON",
 }
 
 # (vendor, device_type, factory) -> reason the router's factory has no registry entry. Empty: every
