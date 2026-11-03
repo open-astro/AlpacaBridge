@@ -322,7 +322,12 @@ TEST_CASE("OnStep telescope - Park and FindHome race the getters and a reconnect
             }
         });
     }
-    for (int i = 0; i < 60; ++i) {
+    // Each pass costs about 4.4 s of wire time, nearly all of it the 200 ms
+    // TCP read slice each blind command waits for a stray ack (five stops in
+    // AbortSlew, Park and FindHome alike, two per MoveAxis): 60 passes made
+    // this the slowest case in the suite at 265 s. 20 passes keep every
+    // command racing the readers 20 times and four reconnects.
+    for (int i = 0; i < 20; ++i) {
         guard([&] { driver->move_axis(i % 2, 1.0); });
         guard([&] { driver->park(); });
         guard([&] { driver->unpark(); });
@@ -330,7 +335,7 @@ TEST_CASE("OnStep telescope - Park and FindHome race the getters and a reconnect
         guard([&] { driver->find_home(); });
         guard([&] { driver->abort_slew(); });
         guard([&] { driver->move_axis(i % 2, 0.0); });
-        if (i % 10 == 9) {
+        if (i % 5 == 4) {
             guard([&] { driver->set_connected(false); });
             guard([&] { driver->set_connected(true); });
         }
