@@ -449,26 +449,15 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Decision 0016 rule 4 and driver-lifecycle #528: transition_mutex_ serialises every sync transition, so the
+        // handshake and the close run with mutex_ released and getters answer meanwhile. No getter takes it.
+        std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
         if (!connected) {
             lifecycle_lock.lock();
             stop_exposure_thread();
         }
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!connected && !connected_.load() && connecting_priming_) {
-            // Disconnect requested mid-priming: a sync set_connected(true) on
-            // another thread has released mutex_ for the priming capture --
-            // conn_task_ (the async task's own state) cannot see this, since
-            // set_connected() is also a public sync entry point, and the
-            // project's own concurrency stress harness calls it directly.
-            // connected_ is still false, so the idempotency check below would
-            // silently drop this disconnect (both sides look "disconnected").
-            // Record the intent instead; the in-flight connect consumes it
-            // once priming finishes and closes the handle rather than
-            // publishing connected_.
-            record_pending_disconnect();
-            return;
-        }
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
@@ -480,17 +469,17 @@ public:
         }
 
         auto& sdk = sdk_;
+        // Set before mutex_ is released, so a name refresh can never slip between the unlock and the flag.
+        transition_in_flight_.store(true);
+        struct ClearInFlight {
+            std::atomic<bool>& flag;
+            ~ClearInFlight() { flag.store(false); }
+        } clear_in_flight{transition_in_flight_};
 
         if (connected) {
-            if (connecting_priming_) {
-                // Another set_connected(true) is already mid-priming and has
-                // released mutex_ for the capture. Every gate above passed
-                // (connected_ is still false), so without this we would
-                // double-open the camera and leak the first handle when only
-                // one close ever fires. The in-flight call publishes
-                // handle_/connected_ when it finishes; this call is a no-op.
-                return;
-            }
+            // The handshake lands in locals and is published under mutex_ at the end, so a failed connect publishes
+            // nothing. connected_ stays false throughout, so no operational member reaches the handle meanwhile.
+            lock.unlock();
             auto cameras = sdk.enumerate_cameras();
             if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
                 throw AlpacaException(
@@ -499,8 +488,9 @@ public:
             }
             const auto& info = cameras[static_cast<std::size_t>(camera_index_)];
             int opened_handle = sdk.open_camera(info.model, info.port);
+            WidgetConfig config;
             try {
-                configure_after_connect_locked(sdk, opened_handle);
+                config = read_widget_config(sdk, opened_handle);
             } catch (const AlpacaException&) {
                 sdk.close_camera(opened_handle);
                 throw;
@@ -509,57 +499,44 @@ public:
                 throw AlpacaException(std::string("Failed to configure DSLR / mirrorless camera: ") + e.what(),
                                       AlpacaError::DriverException);
             }
-            handle_ = opened_handle;
-            camera_info_ = info;
-            camera_info_valid_ = true;
-            pixel_size_um_ = lookup_known_pixel_size_um(info.model);
-            reset_exposure_state_locked();
-
-            // Review PR #485: connected_ is published only once geometry is
-            // fully resolved (cache hit or priming capture), never before --
-            // AsyncConnectable's record_disconnect_if_connect_in_flight() /
-            // consume_pending_disconnect() contract (see async_connectable.h)
-            // assumes connected_==true means this connect task's real work is
-            // done. Publishing it early let a racing set_connected(false) (or
-            // start_exposure(), via ensure_connected()) run concurrently with
-            // the still-unlocked priming capture on the very same libgphoto2
-            // handle -- a genuine use-after-close / concurrent-capture window,
-            // not just a theoretical one.
-            //
-            // Round 2: that fix alone covers only the ASYNC connect()/
-            // disconnect() entry points, which is what conn_task_ tracks --
-            // set_connected() is also a public sync entry point in its own
-            // right (the project's own [stress] harness calls it directly),
-            // and conn_task_ stays kConnIdle for a sync call. connecting_priming_
-            // (below) closes that second window the same way ToupTek AFW's
-            // connecting_homing_ does for its mutex-released homing poll: a
-            // racing sync disconnect records itself via record_pending_disconnect()
-            // instead of being dropped as falsely idempotent, a racing sync
-            // connect no-ops instead of double-opening, and this call consumes
-            // the pending flag after re-locking post-priming, closing the
-            // handle instead of publishing connected_ if one was recorded.
 
             // Sensor geometry is the same for every camera of this model
             // (see the cache helpers above) -- a rig that has already primed
             // this exact model, ever, skips straight to it with no capture
             // and no added latency.
-            if (auto cached = load_cached_sensor_geometry(info.model)) {
-                set_geometry_locked(cached->width, cached->height, cached->bayer_offset_x, cached->bayer_offset_y,
-                                    cached->max_adu);
-                connected_.store(true);
-                return;
-            }
+            const auto cached = load_cached_sensor_geometry(info.model);
 
             // The priming capture is a gp_camera_capture, which a body with mirror lock-up on
             // answers only after a 60 s timeout. Skip it: geometry is then learned from the first
             // real exposure, exactly as when priming fails. A failed MLU read skips too, since
             // priming is best-effort and the read says nothing about whether a capture would stall.
             bool skip_priming = true;
-            try {
-                skip_priming = mirror_lockup_on_locked(opened_handle);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_DEBUG(kLogTag, "Mirror lock-up state unreadable at connect, skipping the priming capture: " +
-                                              std::string(e.what()));
+            if (!cached) {
+                try {
+                    skip_priming = mirror_lockup_on(opened_handle);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG(kLogTag,
+                                     "Mirror lock-up state unreadable at connect, skipping the priming capture: " +
+                                         std::string(e.what()));
+                }
+            }
+
+            lock.lock();
+            handle_ = opened_handle;
+            camera_info_ = info;
+            camera_info_valid_ = true;
+            pixel_size_um_ = lookup_known_pixel_size_um(info.model);
+            apply_widget_config_locked(std::move(config));
+            reset_exposure_state_locked();
+
+            // connected_ is published last on every path (review PR #485): AsyncConnectable's pending-disconnect
+            // contract reads connected_==true as "this connect's work is done", and ensure_connected() keeps every
+            // operational call off the handle until then.
+            if (cached) {
+                set_geometry_locked(cached->width, cached->height, cached->bayer_offset_x, cached->bayer_offset_y,
+                                    cached->max_adu);
+                connected_.store(true);
+                return;
             }
             if (skip_priming) {
                 ALPACA_LOG_DEBUG(kLogTag,
@@ -573,12 +550,9 @@ public:
             // geometry properties are valid the moment Connected becomes
             // true instead of only after the caller's own first exposure.
             // Best-effort -- see prime_sensor_geometry_and_cache.
-            int priming_handle = opened_handle;
-            std::string priming_model = info.model;
-            connecting_priming_ = true;
             lock.unlock();
             try {
-                prime_sensor_geometry_and_cache(priming_handle, priming_model);
+                prime_sensor_geometry_and_cache(opened_handle, info.model);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kLogTag,
                                 "Sensor geometry priming capture failed (will learn on first real "
@@ -586,22 +560,6 @@ public:
                                     std::string(e.what()));
             }
             lock.lock();
-            connecting_priming_ = false;
-            if (consume_pending_disconnect(connected_.load())) {
-                // A sync set_connected(false) landed during the mutex-released
-                // priming capture and recorded itself above instead of being
-                // dropped. Honor it: close the handle we just opened and stay
-                // disconnected rather than publishing connected_. Requested,
-                // not a failure -- return cleanly.
-                const int abandoned_handle = handle_;
-                handle_ = -1;
-                camera_info_valid_ = false;
-                reset_exposure_state_locked();
-                if (abandoned_handle >= 0) {
-                    sdk.close_camera(abandoned_handle);
-                }
-                return;
-            }
             connected_.store(true);
             return;
         }
@@ -609,14 +567,17 @@ public:
         // Disconnecting: publish disconnected before closing the SDK handle
         // so a racing operational call fails fast at its connection check
         // instead of hitting a just-closed camera (driver-lifecycle.instructions.md disconnect
-        // rule). Exposure worker is already joined (lifecycle lock above).
+        // rule). The exposure worker is already joined, and exposure_lifecycle_mutex_ stays held across the
+        // close, so no exposure starts in the gap; the close then runs with mutex_ released.
         const int close_handle = handle_;
         handle_ = -1;
         reset_exposure_state_locked();
         connected_.store(false);
-        if (close_handle >= 0) {
-            sdk.close_camera(close_handle);
+        if (close_handle < 0) {
+            return;
         }
+        lock.unlock();
+        sdk.close_camera(close_handle);
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }
@@ -1031,7 +992,7 @@ public:
             // eosremoterelease press/release pairs (mlu_capture_with_abort). A body that cannot do that must
             // fail here, before the worker starts, rather than stall.
             try {
-                use_mlu = mirror_lockup_on_locked(active_handle);
+                use_mlu = mirror_lockup_on(active_handle);
             } catch (const GPhotoDeviceGoneException& e) {
                 // Same teardown as a worker that finds the camera gone (#1064): report disconnected so the
                 // client reconnects, instead of leaving Connected true on a dead handle.
@@ -1134,19 +1095,33 @@ private:
 
     mutable std::mutex mutex_;
     std::atomic<bool> connected_{false};
-    // True while a sync set_connected(true) has released mutex_ for the
-    // priming capture (review PR #485 round 2) -- guards the window
-    // conn_task_ cannot see, since set_connected() is a public sync entry
-    // point in its own right, not just the async task's body. Mirrors
-    // ToupTek AFW's connecting_homing_; see async_connectable.h's
-    // record_pending_disconnect() doc comment, written for this exact shape.
-    bool connecting_priming_{false};
+    // Serialises sync set_connected() calls; taken first, never by a getter (driver-lifecycle #528).
+    std::mutex transition_mutex_;
+    // True while set_connected runs its SDK handshake or close with mutex_ released.
+    std::atomic<bool> transition_in_flight_{false};
 
     GPhotoCameraInfo camera_info_{};
     bool camera_info_valid_{false};
     double pixel_size_um_{0.0};  // 0.0 = unknown; see known_pixel_size_um_table above
 
-    // Widget capability caches, populated at connect (configure_after_connect_locked).
+    // What read_widget_config learns from the widgets; one field per widget cache member below.
+    struct WidgetConfig {
+        std::vector<std::string> iso_choices;
+        int current_iso_index{0};
+        bool has_bulb{false};
+        std::string remote_press_choice;
+        std::string remote_release_choice;
+        std::optional<std::pair<std::string, std::string>> remote_release_pair;
+        std::string bulb_choice;
+        std::vector<std::pair<std::string, double>> native_shutter_choices;
+        std::string shutter_widget_name{"shutterspeed2"};
+        double min_native_shutter_seconds{0.001};
+        double max_native_shutter_seconds{30.0};
+        std::optional<std::string> format_widget_name;
+        std::optional<std::string> raw_format_choice;
+    };
+
+    // Widget capability caches, read at connect (read_widget_config) and published under mutex_.
     std::vector<std::string> iso_choices_;
     int current_iso_index_{0};
     bool has_bulb_{false};  // long exposure available: a "bulb" toggle, or both eosremoterelease choices
@@ -1324,11 +1299,15 @@ private:
         }
     }
 
+    // Skips the SDK while a transition runs, so gp_camera_autodetect never runs beside the connect's open or
+    // priming capture, and re-checks under mutex_ so an enumerate that overlapped a connect cannot overwrite what
+    // the connect published (decision 0016 rule 6).
     void refresh_cached_camera_info_if_needed() {
-        if (connected_.load()) return;
+        if (connected_.load() || transition_in_flight_.load()) return;
         try {
             auto cameras = sdk_.enumerate_cameras();
             std::lock_guard<std::mutex> lock(mutex_);
+            if (connected_.load() || transition_in_flight_.load()) return;
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
@@ -1338,30 +1317,23 @@ private:
         }
     }
 
-    // Reads widget capabilities from the freshly opened camera and caches
-    // them for the rest of the session. Requires mutex_ held by the caller
-    // (set_connected holds it for the whole connect sequence).
-    void configure_after_connect_locked(GPhotoSDK& sdk, int handle) {
-        iso_choices_.clear();
-        current_iso_index_ = 0;
+    // Reads widget capabilities from the freshly opened camera into a WidgetConfig, touching no driver state, so
+    // the connect runs it with mutex_ released; apply_widget_config_locked publishes the result.
+    WidgetConfig read_widget_config(GPhotoSDK& sdk, int handle) {
+        WidgetConfig c;
         if (sdk.has_widget(handle, "iso")) {
-            iso_choices_ = sdk.get_choices(handle, "iso");
+            c.iso_choices = sdk.get_choices(handle, "iso");
             std::string current = sdk.get_choice_value(handle, "iso");
-            auto it = std::find(iso_choices_.begin(), iso_choices_.end(), current);
-            if (it != iso_choices_.end()) {
-                current_iso_index_ = static_cast<int>(std::distance(iso_choices_.begin(), it));
+            auto it = std::find(c.iso_choices.begin(), c.iso_choices.end(), current);
+            if (it != c.iso_choices.end()) {
+                c.current_iso_index = static_cast<int>(std::distance(c.iso_choices.begin(), it));
             }
         }
 
-        native_shutter_choices_.clear();
-        has_bulb_ = false;
-        bulb_choice_.clear();
-        min_native_shutter_seconds_ = 0.001;
-        max_native_shutter_seconds_ = 30.0;
         const char* shutter_widget_names[] = {"shutterspeed2", "shutterspeed", "eos-shutterspeed"};
         for (const char* name : shutter_widget_names) {
             if (!sdk.has_widget(handle, name)) continue;
-            shutter_widget_name_ = name;
+            c.shutter_widget_name = name;
             for (const auto& choice : sdk.get_choices(handle, name)) {
                 auto seconds = parse_shutter_speed_seconds(choice);
                 if (!seconds.has_value()) {
@@ -1370,10 +1342,10 @@ private:
                     // dial into bulb mode before driving the toggle below.
                     // Prefer a literal "bulb" over other unparseable labels such as
                     // "auto" (Canon shutter value 0), which does not hold the shutter.
-                    if (bulb_choice_.empty() || to_lower(choice) == "bulb") bulb_choice_ = choice;
+                    if (c.bulb_choice.empty() || to_lower(choice) == "bulb") c.bulb_choice = choice;
                     continue;
                 }
-                native_shutter_choices_.emplace_back(choice, *seconds);
+                c.native_shutter_choices.emplace_back(choice, *seconds);
             }
             break;
         }
@@ -1384,10 +1356,7 @@ private:
         // capped at the longest native shutter speed. The pair is also kept in
         // remote_release_pair_ whatever the mode dial says, because mirror
         // lock-up fires the shutter with it (mlu_capture_with_abort).
-        remote_press_choice_.clear();
-        remote_release_choice_.clear();
-        remote_release_pair_.reset();
-        has_bulb_ = sdk.has_widget(handle, "bulb");
+        c.has_bulb = sdk.has_widget(handle, "bulb");
         // The pair is looked up whenever the widget exists, even beside a "bulb" toggle: mirror lock-up needs it
         // to fire the shutter whatever the bulb path is.
         if (sdk.has_widget(handle, "eosremoterelease")) {
@@ -1404,48 +1373,64 @@ private:
             };
             for (const auto& [press, release] : kRemoteReleasePairs) {
                 if (has(press) && has(release)) {
-                    remote_release_pair_ = std::make_pair(std::string(press), std::string(release));
+                    c.remote_release_pair = std::make_pair(std::string(press), std::string(release));
                     break;
                 }
             }
             // Bulb on a Canon body is the shutter-speed "bulb" choice held open by that pair.
-            if (!has_bulb_ && remote_release_pair_.has_value() && to_lower(bulb_choice_) == "bulb") {
-                remote_press_choice_ = remote_release_pair_->first;
-                remote_release_choice_ = remote_release_pair_->second;
-                has_bulb_ = true;
+            if (!c.has_bulb && c.remote_release_pair.has_value() && to_lower(c.bulb_choice) == "bulb") {
+                c.remote_press_choice = c.remote_release_pair->first;
+                c.remote_release_choice = c.remote_release_pair->second;
+                c.has_bulb = true;
             }
         }
-        if (!has_bulb_) {
-            bulb_choice_.clear();
+        if (!c.has_bulb) {
+            c.bulb_choice.clear();
         }
-        std::sort(native_shutter_choices_.begin(), native_shutter_choices_.end(),
+        std::sort(c.native_shutter_choices.begin(), c.native_shutter_choices.end(),
                   [](const auto& a, const auto& b) { return a.second < b.second; });
-        if (!native_shutter_choices_.empty()) {
-            min_native_shutter_seconds_ = native_shutter_choices_.front().second;
-            max_native_shutter_seconds_ = native_shutter_choices_.back().second;
+        if (!c.native_shutter_choices.empty()) {
+            c.min_native_shutter_seconds = c.native_shutter_choices.front().second;
+            c.max_native_shutter_seconds = c.native_shutter_choices.back().second;
         }
 
-        format_widget_name_.reset();
-        raw_format_choice_.reset();
         const char* format_widget_names[] = {"imageformat", "imagequality"};
         for (const char* name : format_widget_names) {
             if (!sdk.has_widget(handle, name)) continue;
             auto choices = sdk.get_choices(handle, name);
             auto raw_choice = pick_raw_format_choice(choices);
             if (raw_choice.has_value()) {
-                format_widget_name_ = name;
-                raw_format_choice_ = raw_choice;
+                c.format_widget_name = name;
+                c.raw_format_choice = raw_choice;
                 sdk.set_choice_value(handle, name, *raw_choice);
                 break;
             }
         }
-        if (!raw_format_choice_.has_value()) {
+        if (!c.raw_format_choice.has_value()) {
             ALPACA_LOG_WARN(kLogTag,
                             "No RAW image-quality choice found on this camera; captures will fail to "
                             "decode unless the camera's current format is already RAW.");
         }
 
-        apply_long_exposure_nr_locked(sdk, handle);
+        apply_long_exposure_nr(sdk, handle);
+        return c;
+    }
+
+    // Requires mutex_ held. Publishes what read_widget_config learned and resets the geometry.
+    void apply_widget_config_locked(WidgetConfig&& c) {
+        iso_choices_ = std::move(c.iso_choices);
+        current_iso_index_ = c.current_iso_index;
+        has_bulb_ = c.has_bulb;
+        remote_press_choice_ = std::move(c.remote_press_choice);
+        remote_release_choice_ = std::move(c.remote_release_choice);
+        remote_release_pair_ = std::move(c.remote_release_pair);
+        bulb_choice_ = std::move(c.bulb_choice);
+        native_shutter_choices_ = std::move(c.native_shutter_choices);
+        shutter_widget_name_ = std::move(c.shutter_widget_name);
+        min_native_shutter_seconds_ = c.min_native_shutter_seconds;
+        max_native_shutter_seconds_ = c.max_native_shutter_seconds;
+        format_widget_name_ = std::move(c.format_widget_name);
+        raw_format_choice_ = std::move(c.raw_format_choice);
 
         // Geometry (sensor size, Bayer phase, max ADU) is not knowable until
         // a frame has actually been decoded -- reset here so a reconnect
@@ -1766,12 +1751,13 @@ private:
         return wait_for_bulb_file(handle, duration_s, "Mirror lock-up capture");
     }
 
-    // Requires mutex_ held. True when the camera's own mirror lock-up (MLU) menu item is on. Single-widget
+    // Reads only the SDK: start_exposure calls it under mutex_, the connect with mutex_ released (the handle is not
+    // yet published). True when the camera's own mirror lock-up (MLU) menu item is on. Single-widget
     // lookups only (docs/failures/0009): Canon 70D `mirrorlock` (0/1, writable but never written here), else
     // Canon 250D `mirrorlockstatus` (read-only, 0 off, 1 on, 2 after the first press). Any non-zero number is
     // on, so a leftover 2 never reads as off and sends the body to a stalling gp_camera_capture. A body with
     // neither widget is MLU off, which keeps the single-capture path.
-    bool mirror_lockup_on_locked(int handle) {
+    bool mirror_lockup_on(int handle) {
         for (const char* name : {"mirrorlock", "mirrorlockstatus"}) {
             if (!sdk_.has_widget(handle, name)) continue;
             const std::string value = to_lower(sdk_.get_text_value(handle, name));
@@ -1783,11 +1769,11 @@ private:
         return false;
     }
 
-    // Requires mutex_ held, camera idle (connect). Writes the Nikon longexpnr widget once when the config asks
-    // for "on" or "off"; "camera" writes nothing. Never fails the connect: a body without the widget (every
+    // Connect only, camera idle, mutex_ released; reads only options_. Writes the Nikon longexpnr widget once when the
+    // config asks for "on" or "off"; "camera" writes nothing. Never fails the connect: a body without the widget (every
     // Canon tested) or a refused write logs a WARN and the connect carries on. The choice text is matched
     // without regard to case against the camera's own list, because libgphoto2 translates On/Off.
-    void apply_long_exposure_nr_locked(GPhotoSDK& sdk, int handle) {
+    void apply_long_exposure_nr(GPhotoSDK& sdk, int handle) {
         const std::string& mode = options_.long_exposure_nr;
         if (mode != "on" && mode != "off") return;
         try {

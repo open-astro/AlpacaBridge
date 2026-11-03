@@ -55,7 +55,7 @@ public:
     std::function<void()> on_decode;
     // Atomic because the stress harness hands one decoder to a driver that
     // decodes from the connect-priming and exposure threads. The driver
-    // serializes those today (connecting_priming_ under mutex_), but this is
+    // serializes those today (transition_mutex_ and the exposure lifecycle), but this is
     // the same trap LockedGPhotoSDK exists to avoid: a fake counter must not
     // be what lights up ThreadSanitizer.
     std::atomic<int> decode_call_count{0};

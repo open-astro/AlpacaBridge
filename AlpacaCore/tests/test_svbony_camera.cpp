@@ -33,24 +33,6 @@ namespace {
 
 using alpacacore::test::require_alpaca_error;
 
-// Holds the hooked fake call until release is set (bounded, so a failed assertion cannot hang the run).
-void hold_until(const std::atomic<bool>& release) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!release.load() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
-
-// Releases a held fake call and joins the thread that made it, on every exit from the test.
-struct ReleaseAndJoin {
-    std::atomic<bool>& release;
-    std::thread& thread;
-    ~ReleaseAndJoin() {
-        release = true;
-        if (thread.joinable()) thread.join();
-    }
-};
-
 } // namespace
 
 TEST_CASE("SVBONY Camera Driver - Defaults", "[svbony][camera][unit]") {

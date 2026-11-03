@@ -41,6 +41,24 @@ inline bool wait_for_flag(const std::atomic<bool>& flag, std::chrono::millisecon
     return true;
 }
 
+/// Holds the hooked fake call until `release` is set (bounded, so a failed assertion cannot hang the run).
+inline void hold_until(const std::atomic<bool>& release) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!release.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+/// Releases a held fake call and joins the thread that made it, on every exit from the test.
+struct ReleaseAndJoin {
+    std::atomic<bool>& release;
+    std::thread& thread;
+    ~ReleaseAndJoin() {
+        release = true;
+        if (thread.joinable()) thread.join();
+    }
+};
+
 /// Polls until the async connect task is done and the driver reports Connected.
 inline bool wait_until_connected(AlpacaDriver& driver, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
     const auto deadline = std::chrono::steady_clock::now() + budget;

@@ -83,16 +83,14 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   `disconnect()` entry points, which is what `conn_task_` tracks. **`set_connected()` is also a
   public sync entry point in its own right** (the project's own `[stress]` harness calls it
   directly, bypassing `conn_task_` entirely, which then stays `kConnIdle` for the whole priming
-  window) — round 2 of the same review added `connecting_priming_`, mirroring ToupTek AFW's
-  `connecting_homing_`: a racing sync disconnect calls `record_pending_disconnect()` instead of
-  being dropped as falsely idempotent (`connected_` is still `false` on both sides), a racing sync
-  connect no-ops instead of double-opening and leaking the first handle, and this call consumes
-  the pending flag after re-locking post-priming, closing the handle instead of publishing
-  `connected_` if a disconnect was recorded. `ensure_connected()` correctly rejects any
-  operational call for the whole window either way. If you touch this function again,
-  `connected_.store(true)` has to stay the *last* thing that happens on the connect path, and any
-  new `mutex_`-released window needs its own `connecting_*` flag the same way — the async task
-  gate alone never covers a sync caller.
+  window). Round 2 of that review added a `connecting_priming_` flag for the sync race; since
+  #1845 `transition_mutex_` serialises every sync transition instead. The whole connect
+  (autodetect, open, widget reads, priming) and the disconnect's close run with `mutex_` released,
+  so `Name` and the other getters answer meanwhile. A sync disconnect that lands during priming
+  waits for the capture, then disconnects, and a second sync connect waits, then returns as
+  idempotent. `transition_in_flight_` keeps the disconnected name refresh from running
+  `gp_camera_autodetect` beside the handshake. `ensure_connected()` rejects every operational call
+  until `connected_.store(true)`, which has to stay the *last* thing on every connect path.
 - **`set_gain()` holds `mutex_` across the SDK call via `with_handle()`, not just for the handle
   copy** — the same class of bug as above, on a different path: the original code read `handle_`
   under a lock via a `handle_value()` helper, released the lock, then called

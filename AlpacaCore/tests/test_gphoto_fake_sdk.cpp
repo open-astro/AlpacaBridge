@@ -37,6 +37,7 @@
 #include "fake_gphoto_sdk.h"
 #include "fake_raw_decoder.h"
 #include "fake_task_clock.h"
+#include "getter_stall_probe.h"
 
 using alpacacore::AlpacaException;
 using alpacacore::test::FakeGPhotoSDK;
@@ -2079,7 +2080,7 @@ TEST_CASE("GPhoto camera fake - a refused longexpnr write warns and does not fai
 
 TEST_CASE("GPhoto camera fake - longExposureNR with no matching choice warns and writes nothing",
           "[gphoto][camera][unit][fakesdk][lenr]") {
-    // Falsified by: delete the match == choices.end() guard in apply_long_exposure_nr_locked (the write then
+    // Falsified by: delete the match == choices.end() guard in apply_long_exposure_nr (the write then
     // dereferences the end iterator).
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
@@ -2105,7 +2106,7 @@ TEST_CASE("GPhoto camera fake - longExposureNR with no matching choice warns and
 
 TEST_CASE("GPhoto camera fake - a camera gone from the USB bus during the longexpnr write fails the connect",
           "[gphoto][camera][unit][fakesdk][lenr]") {
-    // Falsified by: remove the GPhotoDeviceGoneException rethrow in apply_long_exposure_nr_locked (the catch
+    // Falsified by: remove the GPhotoDeviceGoneException rethrow in apply_long_exposure_nr (the catch
     // of std::exception then logs a WARN and the connect succeeds on a dead handle).
     const std::string call = GENERATE(as<std::string>{}, "has_widget", "get_choices", "set_choice_value");
     CAPTURE(call);
@@ -2224,4 +2225,232 @@ TEST_CASE("GPhoto camera fake - ElectronsPerADU and FullWellCapacity raise Prope
     require_alpaca_error([&] { (void)driver->get_full_well_capacity(); },
                          alpacacore::AlpacaError::PropertyNotImplemented);
     driver->set_connected(false);
+}
+
+// Decision 0016 rules 1 and 4: Name and the other identity getters need no device access, so a connect that holds a
+// libgphoto2 call must not park them, and the disconnected name refresh must not run gp_camera_autodetect beside
+// the connect's open or priming capture. Each section holds one connect call on a latch; the getters run on the test
+// thread, and any enumerate_cameras while the call is held comes from a getter (the connect thread is parked).
+// Falsified by: gphoto_camera_driver.cpp set_connected(true) holding mutex_ across open_camera() or the widget reads
+// (get_name() then waits for the latch and fails its budget), or refresh_cached_camera_info_if_needed() without its
+// transition_in_flight_ early return (enumerate_cameras then runs while the open or the priming capture is held).
+TEST_CASE("GPhoto camera fake - Name and identity getters answer while a connect holds the SDK",
+          "[gphoto][camera][unit][fakesdk][getter-stall]") {
+    using namespace alpacacore::test;
+    std::string held_call;
+    SECTION("the open") { held_call = "open_camera"; }
+    SECTION("a connect-time widget read") { held_call = "get_choices"; }
+    SECTION("the priming capture") { held_call = "capture_and_download"; }
+
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    const std::string model = fake.cameras[0].model;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    std::atomic<int> enumerations_while_held{0};
+    fake.before_call = [&](const std::string& name) {
+        if (name == "enumerate_cameras" && entered.load() && !release.load()) ++enumerations_while_held;
+        if (name != held_call || entered.load()) return;
+        entered = true;
+        hold_until(release);
+    };
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+
+    std::thread connector([&] { driver->set_connected(true); });
+    ReleaseAndJoin cleanup{release, connector};
+    REQUIRE(wait_for_flag(entered));
+
+    CHECK(timed([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_sensor_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_sensor_type(); }) < kGetterBudget);
+    CHECK(timed([&] { CHECK_FALSE(driver->get_connected()); }) < kGetterBudget);
+    CHECK(enumerations_while_held.load() == 0);
+    CHECK_FALSE(release.load());  // the call is still held, so the timings above are not vacuous
+
+    release = true;
+    connector.join();
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == model);
+    driver->set_connected(false);
+    CHECK(fake.open_count == fake.close_count);
+}
+
+// Decision 0016 rule 6: a name refresh that read the SDK while a connect ran must not overwrite what the connect
+// published. The refresh is held inside enumerate_cameras on a latch, a connect completes, the camera then reports
+// another model, and the refresh is released.
+// Falsified by: gphoto_camera_driver.cpp refresh_cached_camera_info_if_needed() writing camera_info_ without the
+// connected_/transition_in_flight_ re-check under mutex_ (get_name() then returns the stale refresh model).
+TEST_CASE("GPhoto camera fake - a name refresh that overlapped a connect does not overwrite the connect's model",
+          "[gphoto][camera][unit][fakesdk][getter-stall]") {
+    using namespace alpacacore::test;
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    const std::string model = fake.cameras[0].model;
+    static thread_local bool is_refresher = false;
+    std::atomic<bool> refresh_entered{false};
+    std::atomic<bool> release_refresh{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name != "enumerate_cameras" || !is_refresher) return;
+        refresh_entered = true;
+        hold_until(release_refresh);
+    };
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+
+    std::thread refresher([&] {
+        is_refresher = true;
+        (void)driver->get_name();
+    });
+    ReleaseAndJoin cleanup{release_refresh, refresher};
+    REQUIRE(wait_for_flag(refresh_entered));
+
+    driver->set_connected(true);
+    fake.cameras[0].model = "Stale Refresh Model";  // the refresher reads it only after the release below
+    release_refresh = true;
+    refresher.join();
+
+    CHECK(driver->get_name() == model);
+    CHECK(driver->get_sensor_name() == model);
+    driver->set_connected(false);
+}
+
+// A sync transition that arrives while another sync connect is mid-handshake is applied, never dropped and never
+// doubled: a disconnect during the priming capture ends disconnected with the open balanced, and a second connect
+// during the open opens the camera once.
+// Falsified by: gphoto_camera_driver.cpp set_connected() without its transition_mutex_ lock (the racing disconnect
+// then sees nothing connected and returns, and the connect publishes Connected; the second connect opens again).
+TEST_CASE("GPhoto camera fake - a sync transition during a sync connect is applied once",
+          "[gphoto][camera][unit][fakesdk]") {
+    using namespace alpacacore::test;
+    std::string held_call;
+    bool second_is_connect = false;
+    SECTION("disconnect during the priming capture") { held_call = "capture_and_download"; }
+    SECTION("connect during the open") {
+        held_call = "open_camera";
+        second_is_connect = true;
+    }
+
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name != held_call || entered.load()) return;
+        entered = true;
+        hold_until(release);
+    };
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+
+    std::thread connector([&] { driver->set_connected(true); });
+    ReleaseAndJoin cleanup{release, connector};
+    REQUIRE(wait_for_flag(entered));
+    std::thread second([&] { driver->set_connected(second_is_connect); });
+    // Real time for the second call to reach its gate while the first is still held; the fake answers at once.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    release = true;
+    connector.join();
+    second.join();
+
+    if (second_is_connect) {
+        CHECK(driver->get_connected());
+        CHECK(fake.open_count == 1);
+        driver->set_connected(false);
+    } else {
+        CHECK_FALSE(driver->get_connected());
+    }
+    CHECK(fake.open_count == fake.close_count);
+}
+
+// Driver lifecycle (camera exception) and decision 0016 item 4: a camera's disconnect clears state under mutex_ and
+// runs the SDK close with it released, so identity getters answer while the close is held and operational members
+// fail NotConnected at once instead of waiting behind it.
+// Falsified by: gphoto_camera_driver.cpp set_connected(false) holding mutex_ across close_camera() (get_name() then
+// waits for the latch and fails its budget).
+TEST_CASE("GPhoto camera fake - Name and identity getters answer while a disconnect holds the SDK close",
+          "[gphoto][camera][unit][fakesdk][getter-stall]") {
+    using namespace alpacacore::test;
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    std::atomic<bool> armed{false};
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    std::atomic<int> enumerations_while_held{0};
+    fake.before_call = [&](const std::string& name) {
+        if (name == "enumerate_cameras" && entered.load() && !release.load()) ++enumerations_while_held;
+        if (name != "close_camera" || !armed.load()) return;
+        entered = true;
+        hold_until(release);
+    };
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    armed = true;
+
+    std::thread disconnector([&] { driver->set_connected(false); });
+    ReleaseAndJoin cleanup{release, disconnector};
+    REQUIRE(wait_for_flag(entered));
+
+    CHECK(timed([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)driver->get_sensor_name(); }) < kGetterBudget);
+    CHECK(timed([&] { CHECK_FALSE(driver->get_connected()); }) < kGetterBudget);
+    CHECK(timed([&] {
+              require_alpaca_error([&] { (void)driver->get_gain(); }, alpacacore::AlpacaError::NotConnected);
+          }) < kGetterBudget);
+    CHECK(enumerations_while_held.load() == 0);
+    CHECK_FALSE(release.load());  // the close is still held, so the timings above are not vacuous
+
+    release = true;
+    disconnector.join();
+    CHECK(fake.open_count == fake.close_count);
+}
+
+// A connect that arrives while a disconnect's close is held waits for the close, then opens: it never opens the
+// camera while the old session is still closing, and it is never dropped.
+// Falsified by: gphoto_camera_driver.cpp set_connected() without its transition_mutex_ lock (the connect then opens
+// while the close is held, so open_count rises before the release).
+TEST_CASE("GPhoto camera fake - a connect during a held close waits for the close and then connects",
+          "[gphoto][camera][unit][fakesdk]") {
+    using namespace alpacacore::test;
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    std::atomic<bool> armed{false};
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name != "close_camera" || !armed.load() || entered.load()) return;
+        entered = true;
+        hold_until(release);
+    };
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    armed = true;
+
+    std::thread disconnector([&] { driver->set_connected(false); });
+    ReleaseAndJoin cleanup{release, disconnector};
+    REQUIRE(wait_for_flag(entered));
+    std::atomic<bool> connect_done{false};
+    std::thread connector([&] {
+        driver->set_connected(true);
+        connect_done = true;
+    });
+    // Real time for a connect that ignores the held close to reach open_camera; the fake answers it at once.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK_FALSE(connect_done.load());
+    CHECK(fake.open_count == 1);
+
+    release = true;
+    disconnector.join();
+    connector.join();
+    CHECK(driver->get_connected());
+    CHECK(fake.open_count == 2);
+    driver->set_connected(false);
+    CHECK(fake.open_count == fake.close_count);
 }

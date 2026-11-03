@@ -46,7 +46,7 @@ Symbol: `transition_mutex_`
 | Gemini flat panel |  | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted |  |  |
 | Gemini focuser |  | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | partial | #1840 | rule 3: MaxStep is a live `:08#` read |
 | Gemini PDH switch |  | `AlpacaCore/src/vendors/gemini/gemini_pdh_switch_driver.cpp` | adopted |  |  |
-| gphoto camera | `exposure_lifecycle_mutex_` | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | partial | #1845 | `mutex_` held across the SDK connect |
+| gphoto camera |  | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | adopted |  |  |
 | iOptron filter wheel |  | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted |  |  |
 | iOptron iEAF focuser |  | `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_focuser_driver.cpp` | adopted |  |  |
 | iOptron iGuider camera |  | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted |  |  |
