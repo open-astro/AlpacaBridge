@@ -257,6 +257,9 @@ jobs:
         # The key holds the runner OS and arch but not the image version: when
         # a runner image moves glibc or the toolchain, change the key's
         # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
         id: deps-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -630,6 +633,9 @@ jobs:
         # The key holds the runner OS and arch but not the image version: when
         # a runner image moves glibc or the toolchain, change the key's
         # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
         id: deps-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -797,11 +803,12 @@ jobs:
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-guard-run.log
 
-      - name: Show the [stress] shard logs after a cancel or timeout
+      - name: Show the [stress] shard logs when the job is cancelled
         # The run above prints the shard logs only once every shard has exited,
         # so a shard that hangs until timeout-minutes cancels the job would
         # otherwise leave none of its output in the job log. A failure already
-        # printed them, so this runs on a cancel only. That relies on the job's
+        # printed them, so this runs on a cancel only (a timeout, a newer push
+        # or a manual cancel). For a timeout that relies on the job's
         # timeout-minutes: a step-level timeout-minutes on the run step would
         # fail it instead of cancelling the job, and this step would not run.
         if: cancelled()
@@ -911,6 +918,9 @@ jobs:
         # The key holds the runner OS and arch but not the image version: when
         # a runner image moves glibc or the toolchain, change the key's
         # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
         id: deps-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
