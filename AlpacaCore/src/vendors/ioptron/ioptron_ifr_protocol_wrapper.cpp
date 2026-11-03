@@ -533,7 +533,9 @@ std::shared_ptr<IfrLink> IfrLink::acquire(const IfrConnectionConfig& config) {
 
     // Held across the open, so a focuser and a rotator connecting at the same moment open the port once and
     // the second joins. The open takes the serial-port registry's own lock inside; nothing takes this one
-    // under that, so the order is one way only.
+    // under that, so the order is one way only. One lock for every port: a connect waits out another unit's
+    // handshake too (up to about 3 x (2 s read + 1 s sleep)). Only connects take it, never a getter, and a rig
+    // carries one iFR, so a per-port slot is not worth its code yet.
     std::lock_guard<std::mutex> lock(registry_mutex());
     auto& slot = registry()[key];
     if (auto existing = slot.lock(); existing && existing->link_alive()) {
