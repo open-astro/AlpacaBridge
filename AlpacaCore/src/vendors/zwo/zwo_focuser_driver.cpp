@@ -13,7 +13,9 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_epoch.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/zwo/zwo_eaf_wrapper.h>
@@ -48,7 +50,7 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     ZWOEAFFocuserDriver(int device_number, std::optional<int> focuser_id, std::optional<int> focuser_index,
-                        ZWOEAFSDK& sdk, std::optional<int> configured_max_step)
+                        ZWOEAFSDK& sdk, std::optional<int> configured_max_step, util::TaskClock& clock)
         : AsyncConnectable("ZWO"),
           sdk_(sdk),
           device_number_(device_number),
@@ -58,7 +60,8 @@ public:
           focuser_info_(),
           focuser_info_valid_(false),
           configured_max_step_(configured_max_step),
-          status_cache_("ZWO EAF", kStatusTtl, 3, "ZWO") {}
+          // The TTL and the fault stamp read the injected clock (decision 0005), so a test ages both with advance().
+          status_cache_("ZWO EAF", kStatusTtl, 3, "ZWO", clock) {}
 
     ~ZWOEAFFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -126,6 +129,18 @@ public:
 
     bool get_connected() const override { return link_.is_open(); }
 
+    // Decision 0009 rule 5: the one fault text. While lost, the loss reason, kept until the next Connect or
+    // Disconnect; otherwise the status cache's latched fault, empty while healthy.
+    std::string get_link_fault() const override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!lost_reason_.empty()) {
+                return lost_reason_;
+            }
+        }
+        return status_cache_.fault();
+    }
+
     void connect() override {
         start_connection_task(true);
     }
@@ -150,7 +165,9 @@ public:
         if (connected && consume_pending_disconnect(link_.is_open())) {
             return;
         }
-        if (connected == link_.is_open()) {
+        // A Disconnect of a lost link (Connected already reads false) still tears down: it drops the kept loss
+        // reason (decision 0009 rule 5) and releases an open the loss left behind.
+        if (connected == link_.is_open() && (connected || !has_lost_reason())) {
             return;
         }
         // A new epoch first: a call that captured the old link can no longer drop this one (issue #1500).
@@ -182,6 +199,7 @@ public:
         // removed unit still surfaces, but the driver must not stay half-connected.
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
             max_step_.store(0);
             step_range_.store(0);
             if (focuser_index_.has_value()) {
@@ -298,6 +316,10 @@ public:
         if (position < 0 || position > max_step) {
             throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
         }
+        // Decision 0009 rule 1: a latched fault refuses the move with its text; halt() stays allowed.
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException("ZWO EAF communications compromised: " + fault, AlpacaError::DriverException);
+        }
         {
             std::lock_guard<std::mutex> io(io_mutex_);
             call_locked([&] { sdk_.move(open_id_, position); });
@@ -382,9 +404,33 @@ private:
 
     Status read_status() const {
         ensure_connected();
+        // The session this read belongs to: a staleness loss below drops only this one, never a link a Connect
+        // opened since.
+        const auto captured = link_.load();
         // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
         // mutex_), so no caller may hold mutex_ or the I/O lock around the cache.
-        Status status = status_cache_.get([this] {
+        Status status;
+        try {
+            status = fetch_status();
+        } catch (const std::exception&) {
+            // Decision 0009 rule 2(b), issue #1666: a fault that has stood past the staleness bound is a lost link,
+            // found here by the next failed read (the driver has no poll of its own).
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                lose_link_if_fault_stale_locked(captured);
+            }
+            ensure_connected();  // lost, here or by another caller: NotConnected, not the cache's DriverException
+            throw;
+        }
+        if (status.closed) {
+            throw AlpacaException(closed_reason(), AlpacaError::NotConnected);
+        }
+        return status;
+    }
+
+    // One status frame from the cache, refilled under the I/O lock when it has aged out. Caller holds no driver lock.
+    Status fetch_status() const {
+        return status_cache_.get([this] {
             std::lock_guard<std::mutex> io(io_mutex_);
             Status fresh;
             try {
@@ -418,16 +464,50 @@ private:
             last_position_ = fresh.position;
             return fresh;
         });
-        if (status.closed) {
-            throw AlpacaException(closed_reason(), AlpacaError::NotConnected);
+    }
+
+    // Decision 0009 rule 2(b), issue #1666: a status fault that has stood past util::kLinkStalenessBound on the task
+    // clock, with no good read since it latched, is a lost link (rule 3): Connected false, members NotConnected,
+    // DeviceState empty, the open closed here, the reason kept for get_link_fault() until the next Connect or
+    // Disconnect, one WARN. Caller holds io_mutex_ (no device call is in flight) and no other driver lock; this reads
+    // the cache's leaf fault mutex, then takes mutex_ and the SDK's table mutex. @p captured is the link word the
+    // read loaded before its refill: a Connect or Disconnect since then started a new epoch, so mark_lost() refuses
+    // and the new session is never dropped on the old one's fault (a Connect resets the cache before it publishes).
+    void lose_link_if_fault_stale_locked(util::LinkEpoch::Word captured) const {
+        // The text first: a stale fault latched at least the bound ago, so it is set here (a refill that finished
+        // before this took io_mutex_ can clear it, or latch a fresh one that is not stale yet).
+        const std::string fault = status_cache_.fault();
+        if (!status_cache_.fault_stale() || !link_.mark_lost(captured)) {
+            return;
         }
-        return status;
+        const std::string reason = unit_label_locked() + " did not answer for " +
+                                   std::to_string(util::kLinkStalenessBound.count()) + " s (" + printable(fault) +
+                                   "); Connect again when it answers";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            lost_reason_ = reason;
+        }
+        ALPACA_LOG_WARN("ZWO", unit_label_locked() + " lost: status fault stood for " +
+                                   std::to_string(util::kLinkStalenessBound.count()) + " s; last position " +
+                                   std::to_string(last_position_) + ", max step " + std::to_string(max_step_.load()));
+        // The unit may still be attached (a generic error, not a removal), so close the open now: best effort,
+        // the loss stands whatever the close does.
+        try {
+            release_open_locked();
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "EAF close at a lost link failed: " + printable(e.what()));
+        }
     }
 
     void ensure_connected() const {
         if (!link_.is_open()) {
             throw AlpacaException(closed_reason(), AlpacaError::NotConnected);
         }
+    }
+
+    bool has_lost_reason() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return !lost_reason_.empty();
     }
 
     std::string closed_reason() const {
@@ -525,7 +605,7 @@ private:
 
     // Caller holds io_mutex_. Drops this driver's open, if any. A NotConnected close (the unit is gone, for example
     // a Connected toggle across a replug) is logged and swallowed; any other close error surfaces.
-    void release_open_locked() {
+    void release_open_locked() const {
         if (open_link_ == 0) {
             return;
         }
@@ -588,11 +668,13 @@ private:
     mutable util::LinkEpoch link_;
     // Under io_mutex_: the open this driver holds (open_link_ 0 = none), the serial every Connect binds once one is
     // known (kept across Disconnect, in memory only: decision 0018), and the last position read, for the loss log.
+    // Mutable: a staleness loss found by a const getter closes the open (lose_link_if_fault_stale_locked()).
     int open_id_{-1};
-    std::uint64_t open_link_{0};
+    mutable std::uint64_t open_link_{0};
     std::string bound_serial_;
     mutable int last_position_{0};
-    mutable std::string lost_reason_;  // under mutex_: why a lost link refuses, cleared by the next Connect
+    // Under mutex_: why a lost link refuses, cleared by the next Connect or Disconnect.
+    mutable std::string lost_reason_;
     // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
     // short state reads and writes, never held across an SDK call), then the SDK's SharedOpenTable mutex.
     // link_.mark_lost() takes no lock and the SDK's with_link() holds none.
@@ -606,13 +688,13 @@ private:
 };
 
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, ZWOEAFSDK& sdk,
-                                                      std::optional<int> max_step) {
-    return std::make_unique<ZWOEAFFocuserDriver>(device_number, focuser_id, std::nullopt, sdk, max_step);
+                                                      std::optional<int> max_step, util::TaskClock& clock) {
+    return std::make_unique<ZWOEAFFocuserDriver>(device_number, focuser_id, std::nullopt, sdk, max_step, clock);
 }
 
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index, ZWOEAFSDK& sdk,
-                                                               std::optional<int> max_step) {
-    return std::make_unique<ZWOEAFFocuserDriver>(device_number, std::nullopt, focuser_index, sdk, max_step);
+                                                               std::optional<int> max_step, util::TaskClock& clock) {
+    return std::make_unique<ZWOEAFFocuserDriver>(device_number, std::nullopt, focuser_index, sdk, max_step, clock);
 }
 
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, std::optional<int> max_step) {

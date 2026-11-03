@@ -523,11 +523,12 @@ SDK/protocol version details in that case if you don't already have them from th
 
 ### 7c. Updated date
 
-Update the `## Updated YYYY-MM-DD` line near the top of the file to today's date.
+Leave the `## Updated YYYY-MM-DD` line near the top of the file alone: `/bump-release` sets it at
+each release (its Step 2.5). A date line every validation PR moved made open PRs conflict on it.
 
 ### 7d. Confirm before writing
 
-Show the user the exact diff that will be applied (added row, added Driver Notes lines, updated date) and confirm before saving.
+Show the user the exact diff that will be applied (added row, added Driver Notes lines) and confirm before saving.
 
 ## Step 8 — Restore the original AB log level (MANDATORY — every exit path)
 

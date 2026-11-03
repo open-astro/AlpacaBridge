@@ -17,9 +17,9 @@ A PR may target `stable/X.Y` (a fix during a beta) or be a merge-down PR `stable
 (`docs/beta-channel.md`; its head is `merge-down/X.Y-to-<main|X.Z>`, cut from the stable branch, so the
 update-branch and conflict steps below act on that branch and never on `stable/X.Y`). For a PR whose base is `stable/X.Y`, read `main` / `origin/main` in the
 steps below as that base (`gh pr view <N> --json baseRefName` says which), including the behind
-check and the format and conformu-report diffs. Those two kinds of PR (base `stable/X.Y`, and a
-merge-down into `main`) are merged with `gh pr merge <N> --merge` (merge commit); an ordinary PR
-into `main` keeps the method the steps below already use. A merge-down PR is **never squashed**:
+check and the format and conformu-report diffs. Both kinds of PR land as a merge commit: a PR
+into `stable/X.Y` (no queue there) with `gh pr merge <N> --merge`, and a merge-down into `main`
+through the merge queue like any PR into `main` (Step 3). A merge-down PR is **never squashed**:
 refuse `--squash` and `--rebase` on it, and when
 `update-branch` is needed use the merge-based one. Version-file conflicts in it follow the
 Merge down rule in `.claude/commands/bump-release.md`.
@@ -54,11 +54,19 @@ bot, ending in `✅ Approved` or `⚠️ Issues found`. `gh pr view --json comme
 author as `github-actions` while the REST API reports `github-actions[bot]`, so match both. It only runs when:
 
 - the PR author has write access, **or** the PR carries the `safe-to-review` label (fork PRs), and
-- the author is in `allowed_non_write_users` for pushes the author makes themselves.
+- the author is in `allowed_non_write_users` for pushes the author makes themselves, and
+- the PR is not a draft: a draft's runs are skipped, and marking it ready (`ready_for_review`)
+  starts its first review.
+
+A draft in the list is marked ready first, `gh pr ready <N>`, since running this skill on it is the
+request to review and merge it. That starts a review on the same head, so still run Steps 1.1 to
+1.3 as usual (a fork draft still needs `safe-to-review`, or the `ready_for_review` run is skipped
+too) and skip only the Step 1.4 pre-check, as when Step 1.1 has acted.
 
 Checks to make before waiting on anything:
 
-1. **`review` check skipped / no verdict comment and no `safe-to-review` label** -> add the label
+1. **`review` check skipped / no verdict comment and no `safe-to-review` label** (a draft marked ready
+   first, as above) -> add the label
    via REST (`gh pr edit --add-label` can choke on a GraphQL projects warning):
    ```bash
    gh api -X POST repos/open-astro/AlpacaBridge/issues/<N>/labels -f 'labels[]=safe-to-review'
@@ -185,12 +193,12 @@ while :; do
         echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
     esac
   fi
-  # Only skipped runs and nothing pending: the actor gate skipped the job (fork push
-  # without the label, or an author outside allowed_non_write_users). A cancelled run
+  # Only skipped runs and nothing pending: the job's gate skipped it (a draft, a fork
+  # push without the label, or an author outside allowed_non_write_users). A cancelled run
   # beside the skipped one means a labelled run existed and was re-triggered mid-poll;
   # that is the two-look cancelled case below, not a skip. Step 1.1/1.2.
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ] && [ "$CANCELLED" = 0 ]; then
-    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (Step 1)." >&2; exit 3
+    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Mark a draft ready, or apply or re-apply safe-to-review (Step 1)." >&2; exit 3
   fi
   # Only cancelled runs: a superseding trigger never came. A relabel issued mid-poll
   # cancels the in-flight run a few seconds before its replacement appears, so this
@@ -229,7 +237,7 @@ lands first, but **merge strictly in ascending number order**: with `QUEUE=true`
 they enter the merge queue, and with `QUEUE=false` it keeps the update-branch dance predictable.
 
 On exit `3`, or a timeout: open the run URL (or `gh run list --workflow=claude-review.yml
---limit 5`) and read the failing job. Known stalls: the workflow triggers only on `opened`, `synchronize` and `labeled` (closing and
+--limit 5`) and read the failing job. Known stalls: the workflow triggers only on `opened`, `synchronize`, `labeled` and `ready_for_review` (closing and
 reopening the PR does NOT re-run it), so a stuck or cancelled run is restarted with the
 remove-and-re-add `safe-to-review` label trick from Step 1.2, which also covers the permission
 skip. Do not restart the poll blindly.
@@ -454,19 +462,38 @@ QUEUE=$(gh api repos/open-astro/AlpacaBridge/rules/branches/main --jq '[.[].type
 gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft) mergeable=\(.mergeable) state=\(.mergeStateStatus)"'
 ```
 
-- `draft=true` -> `gh pr ready <N>` first (contributors often open drafts; `gh pr merge` refuses them).
+- `draft=true` (a PR converted back to draft after its review) -> `gh pr ready <N>`, which starts a new
+  review of the same head: go back to Step 2 (neither merge path accepts a draft).
 - `state=BEHIND` with `QUEUE=false` (or a `stable/X.Y` base) -> `update-branch` (Step 1.3) and go
   back to Step 2; the merge commit re-runs the bot. With `QUEUE=true` and base `main`, `BEHIND` is
   not a blocker: merge.
-- `state=BLOCKED` with checks still running -> wait for `gh pr checks <N> --watch`, then merge.
-- otherwise merge:
+- `state=BLOCKED` with checks still running -> wait for `gh pr checks <N> --watch`, then merge. An
+  `enqueuePullRequest` error while a required check is still pending means the same: wait, then retry.
+- otherwise merge. With `QUEUE=false`, or a `stable/X.Y` base:
   ```bash
   gh pr merge <N> --merge
   ```
-  (merge commit, not squash, matching the repo history and the queue's merge method). Never pass
-  `--admin`: it bypasses the queue. With `QUEUE=false` it merges at once; confirm `state=MERGED`.
-  **With `QUEUE=true` it only adds the PR to the merge queue** (or, while a required check is still
-  running, turns on auto-merge, which queues it when the check passes). The queue then runs
+  (merge commit, not squash, matching the repo history and the queue's merge method); it merges at
+  once, so confirm `state=MERGED`. **With `QUEUE=true` and base `main`, add the PR to the merge
+  queue** with the GraphQL mutation, pinned to the head the bot approved:
+  ```bash
+  read -r ID HEAD < <(gh pr view <N> --json id,headRefOid --jq '"\(.id) \(.headRefOid)"')
+  # The one-pass Step 2 check prints the verdict only when it belongs to the head now,
+  # and exits 0 for an Issues-found verdict too, so the approval is checked on its last
+  # line. HEAD is read first, so a push between the two fails one of them. poll.sh is
+  # the Step 2 block saved with this PR's number in its first line.
+  V=$(mktemp)
+  BUDGET=0 bash poll.sh > "$V" \
+    && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] \
+    && gh api graphql -f query='mutation($id:ID!,$sha:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$sha}){mergeQueueEntry{position state}}}' \
+    -f id="$ID" -f sha="$HEAD" --jq .data.enqueuePullRequest.mergeQueueEntry
+  ```
+  Not `gh pr merge`: with the queue required, gh turns on auto-merge instead of queueing, and this
+  repository has auto-merge off, so it fails with "Auto merge is not allowed for this repository"
+  (PR #1961). Do not turn auto-merge on to get around it: an auto-merge PR can land before the
+  review verdict. The pre-check requires an approval on `HEAD` itself (a push after the approval
+  leaves `HEAD` with no verdict, or with that push's own, which may reject it), and
+  `expectedHeadOid` makes the call fail if a push moved the head after `HEAD` was read. Never pass `--admin` to `gh pr merge`: it bypasses the queue. The queue then runs
   `ci.yml` on the merged commit, including `sanitizers-tsan` and `package-deb`, which a PR into
   `main` skips. Wait in the background until the PR merges or leaves the queue:
   ```bash
@@ -488,7 +515,7 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
   (`gh run list --workflow=ci.yml --event=merge_group --limit 10`; its branch is
   `gh-readonly-queue/main/pr-<N>-<sha>`). A failure on the merged commit, typically
   `sanitizers-tsan` or `package-deb`, is fixed on the head branch like any CI failure: run the step 5
-  gates, push, poll for the fresh verdict, merge again. A job that failed in code the PR does not
+  gates, push, poll for the fresh verdict, queue it again. A job that failed in code the PR does not
   touch gets the flake treatment under "Keep looping" before you queue it again. A conflict with a PR
   that merged ahead of it (`CONFLICTING`) is resolved as in Step 1.3.
   The repo has `delete_branch_on_merge` enabled (2026-09-10), so an `origin` head branch is
@@ -559,14 +586,18 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - **Waiting is never a stopping point.** Every wait (step 5 gates, verdict poll, CI checks,
   update-branch) runs as ONE background chain that continues into the next action on its own:
   `run_gates && push && poll` for a fix round, `update-branch && poll && merge` for a refresh
-  (`QUEUE=false` only), and `merge && wait-for-queue` once the PR is queued (`QUEUE=true`).
+  (`QUEUE=false` only), and `poll && enqueue && wait-for-queue` with `QUEUE=true`.
   Never end the turn with "I'll push when pre-flight finishes"; chain it. Every poll exit
   other than a verdict is non-zero (Step 2), so `poll && merge` cannot merge on an empty
   verdict; a refresh verdict can still carry new Defects, so the merge half gates on the
   printed verdict's **last** line (the prompt defines the sign-off as the last line, and a
   review can quote either string in its body, as reviews of this very rubric do):
   (`poll` = the Step 2 block saved to a file, run as `bash poll.sh`):
-  `V=$(mktemp); bash poll.sh > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && gh pr merge <N> --merge`.
+  `V=$(mktemp); bash poll.sh > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && <merge>`,
+  where `<merge>` is the Step 3 command for the mode: `gh pr merge <N> --merge` with `QUEUE=false`,
+  the `enqueuePullRequest` block followed by the queue wait with `QUEUE=true`. That block runs
+  `poll.sh` once more: the first run waits for the verdict, the second checks it is still an
+  approval of the head being queued, so keep both.
 - **A Defect you disagree with** is still fixed or wired into the skill/docs when there is any
   reasonable change that satisfies it. Only a Defect that would require a wrong or unsafe change
   becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.

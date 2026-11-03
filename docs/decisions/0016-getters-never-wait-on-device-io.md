@@ -61,7 +61,7 @@ Symbol: `transition_mutex_`
 | QHY filter wheel |  | `AlpacaCore/src/vendors/qhy/qhy_filterwheel_driver.cpp` | adopted |  |  |
 | QHY focuser |  | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted |  | served from `PolledState` |
 | Sky-Watcher telescope |  | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted |  | `util::LockGate` drops `mutex_` per exchange |
-| SVBONY camera |  | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | partial | #1842 | `mutex_` held across the SDK connect |
+| SVBONY camera |  | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | adopted |  |  |
 | SynScan telescope |  | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted |  | the wrapper's lock is the I/O lock; served from `PolledState` |
 | ToupTek camera |  | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted |  |  |
 | ToupTek filter wheel |  | `AlpacaCore/src/vendors/touptek/touptek_filterwheel_driver.cpp` | adopted |  |  |

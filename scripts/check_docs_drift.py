@@ -139,11 +139,11 @@ Checks:
      is a real date no older than the README badge's release date (issue
      #692). It read 2026-09-24 on the 2026-09-27 release. Every release
      re-verifies the file (Step 2.4 recounts from it), so /bump-release sets
-     the line to the release date and this gate holds it there; between
-     releases it may run ahead (/conformu and /commit bump it) but never
-     behind, and never more than MAX_UPDATED_DAYS_AHEAD past the badge, which
-     catches a typo'd year without consulting the clock. Pure, so it runs in
-     pre-flight; no git state is consulted.
+     the line to the release date and this gate holds it there; only that
+     step sets it (/conformu and /commit leave it alone). It may run ahead
+     but never behind, and never more than MAX_UPDATED_DAYS_AHEAD past the
+     badge, which catches a typo'd year without consulting the clock. Pure,
+     so it runs in pre-flight; no git state is consulted.
  17. Every AlpacaError value AGENTS.md, the ascom-contract and testing
      instructions and .claude/commands/driver-build.md write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
      (issue #682): the name must be a constant in `namespace AlpacaError` and
@@ -1276,7 +1276,8 @@ def check_rule_file_paths_exist(root=ROOT):
 # pre-flight would stop being a faithful mirror of CI. Issue #341.
 #
 # Matches both spellings of the invocation: bare in ci.yml
-# (`./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log`)
+# (`./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log`,
+# and the sharded [stress] run below)
 # and quoted-path in ci_preflight.sh
 # (`"${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log"`).
 # The trailing quoted tag is what distinguishes a real run from the `test -x`
@@ -1291,9 +1292,14 @@ def check_rule_file_paths_exist(root=ROOT):
 # since no grep can read a log it never wrote, so the pairing reports it
 # (review finding on PR #472: with `tee` mandatory, such a run was invisible
 # to the whole check).
+# A run may also carry Catch2's shard pair between the tag and the `tee`
+# (`--shard-count N --shard-index I`, possibly after a `\` line continuation):
+# ci.yml runs the [stress] tag as one shard per core in parallel processes, and
+# a sharded run is still that tag's run, guarded by its own log's grep.
 TSAN_RUN_RE = re.compile(
     r'([^\s"]*)/tests/alpacacore_tests"?\s+"(\[[^"]+\])"'
-    r'(?:\s*(?:2>&1\s*)?\|&?\s*tee\s+"?([^\s"]+)"?)?')
+    r'(?:[\s\\]*--shard-count\s+\S+\s+--shard-index\s+\S+)?'
+    r'(?:[\s\\]*(?:2>&1\s*)?\|&?\s*tee\s+"?([^\s"]+)"?)?')
 TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'\s+(?:<\s*)?\"?([^\s\"<]+)\"?")
 # ci_preflight.sh spells the build directory through a variable; this is its
 # one assignment, so the two paths can be compared by basename.
@@ -1315,9 +1321,9 @@ def _tsan_events(block):
     """The filtered runs and zero-test greps of one TSan block, in file order.
 
     Each run is ("run", tag, build_dir, tee_log) and each grep is
-    ("grep", pattern, log), all paths reduced to their basename so ci.yml's
-    literal `stress-run.log` pairs with ci_preflight.sh's
-    `"${TSAN_BUILD_DIR}/stress-run.log"` without expanding the variable.
+    ("grep", pattern, log), all paths reduced to their basename so a bare
+    log name pairs with ci_preflight.sh's `"${TSAN_BUILD_DIR}/stress-run.log"`
+    without expanding the variable.
     A run with no `| tee` has tee_log None: it is still a run, and the
     pairing below reports it, because no grep can guard a log never written.
     """
@@ -2998,6 +3004,18 @@ def self_test():
     m = sub(ci, '"[stress]" 2>&1 | tee stress-run.log', '"[stress]"')
     check("a run without tee is reported, not skipped",
           any("does not `| tee` a log" in x for x in _tsan_findings(m, pf)))
+
+    # 7b. ci.yml's sharded form of the [stress] run: the Catch2 shard pair
+    #     after a line continuation, then the tee and the grep of that log.
+    sharded = sub(ci, '"[stress]" 2>&1 | tee stress-run.log\n          grep -qE \'test cases: *[1-9]\' stress-run.log',
+                  '"[stress]" \\\n            --shard-count "${n}" --shard-index "${i}" 2>&1 | tee "stress-run-${i}.log" > /dev/null\n'
+                  '          grep -qE \'test cases: *[1-9]\' "stress-run-${i}.log"')
+    check("a sharded [stress] run (--shard-count/--shard-index) is still a run paired with its log",
+          _tsan_findings(sharded, pf) == [])
+    m = sub(sharded, 'tee "stress-run-${i}.log" > /dev/null', 'tee "other-${i}.log" > /dev/null')
+    check("a sharded run whose grep reads another log is still reported",
+          any("writes other-${i}.log but the grep that follows it reads stress-run-${i}.log" in x
+              for x in _tsan_findings(m, pf)))
 
     # 8. scope: the unrelated grep after the TSan job and the unrelated
     #    --suppress= after the cppcheck job are outside both blocks; an

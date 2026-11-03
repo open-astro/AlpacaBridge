@@ -518,8 +518,12 @@ namespace {
 constexpr int kListenBacklog = 64;
 
 // Per-connection socket timeout: a peer that stalls mid-request (slowloris)
-// or mid-response is disconnected after this many seconds of inactivity.
+// or mid-response is disconnected after this many seconds without progress.
+// A response also has a finite size-scaled whole-response deadline.
 constexpr int kSocketTimeoutSeconds = 30;
+
+// Window for the one log line about connections refused by the per-IP cap.
+constexpr int kPerIpRefusalLogSeconds = 60;
 
 // Resolve the peer address once per connection so the router can
 // discriminate clients that send no ClientID in the per-client Connected
@@ -749,6 +753,9 @@ void Server::run_server() {
     util::log_info("Started " + std::to_string(pool_size) + " worker threads for concurrent request handling");
 
     const std::size_t max_connections = config_.max_connections();
+    const std::size_t max_per_ip = config_.max_connections_per_ip();
+    std::chrono::steady_clock::time_point last_refusal_log{};
+    std::size_t refused_since_log = 0;
 
     // Accept connections using select() to allow checking running_ flag periodically
     while (running_) {
@@ -837,9 +844,37 @@ void Server::run_server() {
                 continue;
             }
 
+            std::string remote_address = peer_address_string(client_address);
+            {
+                // Checked before the connection takes a worker or a keep-alive
+                // slot. Refused with no response: the client has sent nothing
+                // yet, and an answer would cost a write per attempt.
+                std::lock_guard<std::mutex> lock(per_ip_mutex_);
+                std::size_t& held = per_ip_connections_[remote_address];
+                if (max_per_ip > 0 && held >= max_per_ip) {
+                    util::socket_close(client_fd);
+                    ++refused_since_log;
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - last_refusal_log >= std::chrono::seconds(kPerIpRefusalLogSeconds)) {
+                        util::log_info("Refused " + std::to_string(refused_since_log) +
+                                       " connection(s) over the limit of " + std::to_string(max_per_ip) +
+                                       " open connections per address (http.max_connections_per_ip), the latest from " +
+                                       remote_address);
+                        last_refusal_log = now;
+                        refused_since_log = 0;
+                    }
+                    continue;
+                }
+                ++held;
+            }
+
+            if (send_buffer_bytes_ > 0) {
+                setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &send_buffer_bytes_, sizeof(send_buffer_bytes_));
+            }
+
             auto conn = std::make_unique<Connection>();
             conn->fd = client_fd;
-            conn->remote_address = peer_address_string(client_address);
+            conn->remote_address = std::move(remote_address);
             conn->opened_at = std::chrono::steady_clock::now();
             // The first request gets the same slowloris bound a worker's recv
             // would have given it, but waited out on the reactor: a client
@@ -864,6 +899,13 @@ namespace {
 // body). Complements SO_RCVTIMEO, which only bounds the gap between bytes —
 // large ImageArray responses are unaffected (this bounds the read side only).
 constexpr int kRequestDeadlineSeconds = 120;
+
+// Finite whole-response allowance: the greater of 120 s and the serialized
+// header/body bytes at 64 KiB/s, rounded up by util::send_budget. Large images
+// receive more time on slow links; a peer that stops making progress still
+// meets the independent 30 s bound. Fixed policy, no configuration keys.
+constexpr int kSendDeadlineSeconds = 120;
+constexpr std::size_t kSendMinBytesPerSecond = std::size_t{64} * 1024;
 
 // How long a keep-alive connection may sit idle between requests before the
 // worker gives it up. Persistent connections matter for timing: ConformU's
@@ -910,7 +952,11 @@ void send_error(util::SocketHandle socket_fd, int status, const char* reason, co
     const std::string response_headers = error_response.to_header_string();
     const std::string& response_body = error_response.body();
     util::socket_send_allv(socket_fd, response_headers.data(), response_headers.size(), response_body.data(),
-                           response_body.size());
+                           response_body.size(),
+                           std::chrono::steady_clock::now() +
+                               util::send_budget(response_headers.size() + response_body.size(),
+                                                 std::chrono::seconds(kSendDeadlineSeconds), kSendMinBytesPerSecond),
+                           std::chrono::seconds(kSocketTimeoutSeconds));
 }
 
 // True when the client wants the connection kept open after this request
@@ -1235,9 +1281,20 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
     // do not require a second full-sized HTTP response string.
     const std::string response_headers = response.to_header_string();
     const std::string& response_body = response.body();
+    const std::size_t response_bytes = response_headers.size() + response_body.size();
+    const auto send_deadline =
+        std::chrono::steady_clock::now() +
+        (send_deadline_.count() > 0
+             ? util::send_budget(response_bytes, send_deadline_, send_min_bytes_per_second_)
+             : util::send_budget(response_bytes, std::chrono::seconds(kSendDeadlineSeconds), kSendMinBytesPerSecond));
     if (!util::socket_send_allv(conn.fd, response_headers.data(), response_headers.size(), response_body.data(),
-                                response_body.size())) {
-        util::log_warning("Failed to send full response: " + util::socket_error_message(util::socket_get_last_error()));
+                                response_body.size(), send_deadline,
+                                send_stall_.count() > 0
+                                    ? send_stall_
+                                    : std::chrono::milliseconds(std::chrono::seconds(kSocketTimeoutSeconds)))) {
+        // A client that stops reading triggers this, so not WARNING (decision 0007 rule 9).
+        util::log_info("Closing connection, response not fully sent: " +
+                       util::socket_error_message(util::socket_get_last_error()));
         return ServeResult::Close;
     }
 
@@ -1372,6 +1429,13 @@ void Server::close_connection(ConnectionPtr conn, bool graceful) {
     }
     conn->fd = util::kInvalidSocket;
     live_connections_.fetch_sub(1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(per_ip_mutex_);
+        const auto it = per_ip_connections_.find(conn->remote_address);
+        if (it != per_ip_connections_.end() && --it->second == 0) {
+            per_ip_connections_.erase(it);
+        }
+    }
 }
 
 void Server::wake_reactor() {

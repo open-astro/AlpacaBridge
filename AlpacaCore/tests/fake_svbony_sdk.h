@@ -84,6 +84,7 @@ public:
     }
 
     std::vector<CameraInfo> enumerate_cameras() override {
+        if (before_call) before_call("enumerate_cameras");
         std::lock_guard lock(mutex_);
         record_locked("enumerate_cameras");
         maybe_fail_locked("enumerate_cameras");
@@ -99,6 +100,7 @@ public:
     }
     void open_camera(int camera_id) override {
         // Outside the mutex, so the delay holds only the caller (the driver's connect), not other fake calls.
+        if (before_call) before_call("open_camera");
         const auto delay = std::chrono::milliseconds(open_delay_ms_.load());
         if (delay.count() > 0) std::this_thread::sleep_for(delay);
         std::lock_guard lock(mutex_);
@@ -109,6 +111,7 @@ public:
         opened_ids_.insert(camera_id);
     }
     void close_camera(int camera_id) override {
+        if (before_call) before_call("close_camera");
         std::lock_guard lock(mutex_);
         record_locked("close_camera");
         maybe_fail_locked("close_camera");
@@ -386,6 +389,10 @@ public:
     void set_frame_data(std::vector<std::uint8_t> data) {
         std::lock_guard lock(mutex_);
         frame_data_ = std::move(data);
+    }
+    void set_camera_name(std::string name) {
+        std::lock_guard lock(mutex_);
+        camera_.name = std::move(name);
     }
     void set_camera_present(bool present) {
         std::lock_guard lock(mutex_);

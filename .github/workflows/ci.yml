@@ -9,22 +9,30 @@
 # lives in its own workflow: its CLI has no arm64 build.)
 #
 # Jobs:
-#   build-test     build vendor-neutral core + run unit tests (the base gate)
-#   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
-#                  vendors ON, instrumented for gcov; per-component + combined
-#                  line coverage in the job summary, HTML/JSON artifact (no
-#                  threshold)
+#   build-test     build vendor-neutral core + run unit tests (the base gate),
+#                  in a debian:trixie container (the distribution we ship for)
+#   build-vendors-shard  stage in-tree vendor SDK .so libs, build with all
+#                  vendors ON, instrumented for gcov, and run every third test
+#                  (three shards); each uploads its raw coverage JSON, except
+#                  in the merge queue
+#   build-vendors  pass only when all three shards passed; merge their coverage
+#                  into per-component + combined line coverage in the job
+#                  summary, HTML/JSON artifact (no threshold); in the merge
+#                  queue it only checks the shards
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
 #   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
-#                  connect/disconnect/operate concurrency suite (issue #101),
-#                  plus [stress-guard] (the harness's own self-tests, issue #322)
+#                  connect/disconnect/operate concurrency suite (issue #101) as
+#                  one Catch2 shard per core in parallel processes, plus
+#                  [stress-guard] (the harness's own self-tests, issue #322)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   package-deb    build the .deb in debian:trixie, install it, run
 #                  scripts/check_bundled_gphoto.sh (bundled libgphoto2 loader path)
-#   unicode        scan sources for Trojan-Source / invisible Unicode
-#   shellcheck     lint the project's shell scripts; run ci_preflight.sh --self-test
-#   javascript     node --check AND node --test the hand-written web UI JavaScript
+#   static-checks  the text, script and JavaScript gates, one step each: the
+#                  Unicode scan, docs drift and the scripts' self-tests, the
+#                  connect-error, serial-port, layering, stress-registration,
+#                  contract-sweep and ConformU-report checks, ShellCheck (plus
+#                  ci_preflight.sh --self-test), and node --check / node --test
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
 #
@@ -35,7 +43,7 @@
 # (no queue there), on a push to main or stable/**, and on workflow_dispatch
 # (`gh workflow run ci.yml --ref <branch>` runs them on a PR branch in this
 # repository before it is queued; a fork PR's branch is not here, so the queue
-# is its first run). format, clang-tidy, conformu-reports and cppcheck's check step run
+# is its first run). format, clang-tidy, static-checks' ConformU step and cppcheck's check step run
 # on pull_request only: they diff against $GITHUB_BASE_REF, which a merge_group
 # run does not set, and a job skipped by its `if:` still satisfies a required
 # check.
@@ -66,7 +74,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 # Single source of truth for the vendored libgpiod build dependency — the
-# build-vendors, sanitizers-tsan and clang-tidy jobs consume these,
+# build-vendors-shard, sanitizers-tsan and clang-tidy jobs consume these,
 # so a version bump can't skew them (tarball + README in AlpacaCore/external/libgpiod/).
 env:
   LIBGPIOD_VER: "2.2.4"
@@ -79,20 +87,30 @@ jobs:
   build-test:
     name: Build + test (arm64)
     runs-on: ubuntu-24.04-arm
+    # Debian 13 (trixie), the distribution AlpacaBridge ships for: the core
+    # suite builds with trixie's gcc 14, glibc and Catch2, as on a user's SBC,
+    # not with the Ubuntu runner's gcc 13. package-deb builds the .deb here too,
+    # but runs no tests.
+    container: debian:trixie
     timeout-minutes: 20
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
-        with:
-          persist-credentials: false
-
       - name: Install build dependencies
-        # catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
+        # Before the checkout: actions/checkout needs git in the container,
+        # and the cache steps use zstd. python3 is for the beta VERSION check
+        # (scripts/check_beta_configure.sh), which the Ubuntu runner had
+        # preinstalled. The container runs as root, so no sudo. catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
         # returns early, ctest finds no tests and exits 0, and this job
         # green-lights while running none of the core suite (issue #586).
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            git \
+            zstd \
+            python3 \
             build-essential \
             cmake \
             ccache \
@@ -107,8 +125,14 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
       - name: Verify toolchain
         run: |
+          grep PRETTY_NAME /etc/os-release
           cmake --version
           g++ --version
 
@@ -117,12 +141,27 @@ jobs:
         # a push to main or stable/** saves it (the save step below), so a pull
         # request reuses its base branch's cache and never writes one. The
         # directory is ccache's default, outside the build tree run_all_tests.sh
-        # deletes on entry.
+        # deletes on entry. The prefix names trixie: objects from the Ubuntu
+        # runner's gcc 13 are no use to gcc 14.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-build-test-${{ github.sha }}
-          restore-keys: ccache-build-test-
+          key: ccache-build-test-trixie-${{ github.sha }}
+          restore-keys: ccache-build-test-trixie-
+
+      - name: Create the unprivileged test user
+        # The suite runs as an ordinary user, as on the Ubuntu runner and on an
+        # SBC. The container runs as root, and root ignores file modes, so a case
+        # that makes a directory read-only to make a write fail (test_routing's
+        # #1473 case; test_software_update, test_serial_by_id_scan and
+        # test_connection_resolver also set modes) would see the write succeed.
+        # The checkout and the restored compiler cache belong to root, so they
+        # are handed to the user.
+        run: |
+          set -euo pipefail
+          useradd --create-home builder
+          mkdir -p "$HOME/.cache/ccache"
+          chown -R builder: "$GITHUB_WORKSPACE" "$HOME/.cache/ccache"
 
       - name: Build + run tests (vendor-neutral core)
         env:
@@ -130,7 +169,11 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
-        run: ./run_all_tests.sh
+        # As the test user. runuser keeps this step's environment except HOME,
+        # SHELL, USER and LOGNAME, which it resets for the user, so CCACHE_DIR
+        # must stay explicit: it points at root's cache directory, which the
+        # save step reads.
+        run: runuser -u builder -- env CCACHE_DIR="$HOME/.cache/ccache" ./run_all_tests.sh
 
       - name: Compiler cache statistics
         if: always()
@@ -141,7 +184,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-build-test-${{ github.sha }}
+          key: ccache-build-test-trixie-${{ github.sha }}
 
       - name: Check the beta VERSION split
         # Pins the ~betaN split both CMakeLists share
@@ -150,14 +193,25 @@ jobs:
         # configure, no compile.
         run: scripts/check_beta_configure.sh
 
-  build-vendors:
-    # The all-vendors suite runs once, instrumented for coverage: the build,
-    # the tests and the gcovr report are this one job (the separate coverage
-    # job ran the same 2413 tests a second time, also at -O0). The report is
-    # informational: no --fail-under threshold.
-    name: Build + test (all vendors, arm64)
+  build-vendors-shard:
+    # The all-vendors suite runs once, instrumented for coverage, split across
+    # three runners: each shard builds the whole tree (ccache makes the build
+    # about 1.5 min) and runs every third test (`ctest -I <shard>,,3`, via
+    # CTEST_SHARD in run_all_tests.sh), so the slow driver cases, which sit
+    # next to each other in test-number order, are spread over the three. One
+    # runner took about 11.5 min of ctest for about 88 min of test time; the
+    # cases wait on fake hardware in real time, so a third of them per runner
+    # also means less contention for the ones that measure time. Each shard
+    # uploads its raw gcovr JSON; build-vendors below merges the three into
+    # the report. The report is informational: no --fail-under threshold.
+    name: Build + test (all vendors, arm64, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    strategy:
+      # Every shard runs to the end, so one red shard does not hide another's failures.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -194,40 +248,58 @@ jobs:
             libcurl4-openssl-dev \
             gcovr
 
-      - name: Build libgpiod v2 from source
-        # The ZWO switch drivers require libgpiod >= 2.0 (gpiod_chip_request_lines),
-        # which the runner's apt does not provide. Install the upstream release
-        # into /usr/local so CMake's find_library picks it up ahead of any system
-        # copy.
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
-          # README there): kernel.org removed old libgpiod point releases on
-          # 2026-07-01 and every mirror synced the deletion within hours,
-          # 404-ing this step twice in one day. No network fetch remains. The
-          # pinned checksum (kernel.org's published sha256, workflow env so
-          # both jobs share one pin) guards against corruption — not
-          # adversarial modification; see the README beside the tarball.
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
       - name: Stage vendor SDK shared libraries
         # Mirrors run_system_setup() in build_and_run.sh: copy the in-tree
@@ -280,6 +352,7 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
           CXXFLAGS: "--coverage -O0 -g"
           LDFLAGS: "--coverage"
+          CTEST_SHARD: ${{ matrix.shard }}/3
         # Zeroed first: the statistics live in the cached directory, so they
         # would otherwise add up every run since the cache was first saved.
         run: |
@@ -292,37 +365,117 @@ jobs:
         run: ccache --show-stats --verbose
 
       - name: Save the compiler cache
-        if: always() && github.event_name == 'push'
+        # Every shard compiles the same tree, so one of them saves it: a second
+        # save of the same key would be refused.
+        if: always() && github.event_name == 'push' && matrix.shard == 1
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
           key: ccache-all-vendors-coverage-${{ github.sha }}
 
-      - name: Generate coverage report
+      - name: Collect this shard's coverage data
+        # Not in the merge queue, which needs pass or fail, not a report (the
+        # PR's own run already published it); about 30 s per shard.
+        if: github.event_name != 'merge_group'
         # Over the one tree run_all_tests.sh builds: AlpacaHTTP/build holds
         # AlpacaCore as a subdirectory, and both suites write the same .gcda
-        # files there (issue #1251).
+        # files there (issue #1251). Raw JSON only: build-vendors merges the
+        # three shards' files (gcovr -a adds the hit counts) and writes the
+        # reports.
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mkdir -p coverage-raw
+          gcovr --root . -j "$(nproc)" \
+            --exclude '.*/tests/' \
+            --exclude '.*/external/' \
+            --exclude '.*/examples/' \
+            --exclude '.*/build[^/]*/' \
+            --gcov-ignore-parse-errors=all \
+            --filter 'AlpacaCore/(src|include)/' \
+            --filter 'AlpacaHTTP/(src|include)/' \
+            --json "coverage-raw/shard-${SHARD}.json" \
+            AlpacaHTTP/build
+
+      - name: Upload this shard's coverage data
+        if: github.event_name != 'merge_group'
+        # Kept a week: re-running one failed shard re-runs build-vendors, which
+        # reads the other shards' files from the earlier attempt.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: coverage-raw-${{ matrix.shard }}
+          path: coverage-raw/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-vendors:
+    # The required check and the review bot's CI wait both name this job, so
+    # it keeps the name the single all-vendors job had. It passes only when
+    # all three shards passed: `!cancelled()` runs it after a failed shard
+    # (to fail here), where a plain needs: would skip it, and a skipped job
+    # satisfies a required check. A run cancelled by a newer push skips it.
+    name: Build + test (all vendors, arm64)
+    needs: build-vendors-shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Require every shard to pass
+        env:
+          SHARDS: ${{ needs.build-vendors-shard.result }}
+        run: |
+          if [ "${SHARDS}" != "success" ]; then
+            echo "::error::An all-vendors test shard did not pass (result: ${SHARDS}); see the shard jobs."
+            exit 1
+          fi
+
+      # The rest builds the coverage report, which the merge queue skips (see
+      # "Collect this shard's coverage data"); there the job only checks the shards.
+      - name: Checkout
+        # gcovr reads the sources for the HTML report.
+        if: github.event_name != 'merge_group'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install gcovr
+        if: github.event_name != 'merge_group'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcovr
+
+      - name: Download the shards' coverage data
+        if: github.event_name != 'merge_group'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: coverage-raw-*
+          path: coverage-raw
+          merge-multiple: true
+
+      - name: Generate coverage report
+        if: github.event_name != 'merge_group'
+        # The shards ran gcov over their own trees with the same filters and
+        # excludes; adding their JSON (-a) sums each line's hits, so this is the
+        # report one runner running every test would write. The combined JSON
+        # it writes feeds the two component reports.
         run: |
           set -euo pipefail
           mkdir -p coverage/html
-          excludes=(
-            --exclude '.*/tests/'
-            --exclude '.*/external/'
-            --exclude '.*/examples/'
-            --exclude '.*/build[^/]*/'
-          )
-          # gcov runs once, for the combined report, which also writes the
-          # raw data as JSON; the two component reports are filtered from that
-          # JSON (-a) instead of running gcov over every .gcda again.
-          gcovr --root . -j "$(nproc)" "${excludes[@]}" \
-            --gcov-ignore-parse-errors=all \
+          shards=(coverage-raw/shard-*.json)
+          if [ "${#shards[@]}" -ne 3 ] || [ ! -f "${shards[0]}" ]; then
+            echo "::error::expected three shard coverage files, found: ${shards[*]}"
+            exit 1
+          fi
+          tracefiles=()
+          for f in "${shards[@]}"; do tracefiles+=(-a "$f"); done
+          gcovr --root . "${tracefiles[@]}" \
             --filter 'AlpacaCore/(src|include)/' \
             --filter 'AlpacaHTTP/(src|include)/' \
             --json coverage/combined-raw.json \
             --txt coverage/combined.txt \
             --json-summary-pretty --json-summary coverage/combined.json \
-            --html-details coverage/html/index.html \
-            AlpacaHTTP/build
+            --html-details coverage/html/index.html
           report() {
             local name="$1"
             shift
@@ -356,6 +509,7 @@ jobs:
           PY
 
       - name: Upload coverage report
+        if: github.event_name != 'merge_group'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage
@@ -446,7 +600,7 @@ jobs:
 
       - name: Install build dependencies
         # libgpiod-dev intentionally omitted (needs >= 2.0, built from source
-        # below) — mirrors the build-vendors job. catch2 is required: without
+        # below) — mirrors the build-vendors-shard job. catch2 is required: without
         # it the tests CMakeLists silently skips the suite and this job would
         # green-light while running nothing.
         run: |
@@ -470,34 +624,61 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
-      - name: Build libgpiod v2 from source
-        # Same vendored tarball + pinned checksum as the build-vendors job
-        # (see the README beside the tarball).
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
       - name: Stage vendor SDK shared libraries
-        # Mirrors the build-vendors job: the vendor-ON build links the in-tree
+        # Mirrors the build-vendors-shard job: the vendor-ON build links the in-tree
         # arm64 vendor .so files from the loader path.
         run: |
           set -euo pipefail
@@ -577,11 +758,43 @@ jobs:
           # (issue #322 review finding). Keep it that way: anything tagged
           # [stress] that is not a vendor registration makes this gate vacuous
           # again.
-          ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log
-          # The test binary's own exit code (via pipefail) is the pass/fail gate;
-          # this grep only guards the zero-test case, so it deliberately matches
-          # both Catch2 summary forms without distinguishing pass from fail.
-          grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-run.log
+          #
+          # The [stress] cases run as Catch2 shards (--shard-count/--shard-index)
+          # in parallel processes, one per core: run serially they took about
+          # 7.75 min of a 9.4 min job, mostly waiting on fakes in real time,
+          # and the all-vendors ctest already runs them in parallel processes.
+          # Each shard's exit code is the pass/fail gate and its log is shown in
+          # its own group; the grep guards the zero-test case per shard, so it
+          # deliberately matches both Catch2 summary forms.
+          shards="$(nproc)"
+          pids=()
+          # A subshell per shard, so `wait` returns the test's status through
+          # pipefail rather than tee's (a bare background pipeline's $! is tee).
+          for ((i = 0; i < shards; i++)); do
+            (
+              set -o pipefail
+              ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" \
+                --shard-count "${shards}" --shard-index "${i}" 2>&1 | tee "stress-run-${i}.log" > /dev/null
+            ) &
+            pids+=("$!")
+          done
+          failed=()
+          for ((i = 0; i < shards; i++)); do
+            wait "${pids[i]}" || failed+=("${i}")
+          done
+          for ((i = 0; i < shards; i++)); do
+            echo "::group::[stress] shard $((i + 1)) of ${shards}"
+            cat "stress-run-${i}.log"
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::[stress] shard index(es) ${failed[*]} failed; see their groups above"
+            exit 1
+          fi
+          for ((i = 0; i < shards; i++)); do
+            grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "stress-run-${i}.log" \
+              || { echo "::error::[stress] shard index ${i} ran no tests"; exit 1; }
+          done
           # Core/harness self-tests that need TSan but aren't a vendor
           # registration -- StressCallGuard's concurrency case and the
           # AsyncConnectable lifecycle case -- run under their own tag,
@@ -589,6 +802,23 @@ jobs:
           # or dropped tag doesn't silently skip them either.
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-guard-run.log
+
+      - name: Show the [stress] shard logs when the job is cancelled
+        # The run above prints the shard logs only once every shard has exited,
+        # so a shard that hangs until timeout-minutes cancels the job would
+        # otherwise leave none of its output in the job log. A failure already
+        # printed them, so this runs on a cancel only (a timeout, a newer push
+        # or a manual cancel). For a timeout that relies on the job's
+        # timeout-minutes: a step-level timeout-minutes on the run step would
+        # fail it instead of cancelling the job, and this step would not run.
+        if: cancelled()
+        run: |
+          for log in stress-run-*.log; do
+            [ -e "${log}" ] || continue
+            echo "::group::${log}"
+            cat "${log}"
+            echo "::endgroup::"
+          done
 
       - name: Compiler cache statistics
         if: always()
@@ -679,47 +909,66 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
-      - name: Build libgpiod v2 from source
-        # Mirrors the build-vendors job: install the upstream release into
-        # /usr/local so clang's default search path resolves the v2 <gpiod.h>
-        # ahead of any system copy.
+      - name: Restore the libgpiod and libgphoto2 builds
+        # Both build from vendored, checksum-pinned tarballs, so a build stays
+        # the same until a pin or the gphoto script changes, and the key holds
+        # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
+        # in every job that needs them: the all-vendors shards, TSan and
+        # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
+        # Nor does it hold the apt set: libgphoto2 configures with
+        # --with-libexif=auto, so keep libexif-dev and libltdl-dev installed
+        # in all three, or the restored tree can need a library a job lacks.
+        id: deps-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/deps-stage
+          key: deps-gpiod-${{ env.LIBGPIOD_VER }}-${{ env.LIBGPIOD_SHA256 }}-gphoto-${{ hashFiles('scripts/build_bundled_gphoto.sh') }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build libgpiod v2 and the bundled libgphoto2
+        # On a cache miss only. libgpiod: the ZWO switch drivers need >= 2.0
+        # (gpiod_chip_request_lines), which the runner's apt does not provide;
+        # the tarball is vendored (AlpacaCore/external/libgpiod/, see the README
+        # there: kernel.org removed old point releases) and its sha256 pin
+        # (workflow env) guards against corruption. libgphoto2: the gphoto
+        # driver links the vendored copy, never the distro one; the script
+        # checks its own pin and, with --destdir, needs no root. Its build tree
+        # goes under RUNNER_TEMP, out of the checkout.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
-          # README there): kernel.org removed old libgpiod point releases on
-          # 2026-07-01 and every mirror synced the deletion within hours,
-          # 404-ing this step twice in one day. No network fetch remains. The
-          # pinned checksum (kernel.org's published sha256, workflow env so
-          # both jobs share one pin) guards against corruption — not
-          # adversarial modification; see the README beside the tarball.
+          stage="${HOME}/deps-stage"
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          (
+            cd /tmp/libgpiod
+            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+            make -j"$(nproc)"
+            make install DESTDIR="${stage}"
+          )
+          scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
+      - name: Install libgpiod v2 and the bundled libgphoto2
+        # libgpiod into /usr/local, where CMake's find_library picks it up ahead
+        # of any system copy; libgphoto2 into /usr/lib/alpacabridge/libgphoto2,
+        # where the executables' rpath finds it.
         run: |
           set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+          sudo cp -a --no-preserve=ownership "${HOME}/deps-stage/." /
+          sudo ldconfig
 
-      - name: Wrap the compilers like build-vendors
+      - name: Wrap the compilers like build-vendors-shard
         # Keep paired with CCACHE_COMPILERCHECK=content and the restore below:
         # without the wrappers every lookup misses, silently.
         run: .github/scripts/coverage-compilers.sh
 
       - name: Restore the compiler cache
-        # Restore only, from build-vendors' cache: run_all_tests.sh configures
+        # Restore only, from build-vendors-shard's cache: run_all_tests.sh configures
         # AlpacaHTTP/build with the same options (vendors ON, tests ON), and
         # this job builds with the same wrappers and flags, so the objects
         # match. This job runs on pull requests only, and a cache saved there
@@ -755,7 +1004,7 @@ jobs:
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
           ccache --show-stats
-          # A low hit rate means this build no longer matches build-vendors'
+          # A low hit rate means this build no longer matches build-vendors-shard's
           # (wrapper step, flags or configure drifted) and the cache is dead
           # weight. Warn rather than fail: a cold main cache is legitimate.
           ccache --print-stats | awk -F'\t' '
@@ -845,17 +1094,31 @@ jobs:
       - name: Check the bundled libgphoto2
         run: scripts/check_bundled_gphoto.sh
 
-  unicode:
-    name: Unicode scan
-    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
-    timeout-minutes: 10
+  static-checks:
+    name: Static checks
+    # The repository's text, script and JavaScript gates, each a step of one job:
+    # every one takes seconds, and as ten jobs they held ten runners per run
+    # (the org's limit is 20 concurrent jobs, and the merge queue runs ci.yml a
+    # second time per PR). Each step runs even when an earlier one failed
+    # (`!cancelled()`), so one run reports every red gate, and the step name
+    # says which. Its `name` is one required check in the main ruleset.
+    runs-on: ubuntu-24.04-arm   # pure text, script and JS scans; arch-independent
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          # Full history for the ConformU step, which diffs against the PR's base.
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Self-test the Unicode scanner
+      - name: Install shellcheck and Node.js
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck nodejs
+
+      - name: Unicode - Self-test the Unicode scanner
+        if: ${{ !cancelled() }}
         # The scanner's failure mode is silence: a regressed scan_text() or
         # an empty file list reads as a clean tree. The self-test pins the
         # FORBIDDEN table, every helper, git-backed file listing and main()
@@ -863,30 +1126,23 @@ jobs:
         # (issue #449).
         run: python3 .github/scripts/check-unicode.py --self-test
 
-      - name: Scan for Trojan-Source / invisible Unicode
+      - name: Unicode - Scan for Trojan-Source / invisible Unicode
+        if: ${{ !cancelled() }}
         # Guards against CVE-2021-42574: bidi controls / zero-width characters
         # that make source render differently than it compiles. Excludes the
         # vendored external/ tree (see the script).
         run: python3 .github/scripts/check-unicode.py
 
-  docs-drift:
-    name: Docs drift check
-    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Self-test check 8's pairing and job-scoping helpers
+      - name: Docs drift - Self-test check 8's pairing and job-scoping helpers
+        if: ${{ !cancelled() }}
         # Literal fixtures, one per mutation the TSan pairing check exists
         # to catch, plus the next-job scoping rule checks 3 and 8 share
         # (issue #455). A matcher that stops matching fails here instead of
         # silently degrading the gate to its floor.
         run: python3 scripts/check_docs_drift.py --self-test
 
-      - name: Self-test the decision-record gate scripts
+      - name: Docs drift - Self-test the decision-record gate scripts
+        if: ${{ !cancelled() }}
         # check_adr_authorization.py runs from the default branch in
         # decision-records.yml and check_adr_scope.py in pr-body.yml and the
         # review bot; a broken copy would otherwise reach main first.
@@ -894,7 +1150,8 @@ jobs:
           python3 scripts/check_adr_authorization.py --self-test
           python3 scripts/check_adr_scope.py --self-test
 
-      - name: Check docs/config for self-inconsistency
+      - name: Docs drift - Check docs/config for self-inconsistency
+        if: ${{ !cancelled() }}
         # Catches drift between the repo's own docs and its actual config
         # that nothing previously caught automatically. The script's module
         # docstring is the authoritative, numbered list of what it checks;
@@ -902,7 +1159,8 @@ jobs:
         # stale twice, issue #455).
         run: python3 scripts/check_docs_drift.py
 
-      - name: Self-test and check the dependency snapshot inventory
+      - name: Docs drift - Self-test and check the dependency snapshot inventory
+        if: ${{ !cancelled() }}
         # dependency-submission.yml reports debian/control, the CMake fetches
         # and AlpacaCore/external/ to the dependency graph. --check fails a
         # directory under AlpacaCore/external/ that
@@ -915,69 +1173,70 @@ jobs:
           python3 scripts/dependency_snapshot.py --check
           python3 scripts/dependency_updates.py --self-test
 
-      - name: Self-test the release-notes extractor
+      - name: Docs drift - Self-test the release-notes extractor
+        if: ${{ !cancelled() }}
         # release.yml runs this too, but only on a tag push; here a broken
         # heading slug or section extractor fails the PR that caused it
         # instead of blocking the release.
         run: python3 scripts/changelog_section.py --self-test
 
-      - name: Validate changelog fragments
+      - name: Docs drift - Validate changelog fragments
+        if: ${{ !cancelled() }}
         # A PR adds changelog.d/<branch-slug>.md instead of editing
         # CHANGELOG.md; a malformed fragment would break the release step.
         run: python3 scripts/changelog_fragments.py --self-test && python3 scripts/changelog_fragments.py --check
 
-      - name: Self-test the debian/changelog generator
+      - name: Docs drift - Self-test the debian/changelog generator
+        if: ${{ !cancelled() }}
         # build_deb.sh feeds the fragments into the .deb changelog through
         # this script; nothing else exercises that path.
         run: python3 scripts/changelog_to_deb.py --self-test
 
-      - name: Self-test the release tag mapping
+      - name: Docs drift - Self-test the release tag mapping
+        if: ${{ !cancelled() }}
         # release.yml runs this too, but only on a tag push or a dry run; here
         # a broken tag/VERSION mapping (scripts/release_tag_cases.txt) fails
         # the PR that caused it instead of the first beta tag.
         run: python3 scripts/release_tag.py --self-test
 
-      - name: Self-test the nightly version
+      - name: Docs drift - Self-test the nightly version
+        if: ${{ !cancelled() }}
         # nightly-build.yml runs it only on main once a night; here a change to
         # it is tested by the PR that makes it.
         run: python3 scripts/nightly_version.py --self-test
 
-      - name: Self-test the cache pruning rule
+      - name: Docs drift - Self-test the cache pruning rule
+        if: ${{ !cancelled() }}
         # cache-prune.yml runs it only after a run on main; here a change to
         # which caches it deletes fails the PR that makes it.
         run: python3 scripts/prune_actions_caches.py --self-test
 
-      - name: Self-test the merge-down exemption
+      - name: Docs drift - Self-test the merge-down exemption
+        if: ${{ !cancelled() }}
         # pr-body.yml runs it on every PR as well; here a change to it is
         # tested by the PR that makes it, whatever that PR's head is named.
         run: python3 scripts/merge_down.py --self-test
 
-      - name: Self-test the stable-PR issue closer
+      - name: Docs drift - Self-test the stable-PR issue closer
+        if: ${{ !cancelled() }}
         # close-linked-issues.yml runs the script only on a merged stable PR;
         # here a change to its keyword parser fails the PR that makes it.
         run: python3 scripts/close_linked_issues.py --self-test
 
-      - name: Self-test the scheduled-run issue reporter
+      - name: Docs drift - Self-test the scheduled-run issue reporter
+        if: ${{ !cancelled() }}
         # scheduled-failure.yml runs it only after a scheduled run on main;
         # here a change to when it opens or closes an issue fails the PR.
         run: python3 scripts/scheduled_run_issue.py --self-test
 
-      - name: Self-test the issue label checker
+      - name: Docs drift - Self-test the issue label checker
+        if: ${{ !cancelled() }}
         # issue-labels.yml runs it on issue events only; here a change to which
         # labels count or when its comment is made or removed fails the PR.
         run: python3 scripts/check_issue_labels.py --self-test
 
-  connect-error-hook:
-    name: Connect-error hook
-    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Every AsyncConnectable driver exposes its connect-failure reason
+      - name: Connect-error hook - Every AsyncConnectable driver exposes its connect-failure reason
+        if: ${{ !cancelled() }}
         # A driver that inherits AsyncConnectable but omits
         # ALPACA_EXPOSE_CONNECT_ERROR() compiles and tests green while its
         # operators are told nothing but "Connection failed" (issue #358).
@@ -986,17 +1245,8 @@ jobs:
           python3 scripts/check_connect_error_hook.py --self-test
           python3 scripts/check_connect_error_hook.py
 
-  serial-port-ownership:
-    name: Serial port ownership
-    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Every serial port is opened through util::SerialLink
+      - name: Serial port ownership - Every serial port is opened through util::SerialLink
+        if: ${{ !cancelled() }}
         # A wrapper that opens a tty by hand compiles and tests green while
         # skipping the in-use registry, TIOCEXCL and the poll()-bounded reads,
         # so another device's probe can retune its live port and a retune can
@@ -1005,35 +1255,18 @@ jobs:
           python3 scripts/check_serial_port_ownership.py --self-test
           python3 scripts/check_serial_port_ownership.py
 
-  layering:
-    name: Layering gate
-    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Self-test the layering gate's fixtures
+      - name: Layering - Self-test the layering gate's fixtures
+        if: ${{ !cancelled() }}
         run: python3 scripts/check_layering.py --self-test
 
-      - name: AlpacaHTTP and catalog schema files include no new vendor headers
+      - name: Layering - AlpacaHTTP and catalog schema files include no new vendor headers
+        if: ${{ !cancelled() }}
         # ADR 0004 (device-catalog) promises the layering gate enforces it;
         # issue #651. Counts alpacacore/vendor includes against a baseline.
         run: python3 scripts/check_layering.py
 
-  stress-registration:
-    name: Stress-test registration
-    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Self-test the check's own regexes and tag wiring
+      - name: Stress registration - Self-test the check's own regexes and tag wiring
+        if: ${{ !cancelled() }}
         # Regression guard for DEVICE_TYPE_OVERRIDE_RE / TEST_CASE_TAGS_RE
         # against synthetic snippets, independent of repo state. It also runs
         # the script's main() over temp files, so the two tag predicates, the
@@ -1042,45 +1275,27 @@ jobs:
         # here rather than passing silently.
         run: python3 scripts/check_stress_registration.py --self-test
 
-      - name: Check [stress] coverage, and that neither stress tag is misplaced
+      - name: Stress registration - Check [stress] coverage, and that neither stress tag is misplaced
+        if: ${{ !cancelled() }}
         # The ci-gates instructions require a [stress] TEST_CASE for every driver exercised
         # by the sanitizers-tsan job; this was previously enforced only by
         # code review. See scripts/check_stress_registration.py.
         run: python3 scripts/check_stress_registration.py
 
-  contract-sweep:
-    name: Contract sweep registration
-    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Self-test the gate's parsers and rules
+      - name: Contract sweep - Self-test the gate's parsers and rules
+        if: ${{ !cancelled() }}
         # Literal fixtures, one per rule (ADR 0003), independent of repo state.
         run: python3 scripts/check_contract_sweep.py --self-test
 
-      - name: Check every catalog-constructed driver is in the contract sweep
+      - name: Contract sweep - Check every catalog-constructed driver is in the contract sweep
+        if: ${{ !cancelled() }}
         # Issue #571: AlpacaCore/tests/contract_sweep.h must hold an entry for
         # every (vendor, deviceType) pair the device catalog constructs, or ALLOWLIST it with a reason.
         # Also checks the guard macros reach alpacacore_tests, so the registry cannot compile empty.
         run: python3 scripts/check_contract_sweep.py
 
-  conformu-reports:
-    name: ConformU report validation
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04-arm   # pure text/JSON scan; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Self-test the ConformU report checker
+      - name: ConformU reports - Self-test the ConformU report checker
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         # main() returns 0 with "nothing to check" whenever the changed-file
         # list is empty, which is right for a PR that touches no report and
         # identical to the prefix filter, rename rule or base-ref resolution
@@ -1089,7 +1304,8 @@ jobs:
         # (issue #449).
         run: python3 scripts/check_conformu_reports.py --self-test
 
-      - name: Reject a failing or missing ConformU report
+      - name: ConformU reports - Reject a failing or missing ConformU report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         # /submit-pr already blocks this locally (a driver PR must ship a
         # clean AlpacaCore/conformu/** or AlpacaHTTP/conformu/** report), but
         # that's a prompt-only gate: a PR opened by hand, or from a fork not
@@ -1100,22 +1316,8 @@ jobs:
           git fetch --no-tags origin "$GITHUB_BASE_REF"
           python3 scripts/check_conformu_reports.py "origin/$GITHUB_BASE_REF"
 
-  shellcheck:
-    name: ShellCheck
-    runs-on: ubuntu-24.04-arm   # static text analysis; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install shellcheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck
-
-      - name: Lint shell scripts
+      - name: ShellCheck - Lint shell scripts
+        if: ${{ !cancelled() }}
         # Our authored scripts only — the vendored external/ tree is skipped.
         # debian/ maintainer scripts have no .sh extension, so add them by name.
         run: |
@@ -1133,25 +1335,12 @@ jobs:
           echo "Linting: ${scripts[*]}"
           shellcheck "${scripts[@]}"
 
-      - name: ci_preflight.sh self-test (bash 3.2 guards, quick-run SKIPs)
+      - name: ShellCheck - ci_preflight.sh self-test (bash 3.2 guards, quick-run SKIPs)
+        if: ${{ !cancelled() }}
         run: ./scripts/ci_preflight.sh --self-test
 
-  javascript:
-    name: JavaScript syntax + unit tests
-    runs-on: ubuntu-24.04-arm   # parses and runs pure JS only; arch-independent
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Node.js
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends nodejs
-
-      - name: Syntax-check web UI JavaScript
+      - name: JavaScript - Syntax-check web UI JavaScript
+        if: ${{ !cancelled() }}
         # The web UI is hand-written static JS served as-is (no bundler/build
         # step). `node --check` is the first half of its gate -- the unit-test
         # step below is the other -- and it parses each
@@ -1170,7 +1359,8 @@ jobs:
             node --check "$f"
           done
 
-      - name: Unit-test web UI JavaScript
+      - name: JavaScript - Unit-test web UI JavaScript
+        if: ${{ !cancelled() }}
         # `node --check` parses; it does not execute. web/format.js holds the
         # page's pure formatting helpers, whose contract includes three
         # fallback guards -- one of them (an engine that ignores hourCycle and

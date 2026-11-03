@@ -39,7 +39,7 @@ git log @{u}..HEAD --oneline 2>/dev/null || echo "NO_UPSTREAM"
 
 If this branch adds or modifies any ConformU files under `AlpacaCore/conformu/**` or `AlpacaHTTP/conformu/**`, every report must pass before the PR can be submitted. Merging a failing report misleads downstream consumers of `SUPPORTED-DRIVERS.md` (or `AlpacaHTTP/conformu/README.md`'s own compliance claim) into thinking a driver or endpoint is validated.
 
-This is checked here so a bad report never reaches CI in the first place, but it is **not** only a prompt-level rule anymore: the `conformu-reports` CI job runs the identical check (`scripts/check_conformu_reports.py`) on every PR and blocks the merge regardless of how the PR was opened. Run it directly instead of doing this by hand:
+This is checked here so a bad report never reaches CI in the first place, but it is **not** only a prompt-level rule anymore: the ConformU step of the `static-checks` CI job runs the identical check (`scripts/check_conformu_reports.py`) on every PR and blocks the merge regardless of how the PR was opened. Run it directly instead of doing this by hand:
 
 ```bash
 python3 scripts/check_conformu_reports.py main
@@ -288,14 +288,14 @@ CI runs a strict set of gates on every PR (`.github/workflows/ci.yml`), and the 
 The script prints a `[PASS]/[FAIL]/[SKIP]` summary. The quick set, in order:
 
 1. **clang-format** changed lines (CI `format`)
-2. **Python gates**: Unicode / Trojan-Source scan (CI `unicode`), stress registration, `Falsified by` and PR template (when `PR_BODY_FILE` is set), ConformU reports, docs drift, connect-error hook, layering, contract sweep (each its CI job of the same name)
+2. **Python gates**: Unicode / Trojan-Source scan, stress registration, `Falsified by` and PR template (when `PR_BODY_FILE` is set), ConformU reports, docs drift, connect-error hook, layering, contract sweep (each a step of CI `static-checks`, named after its gate; `Falsified by` and the PR template run in `pr-body.yml`)
 3. **Beta VERSION split** (`cmake -P` only, no configure; CI `build-test` step)
 4. **cppcheck** changed files (CI `cppcheck`)
-5. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
-6. **javascript** — `node --check` of web UI JS AND `node --test AlpacaHTTP/tests/web/*.test.js` (the file form -- the directory form breaks on Node 22), if either `AlpacaHTTP/web/*.js` or `AlpacaHTTP/tests/web/*.js` changed (CI `javascript`)
+5. **shellcheck** — only if shell scripts changed (CI `static-checks`)
+6. **javascript** — `node --check` of web UI JS AND `node --test AlpacaHTTP/tests/web/*.test.js` (the file form -- the directory form breaks on Node 22), if either `AlpacaHTTP/web/*.js` or `AlpacaHTTP/tests/web/*.js` changed (CI `static-checks`)
 7. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
 
-The build and test gates are reported `[SKIP] ... (quick run; PREFLIGHT_FULL=1 runs it, CI always does)`: both `run_all_tests.sh` passes (CI `build-test`, `build-vendors`), clang-tidy and the ASan+UBSan pass (CI `sanitizers`). `PREFLIGHT_FULL=1` runs them too on an arm64 Linux host; they are full rebuilds and the slow part. `build-vendors` in CI builds instrumented for gcov with atomic counters and the full pre-flight does not, so a test that only fails instrumented can pass locally and fail CI.
+The build and test gates are reported `[SKIP] ... (quick run; PREFLIGHT_FULL=1 runs it, CI always does)`: both `run_all_tests.sh` passes (CI `build-test`, and `build-vendors-shard`, whose three shards each run every third test), clang-tidy and the ASan+UBSan pass (CI `sanitizers`). `PREFLIGHT_FULL=1` runs them too on an arm64 Linux host; they are full rebuilds and the slow part. `build-vendors-shard` in CI builds instrumented for gcov with atomic counters and the full pre-flight does not, so a test that only fails instrumented can pass locally and fail CI; read the failing shard's log, since `build-vendors` only reports that a shard did not pass.
 
 It **auto-installs** a missing tool so its gate actually runs: `shellcheck`/`clang-format`/`cppcheck`/`nodejs` (and, in a full run, `clang-tidy`) via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The quick set also runs on macOS with its stock bash 3.2; there the apt installs do not apply, so pass `PREFLIGHT_NO_INSTALL=1` and a missing tool reports `[SKIP]`.
 
@@ -482,12 +482,12 @@ while :; do
         echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
     esac
   fi
-  # Only skipped runs and nothing pending: the actor gate skipped the job (fork push
-  # without the label, or an author outside allowed_non_write_users). A cancelled run
+  # Only skipped runs and nothing pending: the job's gate skipped it (a draft, a fork
+  # push without the label, or an author outside allowed_non_write_users). A cancelled run
   # beside the skipped one means a labelled run existed and was re-triggered mid-poll;
   # that is the two-look cancelled case below, not a skip. see the fork-label rule above.
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ] && [ "$CANCELLED" = 0 ]; then
-    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (see above)." >&2; exit 3
+    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Mark a draft ready, or apply or re-apply safe-to-review (see above)." >&2; exit 3
   fi
   # Only cancelled runs: a superseding trigger never came. A relabel issued mid-poll
   # cancels the in-flight run a few seconds before its replacement appears, so this
@@ -551,18 +551,19 @@ bot marks "out of scope, open an issue" is listed for the user in Step 10, never
 
 **Do NOT push anything further to this branch — approval is the stopping point.** The Notes an
 approval carries are listed in Step 10; open a follow-up issue for one only when the user asks.
-Then ask the user for approval to merge; on yes:
+Then ask the user for approval to merge; on yes, for a PR into `stable/X.Y` (no queue there):
 
 ```bash
-gh pr merge <number> --merge
+gh pr merge <number> --merge   # stable/X.Y only; for main, see below
 ```
 
-When `main` requires a merge queue (`ci-gates`, "Merge queue"), this adds the PR to the queue
-instead of merging it, and the queue runs `ci.yml` on the merged commit, including
-`sanitizers-tsan` and `package-deb`, which a PR into `main` skips. Never pass `--admin`: it
-bypasses the queue. Wait for the PR to merge or leave the queue with the background block in
+A PR into `main` goes through the merge queue (`ci-gates`, "Merge queue"): add it with the
+`enqueuePullRequest` call in `/pr-checker`'s Step 3, not `gh pr merge`, which tries to turn on
+auto-merge and fails here because the repository has auto-merge off. The queue runs `ci.yml` on
+the merged commit, including `sanitizers-tsan` and `package-deb`, which a PR into `main` skips.
+Never pass `--admin` to `gh pr merge`: it bypasses the queue. Wait for the PR to merge or leave the queue with the background block in
 `/pr-checker`'s Step 3, and treat a removal like a red CI check: fix, push, poll for the fresh
-verdict, merge again. Never update or rebase the branch because `main` moved.
+verdict, queue it again. Never update or rebase the branch because `main` moved.
 
 ### Follow-up issue format
 

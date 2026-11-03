@@ -450,6 +450,7 @@ TEST_CASE("SkyWatcher snapshot - a frame older than the link-loss bound with no 
     CHECK(driver->get_link_fault().empty());
     require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->get_guide_rate(); }, alpacacore::AlpacaError::NotConnected);  // rule 3
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_device_state().empty());
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
@@ -549,6 +550,129 @@ TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked:
     CHECK_FALSE(mount.axis_running(2));
     CHECK_FALSE(driver->get_device_state().empty());
     driver->set_connected(false);
+}
+
+// Decision 0009 rule 1 (open-astro#1786): while Connected stays true on a young fault, a guide-rate write is
+// refused with DriverException and stores nothing, and the getter refuses the same way; an out-of-range
+// value is still InvalidValue first; a good poll restores writes.
+TEST_CASE("SkyWatcher snapshot - a faulted link refuses guide-rate writes and a good poll restores them",
+          "[skywatcher][snapshot][udp]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    sw::ConnectionInfo info = endpoint(mount);
+    info.response_timeout_ms = 100;
+    auto driver = sw::create_skywatcher_telescope(0, info, 39.7392, -104.9903, 1609.0, {}, {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_guide_rate({0.001, 0.002});
+
+    mount.set_silent(true);
+    for (int i = 0; i < 6 && driver->get_link_fault().empty(); ++i) {
+        step(clock, milliseconds(150));
+    }
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    REQUIRE(driver->get_connected());  // faulted, not lost
+
+    const auto fault = alpacacore::AlpacaError::DriverException;
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.003); }, fault);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.003); }, fault);
+    require_alpaca_error([&] { driver->set_guide_rate({0.003, 0.003}); }, fault);
+    require_alpaca_error([&] { driver->get_guide_rate(); }, fault);  // reads refuse too (decision 0009 rule 1)
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    mount.set_silent(false);
+    for (int i = 0; i < 6 && !driver->get_link_fault().empty(); ++i) {
+        step(clock, milliseconds(150));
+    }
+    REQUIRE(driver->get_link_fault().empty());
+    CHECK(driver->get_guide_rate().ra == 0.001);  // the refused writes stored nothing
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_guide_rate_declination(0.003);
+    CHECK(driver->get_guide_rate().ra == 0.001);
+    CHECK(driver->get_guide_rate().dec == 0.003);
+    driver->set_connected(false);
+}
+
+// Decision 0009 rules 1 and 3 (open-astro#1786): the target pair is commanded state. A young fault refuses a read of
+// a set target and a write with DriverException while Connected stays true; a lost link and an explicit disconnect are
+// NotConnected; an out-of-range write is InvalidValue first; a refused write changes neither the value nor its flag.
+TEST_CASE("SkyWatcher snapshot - a faulted or lost link refuses the targets and the guide rate like the other reads",
+          "[skywatcher][snapshot][udp]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    sw::ConnectionInfo info = endpoint(mount);
+    info.response_timeout_ms = 100;
+    auto driver = sw::create_skywatcher_telescope(0, info, 39.7392, -104.9903, 1609.0, {}, {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_target_right_ascension(5.0);  // declination stays unset
+
+    mount.set_silent(true);
+    for (int i = 0; i < 6 && driver->get_link_fault().empty(); ++i) {
+        step(clock, milliseconds(150));
+    }
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    REQUIRE(driver->get_connected());  // faulted, not lost
+
+    const auto fault = alpacacore::AlpacaError::DriverException;
+    const auto invalid = alpacacore::AlpacaError::InvalidValue;
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, fault);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, fault);
+    require_alpaca_error([&] { driver->set_target_right_ascension(6.0); }, fault);
+    require_alpaca_error([&] { driver->set_target_declination(10.0); }, fault);
+    require_alpaca_error([&] { driver->set_target_right_ascension(25.0); }, invalid);
+    require_alpaca_error([&] { driver->set_target_declination(95.0); }, invalid);
+
+    mount.set_silent(false);
+    for (int i = 0; i < 6 && !driver->get_link_fault().empty(); ++i) {
+        step(clock, milliseconds(150));
+    }
+    REQUIRE(driver->get_link_fault().empty());
+    CHECK(driver->get_target_right_ascension() == 5.0);  // the refused writes stored nothing
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    driver->set_target_declination(10.0);
+    CHECK(driver->get_target_declination() == 10.0);
+    CHECK(driver->get_target_right_ascension() == 5.0);
+
+    // Lost: the poll stops answering the clock and the frame ages past the bound.
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    step(clock, alpacacore::util::kLinkStalenessBound + seconds(1));
+    REQUIRE_FALSE(driver->get_connected());
+    const auto lost = alpacacore::AlpacaError::NotConnected;
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, lost);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, lost);
+    require_alpaca_error([&] { driver->set_target_right_ascension(6.0); }, lost);
+    require_alpaca_error([&] { driver->set_target_declination(11.0); }, lost);
+    require_alpaca_error([&] { driver->set_target_right_ascension(25.0); }, invalid);
+    sw::set_status_poll_paused_for_testing(*driver, false);
+    driver->set_connected(false);
+}
+
+// A connected driver answers; after an explicit disconnect the guide rate and the targets are NotConnected.
+TEST_CASE("SkyWatcher snapshot - an explicit disconnect refuses the guide rate and the targets",
+          "[skywatcher][snapshot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    CHECK(driver->get_guide_rate().ra > 0.0);  // a sane sub-sidereal default
+    CHECK(driver->get_guide_rate().dec > 0.0);
+    CHECK(driver->get_guide_rate().ra <= 360.0 / 86164.0905);
+    driver->set_guide_rate({0.001, 0.002});
+    driver->set_target_right_ascension(5.0);
+    CHECK(driver->get_guide_rate().ra == 0.001);
+    CHECK(driver->get_target_right_ascension() == 5.0);
+
+    driver->set_connected(false);
+    const auto lost = alpacacore::AlpacaError::NotConnected;
+    require_alpaca_error([&] { (void)driver->get_guide_rate(); }, lost);
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, lost);
+    require_alpaca_error([&] { driver->set_target_declination(10.0); }, lost);
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.003); }, lost);
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 #endif  // _WIN32

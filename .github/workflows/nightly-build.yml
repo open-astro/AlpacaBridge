@@ -26,7 +26,7 @@
 # every merge, so a nightly .deb that fails the check is never published.
 #
 # The same run also builds all vendors optimized and runs the full suite
-# (issue #1313): CI's build-vendors job is instrumented (-O0 --coverage), so
+# (issue #1313): CI's build-vendors-shard job is instrumented (-O0 --coverage), so
 # nothing else tests optimized, NDEBUG code like the .deb's. The .deb build
 # waits for the test job: a red suite fails the run and nothing is published,
 # so the nightly-build tag stays on the last green commit and the next cron
@@ -114,7 +114,7 @@ jobs:
           persist-credentials: false
 
       - name: Install build dependencies
-        # Same list as ci.yml's build-vendors job, minus gcovr. libgpiod-dev is
+        # Same list as ci.yml's build-vendors-shard job, minus gcovr. libgpiod-dev is
         # omitted on purpose: the runner ships 1.6 and the GPIO drivers need >= 2.0.
         run: |
           set -euo pipefail
@@ -220,7 +220,7 @@ jobs:
           persist-credentials: false
 
       - name: Install build dependencies
-        # Same list as ci.yml's build-vendors job, minus gcovr. libgpiod-dev is
+        # Same list as ci.yml's build-vendors-shard job, minus gcovr. libgpiod-dev is
         # omitted on purpose: the runner ships 1.6 and the GPIO drivers need >= 2.0.
         run: |
           set -euo pipefail

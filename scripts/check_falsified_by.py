@@ -9,7 +9,7 @@ the one production-code mutation that makes it fail:
     - "Gemini focuser - move beyond max_step throws InvalidValue": AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp:212 delete the `steps > max_step_` range check
 
 Grammar: `- "<case name>": <path>:<line> <change>`. `<path>` must exist in the
-checkout and be production code (`AlpacaCore/src|include`, `AlpacaHTTP/src|web`).
+checkout and be production code (`AlpacaCore/src|include`, `AlpacaHTTP/src|include|web`).
 A test-helper path (`AlpacaCore/tests`, `AlpacaHTTP/tests`) is accepted only when
 the case's own name or tags say the helper is the subject (`Fake*`, `PtyPair`,
 `StressCallGuard`, `[stress-guard]`, `[driver_rig]`). `<change>` has at least 3 words.
@@ -68,6 +68,7 @@ PRODUCTION_PREFIXES = (
     "AlpacaCore/src/",
     "AlpacaCore/include/",
     "AlpacaHTTP/src/",
+    "AlpacaHTTP/include/",
     "AlpacaHTTP/web/",
 )
 HELPER_PREFIXES = ("AlpacaCore/tests/", "AlpacaHTTP/tests/")
@@ -199,7 +200,7 @@ def path_error(name, path, tags, exists):
         if HELPER_SUBJECT_RE.search(subject):
             return None
         return "%r: %s is a test helper and the case name/tags do not say the helper is its subject" % (name, path)
-    return "%r: %s is not production code (AlpacaCore/src|include, AlpacaHTTP/src|web)" % (name, path)
+    return "%r: %s is not production code (AlpacaCore/src|include, AlpacaHTTP/src|include|web)" % (name, path)
 
 
 def evaluate(new_cases, entries, body_errors, exists, head_cases=None):
@@ -614,6 +615,8 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     check("missing path reported", len(errs) == 1 and "does not exist" in errs[0])
     errs = evaluate({"A": set()}, [("A", "scripts/foo.py", "x y z")], [], always)
     check("non-production path reported", len(errs) == 1 and "not production" in errs[0])
+    check("HTTP production header accepted", not evaluate(
+        {"A": set()}, [("A", "AlpacaHTTP/include/alpacahttp/util/socket_utils.h", "x y z")], [], always))
     errs = evaluate({"A": set()}, [("A", "AlpacaCore/tests/t.cpp", "x y z")], [], always)
     check("helper path rejected for plain case", len(errs) == 1 and "test helper" in errs[0])
     for nm, tg in [("FakeSdk throws", set()), ("PtyPair closes", set()), ("StressCallGuard counts", set()),

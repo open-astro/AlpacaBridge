@@ -109,8 +109,9 @@ TEST_CASE("Celestron CGX AUX link - resync clears a timeout but never reopens a 
     REQUIRE_FALSE(link.is_healthy());
     fake.set_muted(false);
     link.resync();
-    CHECK(link.is_healthy());
+    CHECK_FALSE(link.is_healthy());  // a flush is not a reply (decision 0009 rule 1)
     CHECK_NOTHROW(link.get_axis_position(alpacacore::vendor::celestron::CgxAxis::RightAscension));
+    CHECK(link.is_healthy());
 
     link.disconnect();
     try {
@@ -124,6 +125,35 @@ TEST_CASE("Celestron CGX AUX link - resync clears a timeout but never reopens a 
     alpacacore::vendor::celestron::CelestronCgxProtocol other;
     CHECK_NOTHROW(other.connect_serial(fake.slave_path()));
     CHECK(other.is_connected());
+}
+
+TEST_CASE("Celestron CGX AUX link - recovering a timed-out stream keeps the fault until the mount replies",
+          "[celestron][cgx][protocol][unit]") {
+    // Decision 0009 rule 1: only a good reply clears a link fault. The CGX stop retry recovers the stream on the
+    // held fd after every timeout and then waits 500 ms on the next exchange; a recovery that reported healthy
+    // let Slewing read clean for that whole wait while the mount was still silent (contract sweep tier 3 flake).
+    using alpacacore::vendor::celestron::CgxAxis;
+    alpacacore::test::FakeCelestronCgxMount fake;
+    REQUIRE(fake.ok());
+    alpacacore::vendor::celestron::CelestronCgxProtocol link;
+    link.connect_serial(fake.slave_path());
+    REQUIRE(link.is_healthy());
+
+    fake.set_muted(true);
+    CHECK_THROWS_AS(link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)),
+                    alpacacore::AlpacaException);
+    REQUIRE_FALSE(link.is_healthy());
+    link.connect_serial(fake.slave_path(), alpacacore::vendor::celestron::AuxLinkSpeed::Baud115200,
+                        std::chrono::milliseconds(0));
+    CHECK_FALSE(link.is_healthy());
+    CHECK_THROWS_AS(link.get_axis_position(CgxAxis::RightAscension, std::chrono::milliseconds(50)),
+                    alpacacore::AlpacaException);
+    link.resync();
+    CHECK_FALSE(link.is_healthy());
+
+    fake.set_muted(false);
+    CHECK_NOTHROW(link.get_axis_position(CgxAxis::RightAscension));
+    CHECK(link.is_healthy());
 }
 
 TEST_CASE("Celestron CGX AUX link - claims kernel exclusive ownership and releases it on reconnect",
