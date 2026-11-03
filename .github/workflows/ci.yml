@@ -11,10 +11,12 @@
 # Jobs:
 #   build-test     build vendor-neutral core + run unit tests (the base gate),
 #                  in a debian:trixie container (the distribution we ship for)
-#   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
-#                  vendors ON, instrumented for gcov; per-component + combined
-#                  line coverage in the job summary, HTML/JSON artifact (no
-#                  threshold)
+#   build-vendors-shard  stage in-tree vendor SDK .so libs, build with all
+#                  vendors ON, instrumented for gcov, and run every third test
+#                  (three shards); each uploads its raw coverage JSON
+#   build-vendors  pass only when all three shards passed; merge their coverage
+#                  into per-component + combined line coverage in the job
+#                  summary, HTML/JSON artifact (no threshold)
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
 #   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
 #                  connect/disconnect/operate concurrency suite (issue #101),
@@ -69,7 +71,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 # Single source of truth for the vendored libgpiod build dependency — the
-# build-vendors, sanitizers-tsan and clang-tidy jobs consume these,
+# build-vendors-shard, sanitizers-tsan and clang-tidy jobs consume these,
 # so a version bump can't skew them (tarball + README in AlpacaCore/external/libgpiod/).
 env:
   LIBGPIOD_VER: "2.2.4"
@@ -188,14 +190,25 @@ jobs:
         # configure, no compile.
         run: scripts/check_beta_configure.sh
 
-  build-vendors:
-    # The all-vendors suite runs once, instrumented for coverage: the build,
-    # the tests and the gcovr report are this one job (the separate coverage
-    # job ran the same 2413 tests a second time, also at -O0). The report is
-    # informational: no --fail-under threshold.
-    name: Build + test (all vendors, arm64)
+  build-vendors-shard:
+    # The all-vendors suite runs once, instrumented for coverage, split across
+    # three runners: each shard builds the whole tree (ccache makes the build
+    # about 1.5 min) and runs every third test (`ctest -I <shard>,,3`, via
+    # CTEST_SHARD in run_all_tests.sh), so the slow driver cases, which sit
+    # next to each other in test-number order, are spread over the three. One
+    # runner took about 11.5 min of ctest for about 88 min of test time; the
+    # cases wait on fake hardware in real time, so a third of them per runner
+    # also means less contention for the ones that measure time. Each shard
+    # uploads its raw gcovr JSON; build-vendors below merges the three into
+    # the report. The report is informational: no --fail-under threshold.
+    name: Build + test (all vendors, arm64, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    strategy:
+      # Every shard runs to the end, so one red shard does not hide another's failures.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -318,6 +331,7 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
           CXXFLAGS: "--coverage -O0 -g"
           LDFLAGS: "--coverage"
+          CTEST_SHARD: ${{ matrix.shard }}/3
         # Zeroed first: the statistics live in the cached directory, so they
         # would otherwise add up every run since the cache was first saved.
         run: |
@@ -330,37 +344,107 @@ jobs:
         run: ccache --show-stats --verbose
 
       - name: Save the compiler cache
-        if: always() && github.event_name == 'push'
+        # Every shard compiles the same tree, so one of them saves it: a second
+        # save of the same key would be refused.
+        if: always() && github.event_name == 'push' && matrix.shard == 1
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
           key: ccache-all-vendors-coverage-${{ github.sha }}
 
-      - name: Generate coverage report
+      - name: Collect this shard's coverage data
         # Over the one tree run_all_tests.sh builds: AlpacaHTTP/build holds
         # AlpacaCore as a subdirectory, and both suites write the same .gcda
-        # files there (issue #1251).
+        # files there (issue #1251). Raw JSON only: build-vendors merges the
+        # three shards' files (gcovr -a adds the hit counts) and writes the
+        # reports.
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mkdir -p coverage-raw
+          gcovr --root . -j "$(nproc)" \
+            --exclude '.*/tests/' \
+            --exclude '.*/external/' \
+            --exclude '.*/examples/' \
+            --exclude '.*/build[^/]*/' \
+            --gcov-ignore-parse-errors=all \
+            --filter 'AlpacaCore/(src|include)/' \
+            --filter 'AlpacaHTTP/(src|include)/' \
+            --json "coverage-raw/shard-${SHARD}.json" \
+            AlpacaHTTP/build
+
+      - name: Upload this shard's coverage data
+        # Kept a week: re-running one failed shard re-runs build-vendors, which
+        # reads the other shards' files from the earlier attempt.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: coverage-raw-${{ matrix.shard }}
+          path: coverage-raw/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-vendors:
+    # The required check and the review bot's CI wait both name this job, so
+    # it keeps the name the single all-vendors job had. It passes only when
+    # all three shards passed: `!cancelled()` runs it after a failed shard
+    # (to fail here), where a plain needs: would skip it, and a skipped job
+    # satisfies a required check. A run cancelled by a newer push skips it.
+    name: Build + test (all vendors, arm64)
+    needs: build-vendors-shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Require every shard to pass
+        env:
+          SHARDS: ${{ needs.build-vendors-shard.result }}
+        run: |
+          if [ "${SHARDS}" != "success" ]; then
+            echo "::error::An all-vendors test shard did not pass (result: ${SHARDS}); see the shard jobs."
+            exit 1
+          fi
+
+      - name: Checkout
+        # gcovr reads the sources for the HTML report.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install gcovr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcovr
+
+      - name: Download the shards' coverage data
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: coverage-raw-*
+          path: coverage-raw
+          merge-multiple: true
+
+      - name: Generate coverage report
+        # The shards ran gcov over their own trees with the same filters and
+        # excludes; adding their JSON (-a) sums each line's hits, so this is the
+        # report one runner running every test would write. The combined JSON
+        # it writes feeds the two component reports.
         run: |
           set -euo pipefail
           mkdir -p coverage/html
-          excludes=(
-            --exclude '.*/tests/'
-            --exclude '.*/external/'
-            --exclude '.*/examples/'
-            --exclude '.*/build[^/]*/'
-          )
-          # gcov runs once, for the combined report, which also writes the
-          # raw data as JSON; the two component reports are filtered from that
-          # JSON (-a) instead of running gcov over every .gcda again.
-          gcovr --root . -j "$(nproc)" "${excludes[@]}" \
-            --gcov-ignore-parse-errors=all \
+          shards=(coverage-raw/shard-*.json)
+          if [ "${#shards[@]}" -ne 3 ] || [ ! -f "${shards[0]}" ]; then
+            echo "::error::expected three shard coverage files, found: ${shards[*]}"
+            exit 1
+          fi
+          tracefiles=()
+          for f in "${shards[@]}"; do tracefiles+=(-a "$f"); done
+          gcovr --root . "${tracefiles[@]}" \
             --filter 'AlpacaCore/(src|include)/' \
             --filter 'AlpacaHTTP/(src|include)/' \
             --json coverage/combined-raw.json \
             --txt coverage/combined.txt \
             --json-summary-pretty --json-summary coverage/combined.json \
-            --html-details coverage/html/index.html \
-            AlpacaHTTP/build
+            --html-details coverage/html/index.html
           report() {
             local name="$1"
             shift
@@ -484,7 +568,7 @@ jobs:
 
       - name: Install build dependencies
         # libgpiod-dev intentionally omitted (needs >= 2.0, built from source
-        # below) — mirrors the build-vendors job. catch2 is required: without
+        # below) — mirrors the build-vendors-shard job. catch2 is required: without
         # it the tests CMakeLists silently skips the suite and this job would
         # green-light while running nothing.
         run: |
@@ -509,7 +593,7 @@ jobs:
             libcurl4-openssl-dev
 
       - name: Build libgpiod v2 from source
-        # Same vendored tarball + pinned checksum as the build-vendors job
+        # Same vendored tarball + pinned checksum as the build-vendors-shard job
         # (see the README beside the tarball).
         run: |
           set -euo pipefail
@@ -535,7 +619,7 @@ jobs:
           sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
       - name: Stage vendor SDK shared libraries
-        # Mirrors the build-vendors job: the vendor-ON build links the in-tree
+        # Mirrors the build-vendors-shard job: the vendor-ON build links the in-tree
         # arm64 vendor .so files from the loader path.
         run: |
           set -euo pipefail
@@ -718,7 +802,7 @@ jobs:
             libcurl4-openssl-dev
 
       - name: Build libgpiod v2 from source
-        # Mirrors the build-vendors job: install the upstream release into
+        # Mirrors the build-vendors-shard job: install the upstream release into
         # /usr/local so clang's default search path resolves the v2 <gpiod.h>
         # ahead of any system copy.
         run: |
@@ -751,13 +835,13 @@ jobs:
           set -euo pipefail
           sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
-      - name: Wrap the compilers like build-vendors
+      - name: Wrap the compilers like build-vendors-shard
         # Keep paired with CCACHE_COMPILERCHECK=content and the restore below:
         # without the wrappers every lookup misses, silently.
         run: .github/scripts/coverage-compilers.sh
 
       - name: Restore the compiler cache
-        # Restore only, from build-vendors' cache: run_all_tests.sh configures
+        # Restore only, from build-vendors-shard's cache: run_all_tests.sh configures
         # AlpacaHTTP/build with the same options (vendors ON, tests ON), and
         # this job builds with the same wrappers and flags, so the objects
         # match. This job runs on pull requests only, and a cache saved there
@@ -793,7 +877,7 @@ jobs:
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
           ccache --show-stats
-          # A low hit rate means this build no longer matches build-vendors'
+          # A low hit rate means this build no longer matches build-vendors-shard's
           # (wrapper step, flags or configure drifted) and the cache is dead
           # weight. Warn rather than fail: a cold main cache is legitimate.
           ccache --print-stats | awk -F'\t' '

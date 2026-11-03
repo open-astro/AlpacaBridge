@@ -163,7 +163,22 @@ check_http_floor "AlpacaHTTP (vendors ${CORE_VENDORS})" "${BUILD_DIR}" "${CORE_B
 # ci_preflight.sh alike (issue #586). Requires CMake >= 3.18. It catches only an
 # EMPTY tree; the floors above catch a shrunken suite (issue #592). One ctest
 # over the whole tree runs both suites in one parallel pool.
-if ! ctest --test-dir "${BUILD_DIR}" --output-on-failure --no-tests=error --timeout "${CTEST_TIMEOUT}" -j "${CTEST_PARALLEL}"; then
+# CTEST_SHARD=<k>/<n> (CI's build-vendors-shard sets it): run only every n-th
+# test from the k-th (`ctest -I k,,n`), so n runners split one suite. The
+# floors above still count the whole tree, so every shard checks it built every
+# test; each test runs in exactly one shard. Unset runs every test.
+SHARD_ARGS=()
+if [[ -n "${CTEST_SHARD:-}" ]]; then
+  if [[ ! "${CTEST_SHARD}" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] \
+     || (( BASH_REMATCH[1] > BASH_REMATCH[2] )); then
+    echo "ERROR: CTEST_SHARD must be <k>/<n> with 1 <= k <= n (got '${CTEST_SHARD}')"
+    exit 1
+  fi
+  SHARD_ARGS=(-I "${BASH_REMATCH[1]},,${BASH_REMATCH[2]}")
+  echo "== ctest shard ${CTEST_SHARD}: every ${BASH_REMATCH[2]}th test from #${BASH_REMATCH[1]} =="
+fi
+if ! ctest --test-dir "${BUILD_DIR}" --output-on-failure --no-tests=error --timeout "${CTEST_TIMEOUT}" \
+     -j "${CTEST_PARALLEL}" ${SHARD_ARGS[@]+"${SHARD_ARGS[@]}"}; then
   # CTEST_RERUN_FAILED=1 (the nightly jobs set it): the failed cases run once
   # more, alone and serially, and that run is the verdict. The all-vendors
   # suite is ~3800 cases that wait on fake hardware in real time; at 2x nproc
