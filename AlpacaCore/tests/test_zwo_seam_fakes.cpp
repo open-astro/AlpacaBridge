@@ -368,7 +368,7 @@ TEST_CASE("ZWO EFW seam - no wheel attached refuses the connect with NotConnecte
     CHECK(sdk.open_calls == 0);
 }
 
-// Falsified by: zwo_filterwheel_driver.cpp set_connected() storing connected_ before open_wheel()
+// Falsified by: zwo_filterwheel_driver.cpp set_connected() publishing the open link before open_wheel_link()
 // returns (get_connected() reads true after the scripted open failure).
 TEST_CASE("ZWO EFW seam - a failed connect leaves the wheel closed", "[zwo][filterwheel][unit][fake-sdk]") {
     FakeZWOEFWSDK sdk;

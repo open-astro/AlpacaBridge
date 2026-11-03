@@ -23,8 +23,10 @@
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -52,8 +54,16 @@ public:
     std::vector<Info> enumerate_wheels() override { return fake.enumerate_wheels(); }
     bool get_wheel_info_by_id(int id, Info& info) override { return fake.get_wheel_info_by_id(id, info); }
     bool get_wheel_info_by_index(int index, Info& info) override { return fake.get_wheel_info_by_index(index, info); }
-    void open_wheel(int id) override { fake.open_wheel(id); }
-    void close_wheel(int id) override { fake.close_wheel(id); }
+    alpacacore::vendor::zwo::SharedOpenTable::Opened open_wheel_link(int id) override {
+        return fake.open_wheel_link(id);
+    }
+    std::optional<alpacacore::vendor::zwo::SharedOpenTable::Opened> open_wheel_candidate(int id) override {
+        return fake.open_wheel_candidate(id);
+    }
+    void close_wheel_link(int id, std::uint64_t link) override { fake.close_wheel_link(id, link); }
+    void with_link(int id, std::uint64_t link, const std::function<void()>& fn) override {
+        fake.with_link(id, link, fn);
+    }
     int get_position(int id) override {
         if (next_ < queued_.size()) return queued_[next_++];
         return fake.get_position(id);
