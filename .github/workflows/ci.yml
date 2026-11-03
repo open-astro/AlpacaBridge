@@ -254,6 +254,9 @@ jobs:
         # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
         # in every job that needs them: the all-vendors shards, TSan and
         # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
         id: deps-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -624,6 +627,9 @@ jobs:
         # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
         # in every job that needs them: the all-vendors shards, TSan and
         # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
         id: deps-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -791,6 +797,20 @@ jobs:
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-guard-run.log
 
+      - name: Show the [stress] shard logs after a cancel or timeout
+        # The run above prints the shard logs only once every shard has exited,
+        # so a shard that hangs until timeout-minutes cancels the job would
+        # otherwise leave none of its output in the job log. A failure already
+        # printed them, so this runs on a cancel only.
+        if: cancelled()
+        run: |
+          for log in stress-run-*.log; do
+            [ -e "${log}" ] || continue
+            echo "::group::${log}"
+            cat "${log}"
+            echo "::endgroup::"
+          done
+
       - name: Compiler cache statistics
         if: always()
         run: ccache --show-stats
@@ -886,6 +906,9 @@ jobs:
         # both. A hit skips the two configure-and-make runs (about 35 to 45 s)
         # in every job that needs them: the all-vendors shards, TSan and
         # clang-tidy. Both install into a staging tree, copied into place below.
+        # The key holds the runner OS and arch but not the image version: when
+        # a runner image moves glibc or the toolchain, change the key's
+        # `deps-gpiod-` prefix in all three jobs so the libraries rebuild.
         id: deps-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
