@@ -270,19 +270,6 @@ jobs:
           key: ccache-all-vendors-coverage-${{ github.sha }}
           restore-keys: ccache-all-vendors-coverage-
 
-      - name: Restore the ctest timings
-        # ctest starts the slowest tests first only when it has an earlier run's
-        # timings (CTEST_COST_DATA in run_all_tests.sh, scripts/ctest_cost.py).
-        # Saved like the compiler cache, only on a push; a pull request and the
-        # merge queue read the base branch's. Only this job keeps them: in
-        # build-test and sanitizers one test (test_server_socket) already takes
-        # the whole ctest run, so the order cannot shorten it.
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ${{ runner.temp }}/ctest-cost
-          key: ctest-cost-all-vendors-${{ github.sha }}
-          restore-keys: ctest-cost-all-vendors-
-
       - name: Build + run tests with coverage (all vendors)
         # CMake takes CXXFLAGS / LDFLAGS on a fresh configure and
         # run_all_tests.sh wipes its build tree first. -fprofile-update=atomic
@@ -295,7 +282,6 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
           CXXFLAGS: "--coverage -O0 -g"
           LDFLAGS: "--coverage"
-          CTEST_COST_DATA: ${{ runner.temp }}/ctest-cost/costs.cmake
         # Zeroed first: the statistics live in the cached directory, so they
         # would otherwise add up every run since the cache was first saved.
         run: |
@@ -313,13 +299,6 @@ jobs:
         with:
           path: ~/.cache/ccache
           key: ccache-all-vendors-coverage-${{ github.sha }}
-
-      - name: Save the ctest timings
-        if: always() && github.event_name == 'push'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ${{ runner.temp }}/ctest-cost
-          key: ctest-cost-all-vendors-${{ github.sha }}
 
       - name: Generate coverage report
         # Over the one tree run_all_tests.sh builds: AlpacaHTTP/build holds
@@ -984,12 +963,6 @@ jobs:
         # cache-prune.yml runs it only after a run on main; here a change to
         # which caches it deletes fails the PR that makes it.
         run: python3 scripts/prune_actions_caches.py --self-test
-
-      - name: Docs drift - Self-test the ctest timings writer
-        if: ${{ !cancelled() }}
-        # build-vendors runs it only after its test run; here a change to the
-        # file it writes fails the PR that makes it.
-        run: python3 scripts/ctest_cost.py --self-test
 
       - name: Docs drift - Self-test the merge-down exemption
         if: ${{ !cancelled() }}

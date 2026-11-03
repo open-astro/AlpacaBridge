@@ -51,6 +51,7 @@ public:
     /// Clears a desynchronized link on the port already held: flushes stale input
     /// and accepts exchanges again. Never opens a port, so a racing disconnect
     /// cannot be undone (issue #896); throws NotConnected on a closed link.
+    /// is_healthy() stays false until the next reply, as after a same-port connect_serial().
     void resync();
     bool is_connected() const;
     bool is_healthy() const { return healthy_.load(); }

@@ -1,0 +1,3 @@
+### Fixed
+
+- **Celestron CGX direct USB: a silent mount no longer reads healthy during stop retries**, Celestron CGX driver. Recovering a timed-out AUX stream on the port already held (the stop retry, tracking rollback and pulse-guide recovery, and the focus motor's `resync()`) no longer clears the link fault; only the next good reply does ([decision 0009](docs/decisions/0009-link-loss-and-relink-policy.md) rule 1). Before, `Slewing` could read clean for up to 500 ms after each retry while the mount stayed silent, and the contract-sweep tier 3 case for the CGX failed intermittently in CI. Covered by `AlpacaCore/tests/test_celestron_cgx_protocol.cpp`.
