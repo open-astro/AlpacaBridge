@@ -801,7 +801,9 @@ jobs:
         # The run above prints the shard logs only once every shard has exited,
         # so a shard that hangs until timeout-minutes cancels the job would
         # otherwise leave none of its output in the job log. A failure already
-        # printed them, so this runs on a cancel only.
+        # printed them, so this runs on a cancel only. That relies on the job's
+        # timeout-minutes: a step-level timeout-minutes on the run step would
+        # fail it instead of cancelling the job, and this step would not run.
         if: cancelled()
         run: |
           for log in stress-run-*.log; do
