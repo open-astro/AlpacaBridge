@@ -147,7 +147,12 @@ public:
     }
     void drop_next_reply(std::uint8_t axis, std::uint8_t command, bool apply_command) {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        reply_faults_.push_back({axis, command, apply_command});
+        reply_faults_.push_back({axis, command, apply_command, std::nullopt});
+    }
+    // The next matching command is applied and acknowledged with this payload in place of its usual reply.
+    void ack_next_with_payload(std::uint8_t axis, std::uint8_t command, std::vector<std::uint8_t> payload) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        reply_faults_.push_back({axis, command, true, std::move(payload)});
     }
 
     void sever_link() {
@@ -248,6 +253,7 @@ private:
         std::uint8_t axis;
         std::uint8_t command;
         bool apply_command;
+        std::optional<std::vector<std::uint8_t>> ack_payload;
     };
 
     void stop_worker() {
@@ -422,9 +428,14 @@ private:
         const auto fault = std::find_if(reply_faults_.begin(), reply_faults_.end(), [&](const ReplyFault& candidate) {
             return candidate.axis == request.destination && candidate.command == request.command;
         });
-        const bool drop_reply = fault != reply_faults_.end();
-        const bool apply_command = !drop_reply || fault->apply_command;
-        if (drop_reply) reply_faults_.erase(fault);
+        const bool faulted = fault != reply_faults_.end();
+        const bool apply_command = !faulted || fault->apply_command;
+        std::optional<std::vector<std::uint8_t>> ack_payload;
+        if (faulted) {
+            ack_payload = std::move(fault->ack_payload);
+            reply_faults_.erase(fault);
+        }
+        const bool drop_reply = faulted && !ack_payload;
         if (!apply_command) return std::nullopt;
         std::vector<std::uint8_t> payload;
         switch (request.command) {
@@ -546,6 +557,7 @@ private:
                 return std::nullopt;
         }
         if (drop_reply) return std::nullopt;
+        if (ack_payload) payload = std::move(*ack_payload);
         return AuxFrame{.source = request.destination,
                         .destination = request.source,
                         .command = request.command,
