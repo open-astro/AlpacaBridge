@@ -291,6 +291,23 @@ std::optional<std::vector<util::ThermalCameraCandidate>> DeviceCatalog::list_the
     return std::nullopt;
 }
 
+void DeviceCatalog::add_camera_lister(std::string vendor, CameraLister lister) {
+    for (auto& entry : camera_listers_) {
+        if (entry.first == vendor) {
+            entry.second = std::move(lister);
+            return;
+        }
+    }
+    camera_listers_.emplace_back(std::move(vendor), std::move(lister));
+}
+
+std::optional<std::vector<AttachedCamera>> DeviceCatalog::list_cameras(std::string_view vendor) const {
+    for (const auto& entry : camera_listers_) {
+        if (entry.first == vendor && entry.second) return entry.second();
+    }
+    return std::nullopt;
+}
+
 const Schema* DeviceCatalog::find_schema(const DeviceKey& key) const {
     for (const Schema& s : schemas_) {
         if (s.key == key) return &s;

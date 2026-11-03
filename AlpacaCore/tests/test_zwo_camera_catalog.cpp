@@ -18,9 +18,12 @@
 
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "../src/catalog/builtin_descriptors.h"
@@ -69,6 +72,33 @@ std::optional<std::string> learned(const BindResult& result, const char* key) {
 BindResult bind(Rig& rig, const DeviceConfig& config, int number, Source source, const std::vector<PeerEntry>& peers) {
     return rig.catalog.bind(kCameraKey, config, number, BindContext{source, peers});
 }
+
+// Every ZWO line logged at INFO or above while it lives; restores the sink and level on any exit.
+struct LogCapture {
+    std::vector<std::pair<logging::LogLevel, std::string>> lines;
+    logging::LogSink previous_sink = logging::get_log_sink();
+    logging::LogLevel previous_level = logging::get_log_level();
+    LogCapture() {
+        logging::set_log_level(logging::LogLevel::Info);
+        logging::set_log_sink([this](logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (component == "ZWO") lines.emplace_back(level, std::string(message));
+        });
+    }
+    ~LogCapture() {
+        logging::set_log_sink(previous_sink);
+        logging::set_log_level(previous_level);
+    }
+    LogCapture(const LogCapture&) = delete;
+    LogCapture& operator=(const LogCapture&) = delete;
+
+    std::vector<logging::LogLevel> levels_of(const std::string& prefix) const {
+        std::vector<logging::LogLevel> levels;
+        for (const auto& [level, message] : lines) {
+            if (message.rfind(prefix, 0) == 0) levels.push_back(level);
+        }
+        return levels;
+    }
+};
 
 }  // namespace
 
@@ -228,4 +258,90 @@ TEST_CASE("ZWO camera catalog - a serial-less entry skips the serials other entr
     // Without the claim the same entry binds the camera and learns its serial.
     const BindResult taken = bind(rig, by_name, 6, Source::Persisted, {});
     CHECK(learned(taken, "serialNumber") == std::string(kFakeSerial));
+}
+
+TEST_CASE("ZWO camera catalog - a saved serial binds that body whatever cameraIndex says",
+          "[catalog][zwo][camera][unit]") {
+    // #1970: the web picker saves the picked camera's serial; the index it sends is a hint only.
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}, {5, "5555666677778888"}});
+    DeviceConfig config = camera_config(0);
+    config.set("serialNumber", std::string("5555666677778888"));
+    const BindResult result = bind(rig, config, 2, Source::Api, {});
+    REQUIRE(result.driver != nullptr);
+    CHECK(result.warnings.empty());
+    CHECK_FALSE(learned(result, "serialNumber").has_value());
+    CHECK(learned(result, "cameraName") == std::string(kFakeName));
+    result.driver->set_connected(true);
+    CHECK(rig.sdk.holders(5) == 1);
+    CHECK(rig.sdk.holders(3) == 0);
+    result.driver->set_connected(false);
+}
+
+TEST_CASE("ZWO camera catalog - an index hint that matches no camera warns with what is attached",
+          "[catalog][zwo][camera][unit]") {
+    // #1969: three cameras added one at a time, each alone at slot 0, while the form sent index 2.
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}});
+    const BindResult result = bind(rig, camera_config(2), 2, Source::Api, {});
+    REQUIRE(result.driver != nullptr);
+    CHECK_FALSE(result.rejection.has_value());
+    CHECK_FALSE(learned(result, "serialNumber").has_value());
+    CHECK_FALSE(learned(result, "cameraName").has_value());
+    REQUIRE(result.warnings.size() == 1);
+    CHECK(result.warnings[0] ==
+          "ZWO camera registered without a serial or model name: cameraIndex 2 matched no attached camera "
+          "(Camera index not found). The SDK enumerated slot 0 Fake ZWO Camera, serial 1111222233334444. Until it "
+          "learns one, a connect binds whichever camera the SDK then lists at cameraIndex 2. Edit the device and "
+          "pick its camera to bind it by serial.");
+
+    // An entry that found its camera, or that already holds a serial, has nothing to warn about.
+    CHECK(bind(rig, camera_config(0), 3, Source::Api, {}).warnings.empty());
+    DeviceConfig unplugged = camera_config(2);
+    unplugged.set("serialNumber", std::string("5555666677778888"));
+    CHECK(bind(rig, unplugged, 4, Source::Persisted, {}).warnings.empty());
+}
+
+TEST_CASE("ZWO camera catalog - the unbound line logs at INFO for an API call and WARN for a stored entry",
+          "[catalog][zwo][camera][unit]") {
+    // Decision 0007 rule 9: a configuredevice call is client-triggered, so it must not log at WARN.
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}});
+    LogCapture capture;
+    REQUIRE(bind(rig, camera_config(2), 2, Source::Api, {}).warnings.size() == 1);
+    REQUIRE(bind(rig, camera_config(2), 3, Source::Persisted, {}).warnings.size() == 1);
+    CHECK(capture.levels_of("Camera #2: ") == std::vector<logging::LogLevel>{logging::LogLevel::Info});
+    CHECK(capture.levels_of("Camera #3: ") == std::vector<logging::LogLevel>{logging::LogLevel::Warn});
+}
+
+TEST_CASE("ZWO camera catalog - a failed enumeration warns for an entry with no identity",
+          "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    rig.sdk.before_call = [](const std::string& call) {
+        if (call == "enumerate_identified_cameras") throw AlpacaException("no usb", AlpacaError::DriverException);
+    };
+    const BindResult result = bind(rig, camera_config(1), 4, Source::Persisted, {});
+    REQUIRE(result.driver != nullptr);
+    REQUIRE(result.warnings.size() == 1);
+    CHECK(result.warnings[0].find("cameraIndex 1 matched no attached camera (the enumeration failed: no usb).") !=
+          std::string::npos);
+    CHECK(result.warnings[0].find("The SDK enumerated") == std::string::npos);
+
+    DeviceConfig named = camera_config(1);
+    named.set("cameraName", std::string(kFakeName));
+    CHECK(bind(rig, named, 5, Source::Persisted, {}).warnings.empty());
+}
+
+TEST_CASE("ZWO camera catalog - lists the attached cameras for the web picker", "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}, {5, ""}});
+    const auto cameras = rig.catalog.list_cameras("zwo");
+    REQUIRE(cameras.has_value());
+    REQUIRE(cameras->size() == 2);
+    CHECK((*cameras)[0].index == 0);
+    CHECK((*cameras)[0].name == kFakeName);
+    CHECK((*cameras)[0].serial == "1111222233334444");
+    CHECK((*cameras)[1].index == 1);
+    CHECK((*cameras)[1].serial.empty());
+    CHECK_FALSE(rig.catalog.list_cameras("qhy").has_value());
 }

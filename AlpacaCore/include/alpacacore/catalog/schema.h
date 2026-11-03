@@ -190,12 +190,16 @@ struct BindContext {
 // The outcome of Factory::bind. A `rejection` means no device: the router
 // reports it (Source::Api) or skips the entry, and the other members are
 // ignored. `learned` holds config keys the entry should store (written over the
-// stored entry); `erased` names keys to remove from it.
+// stored entry); `erased` names keys to remove from it. `warnings` are what the
+// operator should know about a device that did register (a ZWO camera that
+// learned no identity, #1969): the router shows them on the device card and in
+// the configuredevice reply. The hook logs them itself.
 struct BindResult {
     std::unique_ptr<AlpacaDriver> driver;
     std::optional<std::string> rejection;
     DeviceConfig learned;
     std::vector<std::string> erased;
+    std::vector<std::string> warnings;
 };
 
 // `create` builds a driver from one normalized config and touches no hardware.

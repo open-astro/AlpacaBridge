@@ -42,6 +42,13 @@ ZwoResolveResult failed(ZwoResolveFailure failure, std::string message) {
     return result;
 }
 
+// CWE-117: model names, serials and SDK texts are device text; control characters never reach the log or a client.
+std::string printable(std::string text) {
+    std::replace_if(
+        text.begin(), text.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f; }, '?');
+    return text;
+}
+
 }  // namespace
 
 ZwoResolveResult resolve_zwo_camera(const ZwoConfiguredIdentity& entry, const std::vector<ZwoEnumeratedCamera>& found,
@@ -113,6 +120,35 @@ ZwoResolveResult resolve_zwo_camera(const ZwoConfiguredIdentity& entry, const st
         return failed(ZwoResolveFailure::IndexOutOfRange, "Camera index not found");
     }
     return failed(ZwoResolveFailure::NotFound, "Camera ID not specified");
+}
+
+std::string describe_unbound_zwo_camera(const ZwoConfiguredIdentity& entry, const std::string& reason,
+                                        const std::vector<ZwoEnumeratedCamera>* found) {
+    std::string hint = "no cameraIndex or cameraId";
+    if (entry.camera_id.has_value()) {
+        hint = "cameraId " + std::to_string(entry.camera_id.value());
+    } else if (entry.camera_index.has_value()) {
+        hint = "cameraIndex " + std::to_string(entry.camera_index.value());
+    }
+    std::string text = "ZWO camera registered without a serial or model name: " + hint +
+                       " matched no attached camera (" + printable(reason) + ").";
+    if (found != nullptr) {
+        if (found->empty()) {
+            text += " The SDK enumerated no ZWO camera.";
+        } else {
+            text += " The SDK enumerated ";
+            for (std::size_t i = 0; i < found->size(); ++i) {
+                const ZwoEnumeratedCamera& camera = (*found)[i];
+                text += (i == 0 ? "" : "; ") + std::string("slot ") + std::to_string(camera.index) + " " +
+                        printable(trim_zwo_name(camera.name)) +
+                        (camera.serial.empty() ? std::string(", no serial") : ", serial " + printable(camera.serial));
+            }
+            text += ".";
+        }
+    }
+    text += " Until it learns one, a connect binds whichever camera the SDK then lists at " + hint +
+            ". Edit the device and pick its camera to bind it by serial.";
+    return text;
 }
 
 std::string describe_unreadable_zwo_slots(const std::vector<ZwoUnreadableSlot>& unreadable) {

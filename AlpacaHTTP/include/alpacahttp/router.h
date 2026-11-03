@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -45,6 +46,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "request.h"
@@ -321,6 +323,7 @@ private:
     Response handle_failed_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_device_catalog(const Request& request, std::uint32_t server_tx_id);
     Response handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id);
+    Response handle_attached_cameras(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
     Response handle_restart(const Request& request, std::uint32_t server_tx_id);
@@ -364,9 +367,11 @@ private:
     // out about the device that the entry does not yet carry (a ZWO camera's
     // serialNumber, cameraName and uniqueId, #914). The caller stores them
     // with the entry: this function never writes the persisted list itself,
-    // because the API path has not added the entry to it yet.
+    // because the API path has not added the entry to it yet. \p warning, when
+    // given, receives the bind hook's warnings for a device that registered (#1969).
     bool register_device_from_config(const nlohmann::json& config, std::string& error_message,
-                                     ConfigSource source = ConfigSource::Api, nlohmann::json* learned_config = nullptr);
+                                     ConfigSource source = ConfigSource::Api, nlohmann::json* learned_config = nullptr,
+                                     std::string* warning = nullptr);
 
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
     void add_or_replace_persisted_device(const nlohmann::json& config);
@@ -473,6 +478,15 @@ private:
     // so two concurrent calls sending one ID cannot both keep it. Guarded by
     // persisted_devices_mutex_.
     std::set<std::string> reserved_unique_ids_;
+
+    // #1969: what the bind hook said about a device that did register (a ZWO
+    // camera that learned no identity), keyed by type and number, shown as
+    // RegistrationWarning in configureddevices. Set by each registration, erased
+    // by removedevice. A leaf lock: nothing else is taken or called under it.
+    mutable std::mutex registration_warnings_mutex_;
+    std::map<std::pair<alpacacore::DeviceType, int>, std::string> registration_warnings_;
+    void set_registration_warning(alpacacore::DeviceType type, int device_number, std::string warning);
+    std::string registration_warning(alpacacore::DeviceType type, int device_number) const;
 
     mutable std::mutex server_info_mutex_;
     std::string server_name_ = "AlpacaHTTP";

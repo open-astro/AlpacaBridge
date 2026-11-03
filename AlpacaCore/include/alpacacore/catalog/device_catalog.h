@@ -38,6 +38,13 @@ struct DescriptorView {
     bool forget_dropped_selectors;  // Schema::forget_dropped_selectors
 };
 
+// One attached camera as a vendor's camera lister reports it.
+struct AttachedCamera {
+    int index{};         // the cameraIndex value that selects this camera
+    std::string name;    // model name, trimmed
+    std::string serial;  // empty when the camera reports none or it was not read
+};
+
 class DeviceCatalog {
 public:
     // Every key with a schema, in insertion order. available means "a factory is
@@ -99,12 +106,21 @@ public:
     // nullopt when no lister is registered for the vendor; otherwise the lister's result.
     std::optional<std::vector<util::ThermalCameraCandidate>> list_thermal_cameras(std::string_view vendor) const;
 
+    // The attached cameras a vendor's camera entry can bind to, for the web UI's
+    // camera picker (#1970). Same contract as a thermal lister: talks to the SDK,
+    // may open cameras, may throw, registered only when the vendor is built.
+    using CameraLister = std::function<std::vector<AttachedCamera>()>;
+    void add_camera_lister(std::string vendor, CameraLister lister);  // replaces the vendor's
+    // nullopt when no lister is registered for the vendor; otherwise the lister's result.
+    std::optional<std::vector<AttachedCamera>> list_cameras(std::string_view vendor) const;
+
 private:
     const Schema* find_schema(const DeviceKey& key) const;
     const Factory* find_factory(const DeviceKey& key) const;
     std::vector<Schema> schemas_;
     std::vector<Factory> factories_;
     std::vector<std::pair<std::string, ThermalCameraLister>> thermal_camera_listers_;
+    std::vector<std::pair<std::string, CameraLister>> camera_listers_;
 };
 
 // Formats a range bound for a message: an Int field without a fraction, a

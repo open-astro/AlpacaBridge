@@ -506,6 +506,11 @@ function maybeAutoFillIndexFields() {
         if (!input || input.dataset.userModified === 'true') {
             return;
         }
+        // The ZWO camera index is a by-hand fallback behind the camera picker
+        // (#1970): a count of saved cameras is no guess at what is plugged in.
+        if (input.dataset.autoNumber === 'off') {
+            return;
+        }
         if (field.idFieldId) {
             const idInput = document.getElementById(field.idFieldId);
             if (idInput && idInput.value.trim() !== '') {
@@ -680,6 +685,12 @@ async function loadDevices() {
                     <div class="info-item info-item-wide">
                         <span class="info-label">Last Connect Error</span>
                         <span class="info-value info-value-error">${escapeHtml(device.LastConnectError)}</span>
+                    </div>
+                    ` : ''}
+                    ${device.RegistrationWarning ? `
+                    <div class="info-item info-item-wide">
+                        <span class="info-label">Registration Warning</span>
+                        <span class="info-value info-value-error">${escapeHtml(device.RegistrationWarning)}</span>
                     </div>
                     ` : ''}
                 </div>
@@ -1040,6 +1051,131 @@ const playerOneThermalPicker = createThermalCameraPicker({
     isTakenBy: () => true,
 });
 
+// Camera picker of the ZWO camera form (#1970); the option model and its wording
+// live in format.js (zwoCameraOptions / Selection / Hint). The select has no name,
+// so it never reaches FormData; the submit reads read() instead. The index and ID
+// boxes show only for 'manual'.
+function createZwoCameraPicker() {
+    const select = document.getElementById('zwo-camera-picker');
+    const hint = document.getElementById('zwo-camera-picker-hint');
+    const refresh = document.getElementById('zwo-camera-picker-refresh');
+    const manualFields = document.getElementById('zwo-camera-manual-fields');
+    let cameras = [];
+    let listError = '';
+    let saved = null;
+    let loaded = false;
+    let loading = false;
+    let loadSeq = 0;
+
+    // Serials the other ZWO camera entries hold; an edited entry's own is not taken,
+    // even after the edit changes its device number.
+    function taken() {
+        const form = document.getElementById('device-form');
+        const editing = form?.dataset.editing === 'true';
+        const editedNumber = editing
+            ? Number(form.dataset.originalDeviceNumber ?? document.getElementById('device-number')?.value) : null;
+        return currentDevices
+            .filter(d => extractVendor(d) === 'zwo' && extractDeviceType(d) === 'camera')
+            .filter(d => !(editing && Number(d.DeviceNumber) === editedNumber))
+            .map(d => (extractDeviceConfig(d) || {}).serialNumber)
+            .filter(serial => typeof serial === 'string' && serial !== '');
+    }
+
+    function update() {
+        if (hint && select) {
+            // Until the first listing lands, `cameras` is [] and would read as "none attached".
+            hint.textContent = loading ? 'Listing attached cameras...'
+                                       : zwoCameraHint(cameras, select.value, listError, saved);
+        }
+        if (manualFields && select) {
+            manualFields.style.display = select.value === 'manual' ? 'block' : 'none';
+        }
+    }
+
+    function render() {
+        if (!select) {
+            return;
+        }
+        const model = zwoCameraOptions(cameras, saved, select.value, taken());
+        select.replaceChildren(...model.options.map(o => {
+            const option = document.createElement('option');
+            option.value = o.value;
+            option.textContent = o.label;
+            option.disabled = o.disabled;
+            return option;
+        }));
+        select.value = model.selected;
+        update();
+    }
+
+    async function load() {
+        const seq = ++loadSeq;
+        loaded = true;
+        loading = true;
+        update();
+        try {
+            const response = await fetch(API_BASE + '/management/v1/attachedcameras?vendor=zwo', { cache: 'no-store' });
+            const data = await response.json();
+            if (seq !== loadSeq) {
+                return;
+            }
+            if (data.ErrorNumber && data.ErrorNumber !== 0) {
+                cameras = null;
+                listError = data.ErrorMessage || 'error ' + data.ErrorNumber;
+            } else {
+                cameras = Array.isArray(data.Value) ? data.Value : [];
+                listError = '';
+            }
+        } catch (e) {
+            if (seq !== loadSeq) {
+                return;
+            }
+            cameras = null;
+            listError = e.message;
+        }
+        loading = false;
+        render();
+    }
+
+    if (select) {
+        select.addEventListener('change', update);
+    }
+    if (refresh) {
+        refresh.addEventListener('click', () => load());
+    }
+
+    return {
+        ensureLoaded() {
+            if (!loaded) {
+                load();
+            }
+        },
+        invalidate() {
+            loaded = false;
+        },
+        // A new form (null) or the edited entry's config.
+        reset(config) {
+            saved = config ? { cameraIndex: config.cameraIndex, cameraId: config.cameraId,
+                               serialNumber: config.serialNumber, cameraName: config.cameraName } : null;
+            if (select) {
+                select.value = '';
+            }
+            render();
+        },
+        // The binding to submit, or null with the select focused when nothing is picked.
+        read() {
+            const selection = zwoCameraSelection(select ? select.value : '', cameras, saved);
+            if (!selection && select) {
+                select.focus();
+            }
+            return selection;
+        },
+        missingMessage: 'Choose the camera this entry is for, or enter its index by hand.',
+    };
+}
+
+const zwoCameraPicker = createZwoCameraPicker();
+
 function setEditMode(isEditing) {
     const configureTitle = document.getElementById('configure-title');
     const submitButton = document.querySelector('#device-form button[type="submit"]');
@@ -1052,7 +1188,7 @@ function setEditMode(isEditing) {
     }
     if (form) {
         form.dataset.editing = isEditing ? 'true' : 'false';
-        [zwoDewHeaterPicker, touptekThermalPicker, playerOneThermalPicker].forEach(p => {
+        [zwoDewHeaterPicker, touptekThermalPicker, playerOneThermalPicker, zwoCameraPicker].forEach(p => {
             p.invalidate();
             p.reset(null);
         });
@@ -1276,6 +1412,9 @@ async function startEditDevice(device) {
     // #914: remember the identity the server learned for a ZWO camera, and the
     // index/id the form loaded it with, so the submit can resend it unchanged.
     const keepZwoIdentity = vendor === 'zwo' && deviceType === 'camera';
+    if (keepZwoIdentity) {
+        zwoCameraPicker.reset(config);
+    }
     setFormValue('zwo-camera-serial', keepZwoIdentity ? config.serialNumber : '');
     setFormValue('zwo-camera-name', keepZwoIdentity ? config.cameraName : '');
     setFormValue('zwo-camera-loaded-index', keepZwoIdentity ? config.cameraIndex : '');
@@ -3907,6 +4046,9 @@ function updateZwoConfigFields() {
         cameraFields.style.display = isCamera ? 'block' : 'none';
         setFieldGroupEnabled(cameraFields, isCamera && document.getElementById('vendor')?.value === 'zwo');
     }
+    if (isCamera && document.getElementById('vendor')?.value === 'zwo') {
+        zwoCameraPicker.ensureLoaded();
+    }
     const dewHeaterFields = document.getElementById('zwo-dewheater-fields');
     if (dewHeaterFields) {
         dewHeaterFields.style.display = isDewHeater ? 'block' : 'none';
@@ -4265,7 +4407,19 @@ document.getElementById('device-form').addEventListener('submit', async function
                 }
             }
             if (normalizedType === 'camera') {
-                Object.assign(deviceData, zwoCameraIdentityFields(formData));
+                const zwoCamera = zwoCameraPicker.read();
+                if (!zwoCamera) {
+                    alert(zwoCameraPicker.missingMessage);
+                    return;
+                }
+                if (zwoCamera.manual) {
+                    Object.assign(deviceData, zwoCameraIdentityFields(formData));
+                } else {
+                    // The picked (or kept) binding replaces the index and ID boxes.
+                    delete deviceData.cameraIndex;
+                    delete deviceData.cameraId;
+                    Object.assign(deviceData, zwoCamera);
+                }
                 try {
                     const bandwidth = zwoUsbBandwidth(formData.get('zwoUsbBandwidth'));
                     if (bandwidth !== undefined) deviceData.usbBandwidth = bandwidth;
@@ -4714,6 +4868,11 @@ document.getElementById('device-form').addEventListener('submit', async function
             messageDiv.style.display = 'block';
             messageDiv.className = 'message success';
             messageDiv.textContent = isEditing ? 'Device updated successfully!' : 'Device configured successfully!';
+            const warning = configureWarning(result.Value);
+            if (warning) {
+                messageDiv.className = 'message warning';
+                messageDiv.textContent += ' ' + warning;
+            }
             setTimeout(() => {
                 loadDevices();
                 showTab('devices');

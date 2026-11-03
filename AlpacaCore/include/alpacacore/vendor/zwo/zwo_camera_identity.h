@@ -84,6 +84,13 @@ std::string trim_zwo_name(const std::string& name);
 ZwoResolveResult resolve_zwo_camera(const ZwoConfiguredIdentity& entry, const std::vector<ZwoEnumeratedCamera>& found,
                                     const std::set<std::string>& serials_claimed_by_other_entries);
 
+/// The registration warning for an entry that learned no serial or model name
+/// (#1969): names its hint, why it matched no camera (`reason`) and the cameras
+/// the SDK enumerated (`found`; null when the enumeration itself failed), and
+/// what the operator does about it. Device text is made printable (CWE-117).
+std::string describe_unbound_zwo_camera(const ZwoConfiguredIdentity& entry, const std::string& reason,
+                                        const std::vector<ZwoEnumeratedCamera>* found);
+
 /// `ZWO_UID_` plus 16 random hex digits, for a camera that reports no serial.
 std::string generate_zwo_unique_id();
 

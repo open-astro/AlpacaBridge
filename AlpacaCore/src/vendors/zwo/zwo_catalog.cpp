@@ -198,19 +198,36 @@ BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int
     // cameras and only one plugged in, the first entry can learn the other body's serial.
     std::string learned_serial = configured_serial;
     std::string learned_name = configured_name;
+    // #1969: an entry that learns neither binds by its hint alone, so say why and what was there.
+    std::optional<std::string> unbound;
     try {
-        const auto resolved = vendor::zwo::resolve_zwo_camera(
-            binding.identity, sdk.enumerate_identified_cameras(vendor::zwo::trim_zwo_name(configured_name)),
-            binding.claimed_serials);
+        const auto enumerated = sdk.enumerate_identified_cameras(vendor::zwo::trim_zwo_name(configured_name));
+        const auto resolved = vendor::zwo::resolve_zwo_camera(binding.identity, enumerated, binding.claimed_serials);
         if (resolved.camera.has_value()) {
             const auto& found = resolved.camera.value();
             binding.identity.camera_id = found.camera_id;
             binding.identity.camera_index = found.index;
             if (learned_serial.empty()) learned_serial = found.serial;
             if (learned_name.empty()) learned_name = vendor::zwo::trim_zwo_name(found.name);
+        } else if (learned_serial.empty() && learned_name.empty()) {
+            unbound = vendor::zwo::describe_unbound_zwo_camera(binding.identity, resolved.message, &enumerated);
         }
     } catch (const std::exception& e) {
         ALPACA_LOG_WARN("ZWO", std::string("ZWO camera enumeration failed: ") + e.what());
+        if (learned_serial.empty() && learned_name.empty()) {
+            unbound = vendor::zwo::describe_unbound_zwo_camera(
+                binding.identity, std::string("the enumeration failed: ") + e.what(), nullptr);
+        }
+    }
+    if (unbound) {
+        // Decision 0007 rule 9: a configuredevice call is client-triggered, so INFO; a stored entry WARNs.
+        const std::string line = "Camera #" + std::to_string(device_number) + ": " + *unbound;
+        if (context.source == Source::Api) {
+            ALPACA_LOG_INFO("ZWO", line);
+        } else {
+            ALPACA_LOG_WARN("ZWO", line);
+        }
+        result.warnings.push_back(*unbound);
     }
     binding.identity.serial = learned_serial;
     binding.identity.camera_name = learned_name;
@@ -237,6 +254,15 @@ void register_zwo_camera_factory(DeviceCatalog& catalog, vendor::zwo::ZWOSDK& sd
         return bind_camera(sdk, config, device_number, context);
     };
     catalog.add(std::move(camera));
+    // The web UI's camera picker (#1970): the same enumeration bind runs, which
+    // opens each camera through the shared open table to read its serial.
+    catalog.add_camera_lister("zwo", [&sdk] {
+        std::vector<AttachedCamera> cameras;
+        for (const auto& found : sdk.enumerate_identified_cameras()) {
+            cameras.push_back({found.index, vendor::zwo::trim_zwo_name(found.name), found.serial});
+        }
+        return cameras;
+    });
 }
 
 void register_zwo_factory(DeviceCatalog& catalog) {
