@@ -43,7 +43,7 @@ Symbol: `HoldWindow`
 | Driver | Source | State | Issue | Notes |
 | --- | --- | --- | --- | --- |
 | Sky-Watcher telescope | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #1798 | pilot (#1815); slew window and per-axis pulse windows |
-| iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | partial | #1831 | slew window and pulse windows (rules 1, 2, 4); landing (`get_slewing()`, the Park/FindHome motion end) still waits on the 5 s window (rule 3) until a rig shows `:GLS#` reports the GOTO at once |
+| iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | partial | #1831 | slew window and pulse windows (rules 1, 4; rule 2 except the clear on landing); landing (`get_slewing()`, the Park/FindHome motion end) still waits on the 5 s window and does not clear it (rules 2 and 3) until a rig shows `:GLS#` reports the GOTO at once |
 | Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | planned | #1832 | slew window only |
 | Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | planned | #1833 | |
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | planned | #1834 | |
