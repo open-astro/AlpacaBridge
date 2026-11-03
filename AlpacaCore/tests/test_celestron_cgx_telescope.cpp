@@ -761,16 +761,20 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for a
     // link and fails, which releases the port claim.
     mount.sever_link();
     CHECK_NOTHROW(driver->abort_slew());
+    // Slewing raises the link fault before the stop ends (#1950). A site write
+    // sends nothing and is refused until the stop has ended.
     REQUIRE(wait_until(
         [&] {
             try {
-                static_cast<void>(driver->get_slewing());
-                return false;
+                driver->set_site_latitude(46.0);
+                return true;
             } catch (const alpacacore::AlpacaException& error) {
-                return error.error_code() == alpacacore::AlpacaError::DriverException;
+                if (error.error_code() != alpacacore::AlpacaError::InvalidOperation) throw;
+                return false;
             }
         },
         std::chrono::seconds(10)));
+    require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); }, alpacacore::AlpacaError::DriverException);
     REQUIRE_FALSE(util::is_serial_port_in_use(path));
 
     // Another device's probe now holds the node for 3 s while a second stop
@@ -886,10 +890,16 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop communication failures pers
                                  alpacacore::AlpacaError::DriverException);
         }
         // A later verified stop, rather than a property read, clears failure.
-        if (unpark)
-            driver->unpark();
-        else
-            driver->abort_slew();
+        // The fault hides whether the first stop has ended (#1950), and a
+        // request while it runs joins it, so repeat it until a new stop is sent.
+        const int dec_stops = mount.count_command(0x11, 0x24);
+        REQUIRE(wait_until([&] {
+            if (unpark)
+                driver->unpark();
+            else
+                driver->abort_slew();
+            return mount.count_command(0x11, 0x24) > dec_stops;
+        }));
         REQUIRE(wait_until([&] { return stop_done(*driver); }));
         CHECK_FALSE(driver->get_at_park());
         CHECK_FALSE(driver->get_tracking());
@@ -982,12 +992,14 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop owns cancelled mot
         // the restore failure without claiming the old enabled tracking state.
         mount.drop_next_reply(0x10, 0x06, false);
         driver->abort_slew();
+        // Wait for the stop's own failure, not the link fault it meets first (#1950).
         REQUIRE(wait_until([&] {
             try {
                 static_cast<void>(driver->get_slewing());
                 return false;
             } catch (const alpacacore::AlpacaException& error) {
-                return error.error_code() == alpacacore::AlpacaError::DriverException;
+                return error.error_code() == alpacacore::AlpacaError::DriverException &&
+                       std::string(error.what()).starts_with("Celestron CGX stop failed: ");
             }
         }));
         CHECK_FALSE(driver->get_tracking());
