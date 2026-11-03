@@ -164,8 +164,10 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
-        # As the test user. runuser keeps this step's environment; CCACHE_DIR
-        # points at root's cache directory, which the save step reads.
+        # As the test user. runuser keeps this step's environment except HOME,
+        # SHELL, USER and LOGNAME, which it resets for the user, so CCACHE_DIR
+        # must stay explicit: it points at root's cache directory, which the
+        # save step reads.
         run: runuser -u builder -- env CCACHE_DIR="$HOME/.cache/ccache" ./run_all_tests.sh
 
       - name: Compiler cache statistics
