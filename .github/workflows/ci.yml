@@ -13,14 +13,17 @@
 #                  in a debian:trixie container (the distribution we ship for)
 #   build-vendors-shard  stage in-tree vendor SDK .so libs, build with all
 #                  vendors ON, instrumented for gcov, and run every third test
-#                  (three shards); each uploads its raw coverage JSON
+#                  (three shards); each uploads its raw coverage JSON, except
+#                  in the merge queue
 #   build-vendors  pass only when all three shards passed; merge their coverage
 #                  into per-component + combined line coverage in the job
-#                  summary, HTML/JSON artifact (no threshold)
+#                  summary, HTML/JSON artifact (no threshold); in the merge
+#                  queue it only checks the shards
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
 #   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
-#                  connect/disconnect/operate concurrency suite (issue #101),
-#                  plus [stress-guard] (the harness's own self-tests, issue #322)
+#                  connect/disconnect/operate concurrency suite (issue #101) as
+#                  one Catch2 shard per core in parallel processes, plus
+#                  [stress-guard] (the harness's own self-tests, issue #322)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   package-deb    build the .deb in debian:trixie, install it, run
