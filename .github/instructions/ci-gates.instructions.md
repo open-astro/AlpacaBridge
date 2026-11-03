@@ -11,7 +11,8 @@ to a second vendor belongs in the matching shared file, not in a vendor file.
 ### Review bot on fork PRs (`safe-to-review` label)
 
 The Claude review bot (`.github/workflows/claude-review.yml`) runs automatically on
-every push to a same-repo PR branch. Fork PRs are gated: the bot runs only while a
+every push to a same-repo PR branch. It skips a draft PR, so pushes to a draft spend no review
+runs, and marking the PR ready (`ready_for_review`) starts its first review. Fork PRs are gated: the bot runs only while a
 maintainer has applied the **`safe-to-review`** label — applying it triggers the
 first review immediately, later pushes keep reviewing while the label stays on, and
 removing the label stops the bot. The label is the maintainer's trust decision: the

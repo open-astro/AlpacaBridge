@@ -7,7 +7,8 @@ name: Claude Code Review
 # READING hostile PR content, bounded by the read-only allowedTools below.
 on:
   pull_request_target:  # zizmor: ignore[dangerous-triggers] -- label-gated; see comment above
-    types: [opened, synchronize, labeled]
+    # ready_for_review: a draft is not reviewed, so marking it ready starts its first review.
+    types: [opened, synchronize, labeled, ready_for_review]
 
 # A newer push to the same PR cancels the review in flight.
 concurrency:
@@ -19,10 +20,12 @@ jobs:
   # (`.name == "review"` in /pr-checker and /submit-pr); do not add a `name:`.
   review:
     # Same-repo branches review on every push. Fork PRs review only while the
-    # `safe-to-review` label is on (remove it to stop the bot). Dependabot
-    # bumps are reviewed by eye.
+    # `safe-to-review` label is on (remove it to stop the bot). A draft is not
+    # reviewed, so iterating on one spends no review runs; marking it ready
+    # (ready_for_review) reviews its head. Dependabot bumps are reviewed by eye.
     if: >-
       github.actor != 'dependabot[bot]'
+      && !github.event.pull_request.draft
       && (
         github.event.pull_request.head.repo.full_name == github.repository
         || contains(github.event.pull_request.labels.*.name, 'safe-to-review')

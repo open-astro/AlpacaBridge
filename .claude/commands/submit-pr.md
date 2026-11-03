@@ -487,7 +487,7 @@ while :; do
   # beside the skipped one means a labelled run existed and was re-triggered mid-poll;
   # that is the two-look cancelled case below, not a skip. see the fork-label rule above.
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ] && [ "$CANCELLED" = 0 ]; then
-    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (see above)." >&2; exit 3
+    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Mark a draft ready, or apply or re-apply safe-to-review (see above)." >&2; exit 3
   fi
   # Only cancelled runs: a superseding trigger never came. A relabel issued mid-poll
   # cancels the in-flight run a few seconds before its replacement appears, so this

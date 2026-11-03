@@ -54,7 +54,13 @@ bot, ending in `✅ Approved` or `⚠️ Issues found`. `gh pr view --json comme
 author as `github-actions` while the REST API reports `github-actions[bot]`, so match both. It only runs when:
 
 - the PR author has write access, **or** the PR carries the `safe-to-review` label (fork PRs), and
-- the author is in `allowed_non_write_users` for pushes the author makes themselves.
+- the author is in `allowed_non_write_users` for pushes the author makes themselves, and
+- the PR is not a draft: a draft's runs are skipped, and marking it ready (`ready_for_review`)
+  starts its first review.
+
+A draft in the list is marked ready first, `gh pr ready <N>`, since running this skill on it is the
+request to review and merge it. That starts a review on the same head, so treat it like Step 1.1
+having acted: skip the Step 1.4 pre-check and go to Step 2.
 
 Checks to make before waiting on anything:
 
@@ -190,7 +196,7 @@ while :; do
   # beside the skipped one means a labelled run existed and was re-triggered mid-poll;
   # that is the two-look cancelled case below, not a skip. Step 1.1/1.2.
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ] && [ "$CANCELLED" = 0 ]; then
-    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (Step 1)." >&2; exit 3
+    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Mark a draft ready, or apply or re-apply safe-to-review (Step 1)." >&2; exit 3
   fi
   # Only cancelled runs: a superseding trigger never came. A relabel issued mid-poll
   # cancels the in-flight run a few seconds before its replacement appears, so this
@@ -229,7 +235,7 @@ lands first, but **merge strictly in ascending number order**: with `QUEUE=true`
 they enter the merge queue, and with `QUEUE=false` it keeps the update-branch dance predictable.
 
 On exit `3`, or a timeout: open the run URL (or `gh run list --workflow=claude-review.yml
---limit 5`) and read the failing job. Known stalls: the workflow triggers only on `opened`, `synchronize` and `labeled` (closing and
+--limit 5`) and read the failing job. Known stalls: the workflow triggers only on `opened`, `synchronize`, `labeled` and `ready_for_review` (closing and
 reopening the PR does NOT re-run it), so a stuck or cancelled run is restarted with the
 remove-and-re-add `safe-to-review` label trick from Step 1.2, which also covers the permission
 skip. Do not restart the poll blindly.
@@ -454,7 +460,8 @@ QUEUE=$(gh api repos/open-astro/AlpacaBridge/rules/branches/main --jq '[.[].type
 gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft) mergeable=\(.mergeable) state=\(.mergeStateStatus)"'
 ```
 
-- `draft=true` -> `gh pr ready <N>` first (contributors often open drafts; neither merge path accepts one).
+- `draft=true` (a PR converted back to draft after its review) -> `gh pr ready <N>`, which starts a new
+  review of the same head: go back to Step 2 (neither merge path accepts a draft).
 - `state=BEHIND` with `QUEUE=false` (or a `stable/X.Y` base) -> `update-branch` (Step 1.3) and go
   back to Step 2; the merge commit re-runs the bot. With `QUEUE=true` and base `main`, `BEHIND` is
   not a blocker: merge.
