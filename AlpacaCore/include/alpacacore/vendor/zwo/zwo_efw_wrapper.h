@@ -28,8 +28,10 @@ public:
     bool get_wheel_info_by_id(int wheel_id, ZWOEFWInfo& info) override;
     bool get_wheel_info_by_index(int wheel_index, ZWOEFWInfo& info) override;
 
-    void open_wheel(int wheel_id) override;
-    void close_wheel(int wheel_id) override;
+    SharedOpenTable::Opened open_wheel_link(int wheel_id) override;
+    std::optional<SharedOpenTable::Opened> open_wheel_candidate(int wheel_id) override;
+    void close_wheel_link(int wheel_id, std::uint64_t link) override;
+    void with_link(int wheel_id, std::uint64_t link, const std::function<void()>& fn) override;
 
     int get_position(int wheel_id) override;
     void set_position(int wheel_id, int position) override;

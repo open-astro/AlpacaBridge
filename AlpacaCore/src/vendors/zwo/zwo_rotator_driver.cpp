@@ -12,22 +12,39 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_epoch.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/rotator_sync_offset_store.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/zwo/zwo_caa_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <thread>
 
 namespace alpacacore::vendor::zwo {
+
+namespace {
+
+// CWE-117: the serial and SDK error texts are device text; control characters never reach the log or a client.
+std::string printable(std::string text) {
+    std::replace_if(
+        text.begin(), text.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f; }, '?');
+    return text;
+}
+
+}  // namespace
 
 class ZWOCAARotatorDriver : public RotatorDriver, protected alpacacore::AsyncConnectable {
 public:
@@ -35,7 +52,7 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     ZWOCAARotatorDriver(int device_number, std::optional<int> rotator_id, std::optional<int> rotator_index,
-                        ZWOCAASDK& sdk)
+                        ZWOCAASDK& sdk, util::TaskClock& clock)
         : AsyncConnectable("ZWO"),
           sdk_(sdk),
           device_number_(device_number),
@@ -50,16 +67,16 @@ public:
           target_position_(0.0),
           has_target_position_(false),
           sync_offset_(0.0),
-          connected_(false),
-          status_cache_("ZWO CAA", kStatusTtl, 3, "ZWO") {}
+          // The TTL and the fault stamp read the injected clock (decision 0005), so a test ages both with advance().
+          status_cache_("ZWO CAA", kStatusTtl, 3, "ZWO", clock) {}
 
     ~ZWOCAARotatorDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        if (connected_.load()) {
+        if (link_.is_open()) {
             try {
-                set_connected(false);
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Error during CAA destruction: " + std::string(e.what()));
             }
@@ -104,7 +121,7 @@ public:
         const std::string legacy_key = fallback_unique_id();
         std::lock_guard<std::mutex> lock(mutex_);
         const double offset = util::RotatorSyncOffsetStore::load_or_adopt(assigned, legacy_key);
-        if (connected_.load()) {
+        if (link_.is_open()) {
             sync_offset_ = offset;
         }
     }
@@ -131,8 +148,18 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override {
-        return connected_.load();
+    bool get_connected() const override { return link_.is_open(); }
+
+    // Decision 0009 rule 5: the one fault text. While lost, the loss reason, kept until the next Connect or
+    // Disconnect; otherwise the status cache's latched fault, empty while healthy.
+    std::string get_link_fault() const override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!lost_reason_.empty()) {
+                return lost_reason_;
+            }
+        }
+        return status_cache_.fault();
     }
 
     void connect() override {
@@ -153,42 +180,47 @@ public:
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
         // newer pending disconnect by staying down.
-        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+        if (!connected && record_disconnect_if_connect_in_flight(link_.is_open())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        if (connected && consume_pending_disconnect(link_.is_open())) {
             return;
         }
-        if (connected == connected_.load()) {
+        // A Disconnect of a lost link (Connected already reads false) still tears down: it drops the kept loss
+        // reason (decision 0009 rule 5) and releases an open the loss left behind.
+        if (connected == link_.is_open() && (connected || !has_lost_reason())) {
             return;
         }
+        // A new epoch first: a call that captured the old link can no longer drop this one (issue #1668).
+        link_.begin_transition();
 
-        auto& sdk = sdk_;
         if (connected) {
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
-                const int resolved_id = resolve_rotator_id();
-                sdk.open_rotator(resolved_id);
+                release_open_locked();  // an open left from a lost link
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    lost_reason_.clear();
+                }
+                const auto opened = bind_rotator_locked();
                 try {
-                    publish_connect_state(resolved_id);
+                    sdk_.with_link(open_id_, open_link_, [&] { publish_connect_state(open_id_, opened.serial); });
                 } catch (...) {
-                    sdk.close_rotator(resolved_id);
+                    release_open_locked();
                     throw;
                 }
             }
             // After the I/O lock is released: the cache lock is taken before it, never inside it.
             status_cache_.reset();
-            connected_.store(true);
+            link_.publish_open();
             return;
         }
 
-        // Clear driver state before the SDK close: if the close throws (e.g.
-        // device unplugged) the error still surfaces, but the driver must not
-        // stay half-connected.
-        std::optional<int> close_id;
+        // Clear driver state before the SDK close: a close that fails for another reason than a removed unit
+        // still surfaces, but the driver must not stay half-connected.
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            close_id = rotator_id_;
+            lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
             reverse_ = false;
             if (rotator_index_.has_value()) {
                 rotator_id_.reset();
@@ -197,14 +229,11 @@ public:
                 serial_number_.clear();
                 rotator_type_.clear();
             }
-            connected_.store(false);
         }
         status_cache_.reset();
-        if (close_id.has_value()) {
-            // Waits for an exchange in flight: the handle is never closed under one.
-            std::lock_guard<std::mutex> io(io_mutex_);
-            sdk.close_rotator(close_id.value());
-        }
+        // Waits for an exchange in flight: the handle is never closed under one.
+        std::lock_guard<std::mutex> io(io_mutex_);
+        release_open_locked();
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -239,15 +268,14 @@ public:
     bool get_reverse() const override {
         ensure_connected();
         // Reverse is a writable device setting held in memory: a dead link must not serve it.
-        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
-            throw AlpacaException("ZWO CAA communications compromised: " + fault, AlpacaError::DriverException);
-        }
+        refuse_if_faulted();
         std::lock_guard<std::mutex> lock(mutex_);
         return reverse_;
     }
 
     void set_reverse(bool reverse) override {
         ensure_connected();
+        refuse_if_faulted();
         with_io([&](int id) {
             sdk_.set_reverse(id, reverse);
             std::lock_guard<std::mutex> lock(mutex_);
@@ -324,6 +352,7 @@ public:
     void move_absolute(double position) override {
         validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
+        refuse_if_faulted();
         double target = normalize_angle(position);
         double mechanical_target = to_mechanical_angle(target);
         with_io([&](int id) { sdk_.move_absolute(id, mechanical_target); });
@@ -336,6 +365,7 @@ public:
     void move_mechanical(double position) override {
         validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
+        refuse_if_faulted();
         double mechanical_target = normalize_angle(position);
         with_io([&](int id) { sdk_.move_mechanical(id, mechanical_target); });
         status_cache_.invalidate();
@@ -374,7 +404,7 @@ public:
 private:
     // One frame of the live readings; a single refill fills all of it (open-astro#294).
     struct Status {
-        bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
+        bool closed{};  // a disconnect won the I/O lock, or the link was lost: not a frame, not a link failure
         bool is_moving{};
         double degree{};  // logical (reverse-applied) angle, as CAAGetDegree() reports it
     };
@@ -383,26 +413,89 @@ private:
 
     Status read_status() const {
         ensure_connected();
-        const int id = rotator_id_value();
-        // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
-        // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
-        Status status = status_cache_.get([this, id] {
+        // The session this read belongs to: a staleness loss below drops only this one, never a link a Connect
+        // opened since.
+        const auto captured = link_.load();
+        Status status;
+        try {
+            status = fetch_status();
+        } catch (const std::exception&) {
+            // Decision 0009 rule 2(b), issue #1668: a fault that has stood past the staleness bound is a lost link,
+            // found here by the next failed read (the driver has no poll of its own).
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                lose_link_if_fault_stale_locked(captured);
+            }
+            ensure_connected();  // lost, here or by another caller: NotConnected, not the cache's DriverException
+            throw;
+        }
+        if (status.closed) {
+            throw AlpacaException(closed_reason(), AlpacaError::NotConnected);
+        }
+        return status;
+    }
+
+    // One status frame from the cache, refilled under the I/O lock when it has aged out. Caller holds no driver lock
+    // (lock order: cache mutex, I/O lock, mutex_).
+    Status fetch_status() const {
+        return status_cache_.get([this] {
             std::lock_guard<std::mutex> io(io_mutex_);
             Status fresh;
-            if (!connected_.load()) {
-                // A disconnect that won the I/O lock has closed the handle. Returning (not throwing) keeps it
-                // out of the link-health count; the disconnect's reset() drops this frame.
+            try {
+                call_locked([&] {
+                    fresh.is_moving = sdk_.get_motion_status(open_id_).is_moving;
+                    fresh.degree = sdk_.get_degree(open_id_);
+                });
+            } catch (const std::exception& e) {
+                if (!util::is_link_loss(e)) {
+                    throw;  // a fault: the cache counts it toward the latch
+                }
+                // A disconnect that won the I/O lock, or a lost link. Returning (not throwing) keeps it out of the
+                // link-health count; the reader throws NotConnected, and the next connect's reset() drops this frame.
+                fresh = Status{};
                 fresh.closed = true;
                 return fresh;
             }
-            fresh.is_moving = sdk_.get_motion_status(id).is_moving;
-            fresh.degree = sdk_.get_degree(id);
+            last_degree_ = fresh.degree;
             return fresh;
         });
-        if (status.closed) {
-            throw AlpacaException("Rotator not connected", AlpacaError::NotConnected);
+    }
+
+    // Decision 0009 rule 1: a latched status fault refuses a write with its text (Halt stays allowed).
+    void refuse_if_faulted() const {
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException("ZWO CAA communications compromised: " + fault, AlpacaError::DriverException);
         }
-        return status;
+    }
+
+    // Decision 0009 rule 2(b), issue #1668 (the EAF shape of #1666): a status fault that has stood past
+    // util::kLinkStalenessBound on the task clock, with no good read since it latched, is a lost link (rule 3):
+    // Connected false, members NotConnected, DeviceState empty, the open closed here, the reason kept for
+    // get_link_fault() until the next Connect or Disconnect, one WARN. Caller holds io_mutex_ (no device call is in
+    // flight) and no other driver lock. @p captured is the link word the read loaded before its refill, so a Connect
+    // or Disconnect since then makes mark_lost() refuse and the new session is never dropped on the old one's fault.
+    void lose_link_if_fault_stale_locked(util::LinkEpoch::Word captured) const {
+        const std::string fault = status_cache_.fault();
+        if (!status_cache_.fault_stale() || !link_.mark_lost(captured)) {
+            return;
+        }
+        const std::string reason = unit_label_locked() + " did not answer for " +
+                                   std::to_string(util::kLinkStalenessBound.count()) + " s (" + printable(fault) +
+                                   "); Connect again when it answers";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            lost_reason_ = reason;
+        }
+        ALPACA_LOG_WARN("ZWO", unit_label_locked() + " lost: status fault stood for " +
+                                   std::to_string(util::kLinkStalenessBound.count()) + " s; last angle " +
+                                   std::to_string(last_degree_));
+        // The rotator may still be attached (a generic error, not a removal), so close the open now: best effort,
+        // the loss stands whatever the close does.
+        try {
+            release_open_locked();
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "CAA close at a lost link failed: " + printable(e.what()));
+        }
     }
 
     // Caller holds mutex_.
@@ -427,17 +520,133 @@ private:
     }
 
     // One SDK transaction on the open handle. The I/O lock excludes the close in set_connected(false), and
-    // the connected check is repeated under it: a disconnect that won the lock has closed the handle.
+    // call_locked() checks the link under it: a disconnect that won the lock has closed the handle.
     template <typename Fn>
     void with_io(Fn&& fn) {
         std::lock_guard<std::mutex> io(io_mutex_);
-        ensure_connected();
-        fn(rotator_id_value());
+        call_locked([&] { fn(open_id_); });
     }
 
     void ensure_connected() const {
-        if (!connected_.load()) {
-            throw AlpacaException("Rotator not connected", AlpacaError::NotConnected);
+        if (!link_.is_open()) {
+            throw AlpacaException(closed_reason(), AlpacaError::NotConnected);
+        }
+    }
+
+    bool has_lost_reason() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return !lost_reason_.empty();
+    }
+
+    std::string closed_reason() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lost_reason_.empty() ? "Rotator not connected" : lost_reason_;
+    }
+
+    // Caller holds io_mutex_. Runs @p fn under this driver's open; the link word is read first, so a disconnect
+    // that won the I/O lock refuses here. Loss evidence from the SDK (CAA_ERROR_REMOVED, CLOSED, INVALID_ID on a
+    // per-device call, or a link the shared open table retired) drops the link at once (decision 0009 rule 2a,
+    // issue #1668) and surfaces as NotConnected; any other error surfaces as itself.
+    void call_locked(const std::function<void()>& fn) const {
+        const auto captured = link_.load();
+        if (!util::LinkEpoch::is_open(captured)) {
+            throw AlpacaException(closed_reason(), AlpacaError::NotConnected);
+        }
+        try {
+            sdk_.with_link(open_id_, open_link_, fn);
+        } catch (const std::exception& e) {
+            if (!util::is_link_loss(e)) {
+                throw;
+            }
+            const std::string reason = unit_label_locked() + " was removed from USB; Connect again when it is back";
+            if (link_.mark_lost(captured)) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    lost_reason_ = reason;
+                }
+                // Nothing is re-applied at the next Connect; the last-known angle goes to the log once.
+                ALPACA_LOG_WARN("ZWO", unit_label_locked() + " lost (" + printable(e.what()) + "); last angle " +
+                                           std::to_string(last_degree_));
+            }
+            throw AlpacaException(reason, AlpacaError::NotConnected);
+        }
+    }
+
+    // Caller holds io_mutex_.
+    std::string unit_label_locked() const {
+        return "ZWO CAA " + (bound_serial_.empty() ? "id " + std::to_string(open_id_) : printable(bound_serial_));
+    }
+
+    // Caller holds io_mutex_. Opens the rotator this driver is bound to and records the open. Once a serial is known
+    // (an earlier connect in this process) every Connect scans for it, so a replug that moved the rotator to another
+    // SDK id, or swapped two rotators' ids, still opens the same rotator and never another one (issue #1668).
+    // TODO(#1668): confirm on a rig that CAAOpen of a candidate does not move it (the EFW does not, 2026-10-31).
+    SharedOpenTable::Opened bind_rotator_locked() {
+        if (bound_serial_.empty()) {
+            const int id = resolve_rotator_id();
+            auto opened = sdk_.open_rotator_link(id);
+            open_id_ = id;
+            open_link_ = opened.link;
+            bound_serial_ = opened.serial;
+            return opened;
+        }
+        const auto rotators = sdk_.enumerate_rotators();
+        for (const auto& info : rotators) {
+            std::optional<SharedOpenTable::Opened> candidate;
+            try {
+                candidate = sdk_.open_rotator_candidate(info.rotator_id);
+            } catch (const std::exception& e) {
+                // Another process holds it, or its serial read failed: nothing proves which rotator it is.
+                ALPACA_LOG_DEBUG("ZWO",
+                                 "CAA scan skips id " + std::to_string(info.rotator_id) + ": " + printable(e.what()));
+                continue;
+            }
+            if (!candidate.has_value()) {
+                ALPACA_LOG_DEBUG("ZWO", "CAA scan skips id " + std::to_string(info.rotator_id) +
+                                            ": held by a rotator that reports no serial");
+                continue;
+            }
+            if (candidate->serial == bound_serial_) {
+                open_id_ = info.rotator_id;
+                open_link_ = candidate->link;
+                if (rotator_index_.has_value()) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    rotator_id_ = info.rotator_id;
+                    rotator_info_ = info;
+                    rotator_info_valid_ = true;
+                }
+                return *candidate;
+            }
+            try {
+                sdk_.close_rotator_link(info.rotator_id, candidate->link);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("ZWO", "CAA scan close of id " + std::to_string(info.rotator_id) +
+                                            " failed: " + printable(e.what()));
+            }
+        }
+        throw AlpacaException("ZWO CAA " + printable(bound_serial_) + " not attached (" +
+                                  std::to_string(rotators.size()) +
+                                  " found); plug it in and Connect again, or re-save the device in the web UI or "
+                                  "restart the service to bind another rotator",
+                              AlpacaError::NotConnected);
+    }
+
+    // Caller holds io_mutex_. Drops this driver's open, if any. A NotConnected close (the rotator is gone, for
+    // example a Connected toggle across a replug) is logged and swallowed; any other close error surfaces.
+    void release_open_locked() const {
+        if (open_link_ == 0) {
+            return;
+        }
+        const int id = open_id_;
+        const std::uint64_t link = open_link_;
+        open_link_ = 0;
+        try {
+            sdk_.close_rotator_link(id, link);
+        } catch (const std::exception& e) {
+            if (!util::is_link_loss(e)) {
+                throw;
+            }
+            ALPACA_LOG_WARN("ZWO", "CAA close of a removed rotator: " + printable(e.what()));
         }
     }
 
@@ -473,7 +682,7 @@ private:
 
     // Reads the connect-time state from the device, then publishes it: the info, serial and type under
     // mutex_ (short), the rotation limit as an atomic. Caller holds io_mutex_ and not mutex_.
-    void publish_connect_state(int rotator_id) {
+    void publish_connect_state(int rotator_id, const std::string& serial) {
         ZWOCAARotatorInfo info;
         if (!sdk_.get_rotator_info_by_id(rotator_id, info)) {
             throw AlpacaException("Failed to read rotator info", AlpacaError::DriverException);
@@ -487,23 +696,28 @@ private:
             if (reported > 0.0) {
                 max_degree = reported;
             }
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
+            if (util::is_link_loss(e)) {
+                throw;  // the rotator is gone: the connect closes what it opened and fails
+            }
             if (info.max_degree <= 0.0) {
                 max_degree = 360.0;
             }
         }
         // Reverse only changes through set_reverse(): read once, then served from here.
         const bool reverse = sdk_.get_reverse(rotator_id);
-        std::string serial;
-        try {
-            serial = sdk_.get_serial_number(rotator_id);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("ZWO", "CAA serial number unavailable: " + std::string(e.what()));
+        if (serial.empty()) {
+            ALPACA_LOG_WARN("ZWO",
+                            "CAA serial number unavailable: Connect cannot tell this rotator from another after a "
+                            "replug");
         }
         std::string type;
         try {
             type = sdk_.get_rotator_type(rotator_id);
         } catch (const std::exception& e) {
+            if (util::is_link_loss(e)) {
+                throw;  // the rotator is gone: the connect closes what it opened and fails
+            }
             ALPACA_LOG_WARN("ZWO", "CAA type unavailable: " + std::string(e.what()));
         }
         // Persisted Sync offset, keyed by the stored ID (decision 0018). An offset
@@ -560,14 +774,6 @@ private:
         return normalize_angle(logical_angle - sync_offset_);
     }
 
-    int rotator_id_value() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!rotator_id_.has_value()) {
-            throw AlpacaException("Rotator ID not set", AlpacaError::NotConnected);
-        }
-        return rotator_id_.value();
-    }
-
     ZWOCAASDK& sdk_;
     int device_number_;
     std::optional<int> rotator_id_;
@@ -584,9 +790,21 @@ private:
     bool has_target_position_;
     double sync_offset_;
     bool reverse_{false};
-    std::atomic<bool> connected_;
+    // Connected, as epoch << 1 | open bit: begin_transition() and publish_open() in set_connected(), mark_lost() on
+    // loss evidence (issue #1668).
+    mutable util::LinkEpoch link_;
+    // Under io_mutex_: the open this driver holds (open_link_ 0 = none), the serial every Connect binds once one is
+    // known (kept across Disconnect, in memory only: decision 0018), and the last angle read, for the loss log.
+    // Mutable: a staleness loss found by a const getter closes the open.
+    int open_id_{-1};
+    mutable std::uint64_t open_link_{0};
+    std::string bound_serial_;
+    mutable double last_degree_{0.0};
+    // Under mutex_: why a lost link refuses, cleared by the next Connect or Disconnect.
+    mutable std::string lost_reason_;
     // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
-    // short state reads and writes, never held across an SDK call), then the SDK wrapper's own mutex.
+    // short state reads and writes, never held across an SDK call), then the SDK's SharedOpenTable mutex.
+    // link_.mark_lost() takes no lock and the SDK's with_link() holds none.
     // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
     // device transactions (connect, close, move, halt, set_reverse, the status refill). Never take the
     // cache mutex (reset/invalidate) while holding io_mutex_ or mutex_. fault() takes only the
@@ -597,12 +815,14 @@ private:
     mutable util::TtlStatusCache<Status> status_cache_;
 };
 
-std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id, ZWOCAASDK& sdk) {
-    return std::make_unique<ZWOCAARotatorDriver>(device_number, rotator_id, std::nullopt, sdk);
+std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id, ZWOCAASDK& sdk,
+                                                      util::TaskClock& clock) {
+    return std::make_unique<ZWOCAARotatorDriver>(device_number, rotator_id, std::nullopt, sdk, clock);
 }
 
-std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index, ZWOCAASDK& sdk) {
-    return std::make_unique<ZWOCAARotatorDriver>(device_number, std::nullopt, rotator_index, sdk);
+std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index, ZWOCAASDK& sdk,
+                                                               util::TaskClock& clock) {
+    return std::make_unique<ZWOCAARotatorDriver>(device_number, std::nullopt, rotator_index, sdk, clock);
 }
 
 std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id) {

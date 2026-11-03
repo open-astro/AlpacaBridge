@@ -79,6 +79,9 @@ public:
             return {};
         }
         std::vector<DeviceState> state;
+        // One allocation for every field: GCC 14 -O2 reports -Werror=stringop-overflow in std::variant when the
+        // vector grows by push_back (the rotator build, #1668; the filter wheel and focuser bases reserve too).
+        state.reserve(9);
 
         auto add = [&state](const char* name, auto getter) {
             try {

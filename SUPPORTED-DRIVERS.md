@@ -422,6 +422,8 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **SDK**: ZWO EFW SDK Version 1.8.4 (build target)
 - **Connection**: USB (requires libusb-1.0)
+- **USB replug**: Rig check 2026-11-03 (issue #1668; Raspberry Pi CM4 on a StellaVita board, Debian 13 trixie arm64, a ZWO EFW 7-slot wheel on USB 2, a test build of the #1668 branch): the connect left Position at its slot (no -1 for 10 s); a cable pull was answered by `EFW_ERROR_REMOVED` on the next `Position` read, which dropped the link at once (`Connected` false, `DeviceState` empty, one WARN with the serial and the last position); after the replug one Connect, with no Disconnect first, rebound the wheel by serial on its new USB device number, the connect moved nothing, and a move to slot 4 completed. This wheel answers `EFWGetPosition` before an open but refuses `EFWGetProperty` until it is open (a code outside the SDK enum), so the enumeration lists a slot by its id when its property read fails before the open (`read_zwo_efw_slots()`); the released 5.0.2 connected it the same way, and `main` before #1668 skipped it ("No ZWO EFW wheels detected").
+- **ConformU**: 4.6.0-rc.1 (build 56430), 0 errors / 0 issues / 0 timing, 2026-11-03, run on the CM4 rig (Debian 13 trixie arm64, StellaVita board) over localhost against a test build of the #1668 branch, 7-slot EFW on USB 2. Earlier: 4.2.1 (2026-02).
 
 </details>
 

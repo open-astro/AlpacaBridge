@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/rotator_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/zwo/zwo_caa_sdk.h>
 
 #include <memory>
@@ -38,17 +39,19 @@ std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rot
 std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index);
 
 /**
- * @brief Test seam: as create_zwo_caa_rotator(), over an injected CAA SDK.
+ * @brief Test seam: as create_zwo_caa_rotator(), over an injected CAA SDK and task clock.
  *
  * @p sdk must outlive the driver.
  */
-std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id, ZWOCAASDK& sdk);
+std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id, ZWOCAASDK& sdk,
+                                                      util::TaskClock& clock = util::default_task_clock());
 
 /**
- * @brief Test seam: as create_zwo_caa_rotator_by_index(), over an injected CAA SDK.
+ * @brief Test seam: as create_zwo_caa_rotator_by_index(), over an injected CAA SDK and task clock.
  *
  * @p sdk must outlive the driver.
  */
-std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index, ZWOCAASDK& sdk);
+std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index, ZWOCAASDK& sdk,
+                                                               util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::zwo

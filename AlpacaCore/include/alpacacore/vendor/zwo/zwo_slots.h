@@ -71,4 +71,36 @@ std::vector<ZwoSlotRead<Info>> read_zwo_accessory_slots(int count, const std::st
     });
 }
 
+// The EFW variant (issue #1668). ZWO's EFW procedure opens a wheel before EFWGetProperty ("SlotNum is 0 if not
+// opened"), and an EFW on the rig refused the read before its open with a code outside the enum, though it opened and
+// read its property after. So a property failure keeps the slot, by its id alone (the rest of @p Info value-
+// initialised), unless @p gone says the code means the wheel is not there; the connect reads the property after its
+// open. An id that cannot be read is still skipped and logged (#1703). The EAF and CAA headers name no such order, so
+// they keep read_zwo_accessory_slots().
+template <typename Info, typename GetID, typename GetProperty, typename ErrorName, typename Gone>
+std::vector<ZwoSlotRead<Info>> read_zwo_efw_slots(int count, GetID&& get_id, GetProperty&& get_property,
+                                                  ErrorName&& error_name, Gone&& gone) {
+    return read_zwo_slots<Info>(count, "EFW", [&](int slot, Info& info, std::string& error) {
+        int id = 0;
+        const auto id_code = get_id(slot, &id);
+        if (id_code != 0) {
+            error = "EFWGetID: " + error_name(id_code);
+            return false;
+        }
+        const auto property_code = get_property(id, &info);
+        if (property_code == 0) {
+            return true;
+        }
+        if (gone(property_code)) {
+            error = "EFWGetProperty: " + error_name(property_code);
+            return false;
+        }
+        ALPACA_LOG_DEBUG("ZWO", "EFW slot " + std::to_string(slot) + " property unreadable before open (" +
+                                    error_name(property_code) + "); listed by id " + std::to_string(id));
+        info = Info{};
+        info.ID = id;
+        return true;
+    });
+}
+
 }  // namespace alpacacore::vendor::zwo

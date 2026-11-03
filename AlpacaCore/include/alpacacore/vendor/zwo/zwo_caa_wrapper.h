@@ -28,8 +28,10 @@ public:
     bool get_rotator_info_by_id(int rotator_id, ZWOCAARotatorInfo& info) override;
     bool get_rotator_info_by_index(int rotator_index, ZWOCAARotatorInfo& info) override;
 
-    void open_rotator(int rotator_id) override;
-    void close_rotator(int rotator_id) override;
+    SharedOpenTable::Opened open_rotator_link(int rotator_id) override;
+    std::optional<SharedOpenTable::Opened> open_rotator_candidate(int rotator_id) override;
+    void close_rotator_link(int rotator_id, std::uint64_t link) override;
+    void with_link(int rotator_id, std::uint64_t link, const std::function<void()>& fn) override;
 
     ZWOCAAMotionStatus get_motion_status(int rotator_id) override;
     double get_degree(int rotator_id) override;
