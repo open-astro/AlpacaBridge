@@ -692,6 +692,28 @@ TEST_CASE("ZWO Camera Driver - a bare cable pull during an exposure loses the li
 
 // Falsified by: shared_open_table.h call(id, fn, failed) skipping the failed() check (the not-readable answer
 // leaves Connected true).
+// Falsified by: zwo_camera_driver.cpp get_camera_state() not checking the link after poll_exposure_status() (the read
+// that finds the pull answers Idle, as on the rig at fa99a25e).
+TEST_CASE("ZWO Camera Driver - the CameraState read that finds a bare cable pull answers NotConnected",
+          "[zwo][camera][unit][link]") {
+    ExposingCamera rig;
+    rig.sdk.pulled = true;
+
+    require_alpaca_error([&] { (void)rig.camera->get_camera_state(); }, NotConnected);
+    CHECK_FALSE(rig.camera->get_connected());
+}
+
+// Falsified by: zwo_camera_driver.cpp get_image_array() not checking the link in its failed-status branch (the read
+// that finds the pull answers the latched DriverException).
+TEST_CASE("ZWO Camera Driver - the ImageArray read that finds a bare cable pull answers NotConnected",
+          "[zwo][camera][unit][link]") {
+    ExposingCamera rig;
+    rig.sdk.pulled = true;
+
+    require_alpaca_error([&] { (void)rig.camera->get_image_array(); }, NotConnected);
+    CHECK_FALSE(rig.camera->get_connected());
+}
+
 // The idle case: a temperature read the SDK answers as not readable, on a camera it no longer enumerates. A replug
 // and the client's Disconnect and Connect bring it back by serial.
 TEST_CASE("ZWO Camera Driver - a bare cable pull on an idle camera is found by the next temperature read",
@@ -737,8 +759,9 @@ TEST_CASE("ZWO Camera Driver - a generic SDK error on a camera that still enumer
 }
 
 // Falsified by: shared_open_table.h call_unserialised() rethrowing a generic failure without asking Ops::listed.
-// The download runs with no table lock (call_unserialised()); a generic failure from it on a pulled camera fails the
-// acquisition (the async-failure rule) and is a loss, and the dead handle is closed only after the download returned.
+// The download runs with no table lock (call_unserialised()); a generic failure from it on a pulled camera is a loss,
+// the download answers NotConnected as every member does while lost, and the dead handle is closed only after the
+// download returned.
 TEST_CASE("ZWO Camera Driver - a bare cable pull during the image download loses the link",
           "[zwo][camera][unit][link]") {
     FakeZWOSDK sdk;
@@ -764,7 +787,7 @@ TEST_CASE("ZWO Camera Driver - a bare cable pull during the image download loses
     download.join();
 
     REQUIRE(started);
-    CHECK(code.load() == alpacacore::AlpacaError::DriverException);  // the download reports the failed acquisition
+    CHECK(code.load() == NotConnected);
     CHECK_FALSE(camera->get_connected());
     require_alpaca_error([&] { (void)camera->get_image_ready(); }, NotConnected);
     CHECK_FALSE(sdk.closed_during_download());

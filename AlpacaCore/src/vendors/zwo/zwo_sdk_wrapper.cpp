@@ -254,9 +254,8 @@ std::string read_serial_number(int camera_id) {
 
 // Whether the SDK still enumerates @p camera_id (issue #1667). ASIGetNumOfConnectedCameras rescans the bus, so a pulled
 // camera is gone from it while its stale handle still answers a generic error. A slot the SDK cannot read may be this
-// camera, so it proves nothing: the camera counts as listed.
-// TODO(#1667): confirm on a rig that this rescan leaves the other open cameras' handles and ids alone; the camera
-// picker and every Connect already enumerate with cameras open, but not mid-exposure on another camera.
+// camera, so it proves nothing: the camera counts as listed. On the rig (issue #1667, 2026-11-03) the rescan after an
+// ASI2600MM Pro pull left an open ASI120MM Mini mid-exposure alone: its handle, id and frame were unaffected.
 bool camera_listed(int camera_id) {
     const int count = ASIGetNumOfConnectedCameras();
     for (int slot = 0; slot < count; ++slot) {
