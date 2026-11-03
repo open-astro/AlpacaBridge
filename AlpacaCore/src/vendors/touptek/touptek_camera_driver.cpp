@@ -210,6 +210,12 @@ public:
             // write registers into the live frame) or discard a just-completed image
             // (ImageReady/LastExposure cleared, frame unretrievable). Matches
             // the QHY driver, which already returns here without resetting.
+            // A redundant Disconnect set closing_ above and skips the
+            // reset_connection_state_locked() that clears it, so clear it here.
+            if (!connected) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                closing_ = false;
+            }
             return;
         }
 
@@ -1565,10 +1571,13 @@ private:
     // locked while the session is busy, except once the frame is Ready.
     void ensure_not_exposing() const {
         const CameraState state = session_.camera_state();
-        // A kept failure is not a ready frame.
-        const bool frame_ready = !session_.failure() && session_.image_ready();
-        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download ||
-            (session_.busy() && !frame_ready)) {
+        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
+            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
+        }
+        // Past the state check nothing is exposing, and none can start under mutex_,
+        // so the watchdog cannot fail it between failure() and image_ready(): the
+        // image_ready() below cannot raise. A kept failure is not a ready frame.
+        if (session_.busy() && (session_.failure() || !session_.image_ready())) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
         }
     }
