@@ -333,3 +333,37 @@ TEST_CASE("ZWO CAA link - a latched status fault refuses a Reverse write", "[zwo
     CHECK_FALSE(rig.sdk.reverse);  // the write never reached the rotator
     CHECK(rig.driver->get_connected());
 }
+
+// Falsified by: zwo_rotator_driver.cpp bind_rotator_locked() publishing rotator_id_ and rotator_info_ when the scan
+// matches the serial, before publish_connect_state() (the failed reconnect leaves the scanned rotator's name).
+TEST_CASE("ZWO CAA link - a reconnect that fails after the serial scan publishes no identity",
+          "[zwo][rotator][unit][link]") {
+    FakeTaskClock clock;
+    FakeZWOCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0, sdk, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_name() == "CAA");
+    driver->set_connected(false);  // an index binding forgets its id and info
+    REQUIRE(driver->get_name() == "ZWO CAA");
+
+    sdk.fail_info = true;  // the scan finds the serial, then the connect's info read fails
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_name() == "ZWO CAA");
+    CHECK(sdk.holders(sdk.id) == 0);  // the failed connect closed what it opened
+}
+
+// Falsified by: zwo_rotator_driver.cpp resolve_rotator_id() publishing rotator_id_ and rotator_info_ for the slot it
+// found, before publish_connect_state() (the failed first connect leaves the slot's name).
+TEST_CASE("ZWO CAA link - a first connect that fails after resolving the index publishes no identity",
+          "[zwo][rotator][unit][link]") {
+    FakeTaskClock clock;
+    FakeZWOCAASDK sdk;
+    sdk.fail_info = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0, sdk, clock);
+
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_name() == "ZWO CAA");
+    CHECK(sdk.holders(sdk.id) == 0);
+}

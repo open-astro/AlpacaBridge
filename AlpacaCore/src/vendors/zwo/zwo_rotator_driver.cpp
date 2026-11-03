@@ -609,14 +609,8 @@ private:
                 continue;
             }
             if (candidate->serial == bound_serial_) {
-                open_id_ = info.rotator_id;
+                open_id_ = info.rotator_id;  // published as rotator_id_ by publish_connect_state(), at the end
                 open_link_ = candidate->link;
-                if (rotator_index_.has_value()) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    rotator_id_ = info.rotator_id;
-                    rotator_info_ = info;
-                    rotator_info_valid_ = true;
-                }
                 return *candidate;
             }
             try {
@@ -652,7 +646,8 @@ private:
         }
     }
 
-    // Caller holds io_mutex_ (the enumeration is a device call); the id and info publish under mutex_.
+    // Caller holds io_mutex_ (the enumeration is a device call). Publishes nothing: publish_connect_state() stores the
+    // id and info at the end of a successful connect (decision 0016 rule 3), as the EFW driver does.
     int resolve_rotator_id() {
         if (rotator_index_.has_value()) {
             auto rotators = sdk_.enumerate_rotators();
@@ -663,10 +658,6 @@ private:
             int index = rotator_index_.value();
             for (const auto& info : rotators) {
                 if (info.slot_index == index) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    rotator_id_ = info.rotator_id;
-                    rotator_info_ = info;
-                    rotator_info_valid_ = true;
                     return info.rotator_id;
                 }
             }
@@ -682,8 +673,9 @@ private:
         throw AlpacaException("Rotator ID not specified", AlpacaError::InvalidValue);
     }
 
-    // Reads the connect-time state from the device, then publishes it: the info, serial and type under
-    // mutex_ (short), the rotation limit as an atomic. Caller holds io_mutex_ and not mutex_.
+    // Reads the connect-time state from the device, then publishes it: the id an index binding resolved to, the info,
+    // serial and type under mutex_ (short), the rotation limit as an atomic; a connect that throws before this publish
+    // leaves the pre-connect values (decision 0016 rule 3). Caller holds io_mutex_ and not mutex_.
     void publish_connect_state(int rotator_id, const std::string& serial) {
         ZWOCAARotatorInfo info;
         if (!sdk_.get_rotator_info_by_id(rotator_id, info)) {
@@ -734,6 +726,9 @@ private:
                                                   : util::RotatorSyncOffsetStore::load_or_adopt(key, legacy_key);
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (rotator_index_.has_value()) {
+                rotator_id_ = rotator_id;  // the id an index binding, or a rebind by serial, resolved to
+            }
             rotator_info_ = info;
             rotator_info_valid_ = true;
             min_degree_ = 0.0;
