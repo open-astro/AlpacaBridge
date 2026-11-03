@@ -339,6 +339,8 @@ public:
         validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         status_cache_.invalidate();  // relative to the live angle, not a frame up to one TTL old
+        // No refuse_if_faulted() here: this live read refuses a latched fault itself (a failed refill throws, a good
+        // one clears the latch), so a relative move never reaches the SDK on a faulted link.
         double current = get_position();
         double target = normalize_angle(current + position);
         double mechanical_target = to_mechanical_angle(target);

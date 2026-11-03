@@ -323,3 +323,13 @@ TEST_CASE("ZWO CAA link - a latched status fault refuses a move but not a Halt",
     CHECK_NOTHROW(rig.driver->halt());
     CHECK(rig.driver->get_connected());
 }
+
+// Falsified by: zwo_rotator_driver.cpp set_reverse() without refuse_if_faulted() (the Reverse write reaches the SDK).
+TEST_CASE("ZWO CAA link - a latched status fault refuses a Reverse write", "[zwo][rotator][unit][link]") {
+    Rotator rig;
+    rig.latch();
+
+    require_alpaca_error([&] { rig.driver->set_reverse(true); }, DriverException);
+    CHECK_FALSE(rig.sdk.reverse);  // the write never reached the rotator
+    CHECK(rig.driver->get_connected());
+}
