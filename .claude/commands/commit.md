@@ -108,7 +108,9 @@ If the changes include **driver code**, **ConformU results**, or **new device su
      extended. Never blanket-convert an existing provenance-carrying line to the `Validated
      models` pointer; that loses information and needs a human decision, not an automatic edit
      during a commit.
-4. Update the `## Updated YYYY-MM-DD` date at the top to today's date
+4. Leave the `## Updated YYYY-MM-DD` line at the top alone: `/bump-release` sets it at each release.
+   Every driver PR moving it made open PRs conflict on that one line (16 edits from 2026-10-16 to
+   2026-11-01), and with the merge queue a conflict takes a PR out of the queue.
 
 ### SUPPORTED-DRIVERS.md format reference
 

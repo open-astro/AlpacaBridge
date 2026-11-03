@@ -11,9 +11,10 @@ to a second vendor belongs in the matching shared file, not in a vendor file.
 ### Review bot on fork PRs (`safe-to-review` label)
 
 The Claude review bot (`.github/workflows/claude-review.yml`) runs automatically on
-every push to a same-repo PR branch. Fork PRs are gated: the bot runs only while a
+every push to a same-repo PR branch. It skips a draft PR, so pushes to a draft spend no review
+runs, and marking the PR ready (`ready_for_review`) starts its first review. Fork PRs are gated: the bot runs only while a
 maintainer has applied the **`safe-to-review`** label — applying it triggers the
-first review immediately, later pushes keep reviewing while the label stays on, and
+first review immediately (once the PR is out of draft), later pushes keep reviewing while the label stays on, and
 removing the label stops the bot. The label is the maintainer's trust decision: the
 workflow runs with `pull_request_target` (definition always taken from `main`, so a
 fork can't alter the bot's prompt/tools), and the residual risk of the bot *reading*
@@ -44,7 +45,7 @@ Each gate script's docstring (for timeouts and the nightly job, the workflow fil
 authoritative description of what it enforces; the bullets below hold only what an
 author must do. Read the docstring before changing a gate.
 
-- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `static-checks` (one step per gate, each run even after an earlier one fails: `.github/scripts/check-unicode.py`, `scripts/check_docs_drift.py` and the scripts' self-tests, `scripts/check_connect_error_hook.py`, `scripts/check_serial_port_ownership.py`, `scripts/check_layering.py`, `scripts/check_stress_registration.py`, `scripts/check_contract_sweep.py`, `scripts/check_conformu_reports.py` on a PR only, ShellCheck, and `node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF, in a `debian:trixie` container, the distribution AlpacaBridge ships for), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `static-checks` (one step per gate, each run even after an earlier one fails: `.github/scripts/check-unicode.py`, `scripts/check_docs_drift.py` and the scripts' self-tests, `scripts/check_connect_error_hook.py`, `scripts/check_serial_port_ownership.py`, `scripts/check_layering.py`, `scripts/check_stress_registration.py`, `scripts/check_contract_sweep.py`, `scripts/check_conformu_reports.py` on a PR only, ShellCheck, and `node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
 - **Merge queue** (`main` only): a PR into `main` lands through GitHub's merge queue, which runs
   `ci.yml` on the queued merge commit (`merge_group`) and merges only when the required checks
   pass on it. So a branch never has to be brought up to date with `main` before it merges: never
