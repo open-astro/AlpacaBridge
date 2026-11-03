@@ -157,9 +157,7 @@ public:
     // (never in DriverInfo). The SVBONY SDK exposes actual device firmware,
     // unlike the ZWO/QHY/Player One SDKs; it is cached at connect (see
     // set_connected). Guarded by its OWN narrow firmware_mutex_, NOT the class
-    // mutex_ (which set_connected holds for the entire multi-second SDK open/
-    // close), so a configureddevices poll during connect/disconnect returns
-    // immediately instead of blocking on the SDK.
+    // mutex_, so a configureddevices poll returns immediately.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (firmware_.empty()) {
@@ -219,7 +217,7 @@ public:
             lifecycle_lock.lock();
             stop_exposure_thread();
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -240,18 +238,36 @@ public:
 
         auto& sdk = sdk_;
 
+        // Decision 0016 rule 4: the SDK handshake and close run under transition_mutex_ with mutex_
+        // released, so Name and the other identity getters answer while they run. Set before mutex_ is
+        // released, so a name refresh can never slip between the unlock and the flag.
+        transition_in_flight_.store(true);
+        struct ClearInFlight {
+            std::atomic<bool>& flag;
+            ~ClearInFlight() { flag.store(false); }
+        } clear_in_flight{transition_in_flight_};
+
         if (connected) {
-            int resolved_id = resolve_camera_id_locked();
+            // Everything the handshake learns lands in locals and is published under mutex_ at the end,
+            // so a failed connect publishes nothing.
+            lock.unlock();
+            SVBCameraInfo info = resolve_camera();
+            const int resolved_id = info.camera_id;
             ALPACA_LOG_INFO("SVBONY", "SDK version: " + sdk.get_sdk_version());
             sdk.open_camera(resolved_id);
             // Everything from here until connected_ is set true must close the
             // freshly opened camera on failure: the destructor only closes when
             // connected_, so an unguarded throw (set_camera_mode_normal,
-            // load_control_caps_locked, set_roi_format, get_serial_number all
+            // get_control_caps, set_roi_format, get_serial_number all
             // propagate) would leak the SDK open — the ref-counted open never
             // balances — and leave the camera busy for the next connect. Guard
             // the whole post-open configuration in one try (H9; same shape as
             // the ToupTek camera driver).
+            std::unordered_map<SVBControlType, SVBControlCaps> caps;
+            SVBImageType image_type = SVBImageType::Raw8;
+            int roi_width = 0;
+            int roi_height = 0;
+            std::string serial;
             try {
                 // Reset any leftover state from a previous session before
                 // touching mode/controls. Some models (notably SV905C2) start in
@@ -267,24 +283,25 @@ public:
                 sdk.set_camera_mode_normal(resolved_id);
                 sdk.set_auto_save_param(resolved_id, false);
 
-                refresh_camera_info_locked(resolved_id);
-                load_control_caps_locked(resolved_id);
-                select_default_image_type_locked();
-
-                bin_x_ = 1;
-                bin_y_ = 1;
-                start_x_ = 0;
-                start_y_ = 0;
-                num_x_ = camera_info_valid_ ? camera_info_.max_width : 0;
-                num_y_ = camera_info_valid_ ? camera_info_.max_height : 0;
-                update_effective_roi_locked();
-
-                if (roi_width_effective_ > 0 && roi_height_effective_ > 0) {
-                    sdk.set_roi_format(resolved_id, roi_start_x_effective_, roi_start_y_effective_,
-                                       roi_width_effective_, roi_height_effective_, bin_x_);
-                    sdk.set_output_image_type(resolved_id, image_type_);
+                // Re-read properties now that the camera is open, keeping the id from the open.
+                SVBCameraInfo fresh;
+                if (sdk.get_camera_info_by_index(camera_index_, fresh)) {
+                    fresh.camera_id = resolved_id;
+                    info = std::move(fresh);
                 }
-                roi_dirty_ = false;
+                for (const auto& cap : sdk.get_control_caps(resolved_id)) {
+                    caps[cap.type] = cap;
+                }
+                image_type = select_default_image_type(info);
+
+                // Full frame, 1x1 bin, origin 0,0, so update_effective_roi_locked() reduces to the
+                // sensor size aligned down to the SVBONY divisors (width%8, height%2).
+                roi_width = info.max_width - (info.max_width % 8);
+                roi_height = info.max_height - (info.max_height % 2);
+                if (roi_width > 0 && roi_height > 0) {
+                    sdk.set_roi_format(resolved_id, 0, 0, roi_width, roi_height, 1);
+                    sdk.set_output_image_type(resolved_id, image_type);
+                }
 
                 // Control warm-up: write every writable control to its default
                 // value at connect time. SV905C2 (and possibly other SVBONY
@@ -294,7 +311,7 @@ public:
                 // writable control here puts the SDK into a state where later
                 // client writes succeed. Failures are tolerated — they'll be
                 // surfaced again the next time the client touches that control.
-                for (const auto& kv : control_caps_) {
+                for (const auto& kv : caps) {
                     const auto& c = kv.second;
                     if (!c.is_writable) continue;
                     try {
@@ -310,12 +327,12 @@ public:
                 // Refresh pixel size now that camera is open
                 try {
                     float px = sdk.get_sensor_pixel_size(resolved_id);
-                    camera_info_.pixel_size_um = static_cast<double>(px);
+                    info.pixel_size_um = static_cast<double>(px);
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
                     // pixel size may have been set during enumeration
                 }
 
-                serial_number_ = sdk.get_serial_number(resolved_id);
+                serial = sdk.get_serial_number(resolved_id);
                 // Cache the real camera firmware once (web UI only). Querying it on
                 // every configureddevices poll would hit the SDK each time; a failed
                 // query must not fail the connect. Stored under firmware_mutex_ (not
@@ -331,13 +348,32 @@ public:
                     firmware_ = std::move(fw);
                 }
             } catch (const AlpacaException&) {
-                close_after_failed_connect_locked(sdk, resolved_id);
+                close_after_failed_connect(sdk, resolved_id);
                 throw;
             } catch (const std::exception& e) {
-                close_after_failed_connect_locked(sdk, resolved_id);
+                close_after_failed_connect(sdk, resolved_id);
                 throw AlpacaException(std::string("Failed to configure SVBONY camera: ") + e.what(),
                                       AlpacaError::DriverException);
             }
+
+            lock.lock();
+            camera_id_ = resolved_id;
+            camera_info_ = std::move(info);
+            camera_info_valid_ = true;
+            control_caps_ = std::move(caps);
+            image_type_ = image_type;
+            bin_x_ = 1;
+            bin_y_ = 1;
+            start_x_ = 0;
+            start_y_ = 0;
+            num_x_ = camera_info_.max_width;
+            num_y_ = camera_info_.max_height;
+            roi_start_x_effective_ = 0;
+            roi_start_y_effective_ = 0;
+            roi_width_effective_ = roi_width;
+            roi_height_effective_ = roi_height;
+            roi_dirty_ = false;
+            serial_number_ = std::move(serial);
             reset_exposure_state_locked(retired_image);
             connected_.store(true);
             return;
@@ -348,7 +384,8 @@ public:
         // connection check instead of hitting a just-closed camera, and a
         // throwing close can't trap the driver half-connected — same order as
         // the switch/EFW siblings, per the driver-lifecycle.instructions.md disconnect rule (#116).
-        // The exposure worker is already joined (lifecycle lock above).
+        // The exposure worker is already joined, and exposure_lifecycle_mutex_ stays held across the
+        // close, so no exposure can start in the gap; the close then runs with mutex_ released.
         const int close_id = camera_id_;
         camera_id_ = -1;
         camera_info_ = {};
@@ -364,17 +401,26 @@ public:
         }
         reset_exposure_state_locked(retired_image);
         connected_.store(false);
-        if (close_id >= 0) {
-            try {
-                sdk.stop_video_capture(close_id);
-                capture_stop_failed_ = false;
-            } catch (const std::exception& e) {
-                capture_stop_failed_ = true;
-                ALPACA_LOG_WARN("SVBONY", "stop_video_capture during disconnect failed: " + std::string(e.what()));
-            }
-            sdk.close_camera(close_id);
-            capture_stop_failed_ = false;
+        if (close_id < 0) {
+            return;
         }
+        // Operational members fail ensure_connected_locked() from here on, so none reaches the SDK
+        // while the camera closes; capture_stop_failed_ is still written under mutex_.
+        lock.unlock();
+        bool stop_failed = false;
+        try {
+            sdk.stop_video_capture(close_id);
+        } catch (const std::exception& e) {
+            stop_failed = true;
+            ALPACA_LOG_WARN("SVBONY", "stop_video_capture during disconnect failed: " + std::string(e.what()));
+        }
+        {
+            std::lock_guard<std::mutex> relock(mutex_);
+            capture_stop_failed_ = stop_failed;
+        }
+        sdk.close_camera(close_id);
+        std::lock_guard<std::mutex> relock(mutex_);
+        capture_stop_failed_ = false;
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -1311,9 +1357,8 @@ private:
     int camera_index_;
     int camera_id_;
     std::string serial_number_;
-    // firmware_ has its OWN narrow mutex, not the coarse class mutex_ that
-    // set_connected() holds across the whole SDK open/close, so a poll-time
-    // get_device_firmware() never blocks on the SDK.
+    // firmware_ has its OWN narrow mutex, not the class mutex_, so a poll-time
+    // get_device_firmware() never waits on a getter's or operation's lock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_;  // cached at connect; web-UI only (guarded by firmware_mutex_)
     SVBCameraInfo camera_info_;
@@ -1322,6 +1367,8 @@ private:
     std::unordered_map<SVBControlType, SVBControlCaps> control_caps_;
 
     std::atomic<bool> connected_;
+    // True while set_connected runs its SDK handshake or close with mutex_ released.
+    std::atomic<bool> transition_in_flight_{false};
     mutable std::mutex mutex_;
     std::mutex transition_mutex_;
 
@@ -1592,7 +1639,8 @@ private:
         }
     }
 
-    int resolve_camera_id_locked() {
+    // Touches no driver state, so the connect runs it with mutex_ released.
+    SVBCameraInfo resolve_camera() {
         auto cameras = sdk_.enumerate_cameras();
         if (cameras.empty()) {
             ALPACA_LOG_WARN("SVBONY", "No SVBONY cameras detected by SDK");
@@ -1607,21 +1655,7 @@ private:
         const auto& info = cameras[static_cast<std::size_t>(camera_index_)];
         ALPACA_LOG_INFO("SVBONY", "Using camera index " + std::to_string(camera_index_) +
                        ": " + info.name + " (ID " + std::to_string(info.camera_id) + ")");
-        camera_id_ = info.camera_id;
-        camera_info_ = info;
-        camera_info_valid_ = true;
-        return camera_id_;
-    }
-
-    void refresh_camera_info_locked(int camera_id) {
-        // Re-read properties now that the camera is open
-        SVBCameraInfo info;
-        if (sdk_.get_camera_info_by_index(camera_index_, info)) {
-            // Preserve camera_id from open
-            info.camera_id = camera_id;
-            camera_info_ = info;
-            camera_info_valid_ = true;
-        }
+        return info;
     }
 
     void preload_camera_info_locked() {
@@ -1643,7 +1677,9 @@ private:
     }
 
     void refresh_cached_camera_info_if_needed() {
-        if (connected_.load()) {
+        // A connect or disconnect in flight owns the SDK: the real wrapper serialises enumerate_cameras
+        // behind its open and close, so the enumerate would wait them out.
+        if (connected_.load() || transition_in_flight_.load()) {
             return;
         }
 
@@ -1652,6 +1688,11 @@ private:
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 const auto& info = cameras[static_cast<std::size_t>(camera_index_)];
                 std::lock_guard<std::mutex> lock(mutex_);
+                // A connect ran while the enumerate was out: it owns camera_info_ now (decision 0016
+                // rule 6), and this read may be older than what it published.
+                if (connected_.load() || transition_in_flight_.load()) {
+                    return;
+                }
                 if (camera_id_ != info.camera_id) {
                     serial_number_.clear();
                 }
@@ -1664,27 +1705,15 @@ private:
         }
     }
 
-    void load_control_caps_locked(int camera_id) {
-        control_caps_.clear();
-        auto caps = sdk_.get_control_caps(camera_id);
-        for (const auto& cap : caps) {
-            control_caps_[cap.type] = cap;
-        }
-    }
-
-    void select_default_image_type_locked() {
-        if (!camera_info_valid_) {
-            util::throw_invalid_camera_image("SVBONY camera information is unavailable");
-        }
+    static SVBImageType select_default_image_type(const SVBCameraInfo& info) {
         constexpr SVBImageType kColorFormats[] = {SVBImageType::Raw16, SVBImageType::Raw8, SVBImageType::Rgb24,
                                                   SVBImageType::Y16, SVBImageType::Y8};
         constexpr SVBImageType kMonoFormats[] = {SVBImageType::Raw16, SVBImageType::Y16, SVBImageType::Raw8,
                                                  SVBImageType::Y8, SVBImageType::Rgb24};
-        const auto& preferred_formats = camera_info_.is_color ? kColorFormats : kMonoFormats;
+        const auto& preferred_formats = info.is_color ? kColorFormats : kMonoFormats;
         for (const auto type : preferred_formats) {
-            if (supports_format(camera_info_.supported_formats, type)) {
-                image_type_ = type;
-                return;
+            if (supports_format(info.supported_formats, type)) {
+                return type;
             }
         }
         throw AlpacaException(
@@ -1813,8 +1842,8 @@ private:
     }
 
     // Balance the SDK open when post-open configuration throws (H9). The
-    // close itself must not mask the original error.
-    void close_after_failed_connect_locked(SVBSDK& sdk, int resolved_id) {
+    // close itself must not mask the original error. Runs with mutex_ released.
+    static void close_after_failed_connect(SVBSDK& sdk, int resolved_id) {
         try {
             sdk.close_camera(resolved_id);
         } catch (const std::exception& e) {
