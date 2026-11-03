@@ -482,8 +482,8 @@ while :; do
         echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
     esac
   fi
-  # Only skipped runs and nothing pending: the actor gate skipped the job (fork push
-  # without the label, or an author outside allowed_non_write_users). A cancelled run
+  # Only skipped runs and nothing pending: the job's gate skipped it (a draft, a fork
+  # push without the label, or an author outside allowed_non_write_users). A cancelled run
   # beside the skipped one means a labelled run existed and was re-triggered mid-poll;
   # that is the two-look cancelled case below, not a skip. see the fork-label rule above.
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ] && [ "$CANCELLED" = 0 ]; then
