@@ -19,6 +19,7 @@
 #include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/gps_status.h>
+#include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
@@ -30,6 +31,7 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -82,8 +84,6 @@ public:
           aperture_diameter_m_(0.0),
           aperture_area_m2_(0.0),
           focal_length_m_(0.0),
-          pulse_guiding_active_(false),
-          pulse_guiding_end_ns_(0),
           site_latitude_cached_(0.0),
           site_longitude_cached_(0.0),
           site_info_valid_(false),
@@ -350,28 +350,18 @@ public:
                 park_override_until_ = std::chrono::steady_clock::time_point{};
                 park_finalize_pending_ = false;
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
-                slew_override_until_ = std::chrono::steady_clock::time_point{};
+                clear_hold_windows_locked();
                 slew_in_progress_ = false;
                 driver_motion_ = DriverMotion::None;
                 utc_query_supported_ = true;
-                pulse_guiding_active_.store(false, std::memory_order_release);
-                pulse_guiding_end_ns_.store(0, std::memory_order_relaxed);
-                pulse_guiding_hold_ra_valid_ = false;
                 pulse_guiding_hold_ra_hours_ = 0.0;
-                pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
                 last_ra_read_valid_ = false;
                 last_ra_read_hours_ = 0.0;
-                pulse_guiding_ra_correction_valid_ = false;
                 pulse_guiding_ra_baseline_hours_ = 0.0;
                 pulse_guiding_ra_expected_delta_hours_ = 0.0;
-                pulse_guiding_ra_correction_until_ = std::chrono::steady_clock::time_point{};
-                pulse_guiding_dec_correction_valid_ = false;
                 pulse_guiding_dec_baseline_degrees_ = 0.0;
                 pulse_guiding_dec_expected_delta_degrees_ = 0.0;
-                pulse_guiding_dec_correction_until_ = std::chrono::steady_clock::time_point{};
-                pulse_guiding_hold_dec_valid_ = false;
                 pulse_guiding_hold_dec_degrees_ = 0.0;
-                pulse_guiding_hold_dec_until_ = std::chrono::steady_clock::time_point{};
                 last_dec_read_valid_ = false;
                 last_dec_read_degrees_ = 0.0;
                 target_ra_set_ = false;
@@ -451,25 +441,17 @@ public:
             park_override_until_ = std::chrono::steady_clock::time_point{};
             park_finalize_pending_ = false;
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
-            slew_override_until_ = std::chrono::steady_clock::time_point{};
+            clear_hold_windows_locked();
             slew_in_progress_ = false;
             driver_motion_ = DriverMotion::None;
-            pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
-            pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
             last_ra_read_valid_ = false;
             last_ra_read_hours_ = 0.0;
-            pulse_guiding_ra_correction_valid_ = false;
             pulse_guiding_ra_baseline_hours_ = 0.0;
             pulse_guiding_ra_expected_delta_hours_ = 0.0;
-            pulse_guiding_ra_correction_until_ = std::chrono::steady_clock::time_point{};
-            pulse_guiding_dec_correction_valid_ = false;
             pulse_guiding_dec_baseline_degrees_ = 0.0;
             pulse_guiding_dec_expected_delta_degrees_ = 0.0;
-            pulse_guiding_dec_correction_until_ = std::chrono::steady_clock::time_point{};
-            pulse_guiding_hold_dec_valid_ = false;
             pulse_guiding_hold_dec_degrees_ = 0.0;
-            pulse_guiding_hold_dec_until_ = std::chrono::steady_clock::time_point{};
             last_dec_read_valid_ = false;
             last_dec_read_degrees_ = 0.0;
             target_ra_set_ = false;
@@ -659,23 +641,11 @@ public:
             throw AlpacaException("Mount communications compromised: " + published_fault_text(),
                                   AlpacaError::DriverException);
         }
-        if (pulse_guiding_active_.load(std::memory_order_acquire)) {
-            auto now_ns = clock_.now().time_since_epoch().count();
-            if (now_ns >= pulse_guiding_end_ns_.load(std::memory_order_relaxed)) {
-                pulse_guiding_active_.store(false, std::memory_order_release);
-                return false;
-            }
-            return true;
-        }
-        return false;
+        return pulse_window_open();
     }
 
-    // True from PulseGuide until its duration plus kPulseGuideCompletionDelay has passed. Does not
-    // clear the flag (get_is_pulse_guiding() does).
-    bool pulse_window_open() const {
-        return pulse_guiding_active_.load(std::memory_order_acquire) &&
-               clock_.now().time_since_epoch().count() < pulse_guiding_end_ns_.load(std::memory_order_relaxed);
-    }
+    // True from PulseGuide until its duration plus kPulseGuideCompletionDelay has passed (decision 0022).
+    bool pulse_window_open() const { return pulse_guide_hold_.load(std::memory_order_acquire).active(clock_.now()); }
 
     bool get_can_set_declination_rate() const override {
         return false;  // iOptron doesn't support setting Dec rate directly
@@ -733,20 +703,17 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected(LatchProbe::Read);
         double dec_value = 0.0;
-        if (pulse_guiding_hold_dec_valid_ && clock_.now() < pulse_guiding_hold_dec_until_) {
+        if (pulse_position_hold_[kDecAxis].active(clock_.now())) {
             dec_value = pulse_guiding_hold_dec_degrees_;
         } else {
             refresh_position_cache_locked();
             dec_value = cached_dec_degrees_;
         }
-        if (pulse_guiding_dec_correction_valid_) {
-            const auto now = clock_.now();
-            if (now < pulse_guiding_dec_correction_until_) {
-                dec_value = pulse_guiding_dec_baseline_degrees_ +
-                            pulse_guiding_dec_expected_delta_degrees_;
-            }
-            pulse_guiding_dec_correction_valid_ = false;
+        // The first read after a Dec pulse serves the predicted position; any later read is live.
+        if (pulse_position_correction_[kDecAxis].active(clock_.now())) {
+            dec_value = pulse_guiding_dec_baseline_degrees_ + pulse_guiding_dec_expected_delta_degrees_;
         }
+        pulse_position_correction_[kDecAxis].clear();
         last_dec_read_degrees_ = dec_value;
         last_dec_read_valid_ = true;
         return dec_value + sync_offset_dec_degrees_;
@@ -849,19 +816,17 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected(LatchProbe::Read);
         double ra_value = 0.0;
-        if (pulse_guiding_hold_ra_valid_ && clock_.now() < pulse_guiding_hold_until_) {
+        if (pulse_position_hold_[kRaAxis].active(clock_.now())) {
             ra_value = pulse_guiding_hold_ra_hours_;
         } else {
             refresh_position_cache_locked();
             ra_value = cached_ra_hours_;
         }
-        if (pulse_guiding_ra_correction_valid_) {
-            const auto now = clock_.now();
-            if (now < pulse_guiding_ra_correction_until_) {
-                ra_value = util::wrap_hours(pulse_guiding_ra_baseline_hours_ + pulse_guiding_ra_expected_delta_hours_);
-            }
-            pulse_guiding_ra_correction_valid_ = false;
+        // The first read after an RA pulse serves the predicted position; any later read is live.
+        if (pulse_position_correction_[kRaAxis].active(clock_.now())) {
+            ra_value = util::wrap_hours(pulse_guiding_ra_baseline_hours_ + pulse_guiding_ra_expected_delta_hours_);
         }
+        pulse_position_correction_[kRaAxis].clear();
         last_ra_read_hours_ = ra_value;
         last_ra_read_valid_ = true;
         return util::wrap_hours(ra_value + sync_offset_ra_hours_);
@@ -1148,6 +1113,7 @@ public:
         // goto failed.
         const DriverMotion motion = slew_in_progress_ ? DriverMotion::Goto : driver_motion_;
         supersede_slew_dispatch_locked();
+        clear_slew_hold_locked();  // MoveAxis starts no GOTO: Slewing follows the axis flags and the mount
         // open-astro#843: :qR#/:qD# stop arrow motion only ("other slewing and tracking are not affected",
         // RS-232 command language v3.10), so a GOTO, Park or FindHome the driver started keeps moving after
         // MoveAxis. Keep it as driver motion (a jog too: the protocol does not say it ends one) so a PulseGuide
@@ -1193,7 +1159,7 @@ public:
             return true;
         }
         auto now = clock_.now();
-        if (slew_override_until_ > now) {
+        if (slew_hold_.active(now)) {
             return true;
         }
         refresh_status_cache_locked();
@@ -1203,9 +1169,6 @@ public:
             // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
             // dispatching and no Park/FindHome still moving (driver_motion_).
             return !(pulse_window_open() && !slew_in_progress_ && driver_motion_ == DriverMotion::None);
-        }
-        if (slew_override_until_ > now) {
-            return true;
         }
         // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
         // compensating sidereal motion during its final ~1 s approach, so
@@ -1252,8 +1215,8 @@ public:
                                                    std::to_string(slew_refine_count_) + "/" +
                                                    std::to_string(kMaxSlewRefines) + " (" +
                                                    std::to_string(duration_ms) + " ms, final-approach firmware quirk)");
-                    protocol.pulse_guide(direction, duration_ms);
-                    slew_override_until_ = clock_.now() + std::chrono::milliseconds(duration_ms + 500);
+                    send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
+                                               [&] { protocol.pulse_guide(direction, duration_ms); });
                     status_cache_valid_ = false;
                     position_cache_valid_ = false;
                     return true;
@@ -1389,10 +1352,9 @@ public:
         
         auto& protocol = iOptronProtocolWrapper::instance();
         // Use a direct go-to-zero command to avoid aggressive sensor searches.
-        protocol.go_to_home();
+        send_with_slew_hold_locked(std::chrono::seconds(5), [&] { protocol.go_to_home(); });
         supersede_slew_dispatch_locked();
         driver_motion_ = DriverMotion::Home;
-        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
     }
@@ -1408,9 +1370,11 @@ public:
 
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
-            if (!protocol.park(hae29c_quirks_active())) {
-                throw AlpacaException("Failed to park mount");
-            }
+            send_with_slew_hold_locked(std::chrono::seconds(5), [&] {
+                if (!protocol.park(hae29c_quirks_active())) {
+                    throw AlpacaException("Failed to park mount");
+                }
+            });
             clear_device_fault_locked();
         } catch (const std::exception& e) {
             throw_if_link_lost();
@@ -1426,7 +1390,6 @@ public:
         cached_status_.is_at_home = false;
         status_cache_valid_ = true;
         last_status_update_ = clock_.now();
-        slew_override_until_ = last_status_update_ + std::chrono::seconds(5);
         position_cache_valid_ = false;
         // HAE29C firmware quirk (hardware-verified 2026-07-14): :MP1# park
         // slews complete physically but the mount keeps reporting
@@ -1486,7 +1449,7 @@ public:
         slew_in_progress_ = false;
         driver_motion_ = DriverMotion::None;
         status_cache_valid_ = false;
-        slew_override_until_ = std::chrono::steady_clock::time_point{};
+        clear_slew_hold_locked();
     }
     
     void pulse_guide(int direction, int duration) override {
@@ -1515,16 +1478,17 @@ public:
                 calibrated_direction = (direction == 0) ? 1 : 0;
             }
         }
+        // Decision 0022 rule 2: every window below is armed before the pulse command goes out.
+        const auto now = clock_.now();
+        const auto pulse = std::chrono::milliseconds(duration);
         if (duration > 0 && is_dec) {
             if (last_ra_read_valid_) {
                 pulse_guiding_hold_ra_hours_ = last_ra_read_hours_;
             } else {
                 pulse_guiding_hold_ra_hours_ = cached_ra_hours_;
             }
-            pulse_guiding_hold_ra_valid_ = true;
-            pulse_guiding_hold_until_ =
-                clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
-            pulse_guiding_hold_dec_valid_ = false;
+            pulse_position_hold_[kRaAxis].arm(now, pulse + kPulseGuideCompletionDelay + kPulseGuideHoldGrace);
+            pulse_position_hold_[kDecAxis].clear();
             GuideRate guide_rate;
             if (guide_rate_valid_) {
                 guide_rate = cached_guide_rate_;
@@ -1542,19 +1506,16 @@ public:
             } else {
                 pulse_guiding_dec_baseline_degrees_ = cached_dec_degrees_;
             }
-            pulse_guiding_dec_correction_valid_ = true;
-            pulse_guiding_dec_correction_until_ = clock_.now() + std::chrono::milliseconds(duration) +
-                                                  kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
+            pulse_position_correction_[kDecAxis].arm(now,
+                                                     pulse + kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace);
         } else if (duration > 0 && is_ra) {
             if (last_dec_read_valid_) {
                 pulse_guiding_hold_dec_degrees_ = last_dec_read_degrees_;
             } else {
                 pulse_guiding_hold_dec_degrees_ = cached_dec_degrees_;
             }
-            pulse_guiding_hold_dec_valid_ = true;
-            pulse_guiding_hold_dec_until_ =
-                clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
-            pulse_guiding_hold_ra_valid_ = false;
+            pulse_position_hold_[kDecAxis].arm(now, pulse + kPulseGuideCompletionDelay + kPulseGuideHoldGrace);
+            pulse_position_hold_[kRaAxis].clear();
             GuideRate guide_rate;
             if (guide_rate_valid_) {
                 guide_rate = cached_guide_rate_;
@@ -1572,21 +1533,25 @@ public:
             } else {
                 pulse_guiding_ra_baseline_hours_ = cached_ra_hours_;
             }
-            pulse_guiding_ra_correction_valid_ = true;
-            pulse_guiding_ra_correction_until_ = clock_.now() + std::chrono::milliseconds(duration) +
-                                                 kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
+            pulse_position_correction_[kRaAxis].arm(now,
+                                                    pulse + kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace);
         } else {
-            pulse_guiding_hold_ra_valid_ = false;
-            pulse_guiding_hold_dec_valid_ = false;
+            pulse_position_hold_[kRaAxis].clear();
+            pulse_position_hold_[kDecAxis].clear();
         }
-        protocol.pulse_guide(calibrated_direction, duration);
+        // IsPulseGuiding reads this window lock-free, so it is true while the command is on the wire. A zero
+        // duration sends a pulse that ends at once: the window closes.
+        util::HoldWindow guiding;
         if (duration > 0) {
-            auto end = clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
-            pulse_guiding_end_ns_.store(end.time_since_epoch().count(),
-                                        std::memory_order_relaxed);
-            pulse_guiding_active_.store(true, std::memory_order_release);
-        } else {
-            pulse_guiding_active_.store(false, std::memory_order_release);
+            guiding.arm(now, pulse + kPulseGuideCompletionDelay);
+        }
+        pulse_guide_hold_.store(guiding, std::memory_order_release);
+        try {
+            protocol.pulse_guide(calibrated_direction, duration);
+        } catch (...) {
+            // A failed dispatch (decision 0022 rule 2): no pulse runs, so no window stays open.
+            clear_pulse_windows_locked();
+            throw;
         }
     }
     
@@ -1731,7 +1696,7 @@ public:
             // Same reason as prepare_slew_state_locked(): Slewing must read
             // true from the moment this initiator returns, not from when the
             // dispatch body gets the mutex.
-            slew_override_until_ = clock_.now() + std::chrono::seconds(5);
+            slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
         }
 
         start_slew_body(generation, previous_slew_error, "Failed to start async Alt/Az slew",
@@ -1789,7 +1754,7 @@ public:
 
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
-            protocol.unpark();
+            send_with_slew_hold_locked(std::chrono::seconds(2), [&] { protocol.unpark(); });
             clear_device_fault_locked();
         } catch (const std::exception& e) {
             throw_if_link_lost();
@@ -1803,7 +1768,6 @@ public:
         cached_status_.is_at_home = false;
         status_cache_valid_ = true;
         last_status_update_ = clock_.now();
-        slew_override_until_ = last_status_update_ + std::chrono::seconds(2);
         park_override_until_ = last_status_update_ + kUnparkGrace;
         park_finalize_pending_ = false;
     }
@@ -2112,7 +2076,7 @@ private:
         // the settle refinement against the pre-slew position and report the
         // slew complete before it started (caught by the loopback fake-mount
         // test). Every dispatch-failure path clears it again.
-        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
+        slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
     }
 
     void invalidate_slew_error_locked() {
@@ -2123,27 +2087,65 @@ private:
     void supersede_slew_dispatch_locked() {
         // Clear an unsent GOTO's state before a stale worker observes its
         // generation mismatch, preventing a ghost slew/trim after newer motion.
+        // The slew window is left to the caller: every initiator but MoveAxis arms its own, and MoveAxis clears it.
         invalidate_slew_error_locked();
         slew_in_progress_ = false;
         driver_motion_ = DriverMotion::None;
-        clear_slew_override_locked();
     }
 
-    void clear_slew_override_locked() { slew_override_until_ = std::chrono::steady_clock::time_point{}; }
+    void clear_slew_hold_locked() const { slew_hold_.clear(); }
+
+    // Decision 0022 rule 2: arms the slew window for `hold` before `send` puts the command on the wire. A send that
+    // throws takes its window back (the one before it is restored), so a command that failed leaves Slewing as it was.
+    template <typename Send>
+    void send_with_slew_hold_locked(std::chrono::milliseconds hold, Send&& send) const {
+        const util::HoldWindow before = slew_hold_;
+        slew_hold_.arm(clock_.now(), hold);
+        try {
+            send();
+        } catch (...) {
+            slew_hold_ = before;
+            throw;
+        }
+    }
+
+    // Decision 0022 rule 2: a connect and a disconnect start with no window open.
+    void clear_hold_windows_locked() const {
+        clear_slew_hold_locked();
+        clear_pulse_windows_locked();
+    }
+
+    // Every pulse window: IsPulseGuiding's, and the position holds and predictions of PulseGuide.
+    void clear_pulse_windows_locked() const {
+        pulse_guide_hold_.store(util::HoldWindow{}, std::memory_order_release);
+        for (auto& window : pulse_position_hold_) window.clear();
+        for (auto& window : pulse_position_correction_) window.clear();
+    }
 
     // `async_ctx` is the slew slot's context when the GOTO runs on its body: a rejection is then recorded in
     // last_slew_error_ and logged instead of thrown. Null: the synchronous initiators, which throw.
     void dispatch_slew_command_locked(double ra, double dec, util::OperationContext* async_ctx, const char* label) {
         auto& protocol = iOptronProtocolWrapper::instance();
-        protocol.set_target_ra(ra);
-        protocol.set_target_dec(dec);
-        bool accepted = protocol.slew_to_ra_dec();
-        if (!accepted) {
-            accepted = protocol.slew_to_ra_dec_cw_up();
+        bool accepted = false;
+        try {
+            protocol.set_target_ra(ra);
+            protocol.set_target_dec(dec);
+            // Decision 0022 rule 2: re-armed before the :MS1# goes out, so the window runs from the GOTO itself
+            // and not from an initiator whose body waited for mutex_.
+            slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
+            accepted = protocol.slew_to_ra_dec();
+            if (!accepted) {
+                accepted = protocol.slew_to_ra_dec_cw_up();
+            }
+        } catch (...) {
+            // A dispatch that failed (the synchronous initiators throw it on): no GOTO went out.
+            slew_in_progress_ = false;
+            clear_slew_hold_locked();
+            throw;
         }
         if (!accepted) {
             slew_in_progress_ = false;
-            clear_slew_override_locked();
+            clear_slew_hold_locked();
             if (async_ctx != nullptr) {
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
@@ -2157,7 +2159,6 @@ private:
             }
             throw AlpacaException("Slew rejected by mount - target may violate altitude limits");
         }
-        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
     }
@@ -2314,7 +2315,7 @@ private:
         // needs no early end: a parked mount refuses PulseGuide and Unpark ends the window.
         // Runs after the finalizer, which may have re-read the status.
         const bool reached_home = driver_motion_ == DriverMotion::Home && cached_status_.is_at_home;
-        if (reached_home || (!cached_status_.is_slewing && slew_override_until_ <= now)) {
+        if (reached_home || (!cached_status_.is_slewing && !slew_hold_.active(now))) {
             driver_motion_ = DriverMotion::None;
         }
     }
@@ -2787,7 +2788,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             if (generation == slew_operation_generation_) {
                 slew_in_progress_ = false;
-                clear_slew_override_locked();
+                clear_slew_hold_locked();
                 last_slew_error_ = std::move(previous_slew_error);
             }
             throw AlpacaException(std::string(failure_prefix) + ": " + e.what(), AlpacaError::DriverException);
@@ -2808,21 +2809,21 @@ private:
         if (generation != slew_operation_generation_) return;
         if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
             slew_in_progress_ = false;
-            clear_slew_override_locked();
+            clear_slew_hold_locked();
             return;
         }
         try {
             dispatch();
         } catch (const std::exception& e) {
             slew_in_progress_ = false;
-            clear_slew_override_locked();
+            clear_slew_hold_locked();
             if (ctx.stop_reason() == util::StopReason::None) {
                 last_slew_error_ = std::string(label) + " failed: " + e.what();
             }
             ALPACA_LOG_WARN("iOptron", std::string(label) + " dispatch failed: " + e.what());
         } catch (...) {
             slew_in_progress_ = false;
-            clear_slew_override_locked();
+            clear_slew_hold_locked();
             if (ctx.stop_reason() == util::StopReason::None) {
                 last_slew_error_ = std::string(label) + " failed with an unknown error";
             }
@@ -2977,24 +2978,25 @@ private:
     // resets -- still set or clear both.
     bool target_ra_set_ = false;
     bool target_dec_set_ = false;
-    mutable std::atomic<bool> pulse_guiding_active_{false};
-    mutable std::atomic<int64_t> pulse_guiding_end_ns_{0};
-    mutable bool pulse_guiding_hold_ra_valid_ = false;
+    // Decision 0022: the pulse-guide windows, on the task clock. IsPulseGuiding's runs for the pulse plus
+    // kPulseGuideCompletionDelay; the getter reads it without mutex_ (written under it), hence the atomic.
+    mutable std::atomic<util::HoldWindow> pulse_guide_hold_{};
+    static_assert(std::atomic<util::HoldWindow>::is_always_lock_free);
+    // Per axis (kRaAxis, kDecAxis), under mutex_: the hold serves the axis a pulse on the other axis does not
+    // move (pulse_guiding_hold_ra_hours_ / pulse_guiding_hold_dec_degrees_) and the correction serves the pulsed
+    // axis's predicted position to its first read.
+    static constexpr std::size_t kRaAxis = 0;
+    static constexpr std::size_t kDecAxis = 1;
+    mutable std::array<util::HoldWindow, 2> pulse_position_hold_{};
+    mutable std::array<util::HoldWindow, 2> pulse_position_correction_{};
     mutable double pulse_guiding_hold_ra_hours_ = 0.0;
-    mutable std::chrono::steady_clock::time_point pulse_guiding_hold_until_{};
     mutable bool last_ra_read_valid_ = false;
     mutable double last_ra_read_hours_ = 0.0;
-    mutable bool pulse_guiding_ra_correction_valid_ = false;
     mutable double pulse_guiding_ra_baseline_hours_ = 0.0;
     mutable double pulse_guiding_ra_expected_delta_hours_ = 0.0;
-    mutable std::chrono::steady_clock::time_point pulse_guiding_ra_correction_until_{};
-    mutable bool pulse_guiding_dec_correction_valid_ = false;
     mutable double pulse_guiding_dec_baseline_degrees_ = 0.0;
     mutable double pulse_guiding_dec_expected_delta_degrees_ = 0.0;
-    mutable std::chrono::steady_clock::time_point pulse_guiding_dec_correction_until_{};
-    mutable bool pulse_guiding_hold_dec_valid_ = false;
     mutable double pulse_guiding_hold_dec_degrees_ = 0.0;
-    mutable std::chrono::steady_clock::time_point pulse_guiding_hold_dec_until_{};
     mutable bool last_dec_read_valid_ = false;
     mutable double last_dec_read_degrees_ = 0.0;
     
@@ -3082,7 +3084,9 @@ private:
     mutable std::chrono::steady_clock::time_point fast_cache_until_{};
     mutable std::chrono::steady_clock::time_point tracking_override_until_{};
     mutable std::chrono::steady_clock::time_point tracking_rate_override_until_{};
-    mutable std::chrono::steady_clock::time_point slew_override_until_{};
+    // Decision 0022: Slewing reads true while it is active, from a GOTO, Park, FindHome, Unpark or GOTO trim
+    // dispatch for that initiator's hold. Under mutex_.
+    mutable util::HoldWindow slew_hold_;
     // Serializes clock-sync reapers across the join; see stop_clock_sync().
     std::mutex clock_sync_reap_mutex_;
     // Test seam, set before connect: runs on the clock-sync body after its start delay.
