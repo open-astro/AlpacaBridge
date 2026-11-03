@@ -1443,6 +1443,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "thermalcameras";
         return match;
     }
+    if (path == "/management/v1/attachedcameras" || path == "/management/attachedcameras") {
+        match.is_management = true;
+        match.management_endpoint = "attachedcameras";
+        return match;
+    }
     if (path == "/management/v1/configuredevice" || path == "/management/configuredevice") {
         match.is_management = true;
         match.management_endpoint = "configuredevice";
@@ -1570,6 +1575,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_device_catalog(request, server_tx_id);
     } else if (match.management_endpoint == "thermalcameras") {
         return handle_thermal_cameras(request, server_tx_id);
+    } else if (match.management_endpoint == "attachedcameras") {
+        return handle_attached_cameras(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
         return handle_configure_device(request, server_tx_id);
     } else if (match.management_endpoint == "removedevice") {
@@ -2158,6 +2165,11 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 } catch (const std::exception& e) {
                     util::log_warning("Connect-error query failed for " + cap.name + ": " + e.what());
                 }
+            }
+            // #1969: what registration said about this entry (a ZWO camera bound by
+            // its index hint alone). Web UI only, like LastConnectError.
+            if (std::string warning = registration_warning(cap.type, cap.device_number); !warning.empty()) {
+                device["RegistrationWarning"] = std::move(warning);
             }
             devices.push_back(device);
         }
@@ -4480,6 +4492,71 @@ Response Router::handle_thermal_cameras(const Request& request, std::uint32_t se
     return response;
 }
 
+// The cameras a vendor's camera entry can bind to, for the web UI's camera
+// picker (#1970): GET /management/v1/attachedcameras?vendor=zwo. Like the
+// thermal listing, the lister may open each camera through the vendor's shared
+// open table to read its serial.
+Response Router::handle_attached_cameras(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for attachedcameras endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
+        return response;
+    }
+
+    const std::string vendor = request.get_query_param("vendor");
+    try {
+        const auto cameras = catalog_.list_cameras(vendor);
+        if (!cameras.has_value()) {
+            AlpacaResponse alpaca_response = make_error_response(
+                client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                "No camera listing for vendor '" + util::escape_for_log(vendor) + "' in this build");
+            response.set_body(alpaca_response);
+            return response;
+        }
+        nlohmann::json list = nlohmann::json::array();
+        for (const auto& camera : *cameras) {
+            list.push_back({{"Index", camera.index}, {"Name", camera.name}, {"Serial", camera.serial}});
+        }
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = std::move(list);
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error listing attached cameras: " + std::string(e.what()));
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
+void Router::set_registration_warning(alpacacore::DeviceType type, int device_number, std::string warning) {
+    std::lock_guard<std::mutex> lock(registration_warnings_mutex_);
+    if (warning.empty()) {
+        registration_warnings_.erase({type, device_number});
+    } else {
+        registration_warnings_[{type, device_number}] = std::move(warning);
+    }
+}
+
+std::string Router::registration_warning(alpacacore::DeviceType type, int device_number) const {
+    std::lock_guard<std::mutex> lock(registration_warnings_mutex_);
+    const auto it = registration_warnings_.find({type, device_number});
+    return it == registration_warnings_.end() ? std::string() : it->second;
+}
+
 Response Router::handle_static_file(const Request& request) {
     Response response;
     std::string file_path = request.path();
@@ -4838,7 +4915,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
 
         std::string error_message;
         nlohmann::json learned_config = nlohmann::json::object();
-        if (!register_device_from_config(config, error_message, ConfigSource::Api, &learned_config)) {
+        std::string warning;
+        if (!register_device_from_config(config, error_message, ConfigSource::Api, &learned_config, &warning)) {
             if (error_message.empty()) {
                 error_message = "Failed to register device. Please verify the configuration.";
             }
@@ -4865,7 +4943,9 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         save_persisted_devices();
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = std::string("Device registered successfully");
+        // #1969: the web UI shows the text after "Warning: " (configureWarning() in format.js).
+        alpaca_response.value = warning.empty() ? std::string("Device registered successfully")
+                                                : "Device registered successfully. Warning: " + warning;
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
@@ -4991,6 +5071,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         }
 
         bool was_persisted = remove_persisted_device(vendor, device_type_str, device_number);
+        set_registration_warning(device_type, device_number, {});
 
         if (was_registered || was_persisted) {
             if (was_persisted) {
@@ -6038,7 +6119,7 @@ nlohmann::json with_folded_connection_type(const nlohmann::json& config) {
 }  // namespace
 
 bool Router::register_device_from_config(const nlohmann::json& raw_config, std::string& error_message,
-                                         ConfigSource source, nlohmann::json* learned_config) {
+                                         ConfigSource source, nlohmann::json* learned_config, std::string* warning) {
     const nlohmann::json config = with_folded_connection_type(raw_config);
     std::string device_type_str = catalog_json::get_string(config, "deviceType");
     std::string vendor = catalog_json::get_string(config, "vendor");
@@ -6204,6 +6285,10 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
             bound.driver->assign_unique_id(unique_id);
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(bound.driver)))) {
                 util::log_info("Registered " + vendor_label(*view) + " " + device_type_str);
+                std::string joined;
+                for (const auto& text : bound.warnings) joined += (joined.empty() ? "" : " ") + text;
+                set_registration_warning(*device_type_key, device_number, joined);
+                if (warning != nullptr) *warning = std::move(joined);
                 return true;
             }
             error_message = "Failed to register device. Device may already exist.";

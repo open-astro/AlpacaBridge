@@ -8810,6 +8810,56 @@ int main() {
         EXPECT(json.value("ErrorMessage", "").find("SDK listing failed") != std::string::npos);
     }
 
+    // GET /management/v1/attachedcameras?vendor=<v> serves the catalog's camera
+    // lister for the camera form's picker (#1970), in the management envelope.
+    {
+        // case: attachedcameras serves the vendor's camera listing from the catalog
+        alpacahttp::Router router;
+        int lister_calls = 0;
+        router.catalog().add_camera_lister("zzz", [&lister_calls] {
+            ++lister_calls;
+            return std::vector<alpacacore::catalog::AttachedCamera>{{0, "ZWO ASI432MM", "1a2b3c4d5e6f7081"},
+                                                                    {1, "ZWO ASI120MM Mini", ""}};
+        });
+        const auto response =
+            route_request(router, "GET", "/management/v1/attachedcameras?vendor=zzz&ClientTransactionID=32");
+        EXPECT(response.status_code() == 200);
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded());
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.value("ClientTransactionID", 0) == 32);
+        EXPECT(lister_calls == 1);
+        EXPECT(json.contains("Value") && json["Value"].is_array() && json["Value"].size() == 2);
+        if (json.contains("Value") && json["Value"].size() == 2) {
+            EXPECT(json["Value"][0] ==
+                   nlohmann::json({{"Index", 0}, {"Name", "ZWO ASI432MM"}, {"Serial", "1a2b3c4d5e6f7081"}}));
+            EXPECT(json["Value"][1] == nlohmann::json({{"Index", 1}, {"Name", "ZWO ASI120MM Mini"}, {"Serial", ""}}));
+        }
+        // The thermal listing is a separate lister: a vendor with only a camera lister has none.
+        const auto thermal = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/thermalcameras?vendor=zzz").body(), nullptr, false);
+        EXPECT(!thermal.is_discarded() && thermal.value("ErrorNumber", 0) == 0x401);
+    }
+    {
+        // case: attachedcameras refuses an unknown vendor and any verb but GET, and reports a throwing lister
+        alpacahttp::Router router;
+        router.catalog().add_camera_lister("zzz", []() -> std::vector<alpacacore::catalog::AttachedCamera> {
+            throw alpacacore::AlpacaException("SDK listing failed", alpacacore::AlpacaError::DriverException);
+        });
+        const auto unknown = nlohmann::json::parse(
+            route_request(router, "GET", "/management/attachedcameras?vendor=nope").body(), nullptr, false);
+        EXPECT(!unknown.is_discarded() && unknown.value("ErrorNumber", 0) == 0x401);
+        const auto put = route_request(router, "PUT", "/management/v1/attachedcameras", "vendor=zzz");
+        EXPECT(put.status_code() == 405);
+        EXPECT(put.get_header("Allow") == "GET");
+        const auto put_json = nlohmann::json::parse(put.body(), nullptr, false);
+        EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
+        const auto thrown = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/attachedcameras?vendor=zzz").body(), nullptr, false);
+        EXPECT(!thrown.is_discarded() && thrown.value("ErrorNumber", 0) != 0);
+        EXPECT(thrown.value("ErrorMessage", "").find("SDK listing failed") != std::string::npos);
+    }
+
     {
         // case: thermal switch camera bindings refuse a bad serial or an index below Auto
         alpacahttp::Router router;
@@ -8888,6 +8938,32 @@ int main() {
         EXPECT(second.config.value("host", std::string()) == "peers=1");
         remove_device(router, "zzz", "focuser", 9260);
         remove_device(router, "zzz", "focuser", 9261);
+    }
+
+    {
+        // case: a bind hook's registration warning reaches the configuredevice reply and the device card
+        alpacahttp::Router router;
+        alpacahttp::test_catalog::add_schema_and_bind_factory(router.catalog());
+        // A run that aborted before the last removal left 9262 in the persisted file.
+        route_request(router, "POST", "/management/v1/removedevice",
+                      nlohmann::json{{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9262}}.dump());
+        const auto configure = [&](bool enabled) {
+            nlohmann::json body = {
+                {"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9262}, {"enabled", enabled}};
+            return nlohmann::json::parse(
+                route_request(router, "POST", "/management/v1/configuredevice", body.dump()).body(), nullptr, false);
+        };
+        const auto warned = configure(true);
+        EXPECT(!warned.is_discarded() && warned.value("ErrorNumber", -1) == 0);
+        EXPECT(warned.value("Value", "") == "Device registered successfully. Warning: zzz focuser 9262 is enabled");
+        EXPECT(listed_entry(router, "Focuser", 9262).value("RegistrationWarning", "") == "zzz focuser 9262 is enabled");
+        // The next registration of the number replaces it; one with nothing to say clears it.
+        remove_device(router, "zzz", "focuser", 9262);
+        const auto quiet = configure(false);
+        EXPECT(!quiet.is_discarded() && quiet.value("Value", "") == "Device registered successfully");
+        const auto listed = listed_entry(router, "Focuser", 9262);
+        EXPECT(!listed.is_null() && !listed.contains("RegistrationWarning"));
+        remove_device(router, "zzz", "focuser", 9262);
     }
 
     {

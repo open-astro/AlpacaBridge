@@ -653,6 +653,118 @@ function thermalCameraHint(cameras, value, controls, listError, saved, taken) {
     return '';
 }
 
+// Camera picker of the ZWO camera form (#1970). The form used to number the SDK
+// index from the count of saved ZWO cameras, which assumes every camera is
+// plugged in when it is added: a rig whose cameras were added one at a time had
+// each one at index 0, the form sent 1 and 2, and those entries learned no serial
+// (#1969). The picker lists what is attached and saves the picked camera's serial
+// and model name, so the entry binds by serial from then on. `cameras` is the
+// Value of GET /management/v1/attachedcameras?vendor=zwo ({Index, Name, Serial}
+// each), or null when the listing failed. `saved` is the edited entry's
+// {cameraIndex, cameraId, serialNumber, cameraName}, or null for a new one.
+// `taken` lists the serials the other ZWO camera entries hold. Option values: ''
+// (nothing picked yet), 'cam:<index>' (an attached camera), 'saved' (the saved
+// binding, sent back unchanged), 'manual' (the index and ID boxes, for a camera
+// that is not attached yet).
+function zwoCameraTaken(camera, taken) {
+    return Boolean(camera.Serial) && (taken || []).includes(String(camera.Serial));
+}
+
+function zwoCameraLabel(camera, taken) {
+    return String(camera.Name) + ' (index ' + camera.Index + ')' +
+        (camera.Serial ? ', serial ' + camera.Serial : ', no serial') +
+        (zwoCameraTaken(camera, taken) ? ', used by another camera entry' : '');
+}
+
+function zwoSavedHint(saved) {
+    return Number(saved.cameraId) >= 0 ? 'camera ID ' + saved.cameraId : 'index ' + Number(saved.cameraIndex ?? 0);
+}
+
+// The value an edited entry's saved binding selects: its attached camera, else 'saved'.
+function zwoSavedValue(cameras, saved) {
+    if (!saved) return '';
+    const serial = saved.serialNumber ? String(saved.serialNumber) : '';
+    if (serial && Array.isArray(cameras)) {
+        const match = cameras.find(c => c.Serial === serial);
+        if (match) return 'cam:' + match.Index;
+    }
+    return 'saved';
+}
+
+function zwoCameraOptions(cameras, saved, current, taken) {
+    const options = [{ value: '', label: 'Choose the camera', disabled: true }];
+    if (Array.isArray(cameras)) {
+        cameras.forEach(c => options.push({
+            value: 'cam:' + c.Index, label: zwoCameraLabel(c, taken), disabled: zwoCameraTaken(c, taken),
+        }));
+    }
+    const savedValue = zwoSavedValue(cameras, saved);
+    if (savedValue === 'saved') {
+        const label = saved.serialNumber
+            ? 'Saved camera, serial ' + saved.serialNumber + ' (not attached)'
+            : 'Saved entry, ' + zwoSavedHint(saved) + ', no serial learned';
+        options.push({ value: 'saved', label, disabled: false });
+    }
+    options.push({ value: 'manual', label: 'Enter the index by hand (camera not attached)', disabled: false });
+    const pickable = value => options.some(o => o.value === value && !o.disabled);
+    const selected = current && pickable(current) ? current : (pickable(savedValue) ? savedValue : '');
+    return { options, selected };
+}
+
+// What the submit sends, or null when nothing is picked (the submit refuses).
+// { manual: true } means the submit reads the index and ID boxes.
+function zwoCameraSelection(value, cameras, saved) {
+    if (value === 'manual') return { manual: true };
+    if (value === 'saved' && saved) {
+        const result = {};
+        for (const key of ['cameraIndex', 'cameraId', 'serialNumber', 'cameraName']) {
+            if (saved[key] !== undefined && saved[key] !== null && saved[key] !== '') result[key] = saved[key];
+        }
+        return result;
+    }
+    if (typeof value === 'string' && value.startsWith('cam:') && Array.isArray(cameras)) {
+        const index = Number.parseInt(value.slice(4), 10);
+        const camera = cameras.find(c => c.Index === index);
+        if (!camera) return null;
+        const result = { cameraIndex: index };
+        if (camera.Serial) result.serialNumber = String(camera.Serial);
+        if (camera.Name) result.cameraName = String(camera.Name);
+        return result;
+    }
+    return null;
+}
+
+function zwoCameraHint(cameras, value, listError, saved) {
+    if (value === 'manual') {
+        return 'For a camera that is not plugged in yet. Until the entry learns a serial it binds whichever ' +
+            'camera sits at this index, so pick the camera here once it is attached.';
+    }
+    if (value === 'saved' && saved) {
+        return saved.serialNumber
+            ? 'The saved camera is not attached. Saving keeps it.'
+            : 'This entry never learned its camera\'s serial, so it binds whichever camera sits at ' +
+              zwoSavedHint(saved) + '. Pick the camera to bind it by serial.';
+    }
+    if (!Array.isArray(cameras)) {
+        return 'Could not list the attached cameras' + (listError ? ': ' + listError : '') +
+            '. Plug the camera in and press Refresh, or enter the index by hand.';
+    }
+    if (value === '') {
+        return cameras.length === 0
+            ? 'No ZWO camera is attached. Plug it in and press Refresh, or enter the index by hand.'
+            : 'Choose the camera this entry is for.';
+    }
+    return '';
+}
+
+// The warning text a successful configuredevice reply carries (#1969), or ''.
+const CONFIGURE_WARNING_PREFIX = 'Device registered successfully. Warning: ';
+
+function configureWarning(value) {
+    return typeof value === 'string' && value.startsWith(CONFIGURE_WARNING_PREFIX)
+        ? value.slice(CONFIGURE_WARNING_PREFIX.length) : '';
+}
+
 // Saved-config keys the device card's settings list leaves out: the card shows
 // them in its own rows (type, number, vendor, and the Unique ID row for the
 // stored ID in `uniqueId`, decision 0018) or derives them (aperture area
@@ -766,6 +878,7 @@ if (typeof module !== 'undefined' && module.exports) {
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
                         normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
+                        zwoCameraOptions, zwoCameraSelection, zwoCameraHint, configureWarning,
                         deviceSettingShown,
                        showsCalibrationControls, parseCalibrationStatus, isCalibrationRunning,
                        mayAbortCalibration, mayAbortFromStatus, keepPollingCalibration, calibrationStatusClass,

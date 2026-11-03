@@ -661,6 +661,11 @@ input[type="range"] {
     color: #f08a7a;
 }
 
+.message.warning {
+    border-left-color: var(--warn);
+    color: var(--warn);
+}
+
 /* ---- server info / sections ---- */
 .info-box,
 .section-card,

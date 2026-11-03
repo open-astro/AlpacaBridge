@@ -258,3 +258,25 @@ TEST_CASE("ZWO camera slots - an explicit camera id resolves while another slot 
     CHECK(result.camera->index == 1);
     CHECK(result.camera->camera_id == 101);
 }
+
+TEST_CASE("ZWO camera identity - the unbound-entry warning names the hint and every enumerated camera",
+          "[zwo][camera][identity][unit]") {
+    using alpacacore::vendor::zwo::describe_unbound_zwo_camera;
+    ZwoConfiguredIdentity by_index;
+    by_index.camera_index = 1;
+    ZwoEnumeratedCamera padded = mini(0);
+    padded.name = "ZWO ASI120MM Mini \n";
+    const std::vector<ZwoEnumeratedCamera> found{padded, pro(1)};
+    CHECK(describe_unbound_zwo_camera(by_index, "Camera index\tnot found", &found) ==
+          "ZWO camera registered without a serial or model name: cameraIndex 1 matched no attached camera "
+          "(Camera index?not found). The SDK enumerated slot 0 ZWO ASI120MM Mini ?, no serial; slot 1 ZWO "
+          "ASI533MC Pro, serial 0c190e111d020900. Until it learns one, a connect binds whichever camera the SDK "
+          "then lists at cameraIndex 1. Edit the device and pick its camera to bind it by serial.");
+
+    ZwoConfiguredIdentity by_id = by_index;
+    by_id.camera_id = 7;
+    const std::vector<ZwoEnumeratedCamera> none;
+    const std::string text = describe_unbound_zwo_camera(by_id, "ZWO camera ID 7 not found", &none);
+    CHECK(text.find("cameraId 7 matched no attached camera") != std::string::npos);
+    CHECK(text.find("The SDK enumerated no ZWO camera.") != std::string::npos);
+}

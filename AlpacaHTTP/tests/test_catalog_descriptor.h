@@ -141,7 +141,8 @@ inline catalog::Factory make_factory() {
 // A factory with a bind hook, for the router's peer and learned-config handling:
 // it refuses a `count` another stored entry of the key holds, learns `host`
 // ("peers=<N>", N = the stored entries it was shown, itself included when stored)
-// and erases `ratio`. No `create`: the stub is only reachable through bind.
+// and erases `ratio`; with `enabled` it registers with a warning. No `create`:
+// the stub is only reachable through bind.
 inline catalog::Factory make_bind_factory() {
     catalog::Factory factory;
     factory.key = kKey;
@@ -156,6 +157,7 @@ inline catalog::Factory make_bind_factory() {
         result.driver = std::unique_ptr<alpacacore::AlpacaDriver>(new StubFocuser(n, stub_name(c)));
         result.learned.set(kHost.key, "peers=" + std::to_string(context.peers.size()));
         result.erased.emplace_back(kRatio.key);
+        if (c.get(kEnabled)) result.warnings.emplace_back("zzz focuser " + std::to_string(n) + " is enabled");
         return result;
     };
     return factory;

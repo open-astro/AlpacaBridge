@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=33">
+    <link rel="stylesheet" href="/web/style.css?v=34">
 </head>
 <body>
     <div class="container">
@@ -936,15 +936,27 @@
                     </div>
 
                     <div id="zwo-camera-fields" data-device-type="camera">
+                        <!-- #1970: which attached ZWO camera this entry is; saved by serial. -->
                         <div class="form-group">
-                            <label for="camera-index">Camera Index:</label>
-                            <input type="number" id="camera-index" name="cameraIndex" data-config-key="cameraIndex" value="0" min="0">
-                            <small>0-based index from the ZWO SDK enumeration.</small>
+                            <label for="zwo-camera-picker">Camera:</label>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <select id="zwo-camera-picker" style="flex: 1; min-width: 0;"></select>
+                                <button id="zwo-camera-picker-refresh" class="btn btn-secondary btn-small" type="button">Refresh</button>
+                            </div>
+                            <small id="zwo-camera-picker-hint" role="status"></small>
+                            <small>Pick the attached ZWO camera this entry is for. It is saved by serial number, so it stays with that camera if the USB order changes or other cameras are unplugged.</small>
                         </div>
-                        <div class="form-group">
-                            <label for="camera-id">Camera ID (optional):</label>
-                            <input type="number" id="camera-id" name="cameraId" data-config-key="cameraId" min="0">
-                            <small>If set, overrides the camera index.</small>
+                        <div id="zwo-camera-manual-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="camera-index">Camera Index:</label>
+                                <input type="number" id="camera-index" name="cameraIndex" data-config-key="cameraIndex" data-auto-number="off" value="0" min="0">
+                                <small>0-based index from the ZWO SDK enumeration, counting only the cameras plugged in when a client connects.</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="camera-id">Camera ID (optional):</label>
+                                <input type="number" id="camera-id" name="cameraId" data-config-key="cameraId" min="0">
+                                <small>If set, overrides the camera index.</small>
+                            </div>
                         </div>
                         <div class="form-group">
                             <label for="zwo-usb-bandwidth">USB Limit (optional):</label>
@@ -2092,8 +2104,8 @@
         </div>
     </div>
 
-    <script src="/web/format.js?v=16"></script>
+    <script src="/web/format.js?v=17"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=49"></script>
+    <script src="/web/app.js?v=50"></script>
 </body>
 </html>

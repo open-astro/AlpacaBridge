@@ -229,3 +229,77 @@ TEST_CASE("ZWO camera catalog - a serial-less entry skips the serials other entr
     const BindResult taken = bind(rig, by_name, 6, Source::Persisted, {});
     CHECK(learned(taken, "serialNumber") == std::string(kFakeSerial));
 }
+
+TEST_CASE("ZWO camera catalog - a saved serial binds that body whatever cameraIndex says",
+          "[catalog][zwo][camera][unit]") {
+    // #1970: the web picker saves the picked camera's serial; the index it sends is a hint only.
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}, {5, "5555666677778888"}});
+    DeviceConfig config = camera_config(0);
+    config.set("serialNumber", std::string("5555666677778888"));
+    const BindResult result = bind(rig, config, 2, Source::Api, {});
+    REQUIRE(result.driver != nullptr);
+    CHECK(result.warnings.empty());
+    CHECK_FALSE(learned(result, "serialNumber").has_value());
+    CHECK(learned(result, "cameraName") == std::string(kFakeName));
+    result.driver->set_connected(true);
+    CHECK(rig.sdk.holders(5) == 1);
+    CHECK(rig.sdk.holders(3) == 0);
+    result.driver->set_connected(false);
+}
+
+TEST_CASE("ZWO camera catalog - an index hint that matches no camera warns with what is attached",
+          "[catalog][zwo][camera][unit]") {
+    // #1969: three cameras added one at a time, each alone at slot 0, while the form sent index 2.
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}});
+    const BindResult result = bind(rig, camera_config(2), 2, Source::Api, {});
+    REQUIRE(result.driver != nullptr);
+    CHECK_FALSE(result.rejection.has_value());
+    CHECK_FALSE(learned(result, "serialNumber").has_value());
+    CHECK_FALSE(learned(result, "cameraName").has_value());
+    REQUIRE(result.warnings.size() == 1);
+    CHECK(result.warnings[0] ==
+          "ZWO camera registered without a serial or model name: cameraIndex 2 matched no attached camera "
+          "(Camera index not found). The SDK enumerated slot 0 Fake ZWO Camera, serial 1111222233334444. Until it "
+          "learns one, a connect binds whichever camera the SDK then lists at cameraIndex 2. Edit the device and "
+          "pick its camera to bind it by serial.");
+
+    // An entry that found its camera, or that already holds a serial, has nothing to warn about.
+    CHECK(bind(rig, camera_config(0), 3, Source::Api, {}).warnings.empty());
+    DeviceConfig unplugged = camera_config(2);
+    unplugged.set("serialNumber", std::string("5555666677778888"));
+    CHECK(bind(rig, unplugged, 4, Source::Persisted, {}).warnings.empty());
+}
+
+TEST_CASE("ZWO camera catalog - a failed enumeration warns for an entry with no identity",
+          "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    rig.sdk.before_call = [](const std::string& call) {
+        if (call == "enumerate_identified_cameras") throw AlpacaException("no usb", AlpacaError::DriverException);
+    };
+    const BindResult result = bind(rig, camera_config(1), 4, Source::Persisted, {});
+    REQUIRE(result.driver != nullptr);
+    REQUIRE(result.warnings.size() == 1);
+    CHECK(result.warnings[0].find("cameraIndex 1 matched no attached camera (the enumeration failed: no usb).") !=
+          std::string::npos);
+    CHECK(result.warnings[0].find("The SDK enumerated") == std::string::npos);
+
+    DeviceConfig named = camera_config(1);
+    named.set("cameraName", std::string(kFakeName));
+    CHECK(bind(rig, named, 5, Source::Persisted, {}).warnings.empty());
+}
+
+TEST_CASE("ZWO camera catalog - lists the attached cameras for the web picker", "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}, {5, ""}});
+    const auto cameras = rig.catalog.list_cameras("zwo");
+    REQUIRE(cameras.has_value());
+    REQUIRE(cameras->size() == 2);
+    CHECK((*cameras)[0].index == 0);
+    CHECK((*cameras)[0].name == kFakeName);
+    CHECK((*cameras)[0].serial == "1111222233334444");
+    CHECK((*cameras)[1].index == 1);
+    CHECK((*cameras)[1].serial.empty());
+    CHECK_FALSE(rig.catalog.list_cameras("qhy").has_value());
+}
