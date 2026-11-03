@@ -1,0 +1,2 @@
+### Changed (tooling)
+- **The review bot skips draft PRs** (`.github/workflows/claude-review.yml`, `/pr-checker`, `/submit-pr`): it reviewed every push to a draft, so a contributor iterating on one spent a full review run, after waiting for CI, on each push. The job now skips a draft and also runs on `ready_for_review`, so marking a PR ready reviews its head. `/pr-checker` marks a draft in its list ready before it waits for a verdict, and the poll's "review skipped" message names a draft as one cause.

@@ -9,7 +9,8 @@
 # lives in its own workflow: its CLI has no arm64 build.)
 #
 # Jobs:
-#   build-test     build vendor-neutral core + run unit tests (the base gate)
+#   build-test     build vendor-neutral core + run unit tests (the base gate),
+#                  in a debian:trixie container (the distribution we ship for)
 #   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
 #                  vendors ON, instrumented for gcov; per-component + combined
 #                  line coverage in the job summary, HTML/JSON artifact (no
@@ -81,20 +82,30 @@ jobs:
   build-test:
     name: Build + test (arm64)
     runs-on: ubuntu-24.04-arm
+    # Debian 13 (trixie), the distribution AlpacaBridge ships for: the core
+    # suite builds with trixie's gcc 14, glibc and Catch2, as on a user's SBC,
+    # not with the Ubuntu runner's gcc 13. package-deb builds the .deb here too,
+    # but runs no tests.
+    container: debian:trixie
     timeout-minutes: 20
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
-        with:
-          persist-credentials: false
-
       - name: Install build dependencies
-        # catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
+        # Before the checkout: actions/checkout needs git in the container,
+        # and the cache steps use zstd. python3 is for the beta VERSION check
+        # (scripts/check_beta_configure.sh), which the Ubuntu runner had
+        # preinstalled. The container runs as root, so no sudo. catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
         # returns early, ctest finds no tests and exits 0, and this job
         # green-lights while running none of the core suite (issue #586).
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            git \
+            zstd \
+            python3 \
             build-essential \
             cmake \
             ccache \
@@ -109,8 +120,14 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
       - name: Verify toolchain
         run: |
+          grep PRETTY_NAME /etc/os-release
           cmake --version
           g++ --version
 
@@ -119,12 +136,27 @@ jobs:
         # a push to main or stable/** saves it (the save step below), so a pull
         # request reuses its base branch's cache and never writes one. The
         # directory is ccache's default, outside the build tree run_all_tests.sh
-        # deletes on entry.
+        # deletes on entry. The prefix names trixie: objects from the Ubuntu
+        # runner's gcc 13 are no use to gcc 14.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-build-test-${{ github.sha }}
-          restore-keys: ccache-build-test-
+          key: ccache-build-test-trixie-${{ github.sha }}
+          restore-keys: ccache-build-test-trixie-
+
+      - name: Create the unprivileged test user
+        # The suite runs as an ordinary user, as on the Ubuntu runner and on an
+        # SBC. The container runs as root, and root ignores file modes, so a case
+        # that makes a directory read-only to make a write fail (test_routing's
+        # #1473 case; test_software_update, test_serial_by_id_scan and
+        # test_connection_resolver also set modes) would see the write succeed.
+        # The checkout and the restored compiler cache belong to root, so they
+        # are handed to the user.
+        run: |
+          set -euo pipefail
+          useradd --create-home builder
+          mkdir -p "$HOME/.cache/ccache"
+          chown -R builder: "$GITHUB_WORKSPACE" "$HOME/.cache/ccache"
 
       - name: Build + run tests (vendor-neutral core)
         env:
@@ -132,7 +164,11 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
-        run: ./run_all_tests.sh
+        # As the test user. runuser keeps this step's environment except HOME,
+        # SHELL, USER and LOGNAME, which it resets for the user, so CCACHE_DIR
+        # must stay explicit: it points at root's cache directory, which the
+        # save step reads.
+        run: runuser -u builder -- env CCACHE_DIR="$HOME/.cache/ccache" ./run_all_tests.sh
 
       - name: Compiler cache statistics
         if: always()
@@ -143,7 +179,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-build-test-${{ github.sha }}
+          key: ccache-build-test-trixie-${{ github.sha }}
 
       - name: Check the beta VERSION split
         # Pins the ~betaN split both CMakeLists share
