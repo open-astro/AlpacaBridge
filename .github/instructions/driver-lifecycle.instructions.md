@@ -201,8 +201,8 @@ vendor-agnostic; do them in the driver from the start.
   an exposure-in-progress state, checked **under the same lock that publishes it**.
   GPhoto: `start_exposure` sets an `exposure_active_` flag and the setters check it
   under the same lock. ToupTek: the `util::CaptureSession` is the state; `start_exposure`
-  claims it under `mutex_` (`exposure_starting_` covers the gap) and the setters'
-  `ensure_not_exposing()` reads the session under `mutex_`. Checking the state *before* taking that lock is a TOCTOU.
+  sets `exposure_starting_` under `mutex_` until `session_.start()` (which runs without the lock)
+  publishes Exposing, and the setters' `ensure_not_exposing()` reads the session under `mutex_`. Checking the state *before* taking that lock is a TOCTOU.
 - Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
   joining the worker — setting a flag alone makes `join()` block for the whole
   remaining operation (a 10-min frame → a 10-min abort).

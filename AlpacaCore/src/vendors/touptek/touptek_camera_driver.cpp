@@ -1399,7 +1399,10 @@ public:
             if (exposing) {
                 session_.set_stopping(true);  // a frame wait the stop breaks is not a failure
             } else {
-                if (exposure_starting_) return;  // nothing has begun yet; the start goes ahead
+                // Nothing has begun yet; the start goes ahead. An abort that races a
+                // StartExposure inside this window is a deliberate no-op (the client
+                // sent the two calls concurrently, so either order is valid).
+                if (exposure_starting_) return;
                 // A completed exposure: drop its frame. A kept failure stays until the
                 // next StartExposure or a reconnect (decision 0020 rule 3).
                 session_.discard_image();
@@ -1562,12 +1565,8 @@ private:
     // locked while the session is busy, except once the frame is Ready.
     void ensure_not_exposing() const {
         const CameraState state = session_.camera_state();
-        bool frame_ready = false;
-        try {
-            frame_ready = session_.image_ready();
-        } catch (const AlpacaException&) {
-            frame_ready = false;  // a kept failure: not ready
-        }
+        // A kept failure is not a ready frame.
+        const bool frame_ready = !session_.failure() && session_.image_ready();
         if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download ||
             (session_.busy() && !frame_ready)) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
