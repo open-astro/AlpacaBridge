@@ -19,6 +19,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -77,6 +78,7 @@ public:
 
     std::string get_sdk_version() override { return "fake-playerone-sdk"; }
     std::vector<CameraInfo> enumerate_cameras() override {
+        if (before_call) before_call("enumerate_cameras");
         std::lock_guard<std::mutex> lock(mutex_);
         if (no_cameras_) return {};
         std::vector<CameraInfo> cameras{camera_};
@@ -85,6 +87,7 @@ public:
         return cameras;
     }
     void open_camera(int camera_id) override {
+        if (before_call) before_call("open_camera");
         std::this_thread::sleep_for(open_delay_);
         std::lock_guard<std::mutex> lock(mutex_);
         if (auto* listed = find_listed_locked(camera_id)) {
@@ -96,7 +99,11 @@ public:
     }
     void init_camera(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (init_failure_) throw std::runtime_error("scripted init failure");
+        // The real wrapper's throw_on_error() maps POA_ERROR_ACCESS_DENIED to NotConnected.
+        if (init_failure_) {
+            throw alpacacore::AlpacaException("POAInitCamera: scripted init failure",
+                                              alpacacore::AlpacaError::NotConnected);
+        }
         require_open_locked("init_camera", camera_id);
     }
     void close_camera(int camera_id) override {
@@ -429,6 +436,16 @@ public:
         no_cameras_ = no_cameras;
     }
     void set_open_delay(std::chrono::milliseconds delay) { open_delay_ = delay; }
+    // Runs at the top of enumerate_cameras() and open_camera(), outside the fake's lock, so a test can hold the call.
+    std::function<void(const std::string&)> before_call;
+    void set_camera_name(std::string name) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        camera_.name = std::move(name);
+    }
+    std::string camera_name() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return camera_.name;
+    }
     void set_hold_image_data(bool hold, bool ignore_timeout = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         hold_image_data_ = hold;

@@ -279,7 +279,7 @@ public:
                 session_.disconnect_and_join();
             }
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -304,6 +304,16 @@ public:
         auto& sdk = sdk_;
 
         if (connected) {
+            // Decision 0016 rule 4: the handshake runs under transition_mutex_ with mutex_
+            // released, so Name and the other identity getters answer while the SDK opens.
+            // Everything it learns lands in locals and is published under mutex_ at the end.
+            connect_in_flight_.store(true);
+            lock.unlock();
+            struct ClearInFlight {
+                std::atomic<bool>& flag;
+                ~ClearInFlight() { flag.store(false); }
+            } clear_in_flight{connect_in_flight_};
+
             auto cameras = sdk.enumerate_cameras();
             if (cameras.empty()) {
                 throw AlpacaException("No Player One cameras detected", AlpacaError::NotConnected);
@@ -311,149 +321,140 @@ public:
             if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
                 throw AlpacaException("Camera index out of range", AlpacaError::InvalidValue);
             }
-            camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
-            camera_info_valid_ = true;
+            PlayerOneCameraInfo info = cameras[static_cast<std::size_t>(camera_index_)];
+            const int camera_id = info.camera_id;
 
             ALPACA_LOG_INFO("PlayerOne", "SDK version: " + sdk.get_sdk_version());
-            ALPACA_LOG_INFO("PlayerOne", "Opening camera index " + std::to_string(camera_index_) + " (id=" +
-                                             std::to_string(camera_info_.camera_id) + "): " + camera_info_.name);
+            ALPACA_LOG_INFO("PlayerOne", "Opening camera index " + std::to_string(camera_index_) +
+                                             " (id=" + std::to_string(camera_id) + "): " + info.name);
 
-            sdk.open_camera(camera_info_.camera_id);
+            sdk.open_camera(camera_id);
 
+            // Guard the whole post-open init: one close here balances the ref-counted open on every failure.
             try {
-                sdk.init_camera(camera_info_.camera_id);
-            } catch (const std::exception& e) {
                 try {
-                    sdk.close_camera(camera_info_.camera_id);
-                } catch (const std::exception& close_error) {
-                    ALPACA_LOG_WARN("PlayerOne",
-                                    "close_camera after init failure failed: " + std::string(close_error.what()));
-                } catch (...) {
-                    ALPACA_LOG_WARN("PlayerOne", "close_camera after init failure threw a non-standard exception");
+                    sdk.init_camera(camera_id);
+                } catch (const std::exception& e) {
+                    throw AlpacaException(std::string("POAInitCamera failed: ") + e.what(),
+                                          AlpacaError::DriverException);
                 }
-                throw AlpacaException(std::string("POAInitCamera failed: ") + e.what(), AlpacaError::DriverException);
-            }
 
-            // Probe capabilities from POAGetConfigAttributes — this gives us
-            // ranges and writability for every POAConfig this camera exposes.
-            try {
-                caps_ = sdk.probe_config_caps(camera_info_.camera_id);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne", "probe_config_caps failed: " + std::string(e.what()));
-                caps_ = PlayerOneConfigCaps{};
-            }
-
-            // Refresh properties post-init (Player One fills in some fields
-            // only after init — most notably localPath).
-            try {
-                auto fresh = sdk.get_camera_properties_by_id(camera_info_.camera_id);
-                // Keep our enumeration index but take the fresh identity fields.
-                int idx = camera_info_.index;
-                camera_info_ = fresh;
-                camera_info_.index = idx;
-            } catch (const std::exception& e) {
-                ALPACA_LOG_DEBUG("PlayerOne", "get_camera_properties_by_id failed: " + std::string(e.what()));
-            }
-
-            // Select default image format (prefer RAW16 on ≥10-bit sensors).
-            active_format_ = choose_default_format(camera_info_);
-            try {
-                sdk.set_image_format(camera_info_.camera_id, active_format_);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne", "set_image_format failed: " + std::string(e.what()));
-            }
-            bool format_verified = false;
-            try {
-                static_cast<void>(bytes_per_pixel(active_format_));
-                format_verified = sdk.get_image_format(camera_info_.camera_id) == active_format_;
-            } catch (const std::exception& e) {
-                ALPACA_LOG_DEBUG("PlayerOne", "image format readback failed: " + std::string(e.what()));
-            }
-            if (!format_verified) {
-                const int failed_id = camera_info_.camera_id;
+                // Probe capabilities from POAGetConfigAttributes — this gives us
+                // ranges and writability for every POAConfig this camera exposes.
+                PlayerOneConfigCaps caps;
                 try {
-                    sdk.close_camera(failed_id);
-                } catch (const std::exception& close_error) {
-                    ALPACA_LOG_WARN("PlayerOne",
-                                    "close_camera after format failure failed: " + std::string(close_error.what()));
-                } catch (...) {
-                    ALPACA_LOG_WARN("PlayerOne", "close_camera after format failure threw a non-standard exception");
+                    caps = sdk.probe_config_caps(camera_id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("PlayerOne", "probe_config_caps failed: " + std::string(e.what()));
                 }
-                throw AlpacaException("Unable to configure a supported Player One image format",
-                                      AlpacaError::DriverException);
-            }
 
-            // Default ROI = full sensor at bin 1. POASetImageBin resets the
-            // size/start, so do it first then push the full frame.
-            try {
-                sdk.set_image_bin(camera_info_.camera_id, 1);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne", "set_image_bin(1) failed: " + std::string(e.what()));
-            }
-            try {
-                sdk.set_image_start_pos(camera_info_.camera_id, 0, 0);
-                sdk.set_image_size(camera_info_.camera_id, camera_info_.max_width, camera_info_.max_height);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne", "initial ROI setup failed: " + std::string(e.what()));
-            }
-
-            // Re-query so our cache matches what the SDK actually accepted
-            // (width%4==0 / height%2==0 alignment may have trimmed values).
-            int w = camera_info_.max_width;
-            int h = camera_info_.max_height;
-            int sx = 0;
-            int sy = 0;
-            int bin = 1;
-            try {
-                sdk.get_image_size(camera_info_.camera_id, w, h);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_DEBUG("PlayerOne", "initial image-size readback failed: " + std::string(e.what()));
-            } catch (...) {
-                ALPACA_LOG_WARN("PlayerOne", "initial image-size readback threw a non-standard exception");
-            }
-            try {
-                sdk.get_image_start_pos(camera_info_.camera_id, sx, sy);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_DEBUG("PlayerOne", "initial start-position readback failed: " + std::string(e.what()));
-            } catch (...) {
-                ALPACA_LOG_WARN("PlayerOne", "initial start-position readback threw a non-standard exception");
-            }
-            try {
-                bin = sdk.get_image_bin(camera_info_.camera_id);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_DEBUG("PlayerOne", "initial bin readback failed: " + std::string(e.what()));
-            } catch (...) {
-                ALPACA_LOG_WARN("PlayerOne", "initial bin readback threw a non-standard exception");
-            }
-
-            const bool supported_bin =
-                bin > 0 && std::find(camera_info_.supported_bins.begin(), camera_info_.supported_bins.end(), bin) !=
-                               camera_info_.supported_bins.end();
-            const int binned_width = supported_bin ? camera_info_.max_width / bin : 0;
-            const int binned_height = supported_bin ? camera_info_.max_height / bin : 0;
-            if (!supported_bin || camera_info_.max_width <= 0 || camera_info_.max_height <= 0 || w <= 0 || h <= 0 ||
-                sx < 0 || sy < 0 || w > binned_width || h > binned_height || sx > binned_width - w ||
-                sy > binned_height - h) {
-                const int failed_id = camera_info_.camera_id;
+                // Refresh properties post-init (Player One fills in some fields
+                // only after init — most notably localPath).
                 try {
-                    sdk.close_camera(failed_id);
-                } catch (const std::exception& close_error) {
-                    ALPACA_LOG_WARN("PlayerOne",
-                                    "close_camera after invalid geometry failed: " + std::string(close_error.what()));
-                } catch (...) {
-                    ALPACA_LOG_WARN("PlayerOne", "close_camera after invalid geometry threw a non-standard exception");
+                    auto fresh = sdk.get_camera_properties_by_id(camera_id);
+                    // Keep our enumeration index but take the fresh identity fields.
+                    int idx = info.index;
+                    info = fresh;
+                    info.index = idx;
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("PlayerOne", "get_camera_properties_by_id failed: " + std::string(e.what()));
                 }
-                throw AlpacaException("Player One SDK returned invalid sensor or ROI geometry",
-                                      AlpacaError::DriverException);
-            }
 
-            bin_ = bin;
-            num_x_ = w;
-            num_y_ = h;
-            start_x_ = sx;
-            start_y_ = sy;
-            roi_dirty_ = false;
-            format_dirty_ = false;
+                // Select default image format (prefer RAW16 on ≥10-bit sensors).
+                const PlayerOneImageFormat format = choose_default_format(info);
+                try {
+                    sdk.set_image_format(camera_id, format);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("PlayerOne", "set_image_format failed: " + std::string(e.what()));
+                }
+                bool format_verified = false;
+                try {
+                    static_cast<void>(bytes_per_pixel(format));
+                    format_verified = sdk.get_image_format(camera_id) == format;
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("PlayerOne", "image format readback failed: " + std::string(e.what()));
+                }
+                if (!format_verified) {
+                    throw AlpacaException("Unable to configure a supported Player One image format",
+                                          AlpacaError::DriverException);
+                }
+
+                // Default ROI = full sensor at bin 1. POASetImageBin resets the
+                // size/start, so do it first then push the full frame.
+                try {
+                    sdk.set_image_bin(camera_id, 1);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("PlayerOne", "set_image_bin(1) failed: " + std::string(e.what()));
+                }
+                try {
+                    sdk.set_image_start_pos(camera_id, 0, 0);
+                    sdk.set_image_size(camera_id, info.max_width, info.max_height);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("PlayerOne", "initial ROI setup failed: " + std::string(e.what()));
+                }
+
+                // Re-query so our cache matches what the SDK actually accepted
+                // (width%4==0 / height%2==0 alignment may have trimmed values).
+                int w = info.max_width;
+                int h = info.max_height;
+                int sx = 0;
+                int sy = 0;
+                int bin = 1;
+                try {
+                    sdk.get_image_size(camera_id, w, h);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("PlayerOne", "initial image-size readback failed: " + std::string(e.what()));
+                } catch (...) {
+                    ALPACA_LOG_WARN("PlayerOne", "initial image-size readback threw a non-standard exception");
+                }
+                try {
+                    sdk.get_image_start_pos(camera_id, sx, sy);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("PlayerOne", "initial start-position readback failed: " + std::string(e.what()));
+                } catch (...) {
+                    ALPACA_LOG_WARN("PlayerOne", "initial start-position readback threw a non-standard exception");
+                }
+                try {
+                    bin = sdk.get_image_bin(camera_id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("PlayerOne", "initial bin readback failed: " + std::string(e.what()));
+                } catch (...) {
+                    ALPACA_LOG_WARN("PlayerOne", "initial bin readback threw a non-standard exception");
+                }
+
+                const bool supported_bin = bin > 0 && std::find(info.supported_bins.begin(), info.supported_bins.end(),
+                                                                bin) != info.supported_bins.end();
+                const int binned_width = supported_bin ? info.max_width / bin : 0;
+                const int binned_height = supported_bin ? info.max_height / bin : 0;
+                if (!supported_bin || info.max_width <= 0 || info.max_height <= 0 || w <= 0 || h <= 0 || sx < 0 ||
+                    sy < 0 || w > binned_width || h > binned_height || sx > binned_width - w ||
+                    sy > binned_height - h) {
+                    throw AlpacaException("Player One SDK returned invalid sensor or ROI geometry",
+                                          AlpacaError::DriverException);
+                }
+
+                lock.lock();
+                camera_info_ = info;
+                camera_info_valid_ = true;
+                caps_ = caps;
+                active_format_ = format;
+                bin_ = bin;
+                num_x_ = w;
+                num_y_ = h;
+                start_x_ = sx;
+                start_y_ = sy;
+                roi_dirty_ = false;
+                format_dirty_ = false;
+            } catch (...) {
+                try {
+                    sdk.close_camera(camera_id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("PlayerOne", "close_camera after connect failure: " + std::string(e.what()));
+                } catch (...) {
+                    ALPACA_LOG_WARN("PlayerOne", "close_camera after connect failure threw a non-standard exception");
+                }
+                throw;
+            }
 
             reset_exposure_state_locked();
             session_.open();
@@ -1325,6 +1326,8 @@ private:
     PlayerOneConfigCaps caps_{};
 
     std::atomic<bool> connected_{false};
+    // True while set_connected(true) runs its SDK handshake with mutex_ released.
+    std::atomic<bool> connect_in_flight_{false};
     std::mutex transition_mutex_;
     mutable std::mutex mutex_;
 
@@ -1589,11 +1592,19 @@ private:
     }
 
     void refresh_cached_camera_info_if_needed() {
-        if (connected_.load()) return;
+        // A connect in flight owns the SDK: the enumerate would wait out its open.
+        if (connected_.load() || connect_in_flight_.load()) {
+            return;
+        }
         try {
             auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                // A connect ran while the enumerate was out: it owns camera_info_ now
+                // (decision 0016 rule 6), and this read may come from a stale index.
+                if (connected_.load() || connect_in_flight_.load()) {
+                    return;
+                }
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
             }
