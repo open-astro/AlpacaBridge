@@ -686,11 +686,17 @@ function zwoSavedHint(saved) {
 }
 
 // The value an edited entry's saved binding selects: its attached camera, else 'saved'.
+// An entry with a serial binds only that serial; one with a model name and no serial
+// binds by name, the saved index breaking a tie between bodies of one model, as the
+// server's resolve_zwo_camera does.
 function zwoSavedValue(cameras, saved) {
     if (!saved) return '';
     const serial = saved.serialNumber ? String(saved.serialNumber) : '';
-    if (serial && Array.isArray(cameras)) {
-        const match = cameras.find(c => c.Serial === serial);
+    const name = saved.cameraName ? String(saved.cameraName) : '';
+    if (Array.isArray(cameras) && (serial || name)) {
+        const named = serial ? [] : cameras.filter(c => c.Name === name);
+        const match = serial ? cameras.find(c => c.Serial === serial)
+                             : (named.find(c => c.Index === Number(saved.cameraIndex)) || named[0]);
         if (match) return zwoCameraValue(match);
     }
     return 'saved';
@@ -705,8 +711,8 @@ function zwoCameraOptions(cameras, saved, current, taken) {
     }
     const savedValue = zwoSavedValue(cameras, saved);
     if (savedValue === 'saved') {
-        const label = saved.serialNumber
-            ? 'Saved camera, serial ' + saved.serialNumber + ' (not attached)'
+        const label = saved.serialNumber ? 'Saved camera, serial ' + saved.serialNumber + ' (not attached)'
+            : saved.cameraName ? 'Saved camera, ' + saved.cameraName + ', no serial (not attached)'
             : 'Saved entry, ' + zwoSavedHint(saved) + ', no serial learned';
         options.push({ value: 'saved', label, disabled: false });
     }
@@ -744,10 +750,10 @@ function zwoCameraHint(cameras, value, listError, saved) {
             'camera sits at this index, so pick the camera here once it is attached.';
     }
     if (value === 'saved' && saved) {
-        return saved.serialNumber
+        return saved.serialNumber || saved.cameraName
             ? 'The saved camera is not attached. Saving keeps it.'
-            : 'This entry never learned its camera\'s serial, so it binds whichever camera sits at ' +
-              zwoSavedHint(saved) + '. Pick the camera to bind it by serial.';
+            : 'This entry never learned its camera\'s serial or model, so it binds whichever camera sits at ' +
+              zwoSavedHint(saved) + '. Pick its camera to bind the entry to it.';
     }
     if (!Array.isArray(cameras)) {
         return 'Could not list the attached cameras' + (listError ? ': ' + listError : '') +

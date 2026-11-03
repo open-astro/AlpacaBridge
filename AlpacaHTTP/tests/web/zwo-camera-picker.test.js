@@ -94,12 +94,29 @@ test('an entry that never learned a serial says so and can be rebound by picking
     assert.strictEqual(model.selected, 'saved');
     assert.strictEqual(model.options.find(o => o.value === 'saved').label, 'Saved entry, index 1, no serial learned');
     assert.strictEqual(zwoCameraHint([MM432], 'saved', '', saved),
-                       "This entry never learned its camera's serial, so it binds whichever camera sits at index 1. " +
-                       'Pick the camera to bind it by serial.');
+                       "This entry never learned its camera's serial or model, so it binds whichever camera sits at " +
+                       'index 1. Pick its camera to bind the entry to it.');
     assert.deepStrictEqual(zwoCameraSelection('saved', [MM432], saved), { cameraIndex: 1 });
     assert.strictEqual(zwoCameraOptions([MM432], saved, 'sn:1a2b3c4d5e6f7081', []).selected, 'sn:1a2b3c4d5e6f7081');
     assert.strictEqual(zwoCameraOptions([MM432], { cameraId: 4 }, '', []).options.find(o => o.value === 'saved').label,
                        'Saved entry, camera ID 4, no serial learned');
+});
+
+test('an edited entry saved by model name selects its attached camera, and says it binds by name', () => {
+    // A camera with no serial is saved by index and model name, and the server binds it by name.
+    const saved = { cameraIndex: 1, cameraName: 'ZWO ASI120MM Mini' };
+    const moved = { ...MINI120, Index: 0 };
+    assert.strictEqual(zwoCameraOptions([MINI120], saved, '', []).selected, 'cam:1');
+    assert.strictEqual(zwoCameraOptions([MM432, { ...MINI120, Index: 2 }], saved, '', []).selected, 'cam:2');
+    assert.strictEqual(zwoCameraOptions([moved], saved, '', []).selected, 'cam:0');
+    // Not attached: the saved binding is kept, and named for what it binds by.
+    const model = zwoCameraOptions([MM432], saved, '', []);
+    assert.strictEqual(model.selected, 'saved');
+    assert.strictEqual(model.options.find(o => o.value === 'saved').label,
+                       'Saved camera, ZWO ASI120MM Mini, no serial (not attached)');
+    assert.strictEqual(zwoCameraHint([MM432], 'saved', '', saved),
+                       'The saved camera is not attached. Saving keeps it.');
+    assert.deepStrictEqual(zwoCameraSelection('saved', [MM432], saved), saved);
 });
 
 test('the by-hand fallback is always offered, and reads the index boxes', () => {
@@ -220,3 +237,4 @@ test('the by-hand ZWO camera choice sends the index and ID boxes, and no pick re
     assert.deepStrictEqual(refused.alerts, ['pick one']);
     assert.strictEqual(refused.posts.length, 0);
 });
+
