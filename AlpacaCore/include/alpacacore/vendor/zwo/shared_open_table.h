@@ -45,9 +45,11 @@ namespace alpacacore::vendor::zwo {
  * a loss code from the call retires the entry.
  *
  * Ops::listed, when set, is the check for a pull the SDK does not report (issue #1667: ASI SDK 1.41 answered a bare
- * cable pull with ASI_ERROR_GENERAL_ERROR or with success, never a removal code). A per-device call that fails with a
- * DriverException, or whose result the caller's `failed` predicate rejects (an ASI_EXP_FAILED status), asks whether
- * the SDK still enumerates the id; one it no longer lists retires the entry and the call throws NotConnected.
+ * cable pull with ASI_ERROR_GENERAL_ERROR or with success, never a removal code). A per-device call whose body throws
+ * a DriverException (a generic SDK code, or any DriverException the wrapper's body throws itself), or whose result the
+ * caller's `failed` predicate rejects (an ASI_EXP_FAILED status), asks whether the SDK still enumerates the id; one
+ * it no longer lists retires the entry and the call throws NotConnected. A check on a unit that is still listed
+ * changes nothing.
  * A call that succeeds is never checked, so a pull that the SDK answers with success is found by the next failure.
  *
  * call_unserialised() is the one per-device call that must not hold the mutex (a blocking bulk
@@ -246,8 +248,8 @@ private:
         return it;
     }
 
-    // Caller holds mutex_. Runs a checked call's body; a loss code retires the entry, and a generic failure on an id
-    // the SDK no longer enumerates is a loss too.
+    // Caller holds mutex_. Runs a checked call's body; a loss code retires the entry, and a DriverException from the
+    // body (a generic SDK code, or one the wrapper throws itself) on an id the SDK no longer enumerates is a loss too.
     template <class Fn>
     decltype(auto) run_locked(int id, Fn&& fn) {
         try {

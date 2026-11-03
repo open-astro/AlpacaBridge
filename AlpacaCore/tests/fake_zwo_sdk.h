@@ -289,8 +289,10 @@ public:
 
     bool raw_get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) {
         std::lock_guard lock(mutex_);
+        last_read_generic_ = false;
         if (pulled && open_ids_.count(camera_id) != 0) {
             ++unit_touches_;
+            last_read_generic_ = true;
             return false;  // the wrapper answers a generic code on this read as not readable
         }
         require_open_locked(camera_id);
@@ -299,7 +301,10 @@ public:
             value = 0;
         }
         is_auto = false;
-        if (type == ControlType::AntiDewHeater && fail_heater_read) return false;
+        if (type == ControlType::AntiDewHeater && fail_heater_read) {
+            last_read_generic_ = true;
+            return false;
+        }
         if (type == ControlType::BandwidthOverload) {
             if (fail_bandwidth_read) return false;
             value = bandwidth_readback.value_or(value);
@@ -457,13 +462,13 @@ public:
         hit("get_control_caps");
         return table_.call(camera_id, [&] { return raw_get_control_caps(camera_id); });
     }
-    // Harsher than the wrapper, which checks the enumeration after a generic code only: every not-readable answer is
-    // checked here.
+    // As the wrapper: the enumeration is checked after a not-readable answer that a generic code gave (a pulled
+    // camera, fail_heater_read), not after one for a control the camera cannot read (fail_bandwidth_read).
     bool get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) override {
         hit("get_control_value");
         return table_.call(
             camera_id, [&] { return raw_get_control_value(camera_id, type, value, is_auto); },
-            [](bool read) { return !read; });
+            [this](bool read) { return !read && last_read_generic_; });
     }
     void set_control_value(int camera_id, ControlType type, long value, bool is_auto) override {
         hit("set_control_value");
@@ -621,6 +626,9 @@ private:
     std::set<int> open_ids_;
     mutable int unit_touches_{0};
     int temperature_reads_since_open_{0};
+    // Whether the last not-readable control answer came from a generic code; written and read under the table's
+    // mutex (in one call()), so no other call sees it between the two.
+    bool last_read_generic_{false};
     bool download_held_{false};
     bool download_entered_{false};
     bool download_in_progress_{false};
