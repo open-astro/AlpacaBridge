@@ -375,12 +375,14 @@ jobs:
             AlpacaHTTP/build
 
       - name: Upload this shard's coverage data
+        # Kept a week: re-running one failed shard re-runs build-vendors, which
+        # reads the other shards' files from the earlier attempt.
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage-raw-${{ matrix.shard }}
           path: coverage-raw/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   build-vendors:
     # The required check and the review bot's CI wait both name this job, so
