@@ -14,21 +14,42 @@
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <string>
 #include <thread>
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_svbony_sdk.h"
+#include "getter_stall_probe.h"
 #include "locked_svbony_sdk.h"
 
 namespace {
 
 using alpacacore::test::require_alpaca_error;
+
+// Holds the hooked fake call until release is set (bounded, so a failed assertion cannot hang the run).
+void hold_until(const std::atomic<bool>& release) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!release.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+// Releases a held fake call and joins the thread that made it, on every exit from the test.
+struct ReleaseAndJoin {
+    std::atomic<bool>& release;
+    std::thread& thread;
+    ~ReleaseAndJoin() {
+        release = true;
+        if (thread.joinable()) thread.join();
+    }
+};
 
 } // namespace
 
@@ -162,6 +183,157 @@ TEST_CASE("SVBONY Camera Driver - failed connect closes the opened camera", "[sv
     CHECK(fake.call_count("open_camera") == 1);
     CHECK(fake.call_count("close_camera") == 1);
     CHECK(fake.open_count() == 0);
+}
+
+// Decision 0016 rule 3: identity and capabilities are published at the end of connect, so a connect that fails
+// after the open publishes none of what it read. The fake's FrameSpeedMode control is what CanFastReadout reports.
+// Falsified by: svbony_camera_driver.cpp set_connected(true) loading control_caps_ before the post-open
+// get_serial_number (CanFastReadout then reads true after the failed connect).
+TEST_CASE("SVBONY Camera Driver - a failed connect publishes no capabilities and allows a reconnect",
+          "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+    const bool fast_readout_before = driver->get_can_fast_readout();
+    const int x_size_before = driver->get_camera_x_size();
+    const std::string name_before = driver->get_name();
+
+    fake.fail_next("get_serial_number");
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_can_fast_readout() == fast_readout_before);
+    CHECK(driver->get_camera_x_size() == x_size_before);
+    CHECK(driver->get_name() == name_before);
+    CHECK(fake.open_count() == 0);
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_can_fast_readout());
+    CHECK(fake.open_count() == 1);
+    driver->set_connected(false);
+    CHECK(fake.open_count() == 0);
+}
+
+// Decision 0016 rules 1 and 4: Name and the other identity getters need no device access, so a connect that holds
+// the SDK open must not park them, and the disconnected name refresh must not reach the SDK behind the open (the
+// real wrapper serialises enumerate_cameras and open_camera on one mutex). The open is held on a latch; the getters
+// run on the test thread.
+// Falsified by: svbony_camera_driver.cpp set_connected(true) holding mutex_ across open_camera() (get_name() then
+// waits until the latch is released and the timed call fails its budget), or refresh_cached_camera_info_if_needed()
+// without its transition-in-flight early return (enumerate_cameras then runs behind the held open).
+TEST_CASE("SVBONY Camera Driver - Name and identity getters answer while a connect holds the SDK open",
+          "[svbony][camera][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeSVBSDK sdk;
+    std::atomic<bool> open_entered{false};
+    std::atomic<bool> release_open{false};
+    std::atomic<int> enumerations_during_open{0};
+    sdk.before_call = [&](const std::string& call) {
+        if (call == "enumerate_cameras" && open_entered.load() && !release_open.load()) {
+            ++enumerations_during_open;
+        }
+        if (call != "open_camera") return;
+        open_entered = true;
+        hold_until(release_open);
+    };
+    auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+
+    std::thread connector([&] { camera->set_connected(true); });
+    ReleaseAndJoin release{release_open, connector};
+    REQUIRE(wait_for_flag(open_entered));
+
+    CHECK(timed([&] { (void)camera->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)camera->get_sensor_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)camera->get_camera_x_size(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)camera->get_can_pulse_guide(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)camera->get_can_get_cooler_power(); }) < kGetterBudget);
+    CHECK(timed([&] { CHECK_FALSE(camera->get_connected()); }) < kGetterBudget);
+    CHECK(enumerations_during_open.load() == 0);
+    CHECK_FALSE(release_open.load());  // the open is still held, so the timings above are not vacuous
+
+    release_open = true;
+    connector.join();
+    CHECK(camera->get_connected());
+    CHECK(camera->get_name() == "Fake SVBONY Camera");
+    camera->set_connected(false);
+}
+
+// Decision 0016 rule 6: a name refresh that read the SDK while a connect ran must not overwrite what the connect
+// published. The refresh is held inside enumerate_cameras on a latch, a connect completes, the SDK then reports
+// another name, and the refresh is released.
+// Falsified by: svbony_camera_driver.cpp refresh_cached_camera_info_if_needed() writing camera_info_ without the
+// connected_/transition_in_flight_ re-check under mutex_ (get_name() then returns the stale refresh name).
+TEST_CASE("SVBONY Camera Driver - A name refresh that overlapped a connect does not overwrite the connect's info",
+          "[svbony][camera][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeSVBSDK sdk;
+    static thread_local bool is_refresher = false;
+    std::atomic<bool> refresh_entered{false};
+    std::atomic<bool> release_refresh{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call != "enumerate_cameras" || !is_refresher) return;
+        refresh_entered = true;
+        hold_until(release_refresh);
+    };
+    auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+
+    std::thread refresher([&] {
+        is_refresher = true;
+        (void)camera->get_name();
+    });
+    ReleaseAndJoin release{release_refresh, refresher};
+    REQUIRE(wait_for_flag(refresh_entered));
+
+    camera->set_connected(true);
+    sdk.set_camera_name("Stale Refresh Name");
+    release_refresh = true;
+    refresher.join();
+
+    CHECK(camera->get_name() == "Fake SVBONY Camera");
+    CHECK(camera->get_sensor_name() == "Fake SVBONY Camera");
+    camera->set_connected(false);
+}
+
+// Driver lifecycle (camera exception) and decision 0016 item 4: a camera's disconnect clears state under mutex_ and
+// runs the SDK close with it released, so identity getters answer while the close is held and operational members
+// fail NotConnected at once instead of waiting behind it.
+// Falsified by: svbony_camera_driver.cpp set_connected(false) holding mutex_ across close_camera() (get_name() then
+// waits until the latch is released and the timed call fails its budget).
+TEST_CASE("SVBONY Camera Driver - Name and identity getters answer while a disconnect holds the SDK close",
+          "[svbony][camera][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeSVBSDK sdk;
+    std::atomic<bool> close_entered{false};
+    std::atomic<bool> release_close{false};
+    std::atomic<int> enumerations_during_close{0};
+    auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+    camera->set_connected(true);
+    sdk.before_call = [&](const std::string& call) {
+        if (call == "enumerate_cameras" && close_entered.load() && !release_close.load()) {
+            ++enumerations_during_close;
+        }
+        if (call != "close_camera") return;
+        close_entered = true;
+        hold_until(release_close);
+    };
+
+    std::thread disconnector([&] { camera->set_connected(false); });
+    ReleaseAndJoin release{release_close, disconnector};
+    REQUIRE(wait_for_flag(close_entered));
+
+    CHECK(timed([&] { (void)camera->get_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)camera->get_sensor_name(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)camera->get_camera_x_size(); }) < kGetterBudget);
+    CHECK(timed([&] { CHECK_FALSE(camera->get_connected()); }) < kGetterBudget);
+    CHECK(timed([&] {
+              require_alpaca_error([&] { (void)camera->get_gain(); }, alpacacore::AlpacaError::NotConnected);
+          }) < kGetterBudget);
+    CHECK(enumerations_during_close.load() == 0);
+    CHECK_FALSE(release_close.load());  // the close is still held, so the timings above are not vacuous
+
+    release_close = true;
+    disconnector.join();
+    CHECK(sdk.open_count() == 0);
+    CHECK(sdk.call_count("close_camera") == 1);
 }
 
 TEST_CASE("SVBONY Camera Driver - no camera detected refuses the connect", "[svbony][camera][unit][fake-sdk]") {
