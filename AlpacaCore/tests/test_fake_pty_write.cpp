@@ -234,7 +234,7 @@ TEST_CASE("PtyPair - a keep-alive open that fails throws, with the master closed
     // object of type 'BinaryExpr'` with no stack trace -- the symbolizer
     // needs a descriptor too. That is the sanitizer being unable to observe
     // the case, not the case finding a defect. It still runs for real in
-    // build-test and build-vendors, which is where its coverage lives.
+    // build-test and build-vendors-shard, which is where its coverage lives.
 #if defined(ALPACACORE_TESTS_SANITIZED)
     WARN("built with sanitizers; the EMFILE setup-failure check is skipped (see the note above)");
     // Keep the case from ending with zero assertions: WARN is not one, so a
