@@ -84,6 +84,8 @@ public:
         ControlCaps{ControlType::BandwidthOverload, "BandWidth", "USB traffic", 40, 100, 80, true, true};
     bool fail_bandwidth_write{false};
     bool fail_bandwidth_read{false};
+    // The anti-dew heater read answers not readable (a generic code on a camera that still enumerates).
+    std::atomic<bool> fail_heater_read{false};
     std::optional<long> bandwidth_readback;
     bool bandwidth_auto_readback{false};
     // Issue #722: the real SDK answers 0 (success) on the first temperature reads after open.
@@ -297,6 +299,7 @@ public:
             value = 0;
         }
         is_auto = false;
+        if (type == ControlType::AntiDewHeater && fail_heater_read) return false;
         if (type == ControlType::BandwidthOverload) {
             if (fail_bandwidth_read) return false;
             value = bandwidth_readback.value_or(value);
