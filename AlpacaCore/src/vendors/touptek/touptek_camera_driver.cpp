@@ -1385,8 +1385,9 @@ public:
             // ran, so the stream and the settings still need what they needed.
             std::lock_guard<std::mutex> lock(mutex_);
             exposure_starting_ = false;
-            // Not on a camera a disconnect has closed: the stream is gone with it.
-            if (handle_) stream_clean_ = saved_stream_clean;
+            // Not on a camera a disconnect has closed or is closing: its stop already
+            // ended the stream, and handle_ stays set until after disconnect_and_join().
+            if (handle_ && !closing_) stream_clean_ = saved_stream_clean;
             format_dirty_ = format_dirty_ || dirty_format;
             roi_dirty_ = roi_dirty_ || dirty_roi;
             throw;
