@@ -332,10 +332,14 @@ public:
         // Halt is the safety stop: never refused for a link fault.
         std::lock_guard<std::mutex> lock(status_mutex_);
         protocol_.halt();
+        const auto now = clock_.now();
         // Write-through: IsMoving reads false right after Halt, not after the next poll.
-        // No target => not moving, whatever position the motor stopped at.
-        state_.write([](StateFrame& frame) {
+        // No target => not moving, whatever position the motor stopped at. The Halt ends the motion
+        // the way an arrival does, so Temperature's bound counts from here (the poll's own
+        // moving-to-stopped stamp never fires: it reads this frame's moving as already false).
+        state_.write([now](StateFrame& frame) {
             frame.target.reset();
+            if (frame.moving) frame.telemetry_idle_since = now;
             frame.moving = false;
         });
     }

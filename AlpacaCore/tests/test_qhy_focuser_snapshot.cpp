@@ -359,3 +359,22 @@ TEST_CASE("QHY Q-Focuser Snapshot - a stalled move does not stop the telemetry p
     CHECK_NOTHROW(rig.driver().get_temperature());
     CHECK(rig.driver().get_link_fault().empty());
 }
+
+// A Halt ends the motion the way an arrival does: the firmware can answer telemetry again from here, so
+// Temperature's bound counts from the Halt, not from the reading before the move.
+TEST_CASE("QHY Q-Focuser Snapshot - a Halt after a long move restarts the telemetry bound",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    QhyRig rig;
+    REQUIRE(rig.connect());
+    rig.fake().set_telemetry_muted(true);
+    rig.fake().set_steps_per_poll(1);  // 1000 -> 4000 would take 3000 polls: the move outlasts the bound
+    rig.driver().move(4000);
+    rig.tick(110);  // 33 s of motion, past util::kLinkStalenessBound, no telemetry asked for
+    CHECK(rig.driver().get_is_moving() == true);
+    CHECK_NOTHROW(rig.driver().get_temperature());  // a move in progress serves the last reading
+    rig.driver().halt();
+    CHECK_NOTHROW(rig.driver().get_temperature());  // the bound counts from the Halt
+    rig.tick(2);
+    CHECK_NOTHROW(rig.driver().get_temperature());
+    CHECK(rig.driver().get_link_fault().empty());
+}
