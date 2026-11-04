@@ -308,6 +308,8 @@ public:
             // released, so Name and the other identity getters answer while the SDK opens.
             // Everything it learns lands in locals and is published under mutex_ at the end.
             connect_in_flight_.store(true);
+            const std::optional<bool> session_cooler_on = session_cooler_on_;
+            const std::optional<int> session_target_c = session_target_c_;
             lock.unlock();
             struct ClearInFlight {
                 std::atomic<bool>& flag;
@@ -432,6 +434,8 @@ public:
                     throw AlpacaException("Player One SDK returned invalid sensor or ROI geometry",
                                           AlpacaError::DriverException);
                 }
+
+                restore_session_cooler(camera_id, info, caps, session_cooler_on, session_target_c);
 
                 lock.lock();
                 camera_info_ = info;
@@ -609,6 +613,8 @@ public:
             throw AlpacaException("This Player One camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         with_camera([&](int id) { sdk_.set_cooler_on(id, cooler_on); });
+        std::lock_guard<std::mutex> lock(mutex_);
+        session_cooler_on_ = cooler_on;  // re-applied after a reconnect (issue #1998)
     }
     double get_cooler_power() const override {
         ensure_connected();
@@ -900,6 +906,8 @@ public:
         }
         const int target_c = static_cast<int>(std::lround(temperature));
         with_camera([&](int id) { sdk_.set_target_temp_c(id, target_c); });
+        std::lock_guard<std::mutex> lock(mutex_);
+        session_target_c_ = target_c;  // re-applied after a reconnect (issue #1998)
     }
 
     int get_start_x() const override {
@@ -1324,6 +1332,10 @@ private:
     PlayerOneCameraInfo camera_info_{};
     bool camera_info_valid_{false};
     PlayerOneConfigCaps caps_{};
+    // Under mutex_: the last CoolerOn and SetCCDTemperature (whole degrees C) a client set through this driver,
+    // written back after each connect (restore_session_cooler(), issue #1998). Memory only; never persisted.
+    std::optional<bool> session_cooler_on_;
+    std::optional<int> session_target_c_;
 
     std::atomic<bool> connected_{false};
     // True while set_connected(true) runs its SDK handshake with mutex_ released.
@@ -1432,6 +1444,38 @@ private:
             throw AlpacaException("Camera ID not available", AlpacaError::NotConnected);
         }
         return fn(camera_info_.camera_id);
+    }
+
+    // Issue #1998: on the Uranus-C PRO the open after a Disconnect runs POAInitCamera, which restores the camera's
+    // defaults (cooler off, setpoint 0), so a client that reconnected mid-session lost its cooling unannounced. Write
+    // back the CoolerOn and SetCCDTemperature a client set through this driver since the server started: runtime
+    // memory, never persisted, so a server restart starts from the camera's own defaults (the "December heater"
+    // rule in playerone.instructions.md). The setpoint goes first, then the cooler. Runs during connect with mutex_
+    // released, on the camera just opened; a failure is logged and the connect goes on, since CoolerOn then reads
+    // the camera's real state.
+    void restore_session_cooler(int camera_id, const PlayerOneCameraInfo& info, const PlayerOneConfigCaps& caps,
+                                std::optional<bool> cooler_on, std::optional<int> target_c) {
+        if (!info.has_cooler) return;
+        if (target_c.has_value() && caps.has_target_temp && *target_c >= caps.target_temp_min &&
+            *target_c <= caps.target_temp_max) {
+            try {
+                sdk_.set_target_temp_c(camera_id, *target_c);
+                ALPACA_LOG_INFO("PlayerOne", "Restored SetCCDTemperature " + std::to_string(*target_c) +
+                                                 " C from before the reconnect");
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("PlayerOne",
+                                "Could not restore SetCCDTemperature after reconnect: " + std::string(e.what()));
+            }
+        }
+        if (cooler_on.has_value() && caps.has_cooler) {
+            try {
+                sdk_.set_cooler_on(camera_id, *cooler_on);
+                ALPACA_LOG_INFO("PlayerOne", std::string("Restored CoolerOn ") + (*cooler_on ? "true" : "false") +
+                                                 " from before the reconnect");
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("PlayerOne", "Could not restore CoolerOn after reconnect: " + std::string(e.what()));
+            }
+        }
     }
 
     bool cooler_available_copy() const {
