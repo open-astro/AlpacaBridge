@@ -42,12 +42,12 @@ constexpr double kHoldVoltageThreshold = 11.5;
 // window; a stalled or limit-clamped move therefore reads as stopped after
 // one grace period instead of forever.
 constexpr auto kMotionGrace = std::chrono::milliseconds(1500);
-// State poll (open-astro#1310, decision 0010), start to start. One poll is a
-// position and a telemetry exchange (about 35 ms each at 9600 baud), so the
-// period leaves the wire mostly free for Move and Halt. The freshness bound is
-// two periods; the cadence, the fault latch and the link-loss rule live in
-// util::PolledState. Every getter reads memory, so a burst of reads costs no
-// exchange at all.
+// State poll (open-astro#1310, decision 0010), start to start. One poll is one
+// position exchange (about 35 ms at 9600 baud); telemetry rides on its own
+// cadence below (#2031). The period leaves the wire mostly free for Move and
+// Halt. The freshness bound is two periods; the cadence, the fault latch and the
+// link-loss rule live in util::PolledState. Every getter reads memory, so a
+// burst of reads costs no exchange at all.
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
 constexpr int kFaultThreshold = 3;
 // Telemetry (cmd_id 4) is best effort, on its own cadence (#2031): the firmware answers position
