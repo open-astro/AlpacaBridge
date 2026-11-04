@@ -2270,7 +2270,7 @@ void poll_state_now_for_testing(TelescopeDriver& driver) {
     }
 }
 
-std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at_for_testing(TelescopeDriver& driver) {
+std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testing(TelescopeDriver& driver) {
     if (auto* cgx = dynamic_cast<CelestronCgxTelescopeDriver*>(&driver)) {
         return cgx->consume_link_lost_at_for_testing();
     }
