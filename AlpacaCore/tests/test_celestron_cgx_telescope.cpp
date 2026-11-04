@@ -72,6 +72,11 @@ bool wait_until(Predicate predicate, std::chrono::milliseconds timeout = std::ch
     return predicate();
 }
 
+// One state poll on the calling thread: the coordinate getters serve its frame, never the wire (#1940).
+void poll_now(alpacacore::TelescopeDriver& driver) {
+    alpacacore::vendor::celestron::poll_state_now_for_testing(driver);
+}
+
 // Slewing reads false. Until the first stop ACK the link fault raises (#1950), which is not done yet.
 bool stop_done(const alpacacore::TelescopeDriver& driver) {
     try {
@@ -93,7 +98,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect waits for an in-fligh
     auto config = test_info();
     config.port_path = mount.slave_path();
     alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, config, clock);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config, clock);
     alpacacore::test::CgxClockCleanup cleanup{driver, clock};
     driver->set_connected(true);
     driver->find_home();
@@ -171,7 +176,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop displaces a draini
         auto info = test_info();
         info.port_path = mount.slave_path();
         alpacacore::test::FakeTaskClock clock;
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
         alpacacore::test::CgxClockCleanup cleanup{driver, clock};
         driver->set_connected(true);
         driver->find_home();
@@ -295,7 +300,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect drains a stop queued 
     auto info = test_info();
     info.port_path = mount.slave_path();
     alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
     alpacacore::test::CgxClockCleanup cleanup{driver, clock};
     driver->set_connected(true);
     driver->find_home();
@@ -355,7 +360,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - parked target methods refuse pre
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->set_target_right_ascension(7.5);
     driver->set_target_declination(30.0);
@@ -397,7 +402,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect checkpoint leaves cac
         mount.set_auto_complete_motions(true);
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
         REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
@@ -444,15 +449,20 @@ TEST_CASE("Celestron CGX USB Telescope Driver - modern identity is read-only and
     mount.set_motor_identity(0x11, {7, 17, 1, 25}, {0x17, 0x88});
     auto config = test_info();
     config.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, config);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(driver->get_device_firmware() == "RA 7.17.25, Dec 7.17.281");
     const auto requests = mount.requests();
-    REQUIRE(requests.size() == 4);
-    for (const auto& request : requests) {
+    // The four identity queries, then the state poll's first frame (one position read per axis, #1940).
+    REQUIRE(requests.size() == 6);
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+        const auto& request = requests[i];
         CHECK((request.destination == 0x10 || request.destination == 0x11));
-        CHECK((request.command == 0xfe || request.command == 0x05));
+        if (i < 4)
+            CHECK((request.command == 0xfe || request.command == 0x05));
+        else
+            CHECK(request.command == 0x01);
         CHECK(request.payload.empty());
     }
 }
@@ -469,7 +479,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - modern identity rejects malforme
             mount.set_motor_identity(axis, {7, 17, 0, 25}, model);
             auto config = test_info();
             config.port_path = mount.slave_path();
-            auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, config);
+            auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
             require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
             CHECK_FALSE(driver->get_connected());
             CHECK_FALSE(driver->get_device_firmware());
@@ -489,7 +499,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - version lengths and mixed format
             mount.set_motor_identity(axis, version, {0x17, 0x88});
             auto config = test_info();
             config.port_path = mount.slave_path();
-            auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, config);
+            auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
             require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
             CHECK_FALSE(driver->get_connected());
         }
@@ -497,7 +507,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - version lengths and mixed format
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - Defaults", "[celestron][cgx][telescope][unit]") {
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, test_info());
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, test_info());
 
     REQUIRE(driver != nullptr);
     CHECK(driver->get_device_type() == alpacacore::DeviceType::Telescope);
@@ -522,7 +532,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop acknowledgement waits for c
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     mount.set_stop_completion_reads(2);
     CHECK_NOTHROW(driver->abort_slew());
@@ -544,7 +554,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop initiators return before ve
         mount.set_auto_complete_motions(true);
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         if (unpark) {
             driver->park();
@@ -620,7 +630,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - AbortSlew drains only the active
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -656,7 +666,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop completion has a bounded de
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     mount.set_stop_completion_reads(10000);
     const auto started = std::chrono::steady_clock::now();
@@ -691,7 +701,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - async stop verifies deceleration
         mount.set_auto_complete_motions(true);
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         if (unpark) {
             driver->park();
@@ -726,7 +736,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect serializes with the s
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     mount.fragment_next_reply();
     driver->abort_slew();
@@ -743,10 +753,13 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect serializes with the s
 }
 
 #ifndef _WIN32
-// Issue #1457: a stop retry reconnects the port. Since #1456 the reconnect's
-// port claim waits out another device's probe (up to 20 s per attempt), so the
-// retry must not wait there; since #1759 it also runs with mutex_ free, so no
-// getter that takes mutex_ waits behind it.
+// Issue #1457: a stop retry must not wait for another device's probe on the
+// node. Since #1456 a port claim waits out such a probe (up to 20 s per
+// attempt); since #1759 the retry runs with mutex_ free, so no getter that
+// takes mutex_ waits behind it; since #1940 the retry resyncs the fd it
+// already holds and never reopens the port (decision 0009 rule 4), so on a
+// lost link it fails at once. The probe claim below is the wait the retry
+// must never reach.
 TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for another device's probe",
           "[celestron][cgx][telescope][integration][issue1457]") {
     namespace util = alpacacore::util;
@@ -756,11 +769,11 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for a
     auto info = test_info();
     info.port_path = mount.slave_path();
     const std::string path = info.port_path;
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
 
-    // The adapter goes away: the first stop finds the node gone, closes the
-    // link and fails, which releases the port claim.
+    // The adapter goes away: the first stop meets the hangup, which closes
+    // the link and releases the port claim, and the stop fails.
     mount.sever_link();
     CHECK_NOTHROW(driver->abort_slew());
     // Slewing raises the link fault before the stop ends (#1950). A site write
@@ -779,8 +792,9 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for a
     require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); }, alpacacore::AlpacaError::DriverException);
     REQUIRE_FALSE(util::is_serial_port_in_use(path));
 
-    // Another device's probe now holds the node for 3 s while a second stop
-    // retries its reconnect.
+    // Another device's probe now holds the node for 5 s while a second stop
+    // retries. The retry resyncs its own fd, which the loss closed, so it
+    // fails at once and never reopens the port or waits for the probe.
     auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
     REQUIRE(probe);
     auto release = std::async(std::launch::async, [&probe] {
@@ -809,11 +823,12 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a tracking rollback does not wai
     auto info = test_info();
     info.port_path = mount.slave_path();
     const std::string path = info.port_path;
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
 
-    // The adapter goes away: the first tracking write fails, and its rollback
-    // reconnect finds the node gone, closes the link and releases the claim.
+    // The adapter goes away: the first tracking write meets the hangup, which
+    // closes the link and releases the claim; its rollback resyncs the closed
+    // fd and fails too.
     mount.sever_link();
     try {
         driver->set_tracking(false);
@@ -823,7 +838,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a tracking rollback does not wai
     REQUIRE_FALSE(util::is_serial_port_in_use(path));
 
     // Another device's probe holds the node for 5 s while a second tracking
-    // write fails and its rollback reconnects.
+    // write fails and its rollback resyncs the closed fd: nothing reopens the
+    // port, so nothing waits for the probe.
     auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
     REQUIRE(probe);
     auto release = std::async(std::launch::async, [&probe] {
@@ -860,7 +876,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop communication failures pers
         mount.set_auto_complete_motions(true);
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         if (unpark) {
             driver->park();
@@ -917,7 +933,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Slewing raises the link fault wh
         mount.set_auto_complete_motions(true);
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         if (unpark) {
             driver->park();
@@ -930,8 +946,10 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Slewing raises the link fault wh
             require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); },
                                  alpacacore::AlpacaError::DriverException);
         };
-        // A lost encoder reply faults the link until the next matched reply.
+        // A lost encoder reply faults the link until the next matched reply. The state poll's read meets it: the
+        // getters no longer read the axes (#1940).
         mount.drop_next_reply(0x10, 0x01, false);
+        poll_now(*driver);
         require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
                              alpacacore::AlpacaError::DriverException);
         slewing_raises_fault();
@@ -968,7 +986,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop owns cancelled mot
         mount.set_auto_complete_motions(true);
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
         REQUIRE(wait_until([&] { return driver->get_at_home(); }));
@@ -1018,7 +1036,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - explicit stop retains flip cance
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -1054,7 +1072,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync waits for encoder stability
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home(); }));
@@ -1075,7 +1093,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync refuses unsettled encoders 
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home(); }));
@@ -1101,7 +1119,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync verifies settled label read
         mount.set_auto_complete_motions(true);
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
         REQUIRE(wait_until([&] { return driver->get_at_home(); }));
@@ -1127,7 +1145,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync verifies settled label read
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - Device metadata", "[celestron][cgx][telescope][unit]") {
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(3, test_info());
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(3, test_info());
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_name() == "Celestron CGX/CGX-L USB Telescope");
     CHECK(driver->get_description() == "Celestron CGX/CGX-L direct USB mount");
@@ -1143,9 +1161,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - factory rejects invalid configur
         [](const std::function<void(alpacacore::vendor::celestron::CelestronCgxConnectionInfo&)>& set) {
             auto info = test_info();
             set(info);
-            require_alpaca_error(
-                [&] { static_cast<void>(alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info)); },
-                alpacacore::AlpacaError::InvalidValue);
+            require_alpaca_error([&] { static_cast<void>(alpacacore::test::create_cgx_telescope_poll_held(0, info)); },
+                                 alpacacore::AlpacaError::InvalidValue);
         };
     rejects([](auto& info) { info.site_latitude_degrees = 90.1; });
     rejects([](auto& info) { info.site_longitude_degrees = std::numeric_limits<double>::quiet_NaN(); });
@@ -1155,7 +1172,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - factory rejects invalid configur
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - Not connected errors", "[celestron][cgx][telescope][unit]") {
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, test_info());
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, test_info());
     require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
                          alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { static_cast<void>(driver->get_declination()); }, alpacacore::AlpacaError::NotConnected);
@@ -1167,7 +1184,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Not connected errors", "[celestr
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - Unsupported actions", "[celestron][cgx][telescope][unit]") {
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, test_info());
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, test_info());
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
     require_alpaca_error([&] { static_cast<void>(driver->action("unknown", "")); },
@@ -1176,7 +1193,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Unsupported actions", "[celestro
 
 TEST_CASE("Celestron CGX USB Telescope Driver - independent targets and exact errors",
           "[celestron][cgx][telescope][unit]") {
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(1, test_info());
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(1, test_info());
 
     require_alpaca_error([&] { static_cast<void>(driver->get_target_right_ascension()); },
                          alpacacore::AlpacaError::NotConnected);
@@ -1197,7 +1214,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - independent targets and exact er
 
 TEST_CASE("Celestron CGX USB Telescope Driver - error codes and input precedence",
           "[celestron][cgx][telescope][unit]") {
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, test_info());
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, test_info());
 
     require_alpaca_error([&] { driver->pulse_guide(-1, 100); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->pulse_guide(0, 0); }, alpacacore::AlpacaError::NotConnected);
@@ -1263,8 +1280,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate readback and pointing fo
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(
-        0, info, alpacacore::util::default_task_clock(), now);
+    auto driver =
+        alpacacore::test::create_cgx_telescope_poll_held(0, info, alpacacore::util::default_task_clock(), now);
     driver->set_connected(true);
 
     alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return false; });
@@ -1305,8 +1322,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate requires an established 
     auto info = test_info();
     info.port_path = mount.slave_path();
     const auto now = [] { return std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)}; };
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(
-        0, info, alpacacore::util::default_task_clock(), now);
+    auto driver =
+        alpacacore::test::create_cgx_telescope_poll_held(0, info, alpacacore::util::default_task_clock(), now);
     for (int session = 0; session < 2; ++session) {
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
@@ -1334,8 +1351,7 @@ struct CgxUtcRig {
         REQUIRE(mount.ok());
         auto info = test_info();
         info.port_path = mount.slave_path();
-        driver =
-            alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock, [this] { return now(); });
+        driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, [this] { return now(); });
         driver->set_connected(true);
     }
     std::chrono::system_clock::time_point now() const {
@@ -1413,7 +1429,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a UTCDate write restarts the 30 
 
 TEST_CASE("Celestron CGX USB Telescope Driver - unsupported methods use ASCOM errors",
           "[celestron][cgx][telescope][unit]") {
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, test_info());
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, test_info());
     CHECK_FALSE(driver->get_can_slew());
     CHECK_FALSE(driver->get_can_slew_alt_az_async());
     CHECK_FALSE(driver->get_can_sync_alt_az());
@@ -1435,7 +1451,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor co
     info.site_elevation_meters = 0.0;
     info.aperture_diameter_meters = 0.2;
     info.focal_length_meters = 1.0;
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
@@ -1567,7 +1583,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - rejects a Celestron AUX bus with
     mount.set_cgx_switches_present(false);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
 
     require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
@@ -1583,7 +1599,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects without a site and refu
     info.port_path = mount.slave_path();
     info.site_latitude_degrees.reset();
     info.site_longitude_degrees.reset();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
@@ -1634,7 +1650,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - connects without a site and refu
     longitude_info.port_path = longitude_mount.slave_path();
     longitude_info.site_latitude_degrees.reset();
     longitude_info.site_longitude_degrees = 151.215297;
-    driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, longitude_info);
+    driver = alpacacore::test::create_cgx_telescope_poll_held(0, longitude_info);
     driver->set_connected(true);
     refuse_all();
 }
@@ -1647,7 +1663,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - pins guide polarity in both hemi
         auto info = test_info();
         info.port_path = mount.slave_path();
         info.site_latitude_degrees = latitude;
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
         REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -1655,6 +1671,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - pins guide polarity in both hemi
 
         for (const bool beyond_pole : {false, true}) {
             mount.set_encoder_position(0x11, beyond_pole ? 0x400000 : 0xc00000);
+            poll_now(*driver);  // the getters serve the polled frame (#1940)
             CHECK(driver->get_side_of_pier() == (beyond_pole ? 1 : 0));
             for (const auto& [direction, north_normal_velocity] :
                  {std::pair{0, -50}, std::pair{1, 50}, std::pair{2, -50}, std::pair{3, 50}}) {
@@ -1680,6 +1697,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - pins guide polarity in both hemi
                     const auto position = static_cast<std::int64_t>(mount.axis_position(0x11));
                     const int step = velocity > 0 ? 100 : -100;
                     mount.set_encoder_position(0x11, static_cast<std::uint32_t>(position + step) & 0x00ffffffU);
+                    poll_now(*driver);
                     const double after = driver->get_declination();
                     if (direction == 0)
                         CHECK(after > before);
@@ -1698,7 +1716,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - rounds and segments guide durati
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -1736,7 +1754,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - zero duration guide validates st
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     const auto invalid_inputs = [&] {
         require_alpaca_error([&] { driver->pulse_guide(2, -1); }, alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&] { driver->pulse_guide(-1, 0); }, alpacacore::AlpacaError::InvalidValue);
@@ -1806,10 +1824,10 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains isolated Sync references
     first_info.port_path = first_mount.slave_path();
     second_info.port_path = second_mount.slave_path();
     second_info.site_latitude_degrees = -45.0;
-    auto first = alpacacore::vendor::celestron::create_celestron_cgx_telescope(
-        0, first_info, alpacacore::util::default_task_clock(), now);
-    auto second = alpacacore::vendor::celestron::create_celestron_cgx_telescope(
-        1, second_info, alpacacore::util::default_task_clock(), now);
+    auto first =
+        alpacacore::test::create_cgx_telescope_poll_held(0, first_info, alpacacore::util::default_task_clock(), now);
+    auto second =
+        alpacacore::test::create_cgx_telescope_poll_held(1, second_info, alpacacore::util::default_task_clock(), now);
     first->set_connected(true);
     second->set_connected(true);
     first->find_home();
@@ -1900,7 +1918,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - continuity budget expires on the
     auto info = test_info();
     info.port_path = mount.slave_path();
     alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
     alpacacore::test::CgxClockCleanup cleanup{driver, clock};
     driver->set_connected(true);
     driver->find_home();
@@ -1949,7 +1967,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - continuity settling and cleanup 
     auto info = test_info();
     info.port_path = mount.slave_path();
     alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
     alpacacore::test::CgxClockCleanup cleanup{driver, clock};
     driver->set_connected(true);
     driver->find_home();
@@ -1976,8 +1994,10 @@ TEST_CASE("Celestron CGX USB Telescope Driver - continuity settling and cleanup 
         CHECK_NOTHROW(transition.get());
         CHECK(registered);
         CHECK(clock.wait_count() == waits + 3);
-        CHECK(mount.count_command(0x10, 0x01) == ra_reads + 4);
-        CHECK(mount.count_command(0x11, 0x01) == dec_reads + 4);
+        // Four checkpoint reads per axis; a connect adds the state poll's first frame, one read per axis (#1940).
+        const int first_frame = connected ? 1 : 0;
+        CHECK(mount.count_command(0x10, 0x01) == ra_reads + 4 + first_frame);
+        CHECK(mount.count_command(0x11, 0x01) == dec_reads + 4 + first_frame);
         CHECK(driver->get_connected() == connected);
     }
     CHECK(driver->get_at_home());
@@ -2020,7 +2040,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnected continuity requires
             mount.set_auto_complete_motions(true);
             auto info = test_info();
             info.port_path = mount.slave_path();
-            auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+            auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
             driver->set_connected(true);
             driver->find_home();
             REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2064,7 +2084,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - firmware identity change drops t
         for (const auto motor : {0x10, 0x11}) mount.set_motor_identity(motor, {7, 17, 0, 25}, {0x17, 0x88});
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
         REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2099,7 +2119,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - desync and owned-link recovery r
         mount.set_auto_complete_motions(true);
         auto info = test_info();
         info.port_path = mount.slave_path();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
         driver->set_connected(true);
         driver->find_home();
         REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2107,6 +2127,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - desync and owned-link recovery r
             mount.corrupt_next_reply_checksum();
         else
             mount.drop_next_reply(0x10, 0x01, false);
+        poll_now(*driver);  // the state poll's read meets the fault; the getters no longer read the axes (#1940)
         require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
                              alpacacore::AlpacaError::DriverException);
         const auto reads = mount.count_command(0x10, 0x01);
@@ -2160,8 +2181,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains exclusive claim until de
     };
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto first = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
-    auto second = alpacacore::vendor::celestron::create_celestron_cgx_telescope(1, info);
+    auto first = alpacacore::test::create_cgx_telescope_poll_held(0, info);
+    auto second = alpacacore::test::create_cgx_telescope_poll_held(1, info);
     first->set_connected(true);
     first->set_connected(false);
     check_exclusive(1);
@@ -2176,13 +2197,13 @@ TEST_CASE("Celestron CGX USB Telescope Driver - retains exclusive claim until de
 
     // Fail after the fd has been opened and claimed, but before publishing Connected.
     mount.set_motor_identity(0x10, {7}, {0x17, 0x88});
-    auto failed = alpacacore::vendor::celestron::create_celestron_cgx_telescope(2, info);
+    auto failed = alpacacore::test::create_cgx_telescope_poll_held(2, info);
     require_alpaca_error([&] { failed->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(failed->get_connected());
     CHECK_FALSE(failed->get_device_firmware());
     check_exclusive(0);
     mount.set_motor_identity(0x10, {7, 18}, {0x17, 0x88});
-    auto replacement = alpacacore::vendor::celestron::create_celestron_cgx_telescope(3, info);
+    auto replacement = alpacacore::test::create_cgx_telescope_poll_held(3, info);
     CHECK_NOTHROW(replacement->set_connected(true));
     check_exclusive(1);
     replacement.reset();
@@ -2196,7 +2217,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - TrackingRate cannot enable an in
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2232,7 +2253,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - cached hardware state refuses fa
             mount.set_auto_complete_motions(true);
             auto info = test_info();
             info.port_path = mount.slave_path();
-            auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+            auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
             driver->set_connected(true);
             if (state == 1)
                 driver->park();
@@ -2246,6 +2267,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - cached hardware state refuses fa
                 mount.corrupt_next_reply_checksum();
             else
                 mount.sever_link();
+            poll_now(*driver);  // the state poll's read meets the fault; the getters no longer read the axes (#1940)
             require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
                                  alpacacore::AlpacaError::DriverException);
             const std::vector<std::function<void()>> hardware_reads{[&] { static_cast<void>(driver->get_at_home()); },
@@ -2311,8 +2333,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - reference publication cannot ado
         std::atomic<bool> hold_utc{false};
         std::promise<void> utc_entered, release_utc;
         const auto released = release_utc.get_future().share();
-        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(
-            0, info, alpacacore::util::default_task_clock(), [&] {
+        auto driver =
+            alpacacore::test::create_cgx_telescope_poll_held(0, info, alpacacore::util::default_task_clock(), [&] {
                 if (hold_utc.exchange(false)) {
                     utc_entered.set_value();
                     released.wait();
@@ -2337,9 +2359,11 @@ TEST_CASE("Celestron CGX USB Telescope Driver - reference publication cannot ado
         auto utc = std::async(std::launch::async, [&] { return driver->get_utc_date(); });
         const bool mutex_held = utc_entered.get_future().wait_for(2s) == std::future_status::ready;
         // Both labels will now be acknowledged, but publication needs mutex_,
-        // held by UTCDate. IsPulseGuiding bypasses that mutex and faults AUX.
-        mount.drop_next_reply(0x10, 0x27, false);
+        // held by UTCDate. The state poll takes no driver lock: its dropped read
+        // faults AUX (#1940), and the lock-free IsPulseGuiding raises that fault.
+        mount.drop_next_reply(0x10, 0x01, false);
         mount.release_reply_tail();
+        poll_now(*driver);
         bool guide_read_failed = false;
         try {
             static_cast<void>(driver->get_is_pulse_guiding());
@@ -2388,7 +2412,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - keeps Slewing true through the c
     alpacacore::test::FakeTaskClock clock;
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
     alpacacore::test::CgxClockCleanup cleanup{driver, clock};
     driver->set_connected(true);
     driver->set_slew_settle_time(10);
@@ -2424,7 +2448,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - the asynchronous equatorial slew
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2461,7 +2485,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - failed tracking shutdown leaves 
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2502,7 +2526,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a failed slew start keeps its er
     auto info = test_info();
     info.port_path = mount.slave_path();
     info.site_latitude_degrees = -33.9;
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
@@ -2559,7 +2583,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Unpark cancels a pending Park co
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
 
     driver->park();
@@ -2583,7 +2607,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect waits only for the ac
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
@@ -2640,8 +2664,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - routes a pointing-state change t
     // Keep pointing UTC fixed so manual completion cannot leave a new RA
     // correction unserviced; the elapsed-arrival case advances both clocks.
     const auto now = [] { return std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)}; };
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(
-        0, info, alpacacore::util::default_task_clock(), now);
+    auto driver =
+        alpacacore::test::create_cgx_telescope_poll_held(0, info, alpacacore::util::default_task_clock(), now);
     driver->set_connected(true);
     require_alpaca_error([&] { driver->slew_to_coordinates(2.0, 15.0); },
                          alpacacore::AlpacaError::MethodNotImplemented);
@@ -2736,7 +2760,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - site writes after Sync preserve 
         auto info = test_info();
         info.port_path = mount.slave_path();
         info.site_latitude_degrees = -home_latitude;
-        auto driver = create_celestron_cgx_telescope(0, info, alpacacore::util::default_task_clock(), now);
+        auto driver =
+            alpacacore::test::create_cgx_telescope_poll_held(0, info, alpacacore::util::default_task_clock(), now);
         driver->set_connected(true);
         // The reference uses the site at FindHome, not the constructor's site.
         driver->set_site_latitude(home_latitude);
@@ -2816,7 +2841,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - site writes refuse active motion
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
@@ -2853,8 +2878,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - reports a completed GOTO that mi
     const auto now = [&] { return std::chrono::system_clock::time_point{std::chrono::seconds(epoch_seconds.load())}; };
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(
-        0, info, alpacacore::util::default_task_clock(), now);
+    auto driver =
+        alpacacore::test::create_cgx_telescope_poll_held(0, info, alpacacore::util::default_task_clock(), now);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
@@ -2941,7 +2966,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - elapsed arrival uses native slow
             auto info = test_info();
             info.port_path = mount.slave_path();
             alpacacore::test::FakeTaskClock clock;
-            auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock, now);
+            auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, now);
             alpacacore::test::CgxClockCleanup cleanup{driver, clock};
             driver->set_connected(true);
             driver->find_home();
@@ -3009,7 +3034,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stalled GOTO times out and stops
     alpacacore::test::FakeTaskClock clock;
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
     alpacacore::test::CgxClockCleanup cleanup{driver, clock};
     driver->set_connected(true);
     driver->find_home();
@@ -3045,7 +3070,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stops both axes when either GOTO
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
 
     const auto try_failed_goto = [&](std::uint8_t axis, bool command_applies) {
@@ -3089,7 +3114,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stops the responsive axis when t
     REQUIRE(mount.ok());
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     const auto verify_partial_stop = [&](std::uint8_t silent_axis, std::uint8_t responsive_axis) {
         driver->find_home();
@@ -3133,7 +3158,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - unresolved guide failure cannot 
     mount.set_auto_complete_motions(true);
     auto info = test_info();
     info.port_path = mount.slave_path();
-    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
     driver->find_home();
     REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));

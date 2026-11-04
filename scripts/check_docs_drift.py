@@ -2364,7 +2364,7 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0006-async-operation-ownership.md": 3,
     "0007-lan-surface-threat-model.md": 13,
     "0009-link-loss-and-relink-policy.md": 0,
-    "0011-cgx-logical-reference-continuity.md": 4,
+    "0011-cgx-logical-reference-continuity.md": 0,
     "0012-bundled-libgphoto2.md": 1,
     "0013-designs-to-avoid.md": 7,
     "0014-utc-offset.md": 2,

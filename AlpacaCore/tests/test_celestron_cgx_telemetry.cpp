@@ -10,21 +10,30 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+// The CGX coordinate getters serve the state poll's frame (decision 0010, #1940). Every case holds the poll
+// (cgx_clock_cleanup.h), so the only poll exchanges are the connect's first frame and the ones a case runs with
+// poll_now(): the wire counts below are exact.
+
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <functional>
 #include <future>
+#include <string>
 #include <thread>
 
 #include "catch2_compat.h"
 #include "cgx_clock_cleanup.h"
+#include "driver_rig.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_task_clock.h"
 
 namespace {
 using namespace std::chrono_literals;
+using alpacacore::test::require_alpaca_error;
 
 struct TelemetryRig {
     alpacacore::test::FakeCelestronCgxMount mount;
@@ -40,7 +49,7 @@ struct TelemetryRig {
         info.port_path = mount.slave_path();
         info.site_latitude_degrees = 45.0;
         info.site_longitude_degrees = -75.0;
-        driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info, clock, [this] { return utc; });
+        driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock, [this] { return utc; });
         driver->set_connected(true);
         home();
     }
@@ -64,11 +73,25 @@ struct TelemetryRig {
         static_cast<void>(driver->get_side_of_pier());
     }
 
+    void poll_now() { alpacacore::vendor::celestron::poll_state_now_for_testing(*driver); }
+
     int reads(std::uint8_t axis) const { return mount.count_command(axis, 0x01); }
 };
+
+// The link fault itself (decision 0009 rule 1), not a later guard that the same fault also trips.
+void require_fault(const std::function<void()>& read) {
+    try {
+        read();
+        FAIL_CHECK("no throw");
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(error.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(error.what()).find("communications compromised") != std::string::npos);
+    }
+}
 }  // namespace
 
-TEST_CASE("CGX stationary telemetry shares only a bounded raw pair", "[celestron][cgx][telemetry]") {
+TEST_CASE("CGX coordinate getters and DeviceState serve the polled frame without touching the wire",
+          "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     for (const bool parked : {false, true}) {
         if (parked) rig.home(true);
@@ -78,57 +101,40 @@ TEST_CASE("CGX stationary telemetry shares only a bounded raw pair", "[celestron
         const auto state = rig.driver->get_device_state();
         CHECK(state.size() == 12);
         CHECK(std::none_of(state.begin(), state.end(), [](const auto& entry) { return entry.name == "UTCDate"; }));
-        CHECK(rig.reads(0x10) == ra + 1);
-        CHECK(rig.reads(0x11) == dec + 1);
-        CHECK(rig.mount.count_command(0x10, 0x27) == guide_ra + 1);
-        CHECK(rig.mount.count_command(0x11, 0x27) == guide_dec + 1);
+        for (int pass = 0; pass < 3; ++pass) {
+            rig.coordinates();
+            CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+        }
+        // Sky values are computed when read, from the frame and the current UTC.
         const auto old_ra = rig.driver->get_right_ascension();
         rig.utc += 1s;
         CHECK(rig.driver->get_right_ascension() > old_ra);
-        rig.clock.advance(29ms);
-        rig.coordinates();
-        CHECK(rig.reads(0x10) == ra + 1);
-        CHECK(rig.reads(0x11) == dec + 1);
-        // Hits must not slide the deadline: exactly 30 ms from refill expires.
-        rig.clock.advance(1ms);
-        rig.coordinates();
-        CHECK(rig.reads(0x10) == ra + 2);
-        CHECK(rig.reads(0x11) == dec + 2);
+        CHECK(rig.reads(0x10) == ra);
+        CHECK(rig.reads(0x11) == dec);
+        CHECK(rig.mount.count_command(0x10, 0x27) == guide_ra);
+        CHECK(rig.mount.count_command(0x11, 0x27) == guide_dec);
     }
 }
 
-TEST_CASE("CGX DeviceState keeps coordinate reads together across slow live guide status",
-          "[celestron][cgx][telemetry]") {
+TEST_CASE("CGX DeviceState TimeStamp is when the served frame was measured", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
-    for (const bool parked : {false, true}) {
-        if (parked) rig.home(true);
-        const int ra = rig.reads(0x10), dec = rig.reads(0x11);
-        const int guide_ra = rig.mount.count_command(0x10, 0x27);
-        const int guide_dec = rig.mount.count_command(0x11, 0x27);
-        rig.mount.fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x27});
-        auto pending = std::async(std::launch::async, [&] { return rig.driver->get_device_state(); });
-        const bool waiting = rig.mount.wait_for_reply_fragment(2s);
-        // Real guide-status reads straddle the unchanged 30 ms raw-pair TTL.
-        rig.clock.advance(32ms);
-        rig.mount.release_reply_tail();
-        REQUIRE(waiting);
-        const auto state = pending.get();
-        for (const char* name : {"Altitude", "AtHome", "AtPark", "Azimuth", "Declination", "IsPulseGuiding",
-                                 "RightAscension", "SideOfPier", "SiderealTime", "Slewing", "Tracking", "TimeStamp"}) {
-            CHECK(std::count_if(state.begin(), state.end(), [name](const auto& entry) { return entry.name == name; }) ==
-                  1);
-        }
-        CHECK(rig.reads(0x10) == ra + 1);
-        CHECK(rig.reads(0x11) == dec + 1);
-        CHECK(rig.mount.count_command(0x10, 0x27) == guide_ra + 1);
-        CHECK(rig.mount.count_command(0x11, 0x27) == guide_dec + 1);
-    }
+    rig.poll_now();
+    const auto fresh = alpacacore::test::parse_timestamp(alpacacore::test::time_stamp_of(*rig.driver));
+    CHECK(std::chrono::abs(std::chrono::system_clock::now() - fresh) < 1s);
+    // Ten seconds of task-clock time with no poll: stale, still served, stamped with its age.
+    rig.clock.advance(10s);
+    CHECK_NOTHROW(rig.coordinates());
+    const auto aged = alpacacore::test::parse_timestamp(alpacacore::test::time_stamp_of(*rig.driver));
+    CHECK(std::chrono::abs((std::chrono::system_clock::now() - 10s) - aged) < 1s);
+    rig.poll_now();
+    const auto renewed = alpacacore::test::parse_timestamp(alpacacore::test::time_stamp_of(*rig.driver));
+    CHECK(std::chrono::abs(std::chrono::system_clock::now() - renewed) < 1s);
 }
 
-TEST_CASE("CGX telemetry never substitutes cached labels for control or moving reads", "[celestron][cgx][telemetry]") {
+TEST_CASE("CGX control paths read the axes and write the pair through to the frame", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();
-    // Sync's raw-label/branch read is fresh even at a warmed stationary home.
+    // Sync's raw-label/branch read is fresh even at a stationary home.
     rig.mount.set_encoder_position(0x11, 0x810000);
     const auto lst = rig.driver->get_sidereal_time();
     const int sync_ra = rig.reads(0x10), sync_dec = rig.reads(0x11);
@@ -142,50 +148,56 @@ TEST_CASE("CGX telemetry never substitutes cached labels for control or moving r
     CHECK(rig.reads(0x10) == sync_ra + 8);
     CHECK(rig.reads(0x11) == sync_dec + 8);
     CHECK_FALSE(rig.driver->get_at_home());
+    // The synced labels are served before any poll.
     const int ra = rig.reads(0x10), dec = rig.reads(0x11);
+    CHECK(rig.driver->get_right_ascension() == Catch::Approx(lst).margin(1e-3));
+    CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
     rig.coordinates();
-    CHECK(rig.reads(0x10) == ra + 5);
-    CHECK(rig.reads(0x11) == dec + 5);
     rig.driver->set_tracking(true);
-    const int tracking_ra = rig.reads(0x10), tracking_dec = rig.reads(0x11);
     rig.coordinates();
-    CHECK(rig.reads(0x10) == tracking_ra + 5);
-    CHECK(rig.reads(0x11) == tracking_dec + 5);
+    CHECK(rig.reads(0x10) == ra);
+    CHECK(rig.reads(0x11) == dec);
     rig.mount.set_auto_complete_motions(false);
     rig.mount.set_hold_guide_until_completed(true);
-    const int guide_ra = rig.reads(0x10), guide_dec = rig.reads(0x11);
     rig.driver->pulse_guide(0, 100);
     rig.coordinates();
-    CHECK(rig.reads(0x10) == guide_ra + 6);  // one control pair plus five telemetry pairs
-    CHECK(rig.reads(0x11) == guide_dec + 6);
+    CHECK(rig.reads(0x10) == ra + 1);  // the guide's own polarity read; the getters read nothing
+    CHECK(rig.reads(0x11) == dec + 1);
     rig.mount.complete_axis_guide(0x11);
     rig.clock.advance(20ms);
     rig.mount.set_auto_complete_motions(true);
 }
 
-TEST_CASE("CGX telemetry rehome and reconnect discard the previous raw frame", "[celestron][cgx][telemetry]") {
+TEST_CASE("CGX FindHome and reconnect replace the served frame", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();
-    // Rehome republishes the same transport generation, but new encoder labels.
     rig.mount.set_encoder_position(0x11, 0x810000);
-    rig.clock.advance(30ms);
+    rig.poll_now();
     const auto displaced = rig.driver->get_declination();
     CHECK(displaced < 90.0);
-    rig.home();
+    // FindHome publishes the home labels with the reference; no poll runs in between.
     const int home_ra = rig.reads(0x10), home_dec = rig.reads(0x11);
-    CHECK(rig.driver->get_declination() > displaced);
-    rig.coordinates();
-    CHECK(rig.reads(0x10) == home_ra + 1);
-    CHECK(rig.reads(0x11) == home_dec + 1);
+    rig.home();
+    CHECK(rig.driver->get_declination() > 89.99);
+    CHECK(rig.reads(0x10) == home_ra);
+    CHECK(rig.reads(0x11) == home_dec);
+    // A reconnect drops the frame and takes a new one before Connected reads true.
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
+    rig.mount.set_encoder_position(0x11, 0x810000);
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, true);
     const int connect_ra = rig.reads(0x10), connect_dec = rig.reads(0x11);
+    // The continuity check fails on the moved Dec axis, so the reference is gone with the old frame.
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); },
+                         alpacacore::AlpacaError::DriverException);
+    rig.home();
+    CHECK(rig.driver->get_declination() > 89.99);
     rig.coordinates();
-    CHECK(rig.reads(0x10) == connect_ra + 1);
-    CHECK(rig.reads(0x11) == connect_dec + 1);
+    CHECK(rig.reads(0x10) == connect_ra);
+    CHECK(rig.reads(0x11) == connect_dec);
 }
 
-TEST_CASE("CGX telemetry GOTO planning and in-flight coordinates stay fresh", "[celestron][cgx][telemetry]") {
+TEST_CASE("CGX GOTO planning reads the axes and in-flight getters serve the polled frame",
+          "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();
     rig.driver->set_tracking(true);
@@ -194,9 +206,15 @@ TEST_CASE("CGX telemetry GOTO planning and in-flight coordinates stay fresh", "[
     double target_ra = rig.driver->get_sidereal_time() - 1.0;
     if (target_ra < 0.0) target_ra += 24.0;
     rig.driver->slew_to_coordinates_async(target_ra, 85.0);
+    const auto before = rig.driver->get_declination();
     rig.coordinates();
-    CHECK(rig.reads(0x10) == ra + 6);
-    CHECK(rig.reads(0x11) == dec + 6);
+    CHECK(rig.reads(0x10) == ra + 1);  // the planning read only
+    CHECK(rig.reads(0x11) == dec + 1);
+    // In flight the frame moves only with a poll.
+    rig.mount.advance_motion(1s);
+    CHECK(rig.driver->get_declination() == before);
+    rig.poll_now();
+    CHECK(rig.driver->get_declination() != before);
     // Completion samples a fresh pair; the motion waiter uses the same seam.
     const bool waiting = rig.clock.wait_for_wait_count(1, 2s);
     rig.mount.complete_axis_slew(0x10);
@@ -206,31 +224,33 @@ TEST_CASE("CGX telemetry GOTO planning and in-flight coordinates stay fresh", "[
     while (rig.driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
     CHECK(waiting);
     CHECK_FALSE(rig.driver->get_slewing());
-    CHECK(rig.reads(0x10) == ra + 7);
-    CHECK(rig.reads(0x11) == dec + 7);
+    CHECK(rig.reads(0x10) == ra + 3);
+    CHECK(rig.reads(0x11) == dec + 3);
+    CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
 }
 
-TEST_CASE("CGX telemetry failed refill drops the entire pair", "[celestron][cgx][telemetry]") {
+TEST_CASE("CGX a failed poll keeps the frame and the getters raise the fault", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();
-    const int ra = rig.reads(0x10), dec = rig.reads(0x11);
     rig.mount.drop_next_reply(0x11, 0x01, false);
-    rig.clock.advance(30ms);
-    CHECK_THROWS_AS(rig.driver->get_declination(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(rig.driver->get_right_ascension(), alpacacore::AlpacaException);
-    CHECK(rig.reads(0x10) == ra + 1);
-    CHECK(rig.reads(0x11) == dec + 1);
+    rig.poll_now();
+    const int ra = rig.reads(0x10), dec = rig.reads(0x11);
+    require_fault([&] { static_cast<void>(rig.driver->get_declination()); });
+    require_fault([&] { static_cast<void>(rig.driver->get_right_ascension()); });
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.reads(0x10) == ra);
+    CHECK(rig.reads(0x11) == dec);
 }
 
-TEST_CASE("CGX telemetry pending stop refuses a warm pair and completion changes its key",
-          "[celestron][cgx][telemetry]") {
+TEST_CASE("CGX a pending stop refuses the frame until the stop completes", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();
     const int ra = rig.reads(0x10), dec = rig.reads(0x11);
     rig.mount.set_stop_completion_reads(2);
     rig.driver->abort_slew();
     const bool first_wait = rig.clock.wait_for_wait_count(1, 2s);
-    CHECK_THROWS_AS(rig.driver->get_declination(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); },
+                         alpacacore::AlpacaError::DriverException);
     CHECK(rig.reads(0x10) == ra);
     CHECK(rig.reads(0x11) == dec);
     rig.clock.advance(20ms);
@@ -241,49 +261,36 @@ TEST_CASE("CGX telemetry pending stop refuses a warm pair and completion changes
     CHECK(first_wait);
     CHECK(second_wait);
     REQUIRE_FALSE(rig.driver->get_slewing());
-    rig.coordinates();
-    CHECK(rig.reads(0x10) == ra + 1);
-    CHECK(rig.reads(0x11) == dec + 1);
-    rig.mount.set_stop_completion_reads(0);
-    // A whole stop can finish between telemetry calls inside the TTL, while
-    // AtHome remains true. Its generation must still invalidate the pair.
-    rig.driver->abort_slew();
-    const auto second_deadline = std::chrono::steady_clock::now() + 2s;
-    while (rig.driver->get_slewing() && std::chrono::steady_clock::now() < second_deadline)
-        std::this_thread::sleep_for(1ms);
-    REQUIRE_FALSE(rig.driver->get_slewing());
-    rig.coordinates();
-    CHECK(rig.reads(0x10) == ra + 2);
-    CHECK(rig.reads(0x11) == dec + 2);
+    CHECK_NOTHROW(rig.coordinates());
+    CHECK(rig.reads(0x10) == ra);
+    CHECK(rig.reads(0x11) == dec);
 }
 
-TEST_CASE("CGX telemetry bounds unobserved loss and refuses a known fault", "[celestron][cgx][telemetry]") {
+TEST_CASE("CGX a known fault refuses the frame and a recovered link still needs FindHome",
+          "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();
+    rig.mount.drop_next_reply(0x10, 0x01, false);
+    rig.poll_now();
     const int ra = rig.reads(0x10), dec = rig.reads(0x11);
-    rig.mount.drop_next_reply(0x10, 0x27, false);
-    // Unobserved loss is accepted only inside the fixed 30 ms window.
-    rig.clock.advance(29ms);
-    rig.coordinates();
+    const std::vector<std::function<void()>> reads{[&] { static_cast<void>(rig.driver->get_is_pulse_guiding()); },
+                                                   [&] { static_cast<void>(rig.driver->get_right_ascension()); },
+                                                   [&] { static_cast<void>(rig.driver->get_declination()); },
+                                                   [&] { static_cast<void>(rig.driver->get_altitude()); },
+                                                   [&] { static_cast<void>(rig.driver->get_azimuth()); },
+                                                   [&] { static_cast<void>(rig.driver->get_side_of_pier()); }};
+    for (const auto& read : reads) require_fault(read);
     CHECK(rig.reads(0x10) == ra);
     CHECK(rig.reads(0x11) == dec);
-    CHECK_THROWS_AS(rig.driver->get_is_pulse_guiding(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(rig.driver->get_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(rig.driver->get_declination(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(rig.driver->get_altitude(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(rig.driver->get_azimuth(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(rig.driver->get_side_of_pier(), alpacacore::AlpacaException);
-    CHECK(rig.reads(0x10) == ra);
-    CHECK(rig.reads(0x11) == dec);
-    rig.clock.advance(1ms);
-    CHECK_THROWS_AS(rig.driver->get_right_ascension(), alpacacore::AlpacaException);
+    // The next poll recovers the stream, not the reference (decision 0011 rule 2).
+    rig.poll_now();
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); },
+                         alpacacore::AlpacaError::DriverException);
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, true);
-    // Recovery changed the transport generation, but did not restore calibration.
-    CHECK_THROWS_AS(rig.driver->get_declination(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); },
+                         alpacacore::AlpacaError::DriverException);
     rig.home();
-    const int recovered_ra = rig.reads(0x10), recovered_dec = rig.reads(0x11);
-    rig.coordinates();
-    CHECK(rig.reads(0x10) == recovered_ra + 1);
-    CHECK(rig.reads(0x11) == recovered_dec + 1);
+    CHECK(rig.driver->get_declination() > 89.99);
 }
