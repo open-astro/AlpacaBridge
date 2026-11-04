@@ -11,11 +11,15 @@ evidence, but AUX exposes no reset-generation counter.
 
 ## Decision
 
-Keep the exclusive fd across successful logical disconnects. Retain calibration
+Keep the exclusive fd across successful logical disconnects. A failed stop or
+initialization, a lost link ([decision 0009](0009-link-loss-and-relink-policy.md):
+a state-poll fault standing past the staleness bound, #1940) and destruction
+release it; only the client's Connect reopens it. Retain calibration
 only in the same transport session, with matching identity/firmware and bounded,
-read-only stopped/settled encoder checkpoints within two counts. Session errors
-invalidate calibration even when recovery reuses the fd. Fresh construction or
-failed continuity requires explicit FindHome; Connect never homes or relabels.
+read-only stopped/settled encoder checkpoints within two counts. Session errors,
+a timed-out state poll included, invalidate calibration even when recovery reuses
+the fd. Fresh construction, failed continuity or a relink after a lost link
+requires explicit FindHome; Connect never homes or relabels.
 
 Idle site changes update reported coordinates without reversing the mechanical
 hemisphere established by FindHome. AbortSlew/Unpark transfer cleanup to a joined
@@ -26,11 +30,11 @@ idle at dispatch.
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
-1. The CGX driver keeps its exclusive fd across a successful logical disconnect, and retains calibration only in the same transport session with matching identity and firmware and settled encoder checkpoints within two counts. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review.
-2. A session error invalidates calibration, even when recovery reuses the fd. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review.
-3. Connect never homes or relabels; a fresh driver or a failed continuity check needs an explicit FindHome. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review.
+1. The CGX driver keeps its exclusive fd across a successful logical disconnect and releases it only on a failed stop or initialization, a lost link and destruction, and it retains calibration only in the same transport session with matching identity and firmware and settled encoder checkpoints within two counts. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_celestron_cgx_link_loss.cpp` (a lost link releases the port claim), review (the fd closes only in the failed-stop, failed-connect, lost-link and destructor paths; retention compares the session, identity, firmware and both checkpoints).
+2. A session error invalidates calibration, even when recovery reuses the fd. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_celestron_cgx_link_loss.cpp` ("a fault cleared inside the bound keeps the link but not the reference"), review (every failed exchange, the state poll's included, changes the session generation, and `reference_valid_locked()` then refuses).
+3. Connect never homes or relabels; a fresh driver, a failed continuity check or a relink after a lost link needs an explicit FindHome. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review (no home, label write or Sync on the connect path; a failed continuity check and a relink after a lost link leave `calibrated_` false).
 4. An idle site change never reverses the mechanical hemisphere set by FindHome. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_celestron_cgx_telescope.cpp` ("site writes after Sync preserve mechanical hemisphere"), review.
-5. AbortSlew and Unpark hand cleanup to a joined stop worker, and completion or failure stays observable instead of reading idle at dispatch. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review.
+5. AbortSlew and Unpark hand cleanup to a joined stop worker, and completion or failure stays observable instead of reading idle at dispatch. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review (AbortSlew and Unpark start the stop slot and return; Slewing and AtPark report the pending stop and keep its failure until a later verified stop).
 
 ## Alternatives rejected
 
@@ -63,6 +67,13 @@ records the native checks and fault-generation falsifiers; current guard and
 publication rules remain owned by the Celestron instruction file.
 Further deployment and hardware tests
 require a fresh user prompt and approval.
+
+## How to reverse
+
+Close the fd in the disconnect path and clear calibration on every disconnect:
+each Connect then needs FindHome, and the reconnect workflow this record keeps is
+gone. The lost-link release follows [decision 0009](0009-link-loss-and-relink-policy.md)
+and reverts with that adoption (#1940), not with this record.
 
 ## Links
 

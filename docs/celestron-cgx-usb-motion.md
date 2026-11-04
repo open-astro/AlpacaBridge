@@ -140,7 +140,8 @@ completed run 5 pass, with its exact hardware/build scope and remaining limits.
 - Before the tracking race fix, stress failed in the actual `get_tracking()`
   path because it observed the temporary unknown state between stop writes.
   The driver mutex now covers the complete stop ACK pair and tracking-state
-  publication; the expected-exception set was not widened to hide that failure.
+  publication (superseded by #1759); the expected-exception set was not widened
+  to hide that failure.
 - **Earlier native software verification:** normal, UBSan and TSan each passed
   **75 cases / 1486 assertions**, plus **2 stress cases / 5 assertions**. The
   complete native Core CTest suite passed **2115/2115** and HTTP passed **16/16**
