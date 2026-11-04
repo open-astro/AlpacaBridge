@@ -1410,7 +1410,7 @@ TEST_CASE("FakeZWOSDK - only a generic not-readable control answer asks the enum
 // User report (5.0.2, issue #1958): the SDK gives the bound camera's id to another body while the bound one is away,
 // and the disconnected name was read by that id. Falsified by: zwo_camera_driver.cpp
 // refresh_cached_camera_info_if_needed() adopting the by-id read without comparing its model to
-// expected_model_locked().
+// expected_model().
 TEST_CASE("ZWO fake SDK - the disconnected name follows the bound camera, not another one at its id",
           "[zwo][camera][unit]") {
     FakeZWOSDK sdk;
@@ -1433,7 +1433,7 @@ TEST_CASE("ZWO fake SDK - the disconnected name follows the bound camera, not an
 }
 
 // With nothing read from the SDK yet, the card shows the stored model rather than the generic name (issue #1958).
-// Falsified by: zwo_camera_driver.cpp get_name() returning "ZWO Camera" without consulting expected_model_locked().
+// Falsified by: zwo_camera_driver.cpp get_name() returning "ZWO Camera" without consulting expected_model().
 TEST_CASE("ZWO fake SDK - a camera that never answered by id is named by its stored model", "[zwo][camera][unit]") {
     FakeZWOSDK sdk;  // no open link: the fake's by-id read answers nothing
     alpacacore::vendor::zwo::ZwoCameraBinding binding;
