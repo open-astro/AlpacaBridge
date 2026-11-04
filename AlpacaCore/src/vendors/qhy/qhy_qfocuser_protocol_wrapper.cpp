@@ -651,17 +651,21 @@ private:
                 ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply without idx ignored: " + printable(reply));
                 continue;
             }
-            // Return on the first matching idx. Known bounded staleness: when
-            // two consecutive commands share an idx (e.g. back-to-back
-            // {"cmd_id":5} position polls), the command's own OUT first
-            // re-transmits the PREVIOUS reply -- same idx -- and this returns
-            // it, so the value lags by exactly one poll while the kick's fresh
-            // reply is dropped by the next command's tcflush. Harmless in
-            // practice (a one-poll lag in Position/IsMoving during a move,
-            // ConformU-clean) because distinct-idx commands never collide and
-            // the driver's poll sends cmd_id 5 then cmd_id 4 each tick, so two
-            // position polls are never adjacent; revisit if the poll sends
-            // two commands with one idx back to back.
+            // Return on the first matching idx. Bounded staleness: when two
+            // consecutive commands share an idx (back-to-back {"cmd_id":5}
+            // position polls), the command's own OUT first re-transmits the
+            // PREVIOUS reply -- same idx -- and this returns it, so the value
+            // lags by exactly one exchange while the kick's fresh reply is
+            // dropped by the next command's tcflush. Since #2031 the poll sends
+            // cmd_id 5 on every tick and cmd_id 4 at most once a second, never
+            // during a move, so back-to-back position polls are the norm:
+            // Position and IsMoving lag one poll period (250 ms) during a move
+            // and on idle ticks without telemetry, and an arrival shows one
+            // tick late. Accepted: the lag is one period, the getters are
+            // served from the snapshot anyway, and the rig's ConformU sweep
+            // (2026-11-04) passed with it. Waiting a few ms for the kicked
+            // fresh reply when the idx repeats would remove the lag; that
+            // needs a rig run, so it is not done here.
             if (idx == expected_idx || idx == alt_idx) return fields;
             ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply idx " + std::to_string(idx) + " while waiting for " +
                                           std::to_string(expected_idx) + "; skipping");
