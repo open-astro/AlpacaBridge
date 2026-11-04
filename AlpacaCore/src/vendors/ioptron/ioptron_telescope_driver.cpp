@@ -556,7 +556,8 @@ public:
             prefetch_mount_state_locked();
             try {
                 mount_info_ = protocol.get_mount_info();
-            } catch (...) {
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("iOptron", "Mount info unavailable on connect: " + std::string(e.what()));
             }
             // The reads above log and carry on when they fail; a cable pulled during them lost
             // the link (the wrapper released the port), so this Connect fails rather than
