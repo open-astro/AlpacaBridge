@@ -685,9 +685,14 @@ nlohmann::json SoftwareUpdateManager::check() {
         check_in_flight_ = true;
     }
     if (already_running) return status();
+    // Clears the flag on a failure path. The success path clears it itself,
+    // under the lock that builds its answer, so that answer does not report
+    // its own finished check as still in progress.
     struct ClearInFlight {
         SoftwareUpdateManager& self;
+        bool armed = true;
         ~ClearInFlight() {
+            if (!armed) return;
             std::lock_guard<std::mutex> lock(self.mutex_);
             self.check_in_flight_ = false;
         }
@@ -748,6 +753,8 @@ nlohmann::json SoftwareUpdateManager::check() {
     checked_at_ = std::chrono::system_clock::now();
     check_error_.reset();
     release_notes_ = std::move(notes);
+    check_in_flight_ = false;
+    clear_in_flight.armed = false;
     return status_locked(installer, channel_switch, channel);
 }
 

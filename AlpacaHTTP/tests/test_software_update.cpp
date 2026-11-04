@@ -718,6 +718,7 @@ int main() {
         fake->notes = "# notes";
         const auto ok = manager.check();
         EXPECT(ok["UpdateAvailable"] == true);
+        EXPECT(ok["CheckInProgress"] == false);  // the check's own answer: it is finished
         EXPECT(ok["ReleaseUrl"] == "https://mirror.example/release/4.2.0");
         EXPECT(ok["ReleaseNotesUrl"] == "https://mirror.example/notes/4.2.0.md");
         EXPECT(ok.dump().find("secret") == std::string::npos);
@@ -751,7 +752,8 @@ int main() {
         auto* blocking = backend.get();
         SoftwareUpdateManager manager(settings("4.1.0", "u"), std::move(backend));
         EXPECT(manager.status()["CheckInProgress"] == false);
-        std::thread first([&] { manager.check(); });
+        nlohmann::json first_result;
+        std::thread first([&] { first_result = manager.check(); });
         {
             std::unique_lock<std::mutex> lock(blocking->m);
             blocking->cv.wait(lock, [&] { return blocking->fetches == 1; });
@@ -785,6 +787,8 @@ int main() {
             EXPECT(status["CheckInProgress"] == true);
             EXPECT(status["LatestVersion"].is_null());
         }
+        EXPECT(first_result["CheckInProgress"] == false);
+        EXPECT(first_result["LatestVersion"] == "4.2.0");
         const auto after = manager.status();
         EXPECT(after["CheckInProgress"] == false);
         EXPECT(after["LatestVersion"] == "4.2.0");
