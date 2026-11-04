@@ -89,11 +89,14 @@ check() {
   fi
 }
 
+# $1: install or update; the rest are env assignments. USER is left unset: the groups go to `id -un`.
 run_install() {
+  local verb="$1"
+  shift
   : > "${log}"
-  env PATH="${shims}:${PATH}" USER=testuser ALPACACORE_ENABLE_ALL_VENDORS=OFF "$@" \
-    bash "${ROOT}/install_alpaca_service.sh" install > "${tmp}/out.log" 2>&1 || {
-    echo "[FAIL] install_alpaca_service.sh install exited non-zero:"
+  env -u USER PATH="${shims}:${PATH}" ALPACACORE_ENABLE_ALL_VENDORS=OFF "$@" \
+    bash "${ROOT}/install_alpaca_service.sh" "${verb}" > "${tmp}/out.log" 2>&1 || {
+    echo "[FAIL] install_alpaca_service.sh ${verb} exited non-zero:"
     sed 's/^/    /' "${tmp}/out.log"
     failures=$((failures + 1))
   }
@@ -101,21 +104,27 @@ run_install() {
 
 # A fresh host: no gpio group, the user in neither group. The install must create the group and
 # add the user to dialout (serial mounts) and gpio (ASIAIR power ports), as build_and_run.sh does.
-run_install SHIM_GROUPS="testuser" SHIM_HAS_GPIO=0
+run_install install SHIM_GROUPS="testuser" SHIM_HAS_GPIO=0
 check "fresh host: udev rules installed" yes '^install -m 644 .*\.rules /etc/udev/rules\.d/'
 check "fresh host: gpio group created" yes '^groupadd -f gpio$'
 check "fresh host: user added to dialout" yes '^usermod -aG dialout testuser$'
 check "fresh host: user added to gpio" yes '^usermod -aG gpio testuser$'
 
 # Already set up: no group change is asked for.
-run_install SHIM_GROUPS="testuser dialout gpio" SHIM_HAS_GPIO=1
+run_install install SHIM_GROUPS="testuser dialout gpio" SHIM_HAS_GPIO=1
 check "set-up host: no groupadd" no '^groupadd'
 check "set-up host: no usermod" no '^usermod'
 
 # Both opt-outs honoured, as in build_and_run.sh.
-run_install SHIM_GROUPS="testuser" SHIM_HAS_GPIO=0 ALPACA_ADD_DIALOUT=OFF ALPACA_ADD_GPIO=OFF
+run_install install SHIM_GROUPS="testuser" SHIM_HAS_GPIO=0 ALPACA_ADD_DIALOUT=OFF ALPACA_ADD_GPIO=OFF
 check "opt-out: no groupadd" no '^groupadd'
 check "opt-out: no usermod" no '^usermod'
+
+# update sets the groups up too (a host installed before the fix gets them on its next update).
+run_install update SHIM_GROUPS="testuser" SHIM_HAS_GPIO=0
+check "update: gpio group created" yes '^groupadd -f gpio$'
+check "update: user added to dialout" yes '^usermod -aG dialout testuser$'
+check "update: user added to gpio" yes '^usermod -aG gpio testuser$'
 
 # The setup stamp of build_and_run.sh covers every file the setup installs: a changed Altair or
 # Phoenix library, or QHY firmware, must change it so the next run installs it.

@@ -105,11 +105,15 @@ host_setup_input_hash() {
 # Add the user to dialout (serial mounts, focusers and wheels) unless already a member. $1: ON|OFF.
 host_setup_ensure_dialout() {
   [[ "${1:-ON}" == "ON" ]] || return 0
+  # The account the service runs as (install_alpaca_service.sh writes User=$(id -un)), not $USER, which may be
+  # unset or stale under sudo or automation.
+  local user
+  user="$(id -un)"
   if id -nG | tr ' ' '\n' | grep -q '^dialout$'; then
-    echo "User ${USER} is already in the dialout group."
+    echo "User ${user} is already in the dialout group."
   else
-    echo "Adding ${USER} to the dialout group (required for serial/USB device access)."
-    sudo usermod -aG dialout "${USER}"
+    echo "Adding ${user} to the dialout group (required for serial/USB device access)."
+    sudo usermod -aG dialout "${user}"
     echo "You must log out and back in (or run: newgrp dialout) for the change to take effect."
   fi
 }
@@ -120,6 +124,8 @@ host_setup_ensure_dialout() {
 host_setup_ensure_gpio() {
   [[ "${1:-ON}" == "ON" ]] || return 0
   [[ "${OSTYPE:-}" == "linux"* ]] || return 0
+  local user
+  user="$(id -un)"
   # Raspberry Pi OS ships the group; stock Debian and Ubuntu do not. Without it a udev rule's
   # GROUP="gpio" falls back to root and the service gets EACCES at open time.
   if ! getent group gpio >/dev/null; then
@@ -127,8 +133,8 @@ host_setup_ensure_gpio() {
     sudo groupadd -f gpio
   fi
   if ! id -nG | tr ' ' '\n' | grep -q '^gpio$'; then
-    echo "Adding ${USER} to the gpio group (required for ZWO ASIair Pro / Plus power switches)."
-    sudo usermod -aG gpio "${USER}"
+    echo "Adding ${user} to the gpio group (required for ZWO ASIair Pro / Plus power switches)."
+    sudo usermod -aG gpio "${user}"
     echo "You must log out and back in (or run: newgrp gpio) for the change to take effect."
   fi
   # Nodes created before the group existed: fix them now rather than at the next module reload or

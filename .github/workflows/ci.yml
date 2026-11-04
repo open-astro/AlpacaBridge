@@ -32,7 +32,8 @@
 #                  Unicode scan, docs drift and the scripts' self-tests, the
 #                  connect-error, serial-port, layering, stress-registration,
 #                  contract-sweep and ConformU-report checks, ShellCheck (plus
-#                  ci_preflight.sh --self-test), and node --check / node --test
+#                  ci_preflight.sh --self-test and scripts/test_host_setup.sh), and
+#                  node --check / node --test
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
 #
