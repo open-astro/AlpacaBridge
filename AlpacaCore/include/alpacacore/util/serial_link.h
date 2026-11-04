@@ -240,6 +240,7 @@ inline bool tty_write_all(int fd, const std::string& data, int timeout_ms = 2000
  * every later connect queued behind it. This polls the queue depth (TIOCOUTQ) instead. True once
  * the queue is empty; on the deadline it discards the queued bytes (TCOFLUSH) and returns false,
  * so the caller fails the exchange. A tty whose driver cannot report its queue counts as drained.
+ * A @p timeout_ms of 0 or less polls once and then flushes: it is not a "check only" mode.
  */
 inline bool tty_drain_bounded(int fd, int timeout_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
