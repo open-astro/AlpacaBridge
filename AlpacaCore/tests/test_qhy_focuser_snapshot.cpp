@@ -82,7 +82,8 @@ TEST_CASE("QHY Q-Focuser Snapshot - getters between poll ticks cause no wire exc
     CHECK(rig.driver().get_position() == 1000);  // unchanged until the tick
     rig.tick();
     CHECK(rig.driver().get_position() == 2500);
-    CHECK(wire_reads(rig.fake()) == reads_before + 2);
+    // One position read per tick; telemetry rides along only once a second (#2031).
+    CHECK(wire_reads(rig.fake()) == reads_before + 1);
 }
 
 TEST_CASE("QHY Q-Focuser Snapshot - IsMoving is true right after a Move and false right after a Halt",
@@ -218,15 +219,16 @@ TEST_CASE("QHY Q-Focuser Snapshot - a frame a Move overtook does not clear the t
     rig.driver().move(4000);
     REQUIRE(rig.driver().get_is_moving() == true);
 
-    // The tick's poll reads position 1001, then its telemetry exchange is held.
-    const int telemetry_before = rig.fake().count("\"cmd_id\":4}");
-    rig.fake().hold_next_reply_to(4, 600ms);
+    // The tick's poll is held inside its position exchange (telemetry is not asked for while a move is
+    // pending, #2031), so a client write lands while the poll is in flight.
+    const int position_before = rig.fake().count("\"cmd_id\":5}");
+    rig.fake().hold_next_reply_to(5, 600ms);
     rig.clock().advance(kTick);
     const auto deadline = std::chrono::steady_clock::now() + kBound;
-    while (rig.fake().count("\"cmd_id\":4}") == telemetry_before && std::chrono::steady_clock::now() < deadline) {
+    while (rig.fake().count("\"cmd_id\":5}") == position_before && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(5ms);
     }
-    REQUIRE(rig.fake().count("\"cmd_id\":4}") == telemetry_before + 1);
+    REQUIRE(rig.fake().count("\"cmd_id\":5}") == position_before + 1);
 
     // A client Move to the position the poll just read lands while the poll is in flight.
     std::thread mover([&] { rig.driver().move(1001); });
@@ -249,16 +251,16 @@ TEST_CASE("QHY Q-Focuser Snapshot - a Move against a frame older than the stalen
     (void)rig.connect();
     REQUIRE(rig.driver().get_position() == 1000);
 
-    // Park the poll inside its telemetry exchange, so it cannot latch the loss
+    // Park the poll inside its position exchange, so it cannot latch the loss
     // itself, and let the held frame age past util::kLinkStalenessBound (30 s).
-    const int telemetry_before = rig.fake().count("\"cmd_id\":4}");
-    rig.fake().hold_next_reply_to(4, 1500ms);
+    const int position_before = rig.fake().count("\"cmd_id\":5}");
+    rig.fake().hold_next_reply_to(5, 1500ms);
     rig.clock().advance(kTick);
     const auto deadline = std::chrono::steady_clock::now() + kBound;
-    while (rig.fake().count("\"cmd_id\":4}") == telemetry_before && std::chrono::steady_clock::now() < deadline) {
+    while (rig.fake().count("\"cmd_id\":5}") == position_before && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(5ms);
     }
-    REQUIRE(rig.fake().count("\"cmd_id\":4}") == telemetry_before + 1);
+    REQUIRE(rig.fake().count("\"cmd_id\":5}") == position_before + 1);
     rig.clock().advance(31s);
 
     require_alpaca_error([&] { rig.driver().move(1200); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
@@ -282,4 +284,58 @@ TEST_CASE("QHY Q-Focuser Driver - a getter after a successful connect never thro
     REQUIRE_NOTHROW(rig.driver().set_connected(true));
     CHECK_NOTHROW(rig.driver().get_position());
     CHECK_NOTHROW(rig.driver().get_is_moving());
+}
+
+// #2031: the firmware answers position through a move but no telemetry for about 10 s after every move
+// command. The position poll goes on, nothing latches, the last reading is served and the next move goes out.
+TEST_CASE("QHY Q-Focuser Snapshot - telemetry silence after a move keeps the position poll going and latches no fault",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    QhyRig rig;
+    REQUIRE(rig.connect());
+    const double before = rig.driver().get_temperature();
+    rig.fake().set_steps_per_poll(100);
+    rig.fake().set_telemetry_muted(true);
+
+    rig.driver().move(1500);  // 1000 -> 1500 in five position polls
+    rig.tick(3);
+    CHECK(rig.driver().get_is_moving() == true);
+    CHECK(rig.driver().get_position() == 1300);
+    rig.tick(3);
+    CHECK(rig.driver().get_position() == 1500);
+    CHECK(rig.driver().get_is_moving() == false);
+
+    // Twelve more ticks of silence: no fault, the last reading is served, a move is not refused.
+    rig.tick(12);
+    CHECK(rig.driver().get_connected() == true);
+    CHECK(rig.driver().get_link_fault().empty());
+    CHECK(rig.driver().get_temperature() == Catch::Approx(before));
+    CHECK_NOTHROW(rig.driver().move(1200));
+    CHECK(rig.fake().count("\"cmd_id\":6") == 2);
+    // Telemetry was asked for at the connect and once after the arrival, then held off; never during the move.
+    CHECK(rig.fake().count("\"cmd_id\":4}") <= 4);
+
+    // The firmware answers again: the next request, past the hold-off, refreshes the reading.
+    rig.fake().set_telemetry_muted(false);
+    rig.fake().set_external_temperature_milli(21500);
+    rig.tick(24);
+    CHECK(rig.driver().get_temperature() == Catch::Approx(21.5));
+}
+
+// A reading the firmware has not refreshed for the staleness bound is refused (decision 0010 rule 8) while
+// position, which it still answers, is served and nothing is latched or lost.
+TEST_CASE(
+    "QHY Q-Focuser Snapshot - Temperature refuses a telemetry reading older than the staleness bound while "
+    "Position still serves",
+    "[qhy][focuser][snapshot][unit][fake]") {
+    QhyRig rig;
+    REQUIRE(rig.connect());
+    rig.fake().set_telemetry_muted(true);
+    rig.tick(110);  // 33 s on the task clock, past util::kLinkStalenessBound
+    CHECK(rig.driver().get_connected() == true);
+    CHECK(rig.driver().get_link_fault().empty());
+    CHECK(rig.driver().get_position() == 1000);
+    require_alpaca_error([&] { (void)rig.driver().get_temperature(); },
+                         static_cast<int>(alpacacore::AlpacaError::DriverException));
+    // Asked at most once per hold-off, not on every tick.
+    CHECK(rig.fake().count("\"cmd_id\":4}") <= 10);
 }

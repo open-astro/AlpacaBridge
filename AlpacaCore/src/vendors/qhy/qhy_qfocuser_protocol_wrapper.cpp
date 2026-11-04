@@ -74,6 +74,13 @@ constexpr int kKickSliceMs = 200;  // fallback read window before sending anothe
 // until the transaction deadline (issue #527).
 constexpr int kEmptyReplyPauseMs = 50;
 constexpr int kProbeTimeoutMs = 1500;
+// Bound on the drain before the kick (#2030): a unit whose CDC endpoint has stopped taking data
+// never empties the TX queue, and a bare tcdrain() parked the connect forever with the port held.
+// A command is one USB packet, so a healthy unit drains in well under a millisecond.
+constexpr int kDrainTimeoutMs = 500;
+// o_t at or below this is the firmware's no-probe sentinel (-111311 and -105846 seen on the rig
+// with the probe socket empty, #2032); a real probe never reads below -100 C.
+constexpr std::int32_t kNoProbeFloorMilliC = -100000;
 
 // Command ids (INDI create_cmd()).
 constexpr int kCmdVersion = 1;
@@ -261,7 +268,7 @@ static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
         // attempt rather than only on the next one. Without it the probe burns
         // the full kProbeTimeoutMs on attempt 0 on real hardware (~2 s per
         // candidate port); the kick brings it back to the handshake latency.
-        tcdrain(fd);
+        if (!util::tty_drain_bounded(fd, kDrainTimeoutMs)) continue;  // not taking data: not this device (#2030)
         static const char kick = '\n';
         (void)util::tty_write_all(fd, &kick, sizeof(kick));
         bool link_dead = false;
@@ -464,10 +471,12 @@ public:
         return pos;
     }
 
-    QFocuserTelemetry get_telemetry() {
+    QFocuserTelemetry get_telemetry() { return get_telemetry(config_.serial_timeout_ms); }
+
+    QFocuserTelemetry get_telemetry(int timeout_ms) {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
-        auto fields = transact_locked("{\"cmd_id\":4}", kCmdTelemetry, config_.serial_timeout_ms);
+        auto fields = transact_locked("{\"cmd_id\":4}", kCmdTelemetry, timeout_ms);
         std::int32_t o_t = 0, c_t = 0, c_r = 0;
         if (!parse_int(fields, "o_t", o_t) || !parse_int(fields, "c_t", c_t) || !parse_int(fields, "c_r", c_r)) {
             throw AlpacaException("Q-Focuser telemetry reply missing o_t/c_t/c_r", AlpacaError::DriverException);
@@ -476,6 +485,7 @@ public:
         t.external_temperature_c = o_t / 1000.0;
         t.chip_temperature_c = c_t / 1000.0;
         t.voltage_v = c_r / 10.0;
+        t.external_probe_present = o_t > kNoProbeFloorMilliC;
         return t;
     }
 
@@ -604,7 +614,13 @@ private:
         // brings the reply back in ~1 ms on a Raspberry Pi, versus the ~150 ms
         // a wait-then-kick costs -- which is what blew ConformU's 0.1 s FAST
         // target on DeviceState/IsMoving.
-        tcdrain(serial_fd_);
+        if (!util::tty_drain_bounded(serial_fd_, kDrainTimeoutMs)) {
+            // The unit is not taking data (#2030): the kernel queued the command and nothing clocked it out.
+            // Not a removed node, so no loss latch; the poll's fault latch and staleness bound decide.
+            throw AlpacaException("Q-Focuser on " + config_.serial_port +
+                                      " is not taking data (USB endpoint stalled); unplug and replug it",
+                                  AlpacaError::DriverException);
+        }
         static const char kick = '\n';
         (void)util::tty_write_all(serial_fd_, &kick, sizeof(kick));
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -684,6 +700,7 @@ bool QFocuserProtocolWrapper::is_connected() const { return impl_->is_connected(
 bool QFocuserProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
 std::int32_t QFocuserProtocolWrapper::get_position() { return impl_->get_position(); }
 QFocuserTelemetry QFocuserProtocolWrapper::get_telemetry() { return impl_->get_telemetry(); }
+QFocuserTelemetry QFocuserProtocolWrapper::get_telemetry(int timeout_ms) { return impl_->get_telemetry(timeout_ms); }
 void QFocuserProtocolWrapper::move_to(std::int32_t position) { impl_->move_to(position); }
 void QFocuserProtocolWrapper::halt() { impl_->halt(); }
 void QFocuserProtocolWrapper::set_reverse(bool reversed) { impl_->set_reverse(reversed); }

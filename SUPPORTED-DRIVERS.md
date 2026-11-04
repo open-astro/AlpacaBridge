@@ -522,7 +522,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested model**: Q-Focuser High Precision (firmware 20231207, board 208) on Linux arm64, ConformU 4.5.1: 0 errors, 0 issues, all members within timing targets
 - **Link loss**: if the USB cable is pulled mid-session, the next read fails with `NotConnected`, `Connected` reads false, and the port is released so a replugged focuser re-enumerates under the same name. Set `Connected` true again to reconnect.
 - **Not supported**: `StepSize` (hardware does not expose microns), temperature compensation
-- **Protocol quirks**: no moving flag, so `IsMoving` is derived from position versus target with a 1.5 s stall grace; position and telemetry are served from short caches (100 ms / 1 s) so `DeviceState` costs at most two serial round trips (one for position/is-moving, one more for temperature when the 1 s cache is cold).
+- **Protocol quirks**: no moving flag, so `IsMoving` is derived from position versus target with a 1.5 s stall grace; `Position`, `IsMoving` and `Temperature` are served from a 250 ms state poll with no serial round trip at read time. The firmware answers no temperature/voltage telemetry for about 10 s after a move, so telemetry is polled best effort (once a second while idle, backed off after a miss) and the last reading is kept; `Temperature` reports an error only once the reading is 30 s old.
+- **Temperature probe**: with nothing in the external probe socket the firmware reports a sentinel (about -111 C), which the driver refuses as `PropertyNotImplemented` ("No external temperature probe is plugged in..."); set `temperatureSource` to the controller board to read its sensor instead. A unit plugged into USB before its 12 V supply can stop taking USB data until it is replugged; the driver now fails the connect at once ("not taking data") instead of hanging.
 
 </details>
 

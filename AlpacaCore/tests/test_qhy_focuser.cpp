@@ -285,6 +285,34 @@ TEST_CASE("QHY Q-Focuser Driver - Hold settings skipped on USB power", "[qhy][fo
     driver->set_connected(false);
 }
 
+// #2032: with nothing in the probe socket the firmware reports about -111 C, which is a sentinel, not a reading.
+TEST_CASE(
+    "QHY Q-Focuser Driver - No external probe: Temperature is PropertyNotImplemented and the board sensor still "
+    "answers",
+    "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    fake.set_external_probe(false);
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), {});
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    require_alpaca_error([&]() { driver->get_temperature(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    // DeviceState omits what its getter refuses; the rest is still there.
+    bool has_position = false, has_temperature = false;
+    for (const auto& entry : driver->get_device_state()) {
+        if (entry.name == "Position") has_position = true;
+        if (entry.name == "Temperature") has_temperature = true;
+    }
+    CHECK(has_position);
+    CHECK_FALSE(has_temperature);
+    driver->set_connected(false);
+
+    alpacacore::vendor::qhy::QFocuserSettings settings;
+    settings.temperature_source = "chip";
+    auto chip = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), settings);
+    REQUIRE(alpacacore::test::settle_connected(*chip, true, std::chrono::seconds(10)));
+    CHECK(chip->get_temperature() == Catch::Approx(18.727));
+    chip->set_connected(false);
+}
+
 TEST_CASE("QHY Q-Focuser Driver - Absent port fails connect with NotConnected", "[qhy][focuser][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, kAbsentPort);
     require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);

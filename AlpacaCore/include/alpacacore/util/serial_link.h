@@ -232,6 +232,28 @@ inline bool tty_write_all(int fd, const std::string& data, int timeout_ms = 2000
     return tty_write_all(fd, data.data(), data.size(), timeout_ms);
 }
 
+/**
+ * @brief Waits until the tty's transmit queue is empty, at most @p timeout_ms.
+ *
+ * tcdrain() has no timeout: a USB CDC device whose bulk OUT endpoint has stopped taking data (a
+ * Q-Focuser enumerated without its 12 V supply, #2030) parks it forever, with the port held and
+ * every later connect queued behind it. This polls the queue depth (TIOCOUTQ) instead. True once
+ * the queue is empty; on the deadline it discards the queued bytes (TCOFLUSH) and returns false,
+ * so the caller fails the exchange. A tty whose driver cannot report its queue counts as drained.
+ */
+inline bool tty_drain_bounded(int fd, int timeout_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
+    int pending = 0;
+    for (;;) {
+        if (::ioctl(fd, TIOCOUTQ, &pending) != 0) return true;
+        if (pending <= 0) return true;
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        (void)::poll(nullptr, 0, 2);  // 2 ms, the shape of a bounded sleep on a header with poll.h
+    }
+    ::tcflush(fd, TCOFLUSH);
+    return false;
+}
+
 /// Adjusts the line settings SerialLink applies: baud, framing, flow control.
 /// VMIN/VTIME are ignored (the fd is non-blocking).
 using SerialLineConfigure = std::function<void(struct termios&)>;
