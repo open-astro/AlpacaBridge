@@ -209,22 +209,25 @@ TEST_CASE("iOptron iEAF Focuser Driver - the status cache ages by the TaskClock"
     driver->set_connected(false);
 }
 
-// Parameter validation precedes the connection check (ASCOM precedence).
-TEST_CASE("iOptron iEAF Focuser Driver - move range is InvalidValue even while disconnected",
+// A position is never refused: the connection check is the first thing a Move does (issue #2028).
+TEST_CASE("iOptron iEAF Focuser Driver - move is NotConnected while disconnected, whatever the position",
           "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
-    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { driver->move(99999 + 1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->move(99999 + 1); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->move(1000); }, alpacacore::AlpacaError::NotConnected);
 }
 
-TEST_CASE("iOptron iEAF Focuser Driver - move range over the fake", "[ioptron][focuser][unit]") {
+// ConformU moves below 0 and above MaxStep and expects the focuser at that limit (issue #2028).
+TEST_CASE("iOptron iEAF Focuser Driver - A move outside 0..MaxStep goes to that limit", "[ioptron][focuser][unit]") {
     alpacacore::test::FakeIoptronIeaf fake;
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { driver->move(99999 + 1); }, alpacacore::AlpacaError::InvalidValue);
-    CHECK(fake.count(":FM") == 0);
+    driver->move(-1);
+    CHECK(fake.position() == 0);  // the limit, not the request
+    driver->move(99999 + 1);
+    CHECK(fake.position() == 99999);
+    CHECK(fake.count(":FM") == 2);
     driver->set_connected(false);
 }
 

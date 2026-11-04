@@ -22,6 +22,7 @@
 #include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -302,9 +303,10 @@ public:
 
     void move(int position) override {
         ensure_connected();
-        if (position < 0 || position > settings_.max_step) {
-            throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
-        }
+        // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
+        // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, issue #2028). The clamp is
+        // pure arithmetic, so a faulted link is still refused below with the fault text.
+        position = std::clamp(position, 0, std::max(settings_.max_step, 0));
         (void)served_frame();  // refused while the link is faulted or lost
         // Hold status_mutex_ across move_to() so two concurrent moves cannot
         // reach the device in one order while the frame records the other (see

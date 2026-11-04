@@ -312,10 +312,15 @@ public:
 
     void move(int position) override {
         ensure_connected();
-        int max_step = get_max_step();
-        if (position < 0 || position > max_step) {
-            throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
+        const int max_step = get_max_step();
+        if (max_step <= 0) {
+            // The unit stores max step 0 and none is configured: every Move is refused until Max Step is set.
+            throw AlpacaException("The EAF's max step is 0: set Max Step in the device config",
+                                  AlpacaError::InvalidValue);
         }
+        // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
+        // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, issue #2028).
+        position = std::clamp(position, 0, max_step);
         // Decision 0009 rule 1: a latched fault refuses the move with its text; halt() stays allowed.
         if (const std::string fault = status_cache_.fault(); !fault.empty()) {
             throw AlpacaException("ZWO EAF communications compromised: " + fault, AlpacaError::DriverException);

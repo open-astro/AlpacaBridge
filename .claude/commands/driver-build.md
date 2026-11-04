@@ -651,7 +651,7 @@ These three test cases catch the bugs that cause ConformU failures. They run wit
    - ConformU specifically tests boundary values. Device-type examples:
      - Telescope: RA outside [0, 24), Dec outside [-90, 90], site elevation outside [-300, 10000], site latitude outside [-90, 90], site longitude outside [-180, 180], `SlewSettleTime` negative, `PulseGuide` with negative duration
      - Camera: `StartExposure` with negative duration, `BinX`/`BinY` outside [1, MaxBinX/MaxBinY], `Gain` outside [GainMin, GainMax]
-     - Focuser: `Move` beyond `MaxStep`, `Move` with negative position
+     - Focuser: none for `Move`. A `Move` beyond `MaxStep` or below 0 clamps to that limit (ConformU expects the focuser there, not an `InvalidValue`; the shared rule is in `ascom-contract.instructions.md`, #2028), so the case asserts the limit on the wire and the sweep entry is `with_clamping_focuser`
      - Rotator: `MoveAbsolute` outside [0, 360)
      - Switch: operations with switch ID outside [0, MaxSwitch)
    - All test files use the `require_alpaca_error` helper to verify both exception type and error code:
