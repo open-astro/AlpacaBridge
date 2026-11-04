@@ -1281,6 +1281,7 @@ bool CelestronCgxTelescopeDriver::get_slewing() const {
     if (stop_pending_ || stop_slot_.running()) return true;
     std::lock_guard<std::mutex> lock(mutex_);
     require_connected();
+    require_healthy_transport();  // Again under the lock: a fault after the first check must not read a cached value.
     if (stop_pending_ || stop_slot_.running()) return true;
     if (const auto failure = stop_slot_.last_failure())
         throw AlpacaException("Celestron CGX stop failed: " + *failure, AlpacaError::DriverException);
