@@ -770,7 +770,8 @@ int main() {
                 ++returned;
             });
         }
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        // Generous for a loaded CI runner: a parked caller never returns, so it still fails.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         while (returned < kLate && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
