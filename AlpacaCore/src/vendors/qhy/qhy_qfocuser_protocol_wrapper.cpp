@@ -268,7 +268,11 @@ static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
         // attempt rather than only on the next one. Without it the probe burns
         // the full kProbeTimeoutMs on attempt 0 on real hardware (~2 s per
         // candidate port); the kick brings it back to the handshake latency.
-        if (!util::tty_drain_bounded(fd, kDrainTimeoutMs)) continue;  // not taking data: not this device (#2030)
+        if (!util::tty_drain_bounded(fd, kDrainTimeoutMs)) {
+            // Not taking data: not this device, or a stalled Q-Focuser (#2030); the next attempt tries again.
+            ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser probe: the port is not taking data (USB endpoint stalled); skipped");
+            continue;
+        }
         static const char kick = '\n';
         (void)util::tty_write_all(fd, &kick, sizeof(kick));
         bool link_dead = false;
@@ -416,6 +420,7 @@ public:
 
         QFocuserDeviceInfo info;
         bool success = false;
+        std::string last_error;  // the last attempt's reason, carried into the refusal the client reads
         in_connect_ = true;
         for (int attempt = 0; attempt < kHandshakeRetries && !success; ++attempt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(attempt == 0 ? 100 : 500));
@@ -425,7 +430,9 @@ public:
                 // ({"idx":-1}) message before it services the command.
                 auto fields = transact_locked("{\"cmd_id\":1}", kCmdVersion, kHandshakeTimeoutMs);
                 success = parse_device_info(fields, info);
+                if (!success) last_error = "the reply carried no version";
             } catch (const std::exception& e) {
+                last_error = e.what();
                 ALPACA_LOG_WARN(kLogTag,
                                 "Q-Focuser handshake attempt " + std::to_string(attempt + 1) + " failed: " + e.what());
             }
@@ -434,7 +441,7 @@ public:
         if (!success) {
             close_port_locked();
             throw AlpacaException("Q-Focuser handshake failed after " + std::to_string(kHandshakeRetries) +
-                                      " attempts on " + config_.serial_port,
+                                      " attempts on " + config_.serial_port + ": " + last_error,
                                   AlpacaError::NotConnected);
         }
 
@@ -607,8 +614,9 @@ private:
             if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
             throw AlpacaException("Q-Focuser write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-        // tcdrain forces the command out as its OWN USB OUT packet before the
-        // kick is written; without it the kernel coalesces the command and
+        // The bounded drain (util::tty_drain_bounded) forces the command out as
+        // its OWN USB OUT packet before the kick is written; without it the
+        // kernel coalesces the command and
         // the kick into one packet and the reply is never clocked out (the
         // device only transmits on a packet boundary). Draining then kicking
         // brings the reply back in ~1 ms on a Raspberry Pi, versus the ~150 ms
