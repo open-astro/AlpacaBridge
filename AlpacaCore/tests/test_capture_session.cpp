@@ -1159,3 +1159,104 @@ TEST_CASE("CaptureSession - a refused body thread does not restore state over a 
     CHECK_FALSE(h.session->image_ready());  // the closed session stays cleared
     CHECK_FALSE(h.session->busy());
 }
+
+// Falsified by: capture_session.h start() using margin_ instead of watchdog_margin for the deadline (#1979).
+TEST_CASE("CaptureSession - a per-start margin sets the watchdog deadline", "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(1.0, sdk_blocked_body(p, sdk), 10s);
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+
+    h.clock.advance(10999ms);  // 1 s exposure + 10 s margin, less 1 ms; the constructor margin would end it at 3 s
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    CHECK_FALSE(h.session->failure().has_value());
+    h.clock.advance(1ms);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    REQUIRE(h.session->failure().has_value());
+    CHECK(h.session->failure()->find("did not complete before its deadline") != std::string::npos);
+}
+
+// Falsified by: capture_session.h start() defaulting watchdog_margin to something other than margin_ (#1979).
+TEST_CASE("CaptureSession - a start without a margin keeps the constructor margin", "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(1.0, sdk_blocked_body(p, sdk));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+
+    h.clock.advance(2999ms);  // 1 s exposure + kMargin, less 1 ms
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    CHECK_FALSE(h.session->failure().has_value());
+    h.clock.advance(1ms);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK(h.session->failure().has_value());
+}
+
+// Falsified by: capture_session.h drop `const` from margin_ and have start() store watchdog_margin into it (#1979).
+TEST_CASE("CaptureSession - a per-start margin does not carry over to the next start", "[util][capture-session]") {
+    Harness h;
+    auto first = std::make_shared<Probe>();
+    h.session->start(1.0, polling_body(first), 10s);
+    REQUIRE(eventually([&] { return first->entered.load(); }));
+    h.session->abort();
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+
+    auto p = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(1.0, sdk_blocked_body(p, sdk));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    h.clock.advance(2999ms);
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    h.clock.advance(1ms);  // 3 s, not 11 s
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK(h.session->failure().has_value());
+}
+
+// Falsified by: capture_session.h drop `const` from margin_ and have start() write watchdog_margin into it before
+// require_startable_locked() (#1979): the next start without a margin then gets 61 s, not 3 s.
+TEST_CASE("CaptureSession - a refused start leaves the margin alone", "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(1.0, sdk_blocked_body(p, sdk));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+
+    auto second = std::make_shared<Probe>();
+    CHECK(error_of([&] { h.session->start(1.0, instant_body(second, 1), 60s); }) == AlpacaError::InvalidOperation);
+    CHECK_FALSE(second->entered);
+    h.clock.advance(2999ms);
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    h.clock.advance(1ms);  // still the running exposure's 3 s deadline
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK(h.session->failure().has_value());
+    sdk->open();
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+
+    // The refused start's 60 s did not stick: the next start without a margin ends at 3 s.
+    auto third = std::make_shared<Probe>();
+    auto sdk3 = h.gate();
+    h.session->start(1.0, sdk_blocked_body(third, sdk3));
+    REQUIRE(eventually([&] { return third->entered.load(); }));
+    h.clock.advance(2999ms);
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    h.clock.advance(1ms);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK(h.session->failure().has_value());
+}
+
+// Falsified by: capture_session.h start() taking the larger of watchdog_margin and margin_ (#1979).
+TEST_CASE("CaptureSession - a shorter per-start margin ends the exposure earlier", "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(1.0, sdk_blocked_body(p, sdk), 500ms);
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+
+    h.clock.advance(1499ms);
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    CHECK_FALSE(h.session->failure().has_value());
+    h.clock.advance(1ms);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK(h.session->failure().has_value());
+}

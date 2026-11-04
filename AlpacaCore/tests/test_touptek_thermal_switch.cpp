@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 #include <alpacacore/version.h>
 
@@ -157,7 +158,8 @@ TEST_CASE("ToupTek Thermal Switch Driver - Connected names, descriptions and sta
 
     // Every element is writable (dew heater, fan, tail LED); no read-only id exists to test.
     CHECK(driver->get_switch_description(0) == "ToupTek camera anti-fog dew heater level (FakeCam One)");
-    CHECK(driver->get_switch_description(1) == "ToupTek camera radiator fan speed (FakeCam One)");
+    CHECK(driver->get_switch_description(1) ==
+          "ToupTek camera radiator fan speed; it cannot be turned off while the cooler is on (FakeCam One)");
     for (int id = 0; id < 3; ++id) {
         CHECK(driver->get_can_write(id));
         CHECK(driver->get_state_change_complete(id));
@@ -166,7 +168,8 @@ TEST_CASE("ToupTek Thermal Switch Driver - Connected names, descriptions and sta
     driver->set_switch_name(1, "Radiator");
     CHECK(driver->get_switch_name(1) == "Radiator");
     CHECK(driver->get_switch_name(0) == "DewHeater");
-    CHECK(driver->get_switch_description(1) == "ToupTek camera radiator fan speed (FakeCam One)");
+    CHECK(driver->get_switch_description(1) ==
+          "ToupTek camera radiator fan speed; it cannot be turned off while the cooler is on (FakeCam One)");
 
     for (const int id : {-1, 3}) {
         require_alpaca_error([&]() { (void)driver->get_switch_description(id); },
@@ -206,4 +209,46 @@ TEST_CASE("ToupTek Thermal Switch Driver - Connected capability and range member
         require_alpaca_error([&]() { (void)driver->get_switch_step(id); }, alpacacore::AlpacaError::InvalidValue);
     }
     driver->set_connected(false);
+}
+
+// Issue #1993: on the ATR2600M the firmware stops the cooler when the fan stops and leaves it off when the fan
+// returns, so the switch refuses fan off while the camera reports its cooler on. Falsified by:
+// touptek_thermal_switch_driver.cpp write_element_value() sending put_fan(0) without the cooler_running_locked() check.
+TEST_CASE("ToupTek Thermal Switch Driver - fan off is refused while the cooler runs", "[touptek][switch][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    auto camera = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    camera->set_connected(true);
+    thermal->set_connected(true);
+    REQUIRE(camera->get_connected());
+    REQUIRE(thermal->get_connected());
+    REQUIRE(thermal->get_switch_name(1) == "Fan");
+
+    camera->set_cooler_on(true);
+    REQUIRE(camera->get_cooler_on());
+    require_alpaca_error([&]() { thermal->set_switch_value(1, 0.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { thermal->set_switch(1, false); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(camera->get_cooler_on());  // still cooling
+    CHECK(thermal->get_switch_value(1) > 0.0);
+    try {
+        thermal->set_switch_value(1, 0.0);
+        FAIL("fan off was accepted while the cooler runs");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(std::string(e.what()).find("Turn the cooler off") != std::string::npos);
+    }
+    // Other fan speeds and the other elements still write while cooling.
+    thermal->set_switch_value(1, 3.0);
+    CHECK(thermal->get_switch_value(1) == 3.0);
+    thermal->set_switch_value(0, 5.0);
+    CHECK(thermal->get_switch_value(0) == 5.0);
+    CHECK(camera->get_cooler_on());
+
+    // With the cooler off, the fan turns off as before.
+    camera->set_cooler_on(false);
+    thermal->set_switch_value(1, 0.0);
+    CHECK(thermal->get_switch_value(1) == 0.0);
+
+    thermal->set_connected(false);
+    camera->set_connected(false);
 }

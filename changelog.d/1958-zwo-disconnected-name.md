@@ -1,0 +1,2 @@
+### Fixed
+- **ZWO camera** (AlpacaCore): with several ZWO cameras, a disconnected camera's Devices card no longer takes the model name of another camera the SDK has given the same camera id while the bound camera is unplugged or swapped; the card keeps the entry's stored model, and shows it rather than the generic "ZWO Camera" when the SDK has not answered (issue #1958). Only the name was wrong: a Connect already binds the camera by serial.

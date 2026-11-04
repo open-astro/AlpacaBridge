@@ -2035,3 +2035,41 @@ TEST_CASE("Player One Camera Driver - A name refresh that overlapped a connect d
     CHECK(camera->get_name() == connect_name);
     camera->set_connected(false);
 }
+
+// Issue #1998: on the Uranus-C PRO a Disconnect closes the camera and the next open's POAInitCamera restores the
+// camera's defaults, so a client that reconnected mid-session came back with the cooler off and the setpoint at 0.
+// The driver writes back what a client set in this session; nothing is persisted, and a driver that was never told
+// writes nothing. Falsified by: playerone_camera_driver.cpp set_connected() not calling restore_session_cooler().
+TEST_CASE("Player One Camera Driver - a reconnect keeps the cooler state a client set", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_temperature_control_available(true);
+    {
+        auto untouched = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+        untouched->set_connected(true);
+        untouched->set_connected(false);
+        untouched->set_connected(true);
+        CHECK(sdk.cooler_writes() == 0);  // no client set anything: the camera keeps its own defaults
+        CHECK(sdk.target_writes() == 0);
+        CHECK_FALSE(untouched->get_cooler_on());
+        untouched->set_connected(false);
+    }
+
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    driver->set_set_ccd_temperature(-10.0);
+    driver->set_cooler_on(true);
+    REQUIRE(driver->get_cooler_on());
+
+    driver->set_connected(false);
+    driver->set_connected(true);  // the open runs POAInitCamera, which turned the cooler off
+    CHECK(driver->get_cooler_on());
+    CHECK(driver->get_set_ccd_temperature() == Catch::Approx(-10.0));
+
+    // A client that turned the cooler off keeps it off across a reconnect too.
+    driver->set_cooler_on(false);
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_cooler_on());
+    CHECK(driver->get_set_ccd_temperature() == Catch::Approx(-10.0));
+    driver->set_connected(false);
+}

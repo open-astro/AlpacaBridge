@@ -48,6 +48,6 @@ void set_state_poll_spawn_for_testing(TelescopeDriver& driver, std::function<std
 void set_state_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 void poll_state_now_for_testing(TelescopeDriver& driver);
 /// Reads and clears the link-loss stamp (decision 0009 point 3); nullopt when none is held.
-std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at_for_testing(TelescopeDriver& driver);
+std::optional<util::TaskClock::clock::time_point> consume_link_lost_at_for_testing(TelescopeDriver& driver);
 
 }  // namespace alpacacore::vendor::celestron

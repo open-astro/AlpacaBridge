@@ -878,6 +878,61 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
     }
 
+    {
+        // case: parallel imagearray GETs that share one frame each get the whole frame on the wire (#1716)
+        constexpr int kCameraNumber = 9899;
+        constexpr int kWidth = 512;
+        constexpr int kHeight = 512;
+        constexpr int kClients = 3;
+        std::vector<std::int32_t> pixels(static_cast<std::size_t>(kWidth) * kHeight);
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            pixels[i] = static_cast<std::int32_t>(i * 7);
+        }
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        camera->set_image_array({std::move(pixels), kWidth, kHeight, 2});
+        // The first GET's build sits in the getter this long; the others start once it is there, so they join it.
+        camera->image_array_delay = std::chrono::milliseconds(2000);
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(camera));
+        const std::size_t payload_size = 44 + static_cast<std::size_t>(kWidth) * kHeight * sizeof(std::int32_t);
+
+        std::vector<std::string> bodies(kClients);
+        std::vector<std::thread> clients;
+        for (int i = 0; i < kClients; ++i) {
+            if (i == 1) {
+                while (camera->image_getter_calls.load() == 0) std::this_thread::yield();
+            }
+            clients.emplace_back([&, i] {
+                int fd = connect_local(port);
+                EXPECT(fd >= 0);
+                timeval timeout{};
+                timeout.tv_sec = 10;
+                EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+                std::string carry;
+                send_all(fd, "GET /api/v1/camera/" + std::to_string(kCameraNumber) +
+                                 "/imagearray?ClientTransactionID=" + std::to_string(40 + i) +
+                                 " HTTP/1.1\r\nHost: localhost\r\nAccept: application/imagebytes\r\n\r\n");
+                const std::string response = read_one_response(fd, carry);
+                const auto headers_end = response.find("\r\n\r\n");
+                EXPECT(headers_end != std::string::npos);
+                EXPECT(response.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
+                bodies[static_cast<std::size_t>(i)] = response.substr(headers_end + 4);
+                ::close(fd);
+            });
+        }
+        for (auto& client : clients) {
+            client.join();
+        }
+        EXPECT(camera->image_getter_calls == 1);
+        for (int i = 0; i < kClients; ++i) {
+            const auto& body = bodies[static_cast<std::size_t>(i)];
+            EXPECT(body.size() == payload_size);
+            EXPECT(body.size() > 8 && static_cast<unsigned char>(body[8]) == 40 + i);  // its own ClientTransactionID
+            EXPECT(body.compare(44, std::string::npos, bodies[0], 44, std::string::npos) == 0);
+        }
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
     // Per-address connection cap: with max_connections_per_ip = 2, a third
     // connection from 127.0.0.1 is closed with no response while 127.0.0.2
     // is still served, and a slot frees when one of the two closes.

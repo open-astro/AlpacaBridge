@@ -676,9 +676,59 @@ int main() {
         EXPECT(on.status()["CheckEnabled"] == true);
     }
 
-    // --- single flight: a check arriving while another is fetching waits for
-    // it and returns its result without a second fetch.
+    // --- credentials in an operator's mirror URL never reach a client or the
+    // log (issue #1765, decision 0007 rule 8): the userinfo part is removed
+    // from PackagesUrl, the release links and every check error text.
     {
+        // case: mirror credentials are removed from the status, the release links and the check errors
+        using alpacahttp::util::redact_url_userinfo;
+        EXPECT(redact_url_userinfo("https://user:secret@mirror.example/dists/Packages") ==
+               "https://mirror.example/dists/Packages");
+        EXPECT(redact_url_userinfo("https://secret@mirror.example:8443/x") == "https://mirror.example:8443/x");
+        // Only the authority is userinfo: an '@' in the path or query stays.
+        EXPECT(redact_url_userinfo("https://mirror.example/a@b?c=d@e") == "https://mirror.example/a@b?c=d@e");
+        EXPECT(redact_url_userinfo("https://u:p@w@mirror.example/x") == "https://mirror.example/x");
+        EXPECT(redact_url_userinfo("https://mirror.example/x") == "https://mirror.example/x");
+        EXPECT(redact_url_userinfo("not a url") == "not a url");
+        EXPECT(redact_url_userinfo("") == "");
+
+        const std::string url = "https://user:secret@mirror.example/dists/Packages";
+        auto backend = std::make_unique<FakeBackend>();
+        auto* fake = backend.get();
+        fake->index = "Package: other\nVersion: 9.9.9\n";
+        SoftwareUpdateManager manager(settings("4.1.0", url, "https://user:secret@mirror.example/notes/{version}.md",
+                                               "https://user:secret@mirror.example/release/{version}"),
+                                      std::move(backend));
+        EXPECT(manager.status()["PackagesUrl"] == "https://mirror.example/dists/Packages");
+        // The fetch itself still uses the credentials.
+        bool threw = false;
+        try {
+            manager.check();
+        } catch (const SoftwareUpdateError& e) {
+            threw = true;
+            EXPECT(std::string(e.what()).find("secret") == std::string::npos);
+        }
+        EXPECT(threw);
+        EXPECT(fake->last_url == url);
+        EXPECT(manager.status().dump().find("secret") == std::string::npos);
+
+        // A fetch failure whose backend text names the URL, then a check that
+        // finds an update: the links in the status carry no credentials either.
+        fake->index = "Package: alpacabridge\nVersion: 4.2.0\n";
+        fake->notes = "# notes";
+        const auto ok = manager.check();
+        EXPECT(ok["UpdateAvailable"] == true);
+        EXPECT(ok["CheckInProgress"] == false);  // the check's own answer: it is finished
+        EXPECT(ok["ReleaseUrl"] == "https://mirror.example/release/4.2.0");
+        EXPECT(ok["ReleaseNotesUrl"] == "https://mirror.example/notes/4.2.0.md");
+        EXPECT(ok.dump().find("secret") == std::string::npos);
+    }
+
+    // --- a check that arrives while another is fetching does not park its
+    // caller (an HTTP worker) on the first one (issue #1765): it returns the
+    // current status at once, with CheckInProgress set, and fetches nothing.
+    {
+        // case: a check that arrives while another is fetching returns at once with CheckInProgress
         class BlockingBackend final : public SoftwareUpdateBackend {
         public:
             std::mutex m;
@@ -700,27 +750,49 @@ int main() {
         };
         auto backend = std::make_unique<BlockingBackend>();
         auto* blocking = backend.get();
-        // No notes template: exactly one fetch per check.
         SoftwareUpdateManager manager(settings("4.1.0", "u"), std::move(backend));
-        std::thread first([&] { manager.check(); });
+        EXPECT(manager.status()["CheckInProgress"] == false);
+        nlohmann::json first_result;
+        std::thread first([&] { first_result = manager.check(); });
         {
             std::unique_lock<std::mutex> lock(blocking->m);
             blocking->cv.wait(lock, [&] { return blocking->fetches == 1; });
         }
-        nlohmann::json second_result;
-        std::thread second([&] { second_result = manager.check(); });
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        EXPECT(manager.status()["CheckInProgress"] == true);
+        // Several more checks while the first is parked: each returns now.
+        constexpr int kLate = 4;
+        std::atomic<int> returned{0};
+        std::vector<nlohmann::json> late(kLate);
+        std::vector<std::thread> callers;
+        for (int i = 0; i < kLate; ++i) {
+            callers.emplace_back([&, i] {
+                late[static_cast<std::size_t>(i)] = manager.check();
+                ++returned;
+            });
+        }
+        // Generous for a loaded CI runner: a parked caller never returns, so it still fails.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (returned < kLate && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        EXPECT(returned == kLate);
         {
             std::lock_guard<std::mutex> lock(blocking->m);
-            EXPECT(blocking->fetches == 1);  // the second check did not fetch
+            EXPECT(blocking->fetches == 1);
             blocking->release = true;
         }
         blocking->cv.notify_all();
         first.join();
-        second.join();
-        EXPECT(blocking->fetches == 1);
-        EXPECT(second_result["LatestVersion"] == "4.2.0");
-        EXPECT(second_result["UpdateAvailable"] == true);
+        for (auto& t : callers) t.join();
+        for (const auto& status : late) {
+            EXPECT(status["CheckInProgress"] == true);
+            EXPECT(status["LatestVersion"].is_null());
+        }
+        EXPECT(first_result["CheckInProgress"] == false);
+        EXPECT(first_result["LatestVersion"] == "4.2.0");
+        const auto after = manager.status();
+        EXPECT(after["CheckInProgress"] == false);
+        EXPECT(after["LatestVersion"] == "4.2.0");
     }
 
     // --- install() makes its sd-bus calls outside the mutex and refuses a

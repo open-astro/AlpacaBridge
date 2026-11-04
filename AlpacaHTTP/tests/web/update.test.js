@@ -61,6 +61,16 @@ test('a failed check wins over a stale result', () => {
         'Check failed: Update check failed: Could not resolve host: apt.openastro.net');
 });
 
+test('a check in progress says so, over a stale result or error', () => {
+    assert.strictEqual(
+        updateStatusText({ InstalledVersion: '4.1.0', LatestVersion: '4.2.0', UpdateAvailable: true,
+                           CheckError: 'timed out', CheckInProgress: true }),
+        'Checking for updates...');
+    assert.strictEqual(updateStatusText({ InstalledVersion: '4.1.0', CheckInProgress: false }), 'Not checked yet.');
+    assert.strictEqual(updateStatusText({ CheckEnabled: false, CheckInProgress: true }),
+                       'Checking for updates is turned off in the server configuration.');
+});
+
 test('installer states', () => {
     assert.strictEqual(installerStateText({ State: 'idle' }), '');
     assert.strictEqual(installerStateText(undefined), '');

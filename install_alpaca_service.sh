@@ -4,9 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_DIR="${ROOT_DIR}/AlpacaCore"
 HTTP_DIR="${ROOT_DIR}/AlpacaHTTP"
+# Udev rules, vendor libraries and the dialout/gpio groups, shared with build_and_run.sh (#1698).
+# shellcheck source=scripts/host_setup.sh
+source "${ROOT_DIR}/scripts/host_setup.sh"
 SERVICE_NAME="alpacahttp.service"
 CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
+ADD_DIALOUT="${ALPACA_ADD_DIALOUT:-ON}"
+ADD_GPIO="${ALPACA_ADD_GPIO:-ON}"
 GIT_PULL="${ALPACA_GIT_PULL:-OFF}"
 CLEAN_BUILD="${ALPACA_CLEAN_BUILD:-OFF}"
 
@@ -17,6 +22,8 @@ Usage: install_alpaca_service.sh <install|update|uninstall|status>
 Environment overrides:
   ALPACACORE_ENABLE_ALL_VENDORS=ON|OFF
   ALPACA_INSTALL_UDEV_RULES=ON|OFF
+  ALPACA_ADD_DIALOUT=ON|OFF       (add the user to dialout: serial devices)
+  ALPACA_ADD_GPIO=ON|OFF          (create the gpio group, add the user: ASIAIR power ports)
   ALPACA_GIT_PULL=ON|OFF          (update only)
   ALPACA_CLEAN_BUILD=ON|OFF       (install/update)
 USAGE
@@ -58,102 +65,14 @@ install_udev_rules() {
   if [[ "${INSTALL_UDEV_RULES}" != "ON" ]]; then
     return
   fi
+  host_setup_install_vendor_runtime "${CORE_DIR}"
+}
 
-  # Deduplicate rules by basename so multiple copies of the same file (e.g.
-  # the three copies of 85-qhyccd.rules inside the QHY SDK tree) only install
-  # once — matching the single-file-per-vendor pattern used by ZWO.
-  declare -A seen_rules
-  RULES_SRC=()
-  while IFS= read -r -d '' rule; do
-    base="$(basename "${rule}")"
-    if [[ -z "${seen_rules[${base}]+_}" ]]; then
-      seen_rules["${base}"]=1
-      RULES_SRC+=("${rule}")
-    fi
-  done < <(find "${CORE_DIR}/external" -name "*.rules" -type f -print0 | sort -z)
-
-  if [[ ${#RULES_SRC[@]} -eq 0 ]]; then
-    echo "No udev rules found under ${CORE_DIR}/external"
-  else
-    for rule in "${RULES_SRC[@]}"; do
-      echo "Installing udev rule: ${rule}"
-      sudo install -m 644 "${rule}" /etc/udev/rules.d/
-    done
-  fi
-
-  # QHY cameras require firmware files that the udev rules load via fxload.
-  local qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux_arm64_26.07.28"
-  if [[ -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
-    echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
-    sudo mkdir -p /lib/firmware/qhy
-    sudo cp -a "${qhy_sdk_dir}/lib/firmware/qhy/." /lib/firmware/qhy/
-
-    # The system fxload (from apt) does not support -t fx3 (FX3-based cameras).
-    # The QHY SDK ships its own fxload binary that does. Install it so the
-    # udev rule RUN+="/sbin/fxload -t fx3 ..." works correctly.
-    if [[ -f "${qhy_sdk_dir}/sbin/fxload" ]]; then
-      echo "Installing QHY SDK fxload (FX3-capable) to /sbin/fxload"
-      sudo install -m 755 "${qhy_sdk_dir}/sbin/fxload" /sbin/fxload
-    fi
-
-    # Install the QHY shared library so the server can find it at runtime.
-    if [[ -d "${qhy_sdk_dir}/usr/local/lib" ]]; then
-      echo "Installing QHY shared libraries to /usr/local/lib"
-      sudo cp -a "${qhy_sdk_dir}/usr/local/lib/libqhyccd.so"* /usr/local/lib/
-      sudo ldconfig
-    fi
-  fi
-
-  # Install ZWO ASI Camera shared library (used by SmartGuider via zwoasi)
-  local zwo_camera_lib_dir="${CORE_DIR}/external/ZWO/ASI_Camera_SDK/lib/linux/armv8"
-  if [[ -f "${zwo_camera_lib_dir}/libASICamera2.so" ]]; then
-    echo "Installing ZWO ASI Camera shared library to /usr/local/lib"
-    sudo cp -a "${zwo_camera_lib_dir}/libASICamera2.so"* /usr/local/lib/
-    sudo ldconfig
-  fi
-
-  # Install SVBONY Camera shared library
-  local svbony_lib_dir="${CORE_DIR}/external/SVBONY/lib/armv8"
-  if [[ -f "${svbony_lib_dir}/libSVBCameraSDK.so" ]]; then
-    echo "Installing SVBONY Camera shared library to /usr/local/lib"
-    sudo cp -a "${svbony_lib_dir}/libSVBCameraSDK.so"* /usr/local/lib/
-    sudo ldconfig
-  fi
-
-  # Install ToupTek Camera shared library (used by companion guiding software)
-  local touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260519/linux/arm64/glibc"
-  if [[ -f "${touptek_lib_dir}/libtoupcam.so" ]]; then
-    echo "Installing ToupTek Camera shared library to /usr/local/lib"
-    sudo cp -a "${touptek_lib_dir}/libtoupcam.so"* /usr/local/lib/
-    sudo ldconfig
-  fi
-
-  # Install Altair Camera shared library (ToupTek OEM SDK under Altair's name)
-  local altair_lib_dir="${CORE_DIR}/external/Altair/altaircamsdk.20260531/linux/arm64/glibc"
-  if [[ -f "${altair_lib_dir}/libaltaircam.so" ]]; then
-    echo "Installing Altair Camera shared library to /usr/local/lib"
-    sudo cp -a "${altair_lib_dir}/libaltaircam.so"* /usr/local/lib/
-    sudo ldconfig
-  fi
-
-  # Install Player One Camera shared library (SmartGuider dlopens this directly)
-  local playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64"
-  if [[ -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then
-    echo "Installing Player One Camera shared library to /usr/local/lib"
-    sudo cp -a "${playerone_lib_dir}/libPlayerOneCamera.so"* /usr/local/lib/
-    sudo ldconfig
-  fi
-
-  # Install Player One Phoenix Filter Wheel shared library
-  local playerone_pw_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64"
-  if [[ -f "${playerone_pw_lib_dir}/libPlayerOnePW.so" ]]; then
-    echo "Installing Player One Phoenix Filter Wheel shared library to /usr/local/lib"
-    sudo cp -a "${playerone_pw_lib_dir}/libPlayerOnePW.so"* /usr/local/lib/
-    sudo ldconfig
-  fi
-
-  sudo udevadm control --reload-rules
-  sudo udevadm trigger
+# The service runs as this user (write_service_unit), so it needs the same groups build_and_run.sh gives
+# it. Runs on every install and update; each step is a no-op when already done.
+ensure_device_groups() {
+  host_setup_ensure_dialout "${ADD_DIALOUT}"
+  host_setup_ensure_gpio "${ADD_GPIO}"
 }
 
 clean_build_dir() {
@@ -258,6 +177,7 @@ case "${1:-}" in
     require_linux
     ensure_repo_paths
     install_udev_rules
+    ensure_device_groups
     build_projects
     write_service_unit
     start_service
@@ -270,6 +190,7 @@ case "${1:-}" in
     fi
     stop_service
     install_udev_rules
+    ensure_device_groups
     build_projects
     # Refresh the unit file so update installs pick up service-unit changes
     # (e.g. new LogsDirectory directives) and re-assert log directory ownership.

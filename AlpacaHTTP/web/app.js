@@ -2350,7 +2350,16 @@ async function updateCheckClicked() {
     btn.disabled = true;
     updateMessage('');
     try {
-        const status = await updateApi('check', 'POST');
+        let status = await updateApi('check', 'POST');
+        // Another tab's check is fetching: the server answers at once rather
+        // than holding a worker on it (issue #1765), so wait for that one here.
+        // A check takes at most two 15 s fetches.
+        for (let i = 0; status.CheckInProgress && i < 40; ++i) {
+            updateRender(status);
+            btn.disabled = true;  // updateRender re-enables it; keep it off until this wait ends
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            status = await updateApi('status', 'GET');
+        }
         updateRender(status);
     } catch (error) {
         updateMessage(error.message, true);

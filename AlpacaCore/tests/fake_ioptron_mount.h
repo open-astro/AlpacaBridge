@@ -68,6 +68,11 @@ public:
     /// firmware say "moving" with no GOTO issued, as during a pulse-guide or a slew started from the handset.
     void set_system_status(int status) { system_status_.store(status); }
 
+    /// Issue #2000, HAE29C firmware: an accepted GOTO reports status 2 (slewing, not tracking) until it lands, ":Q#"
+    /// stops it without turning tracking on (status 0), and ":ST1#" / ":ST0#" set status 1 / 0. Off by default: a
+    /// GOTO then lands at once and ":ST"/":Q" change no status, as before.
+    void set_goto_tracks_off(bool on) { goto_tracks_off_.store(on); }
+
     /// Where the ":GEP" read says the mount points, until a GOTO or a trim pulse moves it.
     void set_position(double ra_hours, double dec_degrees) {
         ra_units_.store(std::llround(ra_hours * 15.0 * 3600.0 * 100.0));
@@ -221,6 +226,15 @@ private:
             // Land at the target plus the firmware's final-approach error.
             ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_ * 100.0));
             dec_units_.store(pending_dec_);
+            if (goto_tracks_off_.load()) system_status_.store(2);
+            return "1";
+        }
+        if (goto_tracks_off_.load() && (cmd == ":Q#" || cmd == ":ST1#" || cmd == ":ST0#")) {
+            if (cmd == ":ST1#") {
+                system_status_.store(1);
+            } else if (cmd == ":ST0#" || system_status_.load() == 2) {
+                system_status_.store(0);
+            }
             return "1";
         }
         if (cmd.rfind(":ZQ", 0) == 0 || cmd.rfind(":ZS", 0) == 0) {
@@ -253,6 +267,7 @@ private:
     std::atomic<long long> dec_units_{0};
     std::atomic<bool> reject_goto_{false};
     std::atomic<bool> fail_reads_{false};
+    std::atomic<bool> goto_tracks_off_{false};
     FakeMountServer server_;
 };
 

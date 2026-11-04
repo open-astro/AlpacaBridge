@@ -753,10 +753,14 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect serializes with the s
 }
 
 #ifndef _WIN32
-// Issue #1457: a stop retry reconnects the port. Since #1456 the reconnect's
-// port claim waits out another device's probe (up to 20 s per attempt), so the
-// retry must not wait there; since #1759 it also runs with mutex_ free, so no
-// getter that takes mutex_ waits behind it.
+// Issue #1457: a stop retry must not wait for another device's probe on the
+// node. Since #1456 a port claim waits out such a probe (up to 20 s per
+// attempt); since #1759 the retry runs with mutex_ free, so no getter that
+// takes mutex_ waits behind it; since #1940 the retry resyncs the fd it
+// already holds and never reopens the port (decision 0009 rule 4), and a
+// pulled cable is a lost link at once (rule 2a), so a later stop fails
+// because the link is lost, with NotConnected. The probe claim below is the
+// wait the stop must never reach.
 TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for another device's probe",
           "[celestron][cgx][telescope][integration][issue1457]") {
     namespace util = alpacacore::util;
@@ -769,9 +773,9 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for a
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
 
-    // The adapter goes away: the first stop finds the node gone, which is a
-    // lost link at once (decision 0009 rule 2a, #1940): the wrapper releases
-    // the port claim and Slewing reads NotConnected.
+    // The adapter goes away: the first stop meets the hangup, which is a lost
+    // link at once (decision 0009 rule 2a): the wrapper closes the link and
+    // releases the port claim, the stop fails and Slewing reads NotConnected.
     mount.sever_link();
     CHECK_NOTHROW(driver->abort_slew());
     REQUIRE(wait_until([&] { return !driver->get_connected(); }, std::chrono::seconds(10)));
@@ -779,7 +783,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for a
     REQUIRE_FALSE(util::is_serial_port_in_use(path));
 
     // Another device's probe now holds the node for 5 s while a second stop
-    // is asked for: it is refused at once and reopens nothing.
+    // is asked for. The link is lost, so it fails at once with NotConnected
+    // and never reopens the port or waits for the probe.
     auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
     REQUIRE(probe);
     auto release = std::async(std::launch::async, [&probe] {
@@ -811,8 +816,9 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a tracking rollback does not wai
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
 
-    // The adapter goes away: the first tracking write fails, and its rollback
-    // reconnect finds the node gone, closes the link and releases the claim.
+    // The adapter goes away: the first tracking write meets the hangup, which
+    // closes the link and releases the claim; its rollback resyncs the closed
+    // fd and fails too.
     mount.sever_link();
     try {
         driver->set_tracking(false);
@@ -822,7 +828,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a tracking rollback does not wai
     REQUIRE_FALSE(util::is_serial_port_in_use(path));
 
     // Another device's probe holds the node for 5 s while a second tracking
-    // write fails and its rollback reconnects.
+    // write fails and its rollback resyncs the closed fd: nothing reopens the
+    // port, so nothing waits for the probe.
     auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
     REQUIRE(probe);
     auto release = std::async(std::launch::async, [&probe] {

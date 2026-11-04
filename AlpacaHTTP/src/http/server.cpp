@@ -1281,14 +1281,15 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
     // do not require a second full-sized HTTP response string.
     const std::string response_headers = response.to_header_string();
     const std::string& response_body = response.body();
-    const std::size_t response_bytes = response_headers.size() + response_body.size();
+    const std::string_view response_tail = response.body_tail();  // a shared camera frame (#1716)
+    const std::size_t response_bytes = response_headers.size() + response_body.size() + response_tail.size();
     const auto send_deadline =
         std::chrono::steady_clock::now() +
         (send_deadline_.count() > 0
              ? util::send_budget(response_bytes, send_deadline_, send_min_bytes_per_second_)
              : util::send_budget(response_bytes, std::chrono::seconds(kSendDeadlineSeconds), kSendMinBytesPerSecond));
     if (!util::socket_send_allv(conn.fd, response_headers.data(), response_headers.size(), response_body.data(),
-                                response_body.size(), send_deadline,
+                                response_body.size(), response_tail.data(), response_tail.size(), send_deadline,
                                 send_stall_.count() > 0
                                     ? send_stall_
                                     : std::chrono::milliseconds(std::chrono::seconds(kSocketTimeoutSeconds)))) {

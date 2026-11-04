@@ -362,6 +362,8 @@ public:
         hit("put_tec_enable");
         require_open(h);
         tec_on_ = v;
+        // ATR2600M (issue #1993): starting the cooler with the fan off turns the fan back on.
+        if (v && fan_ == 0) fan_ = 1;
     }
     bool get_tec_enable(HToupcam h) override {
         hit("get_tec_enable");
@@ -449,6 +451,8 @@ public:
         hit("put_fan");
         require_open(h);
         fan_ = v;
+        // ATR2600M (issue #1993): the firmware stops the cooler when the fan stops, and a fan restart leaves it off.
+        if (v == 0) tec_on_ = false;
     }
     int get_taillight(HToupcam h) override {
         hit("get_taillight");

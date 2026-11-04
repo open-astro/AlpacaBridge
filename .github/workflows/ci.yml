@@ -32,7 +32,8 @@
 #                  Unicode scan, docs drift and the scripts' self-tests, the
 #                  connect-error, serial-port, layering, stress-registration,
 #                  contract-sweep and ConformU-report checks, ShellCheck (plus
-#                  ci_preflight.sh --self-test), and node --check / node --test
+#                  ci_preflight.sh --self-test and scripts/test_host_setup.sh), and
+#                  node --check / node --test
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
 #
@@ -1338,6 +1339,12 @@ jobs:
       - name: ShellCheck - ci_preflight.sh self-test (bash 3.2 guards, quick-run SKIPs)
         if: ${{ !cancelled() }}
         run: ./scripts/ci_preflight.sh --self-test
+
+      - name: ShellCheck - host setup self-test (install script groups, setup stamp)
+        if: ${{ !cancelled() }}
+        # install_alpaca_service.sh install over shims (sudo records, runs nothing): the dialout and gpio
+        # groups and the udev rules build_and_run.sh also sets up, through scripts/host_setup.sh (#1698).
+        run: ./scripts/test_host_setup.sh
 
       - name: JavaScript - Syntax-check web UI JavaScript
         if: ${{ !cancelled() }}

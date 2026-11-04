@@ -1,0 +1,2 @@
+### Fixed (tests)
+- **GPhoto camera tests**: the case "the MLU exposure deadline includes the settle and the file wait" shared plain variables between the fake's hook on the exposure thread and the test thread. ThreadSanitizer reported a data race, and the last `CHECK` could read a value before the hook wrote it. The shared values are now atomic, and the test waits for a flag the hook sets after its last reading (issue #2005).

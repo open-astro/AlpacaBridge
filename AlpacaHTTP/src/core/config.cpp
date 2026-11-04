@@ -95,20 +95,7 @@ bool parse_bool_value(const std::string& value, bool& result) {
     return false;
 }
 
-bool parse_uint16_value(const std::string& value, std::uint16_t& result) {
-    try {
-        auto parsed = std::stoul(value);
-        if (parsed > std::numeric_limits<std::uint16_t>::max()) {
-            return false;
-        }
-        result = static_cast<std::uint16_t>(parsed);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-// A UDP/TCP port, 1-65535 (0 is not a usable discovery port). Digits only:
+// A UDP/TCP port, 1-65535 (0 would bind a random port no client can find). Digits only:
 // stoul would take "-5" as a huge unsigned value.
 bool parse_port_value(const std::string& value, std::uint16_t& result) {
     if (value.empty() || !std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c); }) ||
@@ -203,7 +190,12 @@ void Config::load_config_from_yaml(const std::string& config_path) {
 
         if (current_section == "http") {
             if (key == "port") {
-                parse_uint16_value(value, http_port_);
+                // Same rule as ALPACAHTTP_PORT and discovery.port (#1741): 0 would bind a random port no client can
+                // find, and a malformed value used to be dropped without a word.
+                if (!parse_port_value(value, http_port_)) {
+                    util::log_warning("Ignoring http.port '" + value + "': expected 1-65535; keeping " +
+                                      std::to_string(http_port_));
+                }
             } else if (key == "thread_pool_size") {
                 std::size_t parsed = 0;
                 if (parse_size_value(value, parsed)) {

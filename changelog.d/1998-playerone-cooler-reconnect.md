@@ -1,0 +1,2 @@
+### Fixed
+- **Player One camera** (AlpacaCore): a Disconnect and Connect no longer leaves a cooled camera with its cooler off and its setpoint at 0. The camera restores its defaults when it is opened again, so a client that reconnected mid-session (NINA after a USB hiccup, or a Connect toggle) lost its cooling without being told. The driver now writes back the `CoolerOn` and `SetCCDTemperature` a client set since the server started; nothing is saved, so a server restart still starts from the camera's own defaults (issue #1998).
