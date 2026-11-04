@@ -22,6 +22,7 @@
 #include <cmath>
 #include <functional>
 #include <future>
+#include <string>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -76,6 +77,17 @@ struct TelemetryRig {
 
     int reads(std::uint8_t axis) const { return mount.count_command(axis, 0x01); }
 };
+
+// The link fault itself (decision 0009 rule 1), not a later guard that the same fault also trips.
+void require_fault(const std::function<void()>& read) {
+    try {
+        read();
+        FAIL_CHECK("no throw");
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(error.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(error.what()).find("communications compromised") != std::string::npos);
+    }
+}
 }  // namespace
 
 TEST_CASE("CGX coordinate getters and DeviceState serve the polled frame without touching the wire",
@@ -223,10 +235,8 @@ TEST_CASE("CGX a failed poll keeps the frame and the getters raise the fault", "
     rig.mount.drop_next_reply(0x11, 0x01, false);
     rig.poll_now();
     const int ra = rig.reads(0x10), dec = rig.reads(0x11);
-    require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); },
-                         alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&] { static_cast<void>(rig.driver->get_right_ascension()); },
-                         alpacacore::AlpacaError::DriverException);
+    require_fault([&] { static_cast<void>(rig.driver->get_declination()); });
+    require_fault([&] { static_cast<void>(rig.driver->get_right_ascension()); });
     CHECK(rig.driver->get_connected());
     CHECK(rig.reads(0x10) == ra);
     CHECK(rig.reads(0x11) == dec);
@@ -269,7 +279,7 @@ TEST_CASE("CGX a known fault refuses the frame and a recovered link still needs 
                                                    [&] { static_cast<void>(rig.driver->get_altitude()); },
                                                    [&] { static_cast<void>(rig.driver->get_azimuth()); },
                                                    [&] { static_cast<void>(rig.driver->get_side_of_pier()); }};
-    for (const auto& read : reads) require_alpaca_error(read, alpacacore::AlpacaError::DriverException);
+    for (const auto& read : reads) require_fault(read);
     CHECK(rig.reads(0x10) == ra);
     CHECK(rig.reads(0x11) == dec);
     // The next poll recovers the stream, not the reference (decision 0011 rule 2).

@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -223,24 +224,35 @@ TEST_CASE("Celestron CGX link loss - a fault cleared inside the bound keeps the 
 TEST_CASE("Celestron CGX link loss - a stop in flight at the loss never reopens the port",
           "[celestron][cgx][link-loss]") {
     LinkLossRig rig;
-    rig.latch_fault();
-    const auto stop_requests = [&] {
-        int count = 0;
-        for (const auto& frame : rig.mount.requests()) count += frame.command == 0x24 ? 1 : 0;
-        return count;
-    };
-    // The muted mount times out every stop ACK; the stop worker resynchronizes and retries (three rounds).
+    rig.driver->set_tracking(true);
+    rig.mount.set_auto_complete_motions(false);
+    rig.mount.set_hold_guide_until_completed(true);
+    const auto waits = rig.clock.wait_count();
+    rig.driver->pulse_guide(0, 1000);
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, 2s));  // the guide body waits on the clock
+    // A Tracking write takes the transition lock and joins the guide; the cancelled guide sleeps on the task
+    // clock while the mount reports it active.
+    auto tracking = std::async(std::launch::async, [&] { rig.driver->set_tracking(false); });
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 2, 2s));
+    // AbortSlew's stop worker waits on the clock for that lock, so it sends nothing until the next clock step.
     rig.driver->abort_slew();
-    const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (stop_requests() == 0 && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
-    REQUIRE(stop_requests() > 0);
-    // The loss lands while retries remain: on_lost closes the fd between two of the worker's exchanges.
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 3, 2s));
+    rig.latch_fault();
+    // The step wakes the guide (its muted status read fails and the Tracking write ends) and the stop worker,
+    // which finds the lock still held and waits again; the poll on the test thread then loses the link.
     rig.clock.advance(alpacacore::util::kLinkStalenessBound);
     rig.poll_now();
     REQUIRE_FALSE(rig.driver->get_connected());
+    REQUIRE(tracking.wait_for(5s) == std::future_status::ready);
+    try {
+        tracking.get();
+    } catch (const alpacacore::AlpacaException&) {  // the stop displaced it, or the link was gone
+    }
+    REQUIRE_FALSE(alpacacore::util::is_serial_port_in_use(rig.path));
     const auto requests = rig.requests();
-    // Disconnect joins the stop worker; its later rounds find the fd closed and send nothing.
-    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
+    // The stop worker runs now, on a closed fd: each failed stop resynchronizes, which never reopens the port.
+    rig.clock.advance(20ms);
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
     CHECK(rig.requests() == requests);
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(rig.path));
 }
