@@ -56,11 +56,12 @@ constexpr std::chrono::milliseconds kStatePollPeriod{250};
 constexpr int kStatePollFaultThreshold = 3;
 constexpr std::chrono::seconds kStatePollMaxAge{1};
 
-// The raw encoder pair the poll measured. Sky values are computed when a getter reads it, from the current UTC,
-// site and mechanical hemisphere, so a frame never carries a stale sidereal time.
+// The raw encoder pair the poll or a control path measured, and the host time it was read at. Sky values are
+// computed when a getter reads it, from the UTC model, site and mechanical hemisphere (served_sky_position_locked()).
 struct CgxFrame {
     std::uint32_t ra_encoder = 0;
     std::uint32_t dec_encoder = 0;
+    std::chrono::system_clock::time_point read_at{};
 };
 
 double configured_site_coordinate(const std::optional<double>& coordinate, const char* name) {
@@ -351,7 +352,9 @@ private:
     // The decision 0011 guards every coordinate read passes, in order. Caller holds mutex_.
     void require_readable_locked() const;
     // The sky position of a raw encoder pair at the current UTC, site and mechanical hemisphere. Caller holds mutex_.
-    CgxSkyPosition sky_position_locked(std::uint32_t ra_encoder, std::uint32_t dec_encoder) const;
+    // `age` shifts the sidereal time back: the sky position when a pair read `age` ago was measured.
+    CgxSkyPosition sky_position_locked(std::uint32_t ra_encoder, std::uint32_t dec_encoder,
+                                       std::chrono::system_clock::duration age = {}) const;
     // The coordinate getters: the guards, then the poll's frame (decision 0010; stale is served). Caller holds mutex_,
     // so a reference change and its frame write are seen together.
     CgxSkyPosition served_sky_position_locked() const;
@@ -365,9 +368,10 @@ private:
     // loop that called this every few milliseconds would starve the poll and, after util::kLinkStalenessBound, read
     // as a lost link mid-motion: keep the callers occasional (arrival, Sync, PulseGuide polarity, slew planning).
     void write_frame(std::uint32_t ra_encoder, std::uint32_t dec_encoder) const {
-        polled_.write([ra_encoder, dec_encoder](CgxFrame& frame) {
+        polled_.write([ra_encoder, dec_encoder, read_at = system_now_()](CgxFrame& frame) {
             frame.ra_encoder = ra_encoder;
             frame.dec_encoder = dec_encoder;
+            frame.read_at = read_at;
         });
     }
     // The poll's exchanges, on the poll thread with no driver lock held (decision 0016). A desynchronized stream is
@@ -379,6 +383,7 @@ private:
             if (!protocol_.is_healthy()) protocol_.resync();
             CgxFrame frame;
             frame.ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
+            frame.read_at = system_now_();  // the RA encoder's read, the one tracking moves
             frame.dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
             return frame;
         } catch (...) {
@@ -475,7 +480,7 @@ private:
     // The pre-Sync pair, held while Sync writes and verifies the labels with mutex_ free: a poll in that window can
     // read a new RA label beside an old Dec label, so the getters serve this pair instead until Sync publishes the
     // verified one or fails. Guarded by mutex_.
-    std::optional<std::pair<std::uint32_t, std::uint32_t>> sync_served_pair_;
+    std::optional<CgxFrame> sync_served_pair_;
     bool motion_state_unverified_ = false;
     bool slew_in_progress_ = false;
     bool restore_tracking_after_slew_ = false;
@@ -652,21 +657,26 @@ void CelestronCgxTelescopeDriver::require_readable_locked() const {
     }
 }
 
-CgxSkyPosition CelestronCgxTelescopeDriver::sky_position_locked(std::uint32_t ra_encoder,
-                                                                std::uint32_t dec_encoder) const {
+CgxSkyPosition CelestronCgxTelescopeDriver::sky_position_locked(std::uint32_t ra_encoder, std::uint32_t dec_encoder,
+                                                                std::chrono::system_clock::duration age) const {
     const double longitude = configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude");
     const auto utc =
         std::chrono::system_clock::time_point{std::chrono::duration_cast<std::chrono::system_clock::duration>(
-            std::chrono::duration<double>(current_utc_locked()))};
+            std::chrono::duration<double>(current_utc_locked()))} -
+        age;
     return cgx_encoder_position_to_sky(ra_encoder, dec_encoder, cgx_local_sidereal_time_hours(utc, longitude),
                                        hemisphere_locked());
 }
 
 CgxSkyPosition CelestronCgxTelescopeDriver::served_sky_position_locked() const {
     require_readable_locked();
-    const auto frame = polled_.served().value;  // the fault and loss checks run even while Sync holds a pair
-    if (sync_served_pair_) return sky_position_locked(sync_served_pair_->first, sync_served_pair_->second);
-    return sky_position_locked(frame.ra_encoder, frame.dec_encoder);
+    auto frame = polled_.served().value;  // the fault and loss checks run even while Sync holds a pair
+    if (sync_served_pair_) frame = *sync_served_pair_;
+    // A frame is up to a poll period old. While tracking, the encoders follow the sky, so the position is the one
+    // when the pair was read: compute at that time (the UTC model applied to the host time of the read). Otherwise
+    // the encoders stand still and the sky moves past them, so the position is the pair's at the current time.
+    const auto age = tracking_ ? system_now_() - frame.read_at : std::chrono::system_clock::duration{};
+    return sky_position_locked(frame.ra_encoder, frame.dec_encoder, age);
 }
 
 CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position(std::unique_lock<std::mutex>& lock,
@@ -1620,7 +1630,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         const std::uint32_t next_dec_rehome_label =
             offset_encoder_label(dec_rehome_label_, signed_cgx_encoder_delta(positions.second, current_dec_encoder));
         reference_write_started = true;  // Even a failed ACK may have changed the controller labels.
-        sync_served_pair_ = std::pair{current_ra_encoder, current_dec_encoder};
+        sync_served_pair_ = CgxFrame{current_ra_encoder, current_dec_encoder, system_now_()};
         {
             const MutexRelease unlocked(lock);
             protocol_.set_axis_position(CgxAxis::RightAscension, positions.first);

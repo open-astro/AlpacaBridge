@@ -7,3 +7,6 @@
 
 ### Changed (tests)
 - **Celestron CGX and focus motor pulled-cable cases** (AlpacaCore, issue #1940): pty-fake cases that pull the cable during a command, the state poll, the connect and (CGX) a slew, Park or pulse body; `FakeCelestronFocuser::sever_link()`; the CGX protocol, cached-state and #1457 stop-retry cases now expect `NotConnected` for a removed device.
+
+### Fixed
+- **Celestron CGX/CGX-L direct USB: RightAscension no longer drifts by up to a poll period while tracking** (AlpacaCore, issue #1940): the getters computed the sky position from the last state poll's encoders at the current sidereal time, so while tracking RightAscension rose by up to 250 ms of sidereal time and dropped back at each poll (ConformU flagged a Dec-only PulseGuide for an RA change). With Tracking on, the position is now computed at the time the encoders were read; with Tracking off, at the current time as before.

@@ -26,6 +26,7 @@
 #include <future>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -227,6 +228,40 @@ TEST_CASE("CGX getters drop the pre-Sync pair when Sync fails after the label wr
     // FindHome restores the reference; the getters serve its labels, not the pair the failed Sync held.
     rig.home();
     CHECK(rig.driver->get_declination() > 89.99);
+}
+
+// A frame is up to a poll period old (#1940 rig, ConformU PulseGuide). While tracking, the encoders follow the sky, so
+// the served position is the one when the pair was read; with tracking off, the sky moves past still encoders.
+TEST_CASE("CGX RightAscension holds between polls while tracking", "[celestron][cgx][telemetry]") {
+    TelemetryRig rig;
+    const auto device_state_ra = [&] {
+        for (const auto& entry : rig.driver->get_device_state())
+            if (entry.name == "RightAscension") return std::get<double>(entry.value);
+        FAIL("no RightAscension in DeviceState");
+        return 0.0;
+    };
+    const auto advance = [&](std::chrono::milliseconds step) {
+        rig.clock.advance(step);
+        rig.utc += step;
+    };
+    rig.mount.set_encoder_position(0x11, 0x810000);  // off the pole, so Altitude moves with the sky
+    rig.driver->set_tracking(true);
+    rig.poll_now();
+    const double ra = rig.driver->get_right_ascension();
+    const double dec = rig.driver->get_declination();
+    const double altitude = rig.driver->get_altitude();
+    advance(200ms);
+    CHECK(rig.driver->get_right_ascension() == Catch::Approx(ra).epsilon(0).margin(1e-9));
+    CHECK(device_state_ra() == Catch::Approx(ra).epsilon(0).margin(1e-9));
+    CHECK(rig.driver->get_declination() == Catch::Approx(dec).epsilon(0).margin(1e-9));
+    // The sky turns under a held position.
+    CHECK(rig.driver->get_altitude() != Catch::Approx(altitude).epsilon(0).margin(1e-9));
+    // Tracking off: the encoders stand still and the served RA advances with sidereal time.
+    rig.driver->set_tracking(false);
+    rig.poll_now();
+    const double still = rig.driver->get_right_ascension();
+    advance(200ms);
+    CHECK(rig.driver->get_right_ascension() - still == Catch::Approx(0.2 * 1.0027379 / 3600.0).epsilon(0).margin(1e-8));
 }
 
 TEST_CASE("CGX FindHome and reconnect replace the served frame", "[celestron][cgx][telemetry]") {
