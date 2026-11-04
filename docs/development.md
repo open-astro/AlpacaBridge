@@ -367,6 +367,12 @@ Use the [`/driver-build` skill](#driver-build--guided-driver-implementation) for
 ./install_alpaca_service.sh status     # show status
 ```
 
+`install` and `update` set up the host the same way `build_and_run.sh` does (both source
+`scripts/host_setup.sh`): the vendor udev rules, QHY firmware and vendor libraries, and the service
+user's `dialout` and `gpio` groups, creating `gpio` on a stock Debian that lacks it.
+`ALPACA_ADD_DIALOUT=OFF` and `ALPACA_ADD_GPIO=OFF` skip the group changes. A group change applies to
+the service at its next start, which the script does.
+
 For production use, prefer the apt package from [apt.openastro.net](https://apt.openastro.net).
 
 ## Dependency graph

@@ -174,7 +174,7 @@ Vendor-specific guidance lives in `.github/instructions/<vendor>.instructions.md
 
 Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.md). Read it as a historical snapshot, not current unresolved findings.
 
-- On Linux, ensure udev rules in `AlpacaCore/external/**/*.rules` are installed. Some vendor SDKs (e.g. QHY) ship multiple copies of the same rules file under different subdirectories — deduplicate by basename when installing so only one copy lands in `/etc/udev/rules.d/`. Keep `build_and_run.sh` and `install_alpaca_service.sh` in sync; both contain the udev/firmware install logic.
+- On Linux, ensure udev rules in `AlpacaCore/external/**/*.rules` are installed. Some vendor SDKs (e.g. QHY) ship multiple copies of the same rules file under different subdirectories — deduplicate by basename when installing so only one copy lands in `/etc/udev/rules.d/`. `build_and_run.sh` and `install_alpaca_service.sh` both source `scripts/host_setup.sh` for the udev, firmware, library and group setup; change it there (#1698).
 - ConformU logs live under `AlpacaCore/conformu/`.
 
 ## Out of Scope Guardrails
