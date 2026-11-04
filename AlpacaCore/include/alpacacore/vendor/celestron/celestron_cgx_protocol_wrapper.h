@@ -55,6 +55,12 @@ public:
     void resync();
     bool is_connected() const;
     bool is_healthy() const { return healthy_.load(); }
+    /// False once an exchange saw the serial port gone (decision 0009 rule 2a): a hangup or end-of-file on the fd,
+    /// or EIO/ENXIO/ENODEV on a read or write. The port is then already released and that exchange threw
+    /// NotConnected. A timeout is not evidence. Lock-free; the next connect_serial() clears it.
+    bool link_alive() const noexcept { return !link_lost_.load(); }
+    /// Why the link was lost, empty while it is alive. Never waits on an exchange.
+    std::string link_fault() const;
     std::uint64_t session_generation() const { return session_generation_.load(); }
 
     AuxFrame exchange(const AuxFrame& request, std::chrono::milliseconds timeout);
@@ -76,6 +82,7 @@ private:
     void goto_axis(CgxAxis axis, std::uint32_t position, std::uint8_t command, const char* operation,
                    std::chrono::milliseconds timeout);
     void disconnect_locked();
+    [[noreturn]] void lose_link_locked(const std::string& reason);
     void write_frame_locked(const std::vector<std::uint8_t>& bytes, std::chrono::steady_clock::time_point deadline);
     void wait_for_locked(short events, std::chrono::steady_clock::time_point deadline);
     std::vector<std::uint8_t> read_frame_locked(std::chrono::steady_clock::time_point deadline);
@@ -88,6 +95,9 @@ private:
     bool desynchronized_ = false;
     util::SerialLink link_;  // the claim, TIOCEXCL and the fd; serial_fd_ is link_.fd() while open
     std::vector<std::uint8_t> receive_buffer_;
+    std::atomic<bool> link_lost_{false};  // set by lose_link_locked(), cleared by the next connect_serial()
+    mutable std::mutex loss_mutex_;       // leaf: guards loss_reason_ only, never held across an exchange
+    std::string loss_reason_;
 };
 
 }  // namespace alpacacore::vendor::celestron
