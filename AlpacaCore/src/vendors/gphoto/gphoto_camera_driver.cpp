@@ -470,6 +470,8 @@ public:
 
         auto& sdk = sdk_;
         // Set before mutex_ is released, so a name refresh can never slip between the unlock and the flag.
+        // clear_in_flight is declared after lock so it is destroyed first: on a connect it clears the flag
+        // while mutex_ is still held and after connected_ is set, so a refresh never sees both false between.
         transition_in_flight_.store(true);
         struct ClearInFlight {
             std::atomic<bool>& flag;
