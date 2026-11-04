@@ -142,7 +142,7 @@ inline std::string unique_test_model(const std::string& base) {
  * Callers push one or more FakeCamera entries into `cameras` before
  * connecting (index == the Alpaca "cameraIndex"). Each fake camera carries
  * its own widget state (choices/current value, toggles, text) so tests can
- * script the widget-probing fallback behavior configure_after_connect_locked
+ * script the widget-probing fallback behavior read_widget_config
  * relies on (e.g. "shutterspeed2" absent but "shutterspeed" present).
  *
  * Failure injection: add a method name to `throw_from` and every call to
@@ -251,8 +251,9 @@ public:
     }
 
     void close_camera(int handle) override {
-        // Never throws (matches the contract: safe on an unknown handle).
+        // Never throws (matches the contract: safe on an unknown handle). before_call may hold it, never throw from it.
         call_log.push_back("close_camera");
+        if (before_call) before_call("close_camera");
         auto it = open_balance_.find(handle);
         if (it != open_balance_.end() && it->second) {
             it->second = false;
