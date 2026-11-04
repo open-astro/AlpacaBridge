@@ -285,6 +285,21 @@ public:
         return static_cast<double>(read_value(id));
     }
 
+    static constexpr const char* kFanOffWhileCooling =
+        "Turn the cooler off (CoolerOn = false) before turning the fan off: the camera stops its cooler when the fan "
+        "stops and does not restart it";
+
+    // Under io_mutex_. True when the camera reports its cooler (TEC) on. A camera that cannot answer has no cooler
+    // to stop, so the fan write goes ahead.
+    bool cooler_running_locked() {
+        try {
+            return sdk_.get_tec_enable(handle_);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ToupTek", "Thermal switch: cooler state unreadable (" + std::string(e.what()) + ")");
+            return false;
+        }
+    }
+
     // Writes value_long to the element's SDK control under the I/O lock, which a disconnect takes before
     // it closes the shared handle (no use-after-close). `element` is the copy value_long was resolved
     // against; if a reconnect to another model replaced the element since, the write is refused rather
@@ -309,6 +324,11 @@ public:
                     sdk.put_heat(handle_, static_cast<int>(value_long));
                     break;
                 case ThermalElementKind::Fan:
+                    if (value_long == 0 && cooler_running_locked()) {
+                        // The firmware stops the cooler with the fan and does not restart it when the fan
+                        // comes back (ATR2600M, issue #1993); a TEC with no fan also overheats.
+                        throw AlpacaException(kFanOffWhileCooling, AlpacaError::InvalidOperation);
+                    }
                     sdk.put_fan(handle_, static_cast<int>(value_long));
                     break;
                 case ThermalElementKind::TailLight:
@@ -516,7 +536,7 @@ private:
             ThermalElement e;
             e.kind = ThermalElementKind::Fan;
             e.name = "Fan";
-            e.description = "ToupTek camera radiator fan speed";
+            e.description = "ToupTek camera radiator fan speed; it cannot be turned off while the cooler is on";
             e.writable = true;
             e.min_value = 0;
             e.max_value = static_cast<long>(info.max_fan_speed);
