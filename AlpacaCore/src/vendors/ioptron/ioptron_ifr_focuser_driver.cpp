@@ -237,7 +237,7 @@ public:
         ensure_link_healthy(*link);
         // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
         // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, issue #2028).
-        position = std::clamp(position, 0, model_.max_step);
+        position = std::clamp(position, 0, std::max(model_.max_step, 0));
         {
             // Armed before the command goes out (decision 0022 rule 2's shape).
             std::lock_guard<std::mutex> lock(mutex_);

@@ -266,7 +266,7 @@ public:
         ensure_connected();
         // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
         // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, issue #2028).
-        position = std::clamp(position, 0, IEAF_MAX_STEP);
+        position = std::clamp(position, 0, std::max(IEAF_MAX_STEP, 0));
         protocol_.move_to(position);
         invalidate_status_cache();
     }
