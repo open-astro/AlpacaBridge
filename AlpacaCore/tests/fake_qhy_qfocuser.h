@@ -97,6 +97,9 @@ public:
     void set_external_temperature_milli(int milli_c) { o_t_.store(milli_c); }
     /// Nothing in the probe socket: o_t carries the firmware's sentinel, -111311 on the rig (#2032).
     void set_external_probe(bool present) { o_t_.store(present ? 23881 : -111311); }
+    /// Answer the handshake with a reply that has no "version" field, the shape of a unit that is not a Q-Focuser
+    /// (INDI's rule): the connect refuses with that reason after its retries.
+    void set_handshake_without_version(bool on) { no_version_.store(on); }
     /// Answer every command except telemetry (cmd_id 4), which is recorded and never answered: the shape
     /// of the real firmware for about 10 s after a move (#2031). The harsher model: position still answers.
     void set_telemetry_muted(bool on) { telemetry_muted_.store(on); }
@@ -207,7 +210,9 @@ private:
 
         switch (id) {
             case 1:
-                reply = "{\"idx\":1,\"id\":\"\\u001f@SL3KG\\u0018TH2C\",\"version\":20231207,\"bv\":208}";
+                reply = no_version_.load()
+                            ? "{\"idx\":1,\"id\":\"\\u001f@SL3KG\\u0018TH2C\",\"bv\":208}"
+                            : "{\"idx\":1,\"id\":\"\\u001f@SL3KG\\u0018TH2C\",\"version\":20231207,\"bv\":208}";
                 break;
             case 5: {
                 int pos = position_.load();
@@ -281,6 +286,7 @@ private:
     std::atomic<int> voltage_tenths_{125};
     std::atomic<int> o_t_{23881};
     std::atomic<bool> telemetry_muted_{false};
+    std::atomic<bool> no_version_{false};
 
     // one_behind_ is set before the driver connects and only read on the
     // reader thread thereafter; held_reply_ is touched solely on that thread

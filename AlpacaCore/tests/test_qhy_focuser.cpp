@@ -313,6 +313,25 @@ TEST_CASE(
     chip->set_connected(false);
 }
 
+// The refusal a client reads carries the last attempt's reason (a stalled unit says "not taking data ...; unplug and
+// replug it" on the rig, which a pty cannot reproduce; a reply without "version" is the hardware-free shape).
+TEST_CASE("QHY Q-Focuser Driver - A refused handshake names the last attempt's reason", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    fake.set_handshake_without_version(true);
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+    std::string message;
+    try {
+        driver->set_connected(true);
+        FAIL("the connect was not refused");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        message = e.what();
+    }
+    CHECK(message.find("handshake failed after 3 attempts on " + fake.slave_path() +
+                       ": the reply carried no version") != std::string::npos);
+    CHECK(driver->get_connected() == false);
+}
+
 TEST_CASE("QHY Q-Focuser Driver - Absent port fails connect with NotConnected", "[qhy][focuser][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, kAbsentPort);
     require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
