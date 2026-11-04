@@ -431,3 +431,53 @@ TEST_CASE("Serial link - tty_drain_bounded returns at once on a pty that takes d
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
     ::close(fd);
 }
+
+namespace {
+// A transmit queue that never empties (#2040): what TIOCOUTQ reports on a USB bridge whose endpoint has stopped
+// taking data. Installed through util::tty_outq_probe_for_testing() for one case and removed by the guard.
+std::atomic<int> g_stalled_probe_calls{0};
+bool stalled_outq_probe(int, int& pending) {
+    g_stalled_probe_calls.fetch_add(1);
+    pending = 5;
+    return true;
+}
+struct StalledOutqGuard {
+    StalledOutqGuard() {
+        g_stalled_probe_calls.store(0);
+        alpacacore::util::tty_outq_probe_for_testing().store(&stalled_outq_probe);
+    }
+    ~StalledOutqGuard() { alpacacore::util::tty_outq_probe_for_testing().store(nullptr); }
+};
+}  // namespace
+
+// #2040: the false path. The queue never empties, so the drain gives up at its deadline, not before and not
+// much after, and reports it, so the caller fails the exchange instead of waiting on the port forever.
+TEST_CASE("Serial link - tty_drain_bounded gives up at its deadline on a queue that never empties",
+          "[serial][serial_link]") {
+    alpacacore::test::PtyPair pty("drain-stalled");
+    const int fd = ::open(pty.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    REQUIRE(fd >= 0);
+    StalledOutqGuard stalled;
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_FALSE(alpacacore::util::tty_drain_bounded(fd, 100));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(elapsed >= std::chrono::milliseconds(100));
+    CHECK(elapsed < std::chrono::milliseconds(1000));
+    CHECK(g_stalled_probe_calls.load() > 1);  // polled until the deadline, not once
+    ::close(fd);
+}
+
+// #2040: a timeout of 0 is one poll, then the flush. A caller that passes 0 to mean "check once" discards the
+// queued command; the header says so, and this pins it.
+TEST_CASE("Serial link - tty_drain_bounded with a zero timeout polls once and flushes a queue that is not empty",
+          "[serial][serial_link]") {
+    alpacacore::test::PtyPair pty("drain-zero");
+    const int fd = ::open(pty.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    REQUIRE(fd >= 0);
+    StalledOutqGuard stalled;
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_FALSE(alpacacore::util::tty_drain_bounded(fd, 0));
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(100));
+    CHECK(g_stalled_probe_calls.load() == 1);
+    ::close(fd);
+}

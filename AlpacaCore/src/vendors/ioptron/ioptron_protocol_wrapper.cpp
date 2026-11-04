@@ -59,6 +59,8 @@ namespace {
 // Names this wrapper's probe and its connected serial link in the serial-port
 // registry (#1202). The Wi-Fi path holds no serial port and takes no claim.
 constexpr const char* kSerialOwner = "iOptron mount";
+// Bound on the TX drain before the serial port closes (issue #137); see disconnect_serial().
+constexpr int kDisconnectDrainTimeoutMs = 250;
 // A mount reply never nears this; it caps a runaway line instead of growing a string forever.
 constexpr std::size_t kMaxReplyLen = 65536;
 
@@ -1288,21 +1290,13 @@ private:
             // before closing — slamming the port shut mid-exchange is what
             // wedges the mount under rapid connect/disconnect cycling.
             // tcdrain() has no timeout and this is the disconnect path the
-            // original wedge symptoms implicated, so bound the drain: poll
-            // the TX queue depth (TIOCOUTQ) with a deadline instead of
-            // blocking, and discard whatever is left if it doesn't empty
-            // (issue #137). At 115200 baud a full command is <1 ms of TX
-            // time, so the 250 ms budget only trips on a genuinely stuck
-            // port — where discarding is the right call anyway.
-            const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
-            int tx_pending = 0;
-            while (ioctl(fd, TIOCOUTQ, &tx_pending) == 0 && tx_pending > 0 &&
-                   std::chrono::steady_clock::now() < drain_deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-            if (tx_pending > 0) {
-                tcflush(fd, TCOFLUSH);
-            }
+            // original wedge symptoms implicated, so the drain is bounded
+            // (issue #137): util::tty_drain_bounded() polls the TX queue depth
+            // (TIOCOUTQ) and discards whatever is left when it does not empty
+            // (#2039: the shared helper, #2033). At 115200 baud a full command
+            // is <1 ms of TX time, so the 250 ms budget only trips on a
+            // genuinely stuck port — where discarding is the right call anyway.
+            (void)util::tty_drain_bounded(fd, kDisconnectDrainTimeoutMs);
             tcflush(fd, TCIFLUSH);
             link_.close();  // releases TIOCEXCL and the registry claim
         }
