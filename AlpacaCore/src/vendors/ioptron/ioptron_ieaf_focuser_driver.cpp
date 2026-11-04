@@ -20,6 +20,7 @@
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -262,10 +263,10 @@ public:
     }
 
     void move(int position) override {
-        if (position < 0 || position > IEAF_MAX_STEP) {
-            throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
-        }
         ensure_connected();
+        // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
+        // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, issue #2028).
+        position = std::clamp(position, 0, IEAF_MAX_STEP);
         protocol_.move_to(position);
         invalidate_status_cache();
     }

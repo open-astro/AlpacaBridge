@@ -18,6 +18,7 @@
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -275,13 +276,12 @@ public:
     }
 
     void move(int position) override {
-        // Exception ordering is unchanged (NotConnected, then InvalidValue). The write runs under the I/O
+        // The connection check comes first (NotConnected while disconnected). The write runs under the I/O
         // lock, which a disconnect takes before it closes the handle (no use-after-close).
         const int max_step = connected_max_step();
-        if (position < 0 || position > max_step) {
-            throw AlpacaException("Focuser position out of range",
-                                  AlpacaError::InvalidValue);
-        }
+        // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
+        // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, issue #2028).
+        position = std::clamp(position, 0, std::max(max_step, 0));
         {
             std::lock_guard<std::mutex> io(io_mutex_);
             ensure_connected();  // a disconnect that won the I/O lock has closed the handle

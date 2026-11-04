@@ -157,7 +157,8 @@ TEST_CASE("QHY Q-Focuser Driver - Reply parser", "[qhy][focuser][unit]") {
     CHECK(parse_qfocuser_reply("{}").empty());
 }
 
-TEST_CASE("QHY Q-Focuser Driver - Value range validation", "[qhy][focuser][unit]") {
+// ConformU moves below 0 and above MaxStep and expects the focuser at that limit (issue #2028).
+TEST_CASE("QHY Q-Focuser Driver - A move outside 0..MaxStep goes to that limit", "[qhy][focuser][unit]") {
     alpacacore::test::FakeQhyQFocuser fake;
     alpacacore::vendor::qhy::QFocuserSettings settings;
     settings.max_step = 5000;
@@ -165,11 +166,11 @@ TEST_CASE("QHY Q-Focuser Driver - Value range validation", "[qhy][focuser][unit]
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     CHECK(driver->get_max_step() == 5000);
-    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { driver->move(5001); }, alpacacore::AlpacaError::InvalidValue);
-    CHECK(fake.count("\"cmd_id\":6") == 0);  // rejected before reaching the wire
-    CHECK_NOTHROW(driver->move(5000));
+    driver->move(-1);
+    CHECK(fake.count("\"cmd_id\":6,\"tar\":0}") == 1);  // the limit, not the request
+    driver->move(5001);
     CHECK(fake.count("\"cmd_id\":6,\"tar\":5000}") == 1);
+    CHECK(fake.count("\"cmd_id\":6") == 2);
 
     driver->set_connected(false);
 }

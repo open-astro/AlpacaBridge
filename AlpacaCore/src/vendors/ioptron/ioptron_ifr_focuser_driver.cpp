@@ -21,6 +21,7 @@
 #include <alpacacore/vendor/ioptron/ioptron_ifr_focuser_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -232,13 +233,11 @@ public:
     }
 
     void move(int position) override {
-        if (position < 0 || position > model_.max_step) {
-            throw AlpacaException(
-                "Focuser position " + std::to_string(position) + " is outside 0.." + std::to_string(model_.max_step),
-                AlpacaError::InvalidValue);
-        }
         const auto link = connected_link();
         ensure_link_healthy(*link);
+        // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
+        // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, issue #2028).
+        position = std::clamp(position, 0, model_.max_step);
         {
             // Armed before the command goes out (decision 0022 rule 2's shape).
             std::lock_guard<std::mutex> lock(mutex_);

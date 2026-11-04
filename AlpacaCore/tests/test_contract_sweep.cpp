@@ -264,12 +264,7 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
 
 // The tier-1 probe list: the type's probes plus the focuser move(-1) of a driver that checks a static range.
 std::vector<Probe> invalid_value_probes(AlpacaDriver& d, const ContractEntry& e) {
-    auto p = invalid_value_probes(d, e.type);
-    if (e.type == DeviceType::Focuser && e.focuser_static_range) {
-        auto& f = dynamic_cast<alpacacore::FocuserDriver&>(d);
-        p.push_back({"move(-1)", [&] { f.move(-1); }});
-    }
-    return p;
+    return invalid_value_probes(d, e.type);
 }
 
 // Operational properties and methods that must throw NotConnected while

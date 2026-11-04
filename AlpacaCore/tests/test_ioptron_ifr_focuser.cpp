@@ -112,18 +112,23 @@ TEST_CASE("iOptron iFR Focuser Driver - Device specifics once connected", "[iopt
     CHECK(big->get_name() == "iOptron iFR 4\" Focuser");
 }
 
-TEST_CASE("iOptron iFR Focuser Driver - Value range validation", "[ioptron][ifr][focuser][unit]") {
+// ConformU moves below 0 and above MaxStep and expects the focuser at that limit (issue #2028).
+TEST_CASE("iOptron iFR Focuser Driver - A move outside 0..MaxStep goes to that limit",
+          "[ioptron][ifr][focuser][unit]") {
     FakeIoptronIfr fake;
     FakeTaskClock clock;
+    fake.set_focuser_position(1000);
     auto driver = connected_focuser(fake, clock);
 
-    require_alpaca_error([&] { driver->move(-1); }, AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->move(62501); }, AlpacaError::InvalidValue);
-    CHECK(fake.count(":FM") == 0);  // refused before anything is sent
+    driver->move(-1);
+    CHECK(fake.count(":FM0000000#") == 1);  // the limit, not the request
+    driver->move(62501);
+    CHECK(fake.count(":FM0062500#") == 1);
+    CHECK(fake.count(":FM") == 2);
 
-    // InvalidValue precedes NotConnected.
+    // A position is never refused: the connection check is the first thing a Move does.
     auto offline = ifr::create_ifr_focuser(0, "/dev/ttyUSB0");
-    require_alpaca_error([&] { offline->move(62501); }, AlpacaError::InvalidValue);
+    require_alpaca_error([&] { offline->move(62501); }, AlpacaError::NotConnected);
     require_alpaca_error([&] { offline->move(100); }, AlpacaError::NotConnected);
 }
 
