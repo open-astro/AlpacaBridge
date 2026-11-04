@@ -150,6 +150,37 @@ int main(int argc, char** argv) {
             }
         }
     }
-    EXPECT(selected == "expired" || selected == "retry" || selected == "interrupted" || selected == "nonpositive");
+    {
+        // case: three buffers go out in order and an empty middle one is skipped
+        if (selected == "three") {
+            SocketPair sockets;
+            // A tail larger than the socket buffer, so the send spans several sendmsg calls.
+            const std::string tail(256 * 1024, 't');
+            timeval receive_timeout{};
+            receive_timeout.tv_sec = 2;  // a short send fails the comparison instead of hanging the reader
+            EXPECT(::setsockopt(sockets.fd[1], SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)) ==
+                   0);
+            std::string received;
+            std::thread reader([&] {
+                char bytes[8192];
+                while (received.size() < 4 + 4 + tail.size()) {
+                    const ssize_t n = ::recv(sockets.fd[1], bytes, sizeof(bytes), 0);
+                    if (n <= 0) break;
+                    received.append(bytes, static_cast<std::size_t>(n));
+                }
+            });
+            EXPECT(alpacahttp::util::socket_send_allv(sockets.fd[0], "head", 4, "body", 4, tail.data(), tail.size(),
+                                                      Clock::now() + 5s, 1s));
+            reader.join();
+            EXPECT(received == "headbody" + tail);
+            EXPECT(alpacahttp::util::socket_send_allv(sockets.fd[0], "head", 4, "", 0, "tail", 4, Clock::now() + 1s,
+                                                      100ms));
+            char bytes[8];
+            EXPECT(::recv(sockets.fd[1], bytes, sizeof(bytes), MSG_DONTWAIT) == 8);
+            EXPECT(std::string(bytes, sizeof(bytes)) == "headtail");
+        }
+    }
+    EXPECT(selected == "expired" || selected == "retry" || selected == "interrupted" || selected == "nonpositive" ||
+           selected == "three");
     std::cout << selected << ": passed\n";
 }

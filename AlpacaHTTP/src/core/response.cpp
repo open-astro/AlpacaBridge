@@ -68,7 +68,21 @@ void Response::set_content_length(std::size_t length) {
 
 void Response::set_body(std::string body) {
     body_ = std::move(body);
+    tail_.reset();
+    tail_offset_ = 0;
     set_content_length(body_.size());
+}
+
+void Response::set_body(std::string head, std::shared_ptr<const std::string> tail, std::size_t tail_offset) {
+    body_ = std::move(head);
+    tail_ = std::move(tail);
+    tail_offset_ = tail_ && tail_offset < tail_->size() ? tail_offset : (tail_ ? tail_->size() : 0);
+    set_content_length(body_size());
+}
+
+std::string_view Response::body_tail() const {
+    if (!tail_) return {};
+    return std::string_view(*tail_).substr(tail_offset_);
 }
 
 void Response::set_body(const AlpacaResponse& alpaca_response) {
@@ -77,6 +91,8 @@ void Response::set_body(const AlpacaResponse& alpaca_response) {
     // default throws type_error.316 and fails the whole response; replace
     // invalid bytes with U+FFFD instead.
     body_ = json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+    tail_.reset();
+    tail_offset_ = 0;
     set_content_type("application/json");
     set_content_length(body_.size());
 }
@@ -133,7 +149,7 @@ std::string Response::to_header_string() const {
     // be unframeable, and defaulting it here makes the invariant hold by
     // construction rather than by the caller remembering.
     if (!has_content_length) {
-        oss << "Content-Length: " << body_.size() << "\r\n";
+        oss << "Content-Length: " << body_size() << "\r\n";
     }
 
     oss << "\r\n";
@@ -144,6 +160,7 @@ std::string Response::to_header_string() const {
 std::string Response::to_string() const {
     std::string response = to_header_string();
     response.append(body_);
+    response.append(body_tail());
     return response;
 }
 

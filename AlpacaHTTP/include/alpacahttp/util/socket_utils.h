@@ -118,11 +118,17 @@ inline std::chrono::milliseconds send_budget(std::size_t bytes, std::chrono::mil
 // false when either expires (errno ETIMEDOUT) so the caller closes the
 // connection. Only a positive write restarts the `stall` wait; EINTR does not.
 // A nonpositive `stall` omits that bound and keeps the response deadline.
+//
+// The three-buffer form sends a response whose body is a per-request head
+// followed by a shared tail (Response::body_tail(), a camera image several
+// parallel GETs share, #1716) without joining them either. An empty buffer is
+// skipped.
 inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t first_length, const char* second,
-                             std::size_t second_length, std::chrono::steady_clock::time_point deadline,
-                             std::chrono::milliseconds stall) {
-    std::array<iovec, 2> vectors{
-        {{const_cast<char*>(first), first_length}, {const_cast<char*>(second), second_length}}};
+                             std::size_t second_length, const char* third, std::size_t third_length,
+                             std::chrono::steady_clock::time_point deadline, std::chrono::milliseconds stall) {
+    std::array<iovec, 3> vectors{{{const_cast<char*>(first), first_length},
+                                  {const_cast<char*>(second), second_length},
+                                  {const_cast<char*>(third), third_length}}};
     std::size_t index = 0;
     auto progress_deadline = std::chrono::steady_clock::now() + stall;
     while (index < vectors.size()) {
@@ -189,6 +195,12 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
         }
     }
     return true;
+}
+
+inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t first_length, const char* second,
+                             std::size_t second_length, std::chrono::steady_clock::time_point deadline,
+                             std::chrono::milliseconds stall) {
+    return socket_send_allv(handle, first, first_length, second, second_length, nullptr, 0, deadline, stall);
 }
 
 // Close a client connection without destroying data the peer has not read

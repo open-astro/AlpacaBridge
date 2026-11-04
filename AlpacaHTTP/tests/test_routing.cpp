@@ -1372,20 +1372,35 @@ int main() {
             return responses;
         };
 
+        // The bytes a response puts on the wire after its headers.
+        const auto wire_body = [](const alpacahttp::Response& response) {
+            return response.body() + std::string(response.body_tail());
+        };
+        // Every joined response points at one encoded frame, not a copy each (#1716).
+        const auto share_one_frame = [](const std::vector<alpacahttp::Response>& responses) {
+            for (const auto& response : responses) {
+                EXPECT(!response.body_tail().empty());
+                EXPECT(response.body_tail().data() == responses[0].body_tail().data());
+            }
+        };
+
         // JSON: one getter call, every response is what a lone request with the same ids gets.
         camera->set_image_array(frame(10));
         camera->image_getter_calls = 0;
         const auto json_responses = run_parallel("application/json");
         EXPECT(camera->image_getter_calls == 1);
+        share_one_frame(json_responses);
         camera->image_array_delay = std::chrono::milliseconds(0);
         for (int i = 0; i < kThreads; ++i) {
             const auto alone = get_image("application/json", 100 + i, 200 + i);
+            EXPECT(alone.body_tail().empty());  // a lone GET owns its body
             EXPECT(json_responses[i].status_code() == 200);
-            EXPECT(json_responses[i].body() == alone.body());
+            EXPECT(wire_body(json_responses[i]) == alone.body());
             EXPECT(json_responses[i].get_header("Content-Length") == std::to_string(alone.body().size()));
             EXPECT(json_responses[i].get_header("Content-Type") == "application/json");
+            EXPECT(json_responses[i].to_string() == alone.to_string());
         }
-        EXPECT(json_responses[0].body() ==
+        EXPECT(wire_body(json_responses[0]) ==
                "{\"ClientTransactionID\":100,\"ServerTransactionID\":200,\"ErrorNumber\":0,\"ErrorMessage\":\"\","
                "\"Type\":2,\"Rank\":2,\"Value\":[[10,12],[11,13]]}");
 
@@ -1394,31 +1409,35 @@ int main() {
         camera->image_getter_calls = 0;
         const auto bytes_responses = run_parallel("application/imagebytes");
         EXPECT(camera->image_getter_calls == 1);
+        share_one_frame(bytes_responses);
         camera->image_array_delay = std::chrono::milliseconds(0);
         for (int i = 0; i < kThreads; ++i) {
             const auto alone = get_image("application/imagebytes", 100 + i, 200 + i);
             EXPECT(bytes_responses[i].get_header("Content-Type") == "application/imagebytes");
-            EXPECT(bytes_responses[i].body() == alone.body());
+            EXPECT(bytes_responses[i].body().size() == 44);  // the metadata header is the head
+            EXPECT(wire_body(bytes_responses[i]) == alone.body());
+            EXPECT(bytes_responses[i].get_header("Content-Length") == std::to_string(alone.body().size()));
         }
 
         // A new exposure is a new frame, also when requests overlap a StartExposure.
         camera->set_image_array(frame(50));
         EXPECT(put_camera("startexposure", "Duration=1&Light=true").status_code() == 200);
         const auto fresh = get_image("application/json", 1, 2);
-        EXPECT(nlohmann::json::parse(fresh.body()).at("Value") == nlohmann::json::parse("[[50,52],[51,53]]"));
+        EXPECT(nlohmann::json::parse(wire_body(fresh)).at("Value") == nlohmann::json::parse("[[50,52],[51,53]]"));
         camera->set_image_array(frame(70));
         camera->image_array_delay = std::chrono::milliseconds(300);
         camera->image_getter_calls = 0;
         std::thread old_frame_reader([&] {
             const auto old_frame = get_image("application/json", 3, 4);
-            EXPECT(nlohmann::json::parse(old_frame.body()).at("Value") == nlohmann::json::parse("[[70,72],[71,73]]"));
+            EXPECT(nlohmann::json::parse(wire_body(old_frame)).at("Value") ==
+                   nlohmann::json::parse("[[70,72],[71,73]]"));
         });
         // The reader has copied frame 70 once the stub counts the call; only then replace the member.
         while (camera->image_getter_calls.load() == 0) std::this_thread::yield();
         camera->set_image_array(frame(90));
         EXPECT(put_camera("abortexposure", "").status_code() == 200);
         const auto after_abort = get_image("application/json", 5, 6);
-        EXPECT(nlohmann::json::parse(after_abort.body()).at("Value") == nlohmann::json::parse("[[90,92],[91,93]]"));
+        EXPECT(nlohmann::json::parse(wire_body(after_abort)).at("Value") == nlohmann::json::parse("[[90,92],[91,93]]"));
         old_frame_reader.join();
 
         // Error paths are unchanged: every parallel request reports the driver's error with its own ids.
@@ -7663,6 +7682,28 @@ int main() {
         }
         EXPECT(occurrences == 1);
         EXPECT(wire.find("Content-Length: 2\r\n") != std::string::npos);
+    }
+
+    {
+        // case: a shared body tail is framed and serialized after the head, and a plain body drops it (#1716)
+        const auto frame = std::make_shared<const std::string>("HEADER-of-builder|pixels");
+        alpacahttp::Response response;
+        response.set_body("mine|", frame, 17);
+        EXPECT(response.body() == "mine|");
+        EXPECT(response.body_tail() == "|pixels");
+        EXPECT(response.body_tail().data() == frame->data() + 17);  // shared, not copied
+        EXPECT(response.body_size() == 12);
+        EXPECT(response.get_header("Content-Length") == "12");
+        const std::string wire = response.to_string();
+        EXPECT(wire.size() >= 12 && wire.compare(wire.size() - 12, 12, "mine||pixels") == 0);
+        // An offset past the end leaves an empty tail, never an out-of-range view.
+        response.set_body("h", frame, 1000);
+        EXPECT(response.body_tail().empty());
+        EXPECT(response.get_header("Content-Length") == "1");
+        response.set_body("h", frame, 17);
+        response.set_body("plain");
+        EXPECT(response.body_tail().empty());
+        EXPECT(response.get_header("Content-Length") == "5");
     }
 
     // Issue #130: a driver whose get_connected() blocks behind an in-flight

@@ -14,7 +14,9 @@
 
 #include <alpacacore/camera_driver.h>
 
+#include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -24,7 +26,12 @@ namespace alpacahttp {
 
 struct ImagePayload {
     std::string content_type;
+    // The response bytes are `body` then `*tail` from `tail_offset` on
+    // (Response::set_body(head, tail, offset)). Only a build_shared() GET that
+    // joined another's build has a tail: one encoded frame for all of them.
     std::string body;
+    std::shared_ptr<const std::string> tail;
+    std::size_t tail_offset = 0;
 };
 
 // True when the Accept header value asks for application/imagebytes (any case).
@@ -52,9 +59,10 @@ public:
 // build(fetch(), ...) with two limits on parallel imagearray GETs (#1716):
 //  - At most one image build runs at a time, process wide. Requests beyond that wait.
 //  - GETs for the same device, encoding and ImageBuildEpoch that arrive while a build
-//    is running share it: fetch() runs once and each of them gets the encoded body,
-//    carrying its own ClientTransactionID and ServerTransactionID. Nothing is kept
-//    once the build is done, so a later GET fetches the current frame.
+//    is running share it: fetch() runs once, and each of them gets a small head
+//    carrying its own ClientTransactionID and ServerTransactionID plus a shared tail,
+//    the one encoded frame, never a copy of it. Nothing is kept once the last
+//    response is sent, so a later GET fetches the current frame.
 // A fetch() or build failure reaches every request that joined the build.
 ImagePayload build_shared(const void* device, const std::function<alpacacore::ImageArray()>& fetch,
                           std::string_view accept_header, const DeviceCall& call);
