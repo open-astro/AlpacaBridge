@@ -612,9 +612,12 @@ public:
         if (!cooler_available_copy()) {
             throw AlpacaException("This Player One camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
-        with_camera([&](int id) { sdk_.set_cooler_on(id, cooler_on); });
-        std::lock_guard<std::mutex> lock(mutex_);
-        session_cooler_on_ = cooler_on;  // re-applied after a reconnect (issue #1998)
+        // Recorded under the same mutex_ hold as the write (with_camera takes it), so the remembered value is the
+        // one the camera last received; re-applied after a reconnect (issue #1998).
+        with_camera([&](int id) {
+            sdk_.set_cooler_on(id, cooler_on);
+            session_cooler_on_ = cooler_on;
+        });
     }
     double get_cooler_power() const override {
         ensure_connected();
@@ -905,9 +908,11 @@ public:
             }
         }
         const int target_c = static_cast<int>(std::lround(temperature));
-        with_camera([&](int id) { sdk_.set_target_temp_c(id, target_c); });
-        std::lock_guard<std::mutex> lock(mutex_);
-        session_target_c_ = target_c;  // re-applied after a reconnect (issue #1998)
+        // Recorded under the write's mutex_ hold, as in set_cooler_on(); re-applied after a reconnect (issue #1998).
+        with_camera([&](int id) {
+            sdk_.set_target_temp_c(id, target_c);
+            session_target_c_ = target_c;
+        });
     }
 
     int get_start_x() const override {
@@ -1456,8 +1461,13 @@ private:
     void restore_session_cooler(int camera_id, const PlayerOneCameraInfo& info, const PlayerOneConfigCaps& caps,
                                 std::optional<bool> cooler_on, std::optional<int> target_c) {
         if (!info.has_cooler) return;
-        if (target_c.has_value() && caps.has_target_temp && *target_c >= caps.target_temp_min &&
-            *target_c <= caps.target_temp_max) {
+        if (target_c.has_value() && caps.has_target_temp &&
+            (*target_c < caps.target_temp_min || *target_c > caps.target_temp_max)) {
+            ALPACA_LOG_DEBUG("PlayerOne", "Not restoring SetCCDTemperature " + std::to_string(*target_c) +
+                                              " C: outside this camera's range " +
+                                              std::to_string(caps.target_temp_min) + ".." +
+                                              std::to_string(caps.target_temp_max));
+        } else if (target_c.has_value() && caps.has_target_temp) {
             try {
                 sdk_.set_target_temp_c(camera_id, *target_c);
                 ALPACA_LOG_INFO("PlayerOne", "Restored SetCCDTemperature " + std::to_string(*target_c) +
