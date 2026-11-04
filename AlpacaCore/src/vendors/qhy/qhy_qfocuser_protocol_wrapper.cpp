@@ -645,6 +645,7 @@ private:
         // the kicked fresh one follows; `stale` holds the first match while the read goes on for the second.
         const bool repeats = last_reply_idx_ == expected_idx || last_reply_idx_ == alt_idx;
         std::optional<std::map<std::string, std::string>> stale;
+        std::int32_t stale_idx = -2;  // the stale reply's own idx: what the firmware holds when no fresh one comes
         std::chrono::steady_clock::time_point fresh_deadline{};
         auto finish = [&](std::int32_t idx) { last_reply_idx_ = idx; };
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -655,7 +656,7 @@ private:
             if (stale.has_value()) {
                 const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(fresh_deadline - slice_start);
                 if (left.count() <= 0) {
-                    finish(expected_idx);
+                    finish(stale_idx);
                     return *stale;
                 }
                 slice_ms = static_cast<int>(std::min<long long>(slice_ms, left.count()));
@@ -667,7 +668,7 @@ private:
                     // No fresh reply inside the window: the link is not one behind (or the fresh reply was lost),
                     // so the first match stands. No re-kick: a kick only re-transmits what is already read.
                     if (std::chrono::steady_clock::now() >= fresh_deadline) {
-                        finish(expected_idx);
+                        finish(stale_idx);
                         return *stale;
                     }
                     continue;
@@ -703,6 +704,7 @@ private:
             if (idx == expected_idx || idx == alt_idx) {
                 if (repeats && !stale.has_value()) {
                     stale = std::move(fields);
+                    stale_idx = idx;
                     fresh_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kFreshReplyWaitMs);
                     continue;
                 }
@@ -713,7 +715,7 @@ private:
                                           std::to_string(expected_idx) + "; skipping");
         }
         if (stale.has_value()) {
-            finish(expected_idx);
+            finish(stale_idx);
             return *stale;
         }
         throw AlpacaException("Q-Focuser timed out waiting for reply to " + cmd, AlpacaError::DriverException);
