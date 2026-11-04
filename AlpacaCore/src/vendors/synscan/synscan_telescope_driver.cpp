@@ -1360,12 +1360,25 @@ public:
                 // Cancelled by replacement, AbortSlew, disconnect or
                 // destruction. Still make a best-effort attempt to stop the
                 // axis before exiting — the mount would otherwise keep slewing.
-                // AbortSlew restores tracking itself; teardown must not.
+                // AbortSlew restores tracking itself; teardown must not. A failed stop is logged and the axis
+                // marked as possibly moving, as the refused-start path does (#1725); the caller's own stop or
+                // teardown goes on and the error is not stored for the next command.
+                std::string stop_error;
                 try {
                     SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    // Cancellation path (disconnect/destruction) — the caller
-                    // is tearing the connection down; nothing more to do.
+                } catch (const std::exception& e) {
+                    stop_error = e.what();
+                } catch (...) {
+                    stop_error = "unknown error";
+                }
+                if (!stop_error.empty()) {
+                    ALPACA_LOG_ERROR("SynScan", "PulseGuide stop after a cancelled pulse failed on axis " +
+                                                    std::to_string(axis) +
+                                                    "; the axis may still be moving: " + stop_error);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (connected_) {
+                        manual_axis_slewing_[axis] = true;
+                    }
                 }
                 return;
             }

@@ -877,6 +877,63 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
     driver->set_connected(false);
 }
 
+// #1725: a pulse cancelled by replacement, AbortSlew, disconnect or destruction makes a best-effort stop whose
+// failure was swallowed, so a dead link left the axis possibly moving with nothing logged. The failed stop is logged
+// at ERROR and the axis marked as possibly moving, as the refused-start path does.
+// Falsified by: synscan_telescope_driver.cpp run_pulse_stop_body cancel branch, put the empty catch back.
+TEST_CASE("SynScan Telescope Driver - a cancelled pulse whose stop fails logs the failure",
+          "[synscan][telescope][unit]") {
+    std::atomic<int> errors{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Error && component == "SynScan" &&
+                message.find("PulseGuide stop after a cancelled pulse failed on axis 0") != std::string::npos) {
+                ++errors;
+            }
+        });
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        switch (command.empty() ? '\0' : command[0]) {
+            case 'K':
+                return std::string(1, command.size() > 1 ? command[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return std::string("12AB0500,20000500#");
+            case 't':
+                return std::string(1, '\x01') + "#";
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'L':
+                return std::string("0#");
+            default:
+                return std::string("#");
+        }
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    alpacacore::test::FakeTaskClock clock;  // the 300 ms pulse never elapses on its own
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->pulse_guide(2, 300);  // East, RA
+    REQUIRE(server.drop_connections());
+    driver.reset();  // destruction cancels the pulse; its stop cannot be sent on the dropped link
+    CHECK(errors == 1);
+}
+
 // Steps the fake clock until `pred` holds, so a pulse timer parked on it fires without a sleep. Each step waits for
 // the woken task to settle; the 10 s bound is real time (the handset's response timeouts run on it).
 bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred) {
