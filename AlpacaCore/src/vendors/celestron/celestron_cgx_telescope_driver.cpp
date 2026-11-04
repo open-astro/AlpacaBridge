@@ -472,6 +472,10 @@ private:
     CgxHemisphere mechanical_hemisphere_;
     bool needs_sync_ = false;
     bool sync_correction_active_ = false;
+    // The pre-Sync pair, held while Sync writes and verifies the labels with mutex_ free: a poll in that window can
+    // read a new RA label beside an old Dec label, so the getters serve this pair instead until Sync publishes the
+    // verified one or fails. Guarded by mutex_.
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> sync_served_pair_;
     bool motion_state_unverified_ = false;
     bool slew_in_progress_ = false;
     bool restore_tracking_after_slew_ = false;
@@ -660,7 +664,8 @@ CgxSkyPosition CelestronCgxTelescopeDriver::sky_position_locked(std::uint32_t ra
 
 CgxSkyPosition CelestronCgxTelescopeDriver::served_sky_position_locked() const {
     require_readable_locked();
-    const auto frame = polled_.served().value;
+    const auto frame = polled_.served().value;  // the fault and loss checks run even while Sync holds a pair
+    if (sync_served_pair_) return sky_position_locked(sync_served_pair_->first, sync_served_pair_->second);
     return sky_position_locked(frame.ra_encoder, frame.dec_encoder);
 }
 
@@ -1615,6 +1620,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         const std::uint32_t next_dec_rehome_label =
             offset_encoder_label(dec_rehome_label_, signed_cgx_encoder_delta(positions.second, current_dec_encoder));
         reference_write_started = true;  // Even a failed ACK may have changed the controller labels.
+        sync_served_pair_ = std::pair{current_ra_encoder, current_dec_encoder};
         {
             const MutexRelease unlocked(lock);
             protocol_.set_axis_position(CgxAxis::RightAscension, positions.first);
@@ -1646,6 +1652,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         ra_rehome_label_ = next_ra_rehome_label;
         dec_rehome_label_ = next_dec_rehome_label;
         write_frame(positions.first, positions.second);  // the verified labels, before the next poll
+        sync_served_pair_.reset();
         at_home_ = false;
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -1653,6 +1660,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         sync_correction_active_ = true;
         needs_sync_ = false;
     } catch (...) {
+        sync_served_pair_.reset();  // MutexRelease took mutex_ back
         if (reference_write_started) {
             calibrated_ = false;
             needs_sync_ = true;

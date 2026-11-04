@@ -15,15 +15,18 @@
 // poll_now(): the wire counts below are exact.
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "cgx_clock_cleanup.h"
@@ -166,6 +169,64 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
     rig.mount.complete_axis_guide(0x11);
     rig.clock.advance(20ms);
     rig.mount.set_auto_complete_motions(true);
+}
+
+// Sync writes the RA label, then the Dec label, then verifies both, with mutex_ free (decision 0016) and the reference
+// still valid. A poll between the two writes publishes the new RA label beside the old Dec label. The fake lags the
+// Dec readback by one read after the write, so the poll run during the first verify sleep reads exactly that pair.
+TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[celestron][cgx][telemetry]") {
+    namespace cgx = alpacacore::vendor::celestron;
+    TelemetryRig rig;
+    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.poll_now();
+    const double before_ra = rig.driver->get_right_ascension();
+    const double before_dec = rig.driver->get_declination();
+    const double lst = rig.driver->get_sidereal_time();
+    const auto old_dec_label = rig.mount.axis_position(0x11);
+    const auto side =
+        cgx::cgx_encoder_position_to_sky(rig.mount.axis_position(0x10), old_dec_label, lst, cgx::CgxHemisphere::North)
+            .pointing_side;
+    const auto new_dec_label =
+        cgx::cgx_sky_position_to_encoders(lst, 85.0, lst, cgx::CgxHemisphere::North, side).second;
+    rig.mount.set_label_read_offsets(0x11, {0, cgx::signed_cgx_encoder_delta(old_dec_label, new_dec_label)});
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    // Waits 1-3 are the settle before the writes; wait 4 is the first verify sleep, after both label writes.
+    for (int wait = 1; wait <= 3; ++wait) {
+        CHECK(rig.clock.wait_for_wait_count(wait, 2s));
+        rig.clock.advance(20ms);
+    }
+    CHECK(rig.clock.wait_for_wait_count(4, 2s));
+    rig.poll_now();  // new RA label, old Dec label
+    const double during_ra = rig.driver->get_right_ascension();
+    const double during_dec = rig.driver->get_declination();
+    rig.clock.advance(20ms);
+    CHECK(rig.clock.wait_for_wait_count(5, 2s));
+    rig.clock.advance(20ms);
+    CHECK_NOTHROW(sync.get());
+    CHECK(rig.mount.axis_position(0x11) == new_dec_label);  // the lagged read was the old Dec label
+    CHECK(std::abs(lst - before_ra) > 0.1);                 // a new RA label would show
+    CHECK(during_ra == Catch::Approx(before_ra).margin(1e-6));
+    CHECK(during_dec == Catch::Approx(before_dec).margin(1e-6));
+    // Sync publishes the verified pair.
+    CHECK(rig.driver->get_right_ascension() == Catch::Approx(lst).margin(1e-3));
+    CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
+}
+
+TEST_CASE("CGX getters drop the pre-Sync pair when Sync fails after the label writes", "[celestron][cgx][telemetry]") {
+    TelemetryRig rig;
+    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.poll_now();
+    const double lst = rig.driver->get_sidereal_time();
+    rig.mount.set_label_read_offsets(0x11, std::vector<std::int32_t>(40, 100));  // the Dec label never reads back
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    for (int wait = 1; wait <= 40 && sync.wait_for(0s) != std::future_status::ready; ++wait) {
+        if (rig.clock.wait_for_wait_count(wait, 2s)) rig.clock.advance(20ms);
+    }
+    require_alpaca_error([&] { sync.get(); }, alpacacore::AlpacaError::DriverException);
+    rig.mount.set_label_read_offsets(0x11, {});
+    // FindHome restores the reference; the getters serve its labels, not the pair the failed Sync held.
+    rig.home();
+    CHECK(rig.driver->get_declination() > 89.99);
 }
 
 TEST_CASE("CGX FindHome and reconnect replace the served frame", "[celestron][cgx][telemetry]") {
