@@ -345,7 +345,8 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // Check the disconnect sentinel first so a concurrent disconnect yields
-            // NotConnected, not a generic DriverException (matches get_position).
+            // NotConnected, not a generic DriverException (matches get_position). An early exit only: the
+            // handle this move uses is the one read under the I/O lock below (#2037), never this one.
             if (!handle_) {
                 throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
             }
