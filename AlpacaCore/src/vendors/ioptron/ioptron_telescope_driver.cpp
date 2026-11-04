@@ -21,6 +21,7 @@
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/lock_gate.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/task_clock.h>
@@ -45,6 +46,7 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <type_traits>
 
 namespace alpacacore::vendor::ioptron {
 
@@ -55,10 +57,170 @@ namespace alpacacore::vendor::ioptron {
  * the RS-232 command protocol over serial or TCP connection.
  */
 class iOptronTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
+    // Decision 0016 (#1829): getters never wait on device I/O. Two driver locks, in this order:
+    //   transition_mutex_ -> io_mutex_ (the operation lock) -> mutex_ (the state lock, a leaf)
+    // io_mutex_ keeps one command's exchanges and state writes together: every member that reaches the mount
+    // (a command, a getter whose TTL cache has lapsed, the connect and the close) holds it for the whole call.
+    // Some sequences must not be split: :SRA#/:Sd# set the target the :MS1#/:MS2# after them uses, and a
+    // Park's :MP1# is followed by its park-position read. mutex_ is never held ACROSS an exchange: every call
+    // through Wire drops it for the exchange and takes it back after. The protocol wrapper's own lock
+    // serialises the wire itself; the slew and clock-sync bodies take the two locks like a command does.
+    //
+    // A member that needs no device access (Name, the targets, SiteElevation, UTCDate, the guide-rate cache,
+    // the capability and limit getters) takes mutex_ alone (StateLock::Mode::State) and never waits behind
+    // the wire. State such a member reads was written under mutex_ and io_mutex_ together; a command that
+    // read a value before an exchange and uses it after relies only on state that Mode::Io members write.
+    //
+    // The gate itself (which locks this thread holds, StateLock's two modes, dropping mutex_ around an
+    // exchange) is util::LockGate (lock_gate.h, #1729). A full lock table refuses the StateLock with
+    // DriverException before any lock is taken (decision 0016 Rule 6).
+
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
+    // The driver's state lock, with the operation lock above it in Mode::Io (util::StateLock). Mode::State is
+    // for the members that take no operation lock and never reach the wire.
+    using StateLock = util::StateLock;
+
+private:
+    // Every exchange with the mount goes through this gate (the process-wide protocol wrapper behind it). The
+    // caller holds the operation lock; it gives up the state lock for the call, if it holds it, and takes it
+    // back after (also when the call throws). A caller without the operation lock is a defect: it throws
+    // DriverException instead of reaching the wire.
+    class Wire {
+    public:
+        explicit Wire(const iOptronTelescopeDriver& driver) : driver_(driver) {}
+
+        template <typename F>
+        decltype(auto) call(F&& f) const {
+            auto& wrapper = iOptronProtocolWrapper::instance();
+            const util::LockGate& gate = driver_.lock_gate_;
+            if (!gate.holds_io()) {
+                throw AlpacaException("iOptron: a mount exchange without the operation lock",
+                                      AlpacaError::DriverException);
+            }
+            return gate.exchange([&]() -> decltype(auto) { return f(wrapper); });
+        }
+
+        // Text under the wrapper's small mutexes, no I/O and never held across an exchange: called directly.
+        std::string last_connect_error() const { return iOptronProtocolWrapper::instance().last_connect_error(); }
+        std::string link_fault() const { return iOptronProtocolWrapper::instance().link_fault(); }
+
+        bool connect(const ConnectionInfo& info) const {
+            return call([&](auto& p) { return p.connect(info); });
+        }
+        void disconnect() const {
+            call([](auto& p) { p.disconnect(); });
+        }
+        // Takes the wrapper's exchange mutex, so it is an exchange for the gate (decision 0009 rule 2b).
+        void lose_link(const std::string& reason) const {
+            call([&](auto& p) { p.lose_link(reason); });
+        }
+        MountInfo get_mount_info() const {
+            return call([](auto& p) { return p.get_mount_info(); });
+        }
+        Position get_position() const {
+            return call([](auto& p) { return p.get_position(); });
+        }
+        AltAz get_alt_az() const {
+            return call([](auto& p) { return p.get_alt_az(); });
+        }
+        MountStatus get_status() const {
+            return call([](auto& p) { return p.get_status(); });
+        }
+        SiteInfo get_site_info() const {
+            return call([](auto& p) { return p.get_site_info(); });
+        }
+        SiteInfo get_site_location() const {
+            return call([](auto& p) { return p.get_site_location(); });
+        }
+        AltAz get_park_position() const {
+            return call([](auto& p) { return p.get_park_position(); });
+        }
+        std::chrono::system_clock::time_point get_utc_time() const {
+            return call([](auto& p) { return p.get_utc_time(); });
+        }
+        void set_target_ra(double ra_hours) const {
+            call([&](auto& p) { p.set_target_ra(ra_hours); });
+        }
+        void set_target_dec(double dec_degrees) const {
+            call([&](auto& p) { p.set_target_dec(dec_degrees); });
+        }
+        bool slew_to_ra_dec() const {
+            return call([](auto& p) { return p.slew_to_ra_dec(); });
+        }
+        bool slew_to_ra_dec_cw_up() const {
+            return call([](auto& p) { return p.slew_to_ra_dec_cw_up(); });
+        }
+        void stop_slewing() const {
+            call([](auto& p) { p.stop_slewing(); });
+        }
+        void start_tracking() const {
+            call([](auto& p) { p.start_tracking(); });
+        }
+        void stop_tracking() const {
+            call([](auto& p) { p.stop_tracking(); });
+        }
+        bool park(bool zero_distance_workaround) const {
+            return call([&](auto& p) { return p.park(zero_distance_workaround); });
+        }
+        void unpark() const {
+            call([](auto& p) { p.unpark(); });
+        }
+        void set_park_position(double alt_degrees, double az_degrees) const {
+            call([&](auto& p) { p.set_park_position(alt_degrees, az_degrees); });
+        }
+        void go_to_home() const {
+            call([](auto& p) { p.go_to_home(); });
+        }
+        void pulse_guide(int direction, int duration_ms) const {
+            call([&](auto& p) { p.pulse_guide(direction, duration_ms); });
+        }
+        void set_longitude(double longitude_degrees) const {
+            call([&](auto& p) { p.set_longitude(longitude_degrees); });
+        }
+        void set_latitude(double latitude_degrees) const {
+            call([&](auto& p) { p.set_latitude(latitude_degrees); });
+        }
+        void set_hemisphere(bool is_northern) const {
+            call([&](auto& p) { p.set_hemisphere(is_northern); });
+        }
+        void set_utc_time(std::chrono::system_clock::time_point utc_time) const {
+            call([&](auto& p) { p.set_utc_time(utc_time); });
+        }
+        void set_timezone_offset(int offset_minutes) const {
+            call([&](auto& p) { p.set_timezone_offset(offset_minutes); });
+        }
+        void set_dst_observed(bool observed) const {
+            call([&](auto& p) { p.set_dst_observed(observed); });
+        }
+        void set_tracking_rate(int rate) const {
+            call([&](auto& p) { p.set_tracking_rate(rate); });
+        }
+        void set_custom_tracking_rate(double rate_multiplier) const {
+            call([&](auto& p) { p.set_custom_tracking_rate(rate_multiplier); });
+        }
+        std::pair<double, double> get_guide_rates() const {
+            return call([](auto& p) { return p.get_guide_rates(); });
+        }
+        void set_guide_rates(double ra_rate, double dec_rate) const {
+            call([&](auto& p) { p.set_guide_rates(ra_rate, dec_rate); });
+        }
+        std::string send_command(const std::string& command) const {
+            return call([&](auto& p) { return p.send_command(command); });
+        }
+        void send_command_blind(const std::string& command) const {
+            call([&](auto& p) { p.send_command_blind(command); });
+        }
+
+    private:
+        const iOptronTelescopeDriver& driver_;
+    };
+
+    Wire wire() const { return Wire(*this); }
+
+public:
     /**
      * @brief Construct iOptron telescope driver.
      *
@@ -159,6 +321,7 @@ public:
     }
     
     std::string get_name() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);  // no wire I/O: never waits behind a connect
         if (!mount_info_.model_name.empty()) {
             return "iOptron " + mount_info_.model_name;
         }
@@ -170,6 +333,7 @@ public:
     }
 
     std::string fallback_unique_id() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         if (mount_info_.model_code.empty()) {
             return "iOptron_" + std::to_string(device_number_);
         }
@@ -243,8 +407,25 @@ public:
     }
 
     void set_connected(bool connected) override {
+        // Decision 0016 (#1829): the whole call runs under transition_mutex_, which no getter takes, and holds
+        // io_mutex_ from its first state write to its end. Every exchange below goes through Wire, so mutex_ is
+        // free while the handshake, the post-connect reads and the close are on the wire: a getter meanwhile
+        // reads NotConnected (check_connected()), its cache or its identity instead of waiting for them.
         std::lock_guard<std::mutex> transition(transition_mutex_);
-        std::unique_lock<std::mutex> lock(mutex_);
+        const Wire protocol = wire();
+        if (!connected || (connected_ && link_lost())) {
+            // A disconnect, or a connect over a lost link (decision 0009 rule 4), ends the session's bodies
+            // first, with no driver lock held: the clock-sync body and the slew dispatch take both locks, so a
+            // join under either would deadlock, and a body mid-exchange must finish that exchange and then see
+            // its stop before this call takes the operation lock, so it sends nothing more (the clock-sync
+            // slot cases). transition_mutex_ keeps every other connect and disconnect out meanwhile.
+            stop_clock_sync();
+            {
+                std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
+                reap_slew_dispatch();
+            }
+        }
+        StateLock lock(lock_gate_);
 
         ALPACA_LOG_INFO("iOptron", "set_connected called with: " + std::string(connected ? "true" : "false"));
 
@@ -266,158 +447,62 @@ public:
             return;
         }
 
-        bool schedule_clock_sync = false;
-        bool disconnect_protocol = false;
-
         if (connected) {
             ALPACA_LOG_INFO("iOptron", "Attempting to connect...");
-            auto& protocol = iOptronProtocolWrapper::instance();
-            ALPACA_LOG_INFO("iOptron", "Got protocol instance");
             if (connected_) {
                 // Connect over a lost link (decision 0009 rule 4): end the dead session first, as
-                // Disconnect does, then connect afresh below, which resets the rest of the session
-                // state. The joins run without mutex_ (the bodies take it); transition_mutex_ keeps
-                // every other connect and disconnect out meanwhile.
+                // Disconnect does (its bodies were joined above), then connect afresh below, which
+                // resets the rest of the session state.
                 published_connected_ = false;
                 connected_ = false;
-                lock.unlock();
-                stop_clock_sync();
-                {
-                    std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
-                    reap_slew_dispatch();
-                }
                 protocol.disconnect();  // the port is already released; clears the kept loss reason
-                lock.lock();
             }
 
             // Auto-detected devices resolve their port or host here, not in the
             // factory: a persisted device is constructed at server start-up,
             // when a Wi-Fi mount has often not joined the network yet (#659).
-            util::connect_resolved(
-                connection_info_, connection_resolved_, connection_resolver_,
-                [this, &protocol](const ConnectionInfo& info) {
-                    ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
-                    if (!protocol.connect(info)) {
-                        ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
-                        // The wrapper's reason (a port another connected device
-                        // holds, a busy or missing port) reaches the client (#1202).
-                        const std::string reason = protocol.last_connect_error();
-                        const std::string message =
-                            "Failed to connect to iOptron mount" + (reason.empty() ? std::string() : ": " + reason);
-                        // A refused TCP connect, a vanished serial node, or a port another
-                        // connected device now holds (#1202) means the
-                        // resolved endpoint is gone: re-scan. A node that is present
-                        // but would not open is not stale (busy, permissions).
-                        if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
-                            throw util::StaleEndpoint(message);
+            // The scan and the open run as one exchange: the state lock is released for them and taken
+            // back before the outcome or its exception leaves. The connection members the scan writes are
+            // read only under transition_mutex_, which this call holds; io_mutex_ stays held.
+            protocol.call([&](auto&) {
+                util::connect_resolved(
+                    connection_info_, connection_resolved_, connection_resolver_,
+                    [this, &protocol](const ConnectionInfo& info) {
+                        ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
+                        if (!protocol.connect(info)) {
+                            ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
+                            // The wrapper's reason (a port another connected device
+                            // holds, a busy or missing port) reaches the client (#1202).
+                            const std::string reason = protocol.last_connect_error();
+                            const std::string message =
+                                "Failed to connect to iOptron mount" + (reason.empty() ? std::string() : ": " + reason);
+                            // A refused TCP connect, a vanished serial node, or a port another
+                            // connected device now holds (#1202) means the
+                            // resolved endpoint is gone: re-scan. A node that is present
+                            // but would not open is not stale (busy, permissions).
+                            if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
+                                throw util::StaleEndpoint(message);
+                            }
+                            throw AlpacaException(message);
                         }
-                        throw AlpacaException(message);
-                    }
-                    // An auto-detected mount is remembered once it answered, so the next connect
-                    // tries this place first. A configured port or host has no resolver and is
-                    // never stored.
-                    if (connection_resolver_) {
-                        util::DeviceLocationStore::save(util::location_key(get_unique_id(), location_index_),
-                                                        location_of(info));
-                    }
-                },
-                "iOptron");
-            {
-                ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
-                site_info_valid_ = false;
-                position_cache_valid_ = false;
-                altaz_cache_valid_ = false;
-                status_cache_valid_ = false;
-                guide_rate_valid_ = false;
-                utc_offset_.clear();
-                client_disagreement_warned_ = false;
-                device_faulted_ = false;
-                device_fault_count_ = 0;
-                last_device_error_.clear();
-                publish_link_fault_locked();
-                dec_guide_calibration_attempted_ = false;
-                dec_guide_calibrated_ = false;
-                dec_guide_inverted_ = true;
-                dec_guide_calibration_side_ = -1;
-                dec_guide_calibration_in_progress_.store(false);
-                guide_rate_calibration_attempted_ = false;
-                guide_rate_calibrated_ = false;
-                guide_rate_scale_ra_ = 1.0;
-                guide_rate_scale_dec_ = 1.0;
-                axis_move_active_primary_ = false;
-                axis_move_active_secondary_ = false;
-                tracking_state_before_move_.reset();
-                park_override_until_ = std::chrono::steady_clock::time_point{};
-                park_finalize_pending_ = false;
-                tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
-                clear_hold_windows_locked();
-                slew_in_progress_ = false;
-                driver_motion_ = DriverMotion::None;
-                utc_query_supported_ = true;
-                pulse_guiding_hold_ra_hours_ = 0.0;
-                last_ra_read_valid_ = false;
-                last_ra_read_hours_ = 0.0;
-                pulse_guiding_ra_baseline_hours_ = 0.0;
-                pulse_guiding_ra_expected_delta_hours_ = 0.0;
-                pulse_guiding_dec_baseline_degrees_ = 0.0;
-                pulse_guiding_dec_expected_delta_degrees_ = 0.0;
-                pulse_guiding_hold_dec_degrees_ = 0.0;
-                last_dec_read_valid_ = false;
-                last_dec_read_degrees_ = 0.0;
-                target_ra_set_ = false;
-                target_dec_set_ = false;
-                target_ra_hours_ = 0.0;
-                target_dec_degrees_ = 0.0;
-                sync_offset_ra_hours_ = 0.0;
-                sync_offset_dec_degrees_ = 0.0;
-                slew_in_progress_ = false;
-                invalidate_slew_error_locked();
-                util::UtcOffset mount_time;
-                lock.unlock();
-                try {
-                    const auto utc = protocol.get_utc_time();
-                    mount_time.set(utc, clock_.now());
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
-                }
-                lock.lock();
-                utc_offset_ = mount_time;
-                connected_ = true;
-                prefetch_mount_state_locked();
-                try {
-                    mount_info_ = protocol.get_mount_info();
-                } catch (...) {
-                }
-                // The reads above log and carry on when they fail; a cable pulled during them lost
-                // the link (the wrapper released the port), so this Connect fails rather than
-                // publishing a mount that is gone. The reason goes with the failure and is not kept.
-                if (link_lost()) {
-                    const std::string reason = protocol.link_fault();
-                    connected_ = false;
-                    protocol.disconnect();
-                    throw AlpacaException("Failed to connect to iOptron mount: " + reason, AlpacaError::NotConnected);
-                }
-                fast_cache_until_ = clock_.now() + kFastCacheGrace;
-                schedule_clock_sync = true;
-                std::string mount_desc = mount_info_.model_name.empty()
-                    ? "unknown model"
-                    : mount_info_.model_name + " (" + mount_info_.model_code + ")";
-                ALPACA_LOG_INFO(
-                    "iOptron",
-                    "Connected to " + mount_desc + " over " +
-                        std::string(connection_info_.type == ConnectionType::Serial ? "Serial/USB" : "Network"));
-                published_connected_ = true;  // the connect is complete (#910)
-            }
-        } else {
-            ALPACA_LOG_INFO("iOptron", "Disconnecting...");
-            published_connected_ = false;
-            connected_ = false;
+                        // An auto-detected mount is remembered once it answered, so the next connect
+                        // tries this place first. A configured port or host has no resolver and is
+                        // never stored.
+                        if (connection_resolver_) {
+                            util::DeviceLocationStore::save(util::location_key(get_unique_id(), location_index_),
+                                                            location_of(info));
+                        }
+                    },
+                    "iOptron");
+            });
+            ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
             site_info_valid_ = false;
             position_cache_valid_ = false;
             altaz_cache_valid_ = false;
             status_cache_valid_ = false;
             guide_rate_valid_ = false;
             utc_offset_.clear();
+            client_disagreement_warned_ = false;
             device_faulted_ = false;
             device_fault_count_ = 0;
             last_device_error_.clear();
@@ -431,10 +516,6 @@ public:
             guide_rate_calibrated_ = false;
             guide_rate_scale_ra_ = 1.0;
             guide_rate_scale_dec_ = 1.0;
-            utc_query_supported_ = true;
-            sync_offset_ra_hours_ = 0.0;
-            sync_offset_dec_degrees_ = 0.0;
-            fast_cache_until_ = std::chrono::steady_clock::time_point{};
             axis_move_active_primary_ = false;
             axis_move_active_secondary_ = false;
             tracking_state_before_move_.reset();
@@ -444,6 +525,7 @@ public:
             clear_hold_windows_locked();
             slew_in_progress_ = false;
             driver_motion_ = DriverMotion::None;
+            utc_query_supported_ = true;
             pulse_guiding_hold_ra_hours_ = 0.0;
             last_ra_read_valid_ = false;
             last_ra_read_hours_ = 0.0;
@@ -458,29 +540,102 @@ public:
             target_dec_set_ = false;
             target_ra_hours_ = 0.0;
             target_dec_degrees_ = 0.0;
-            slew_in_progress_ = false;
+            sync_offset_ra_hours_ = 0.0;
+            sync_offset_dec_degrees_ = 0.0;
             invalidate_slew_error_locked();
-            disconnect_protocol = true;
-        }
-
-        lock.unlock();
-
-        if (schedule_clock_sync) {
-            start_clock_sync();
-        }
-        if (disconnect_protocol) {
-            stop_clock_sync();
-            // Cancel and join the async slew dispatch (slew slot) before tearing down the
-            // protocol connection (runs after lock.unlock() — the thread
-            // takes mutex_, so joining under the lock would deadlock).
-            {
-                std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
-                reap_slew_dispatch();
+            // The mount clock is sampled once, before Connected is published (the getter makes no exchange).
+            util::UtcOffset mount_time;
+            try {
+                const auto utc = protocol.get_utc_time();
+                mount_time.set(utc, clock_.now());
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
             }
-            auto& protocol = iOptronProtocolWrapper::instance();
-            protocol.disconnect();
-            ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
+            utc_offset_ = mount_time;
+            connected_ = true;
+            prefetch_mount_state_locked();
+            try {
+                mount_info_ = protocol.get_mount_info();
+            } catch (...) {
+            }
+            // The reads above log and carry on when they fail; a cable pulled during them lost
+            // the link (the wrapper released the port), so this Connect fails rather than
+            // publishing a mount that is gone. The reason goes with the failure and is not kept.
+            if (link_lost()) {
+                const std::string reason = protocol.link_fault();
+                connected_ = false;
+                protocol.disconnect();
+                throw AlpacaException("Failed to connect to iOptron mount: " + reason, AlpacaError::NotConnected);
+            }
+            fast_cache_until_ = clock_.now() + kFastCacheGrace;
+            std::string mount_desc = mount_info_.model_name.empty()
+                                         ? "unknown model"
+                                         : mount_info_.model_name + " (" + mount_info_.model_code + ")";
+            ALPACA_LOG_INFO(
+                "iOptron", "Connected to " + mount_desc + " over " +
+                               std::string(connection_info_.type == ConnectionType::Serial ? "Serial/USB" : "Network"));
+            published_connected_ = true;  // the connect is complete (#910)
+            lock.unlock();
+            // After the locks are released: the body takes both.
+            start_clock_sync();
+            return;
         }
+
+        ALPACA_LOG_INFO("iOptron", "Disconnecting...");
+        // The bodies were joined above. The state is cleared under mutex_, then the close runs under io_mutex_
+        // with mutex_ released for it (decision 0016 item 4), so a member that gets a lock meanwhile reads
+        // NotConnected and no exchange sees a closed port.
+        published_connected_ = false;
+        connected_ = false;
+        site_info_valid_ = false;
+        position_cache_valid_ = false;
+        altaz_cache_valid_ = false;
+        status_cache_valid_ = false;
+        guide_rate_valid_ = false;
+        utc_offset_.clear();
+        device_faulted_ = false;
+        device_fault_count_ = 0;
+        last_device_error_.clear();
+        publish_link_fault_locked();
+        dec_guide_calibration_attempted_ = false;
+        dec_guide_calibrated_ = false;
+        dec_guide_inverted_ = true;
+        dec_guide_calibration_side_ = -1;
+        dec_guide_calibration_in_progress_.store(false);
+        guide_rate_calibration_attempted_ = false;
+        guide_rate_calibrated_ = false;
+        guide_rate_scale_ra_ = 1.0;
+        guide_rate_scale_dec_ = 1.0;
+        utc_query_supported_ = true;
+        sync_offset_ra_hours_ = 0.0;
+        sync_offset_dec_degrees_ = 0.0;
+        fast_cache_until_ = std::chrono::steady_clock::time_point{};
+        axis_move_active_primary_ = false;
+        axis_move_active_secondary_ = false;
+        tracking_state_before_move_.reset();
+        park_override_until_ = std::chrono::steady_clock::time_point{};
+        park_finalize_pending_ = false;
+        tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
+        clear_hold_windows_locked();
+        slew_in_progress_ = false;
+        driver_motion_ = DriverMotion::None;
+        pulse_guiding_hold_ra_hours_ = 0.0;
+        last_ra_read_valid_ = false;
+        last_ra_read_hours_ = 0.0;
+        pulse_guiding_ra_baseline_hours_ = 0.0;
+        pulse_guiding_ra_expected_delta_hours_ = 0.0;
+        pulse_guiding_dec_baseline_degrees_ = 0.0;
+        pulse_guiding_dec_expected_delta_degrees_ = 0.0;
+        pulse_guiding_hold_dec_degrees_ = 0.0;
+        last_dec_read_valid_ = false;
+        last_dec_read_degrees_ = 0.0;
+        target_ra_set_ = false;
+        target_dec_set_ = false;
+        target_ra_hours_ = 0.0;
+        target_dec_degrees_ = 0.0;
+        invalidate_slew_error_locked();
+        protocol.disconnect();
+        ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
     }
 
     // "gps_status": whether the mount's GPS receiver holds a fix, with the receiver's own latitude and
@@ -500,14 +655,11 @@ public:
             throw AlpacaException("Action not supported: " + std::string(action_name),
                                   AlpacaError::ActionNotImplemented);
         }
-        {
-            // mutex_ guards state only; the wire has its own lock in the protocol wrapper (decision 0016).
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-        }
+        StateLock lock(lock_gate_);
+        check_connected();
         // :GLS# digit 17 is 2 only for valid GPS data; the site in the same reply is then the receiver's
         // reading. Without a fix the reply holds the stored site, which must not be reported as GPS.
-        const SiteInfo site = iOptronProtocolWrapper::instance().get_site_location();
+        const SiteInfo site = wire().get_site_location();
         const bool fix = (site.gps_status == 2);
         if (!fix) return util::format_gps_status(false, std::nullopt, std::nullopt);
         return util::format_gps_status(true, site.latitude_degrees, site.longitude_degrees);
@@ -518,10 +670,10 @@ public:
     }
     
     std::string command_blind(std::string_view command, bool raw) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
+
+        const Wire protocol = wire();
         if (raw) {
             protocol.send_command_blind(std::string(command));
         } else {
@@ -533,10 +685,10 @@ public:
     }
     
     bool command_bool(std::string_view command, bool raw) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
+
+        const Wire protocol = wire();
         if (raw) {
             std::string response = protocol.send_command(std::string(command));
             return (response == "1");
@@ -548,10 +700,10 @@ public:
     }
     
     std::string command_string(std::string_view command, bool raw) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
+
+        const Wire protocol = wire();
         if (raw) {
             return protocol.send_command(std::string(command));
         } else {
@@ -567,10 +719,11 @@ public:
     }
     
     double get_altitude() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        refresh_altaz_cache_locked();
-        return cached_alt_degrees_;
+        return serve_cached_or_refill([&] { return altaz_cache_fresh_locked(); },
+                                      [&] {
+                                          refresh_altaz_cache_locked();
+                                          return cached_alt_degrees_;
+                                      });
     }
     
     double get_aperture_diameter() const override {
@@ -592,28 +745,32 @@ public:
     }
     
     bool get_at_home() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        refresh_status_cache_locked();
-        return cached_status_.is_at_home;
+        return serve_cached_or_refill([&] { return status_cache_fresh_locked(); },
+                                      [&] {
+                                          refresh_status_cache_locked();
+                                          return cached_status_.is_at_home;
+                                      });
     }
     
     bool get_at_park() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        auto now = clock_.now();
-        if (park_override_until_ > now) {
-            return false;
-        }
-        refresh_status_cache_locked();
-        return cached_status_.is_parked;
+        return serve_cached_or_refill(
+            [&] { return park_override_until_ > clock_.now() || status_cache_fresh_locked(); },
+            [&] {
+                auto now = clock_.now();
+                if (park_override_until_ > now) {
+                    return false;
+                }
+                refresh_status_cache_locked();
+                return cached_status_.is_parked;
+            });
     }
     
     double get_azimuth() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        refresh_altaz_cache_locked();
-        return cached_az_degrees_;
+        return serve_cached_or_refill([&] { return altaz_cache_fresh_locked(); },
+                                      [&] {
+                                          refresh_altaz_cache_locked();
+                                          return cached_az_degrees_;
+                                      });
     }
     
     bool get_can_find_home() const override {
@@ -700,27 +857,29 @@ public:
     }
     
     double get_declination() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        double dec_value = 0.0;
-        if (pulse_position_hold_[kDecAxis].active(clock_.now())) {
-            dec_value = pulse_guiding_hold_dec_degrees_;
-        } else {
-            refresh_position_cache_locked();
-            dec_value = cached_dec_degrees_;
-        }
-        // The first read after a Dec pulse serves the predicted position; any later read is live.
-        if (pulse_position_correction_[kDecAxis].active(clock_.now())) {
-            dec_value = pulse_guiding_dec_baseline_degrees_ + pulse_guiding_dec_expected_delta_degrees_;
-        }
-        pulse_position_correction_[kDecAxis].clear();
-        last_dec_read_degrees_ = dec_value;
-        last_dec_read_valid_ = true;
-        return dec_value + sync_offset_dec_degrees_;
+        return serve_cached_or_refill(
+            [&] { return pulse_position_hold_[kDecAxis].active(clock_.now()) || position_cache_fresh_locked(); },
+            [&] {
+                double dec_value = 0.0;
+                if (pulse_position_hold_[kDecAxis].active(clock_.now())) {
+                    dec_value = pulse_guiding_hold_dec_degrees_;
+                } else {
+                    refresh_position_cache_locked();
+                    dec_value = cached_dec_degrees_;
+                }
+                // The first read after a Dec pulse serves the predicted position; any later read is live.
+                if (pulse_position_correction_[kDecAxis].active(clock_.now())) {
+                    dec_value = pulse_guiding_dec_baseline_degrees_ + pulse_guiding_dec_expected_delta_degrees_;
+                }
+                pulse_position_correction_[kDecAxis].clear();
+                last_dec_read_degrees_ = dec_value;
+                last_dec_read_valid_ = true;
+                return dec_value + sync_offset_dec_degrees_;
+            });
     }
     
     double get_declination_rate() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         // iOptron doesn't support getting Dec rate directly
         // Return 0 (not available)
@@ -729,7 +888,7 @@ public:
     
     void set_declination_rate(double rate) override {
         (void)rate;  // Unused - not supported
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw AlpacaException(
             "Declination rate is not implemented by this mount",
@@ -738,15 +897,17 @@ public:
     }
     
     bool get_tracking() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        return get_tracking_locked();
+        return serve_cached_or_refill(
+            [&] {
+                return (tracking_override_until_ > clock_.now() && status_cache_valid_) || status_cache_fresh_locked();
+            },
+            [&] { return get_tracking_locked(); });
     }
     
     void set_tracking(bool tracking) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         if (tracking) {
             ensure_not_parked_locked("Tracking");
         }
@@ -775,7 +936,7 @@ public:
     }
     
     GuideRate get_guide_rate() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         
         try {
@@ -797,12 +958,12 @@ public:
         if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
             throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
         
         const double scale_ra = guide_rate_calibrated_ ? guide_rate_scale_ra_ : 1.0;
         const double scale_dec = guide_rate_calibrated_ ? guide_rate_scale_dec_ : 1.0;
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         double ra_fraction = rate.ra / (kSiderealRateDegPerSec * scale_ra);
         double dec_fraction = rate.dec / (kSiderealRateDegPerSec * scale_dec);
         ra_fraction = std::clamp(ra_fraction, 0.01, 0.90);
@@ -813,27 +974,30 @@ public:
     }
     
     double get_right_ascension() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        double ra_value = 0.0;
-        if (pulse_position_hold_[kRaAxis].active(clock_.now())) {
-            ra_value = pulse_guiding_hold_ra_hours_;
-        } else {
-            refresh_position_cache_locked();
-            ra_value = cached_ra_hours_;
-        }
-        // The first read after an RA pulse serves the predicted position; any later read is live.
-        if (pulse_position_correction_[kRaAxis].active(clock_.now())) {
-            ra_value = util::wrap_hours(pulse_guiding_ra_baseline_hours_ + pulse_guiding_ra_expected_delta_hours_);
-        }
-        pulse_position_correction_[kRaAxis].clear();
-        last_ra_read_hours_ = ra_value;
-        last_ra_read_valid_ = true;
-        return util::wrap_hours(ra_value + sync_offset_ra_hours_);
+        return serve_cached_or_refill(
+            [&] { return pulse_position_hold_[kRaAxis].active(clock_.now()) || position_cache_fresh_locked(); },
+            [&] {
+                double ra_value = 0.0;
+                if (pulse_position_hold_[kRaAxis].active(clock_.now())) {
+                    ra_value = pulse_guiding_hold_ra_hours_;
+                } else {
+                    refresh_position_cache_locked();
+                    ra_value = cached_ra_hours_;
+                }
+                // The first read after an RA pulse serves the predicted position; any later read is live.
+                if (pulse_position_correction_[kRaAxis].active(clock_.now())) {
+                    ra_value =
+                        util::wrap_hours(pulse_guiding_ra_baseline_hours_ + pulse_guiding_ra_expected_delta_hours_);
+                }
+                pulse_position_correction_[kRaAxis].clear();
+                last_ra_read_hours_ = ra_value;
+                last_ra_read_valid_ = true;
+                return util::wrap_hours(ra_value + sync_offset_ra_hours_);
+            });
     }
 
     double get_right_ascension_rate() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         // ASCOM RightAscensionRate is an OFFSET from sidereal tracking, in
         // seconds of RA per sidereal second — NOT the absolute tracking rate in
@@ -844,7 +1008,7 @@ public:
     
     void set_right_ascension_rate(double rate) override {
         (void)rate;  // Unused - not supported
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw AlpacaException(
             "Right ascension rate is not implemented by this mount",
@@ -853,65 +1017,70 @@ public:
     }
     
     int get_side_of_pier() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
+        return serve_cached_or_refill(
+            [&] {
+                return position_cache_valid_ && !slew_in_progress_ && !cached_status_.is_slewing &&
+                       (clock_.now() - last_position_update_) < kSideOfPierPositionTtl && site_info_valid_;
+            },
+            [&] {
+                // Pier side only changes across a slew, flip, park or home, and every
+                // motion initiator invalidates the position cache, so a position a
+                // few seconds old is authoritative here. One :GEP# round trip costs
+                // ~100 ms of mount latency (HAE16 EQ ConformU 4.5.0, 2026-08-25:
+                // 0.113 s against the 0.1 s FAST target when the 1 s cache had just
+                // lapsed), so this read tolerates a longer staleness than RA/Dec.
+                // slew_in_progress_ (set by every GOTO initiator, cleared once
+                // Slewing has observed completion) is the authoritative "a move may
+                // be changing pier side" signal here: cached_status_.is_slewing is
+                // only refreshed when someone polls Slewing/DeviceState, so a client
+                // that polls SideOfPier alone across a flip would otherwise ride the
+                // 5 s window on pre-flip data (PR #228 review). While a slew is in
+                // flight every read goes live. The flag is sticky until the next
+                // Slewing/DeviceState poll observes completion, so a client that
+                // polls SideOfPier alone keeps live reads after the move as well:
+                // never stale, just uncached until it asks whether the slew ended.
+                const auto now = clock_.now();
+                if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
+                    (now - last_position_update_) >= kSideOfPierPositionTtl) {
+                    refresh_position_cache_locked();
+                }
+                if (!site_info_valid_) {
+                    ensure_site_info_cached_locked();
+                    // ensure_site_info_cached_locked() sets site_info_valid_ on success;
+                    // this re-check detects a failed cache populate, not a dead condition.
+                    // cppcheck-suppress identicalInnerCondition
+                    if (!site_info_valid_) {
+                        return normalize_side_of_pier_value(cached_side_of_pier_);
+                    }
+                }
 
-        // Pier side only changes across a slew, flip, park or home, and every
-        // motion initiator invalidates the position cache, so a position a
-        // few seconds old is authoritative here. One :GEP# round trip costs
-        // ~100 ms of mount latency (HAE16 EQ ConformU 4.5.0, 2026-08-25:
-        // 0.113 s against the 0.1 s FAST target when the 1 s cache had just
-        // lapsed), so this read tolerates a longer staleness than RA/Dec.
-        // slew_in_progress_ (set by every GOTO initiator, cleared once
-        // Slewing has observed completion) is the authoritative "a move may
-        // be changing pier side" signal here: cached_status_.is_slewing is
-        // only refreshed when someone polls Slewing/DeviceState, so a client
-        // that polls SideOfPier alone across a flip would otherwise ride the
-        // 5 s window on pre-flip data (PR #228 review). While a slew is in
-        // flight every read goes live. The flag is sticky until the next
-        // Slewing/DeviceState poll observes completion, so a client that
-        // polls SideOfPier alone keeps live reads after the move as well:
-        // never stale, just uncached until it asks whether the slew ended.
-        const auto now = clock_.now();
-        if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
-            (now - last_position_update_) >= kSideOfPierPositionTtl) {
-            refresh_position_cache_locked();
-        }
-        if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-            // ensure_site_info_cached_locked() sets site_info_valid_ on success;
-            // this re-check detects a failed cache populate, not a dead condition.
-            // cppcheck-suppress identicalInnerCondition
-            if (!site_info_valid_) {
-                return normalize_side_of_pier_value(cached_side_of_pier_);
-            }
-        }
-
-        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
-        const double synced_ra = util::wrap_hours(cached_ra_hours_ + sync_offset_ra_hours_);
-        const double hour_angle = util::shortest_ra_delta_hours(lst, synced_ra);
-        return util::pier_side_for_hour_angle(hour_angle);
+                const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
+                const double synced_ra = util::wrap_hours(cached_ra_hours_ + sync_offset_ra_hours_);
+                const double hour_angle = util::shortest_ra_delta_hours(lst, synced_ra);
+                return util::pier_side_for_hour_angle(hour_angle);
+            });
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
         util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        return serve_cached_or_refill([&] { return site_info_valid_; },
+                                      [&] {
+                                          if (!site_info_valid_) {
+                                              ensure_site_info_cached_locked();
+                                              // ensure_site_info_cached_locked() sets site_info_valid_ on success;
+                                              // this re-check detects a failed cache populate, not a dead condition.
+                                              // cppcheck-suppress identicalInnerCondition
+                                              if (!site_info_valid_) {
+                                                  return normalize_side_of_pier_value(cached_side_of_pier_);
+                                              }
+                                          }
 
-        if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-            // ensure_site_info_cached_locked() sets site_info_valid_ on success;
-            // this re-check detects a failed cache populate, not a dead condition.
-            // cppcheck-suppress identicalInnerCondition
-            if (!site_info_valid_) {
-                return normalize_side_of_pier_value(cached_side_of_pier_);
-            }
-        }
+                                          const double lst = util::local_sidereal_hours(current_utc_time_locked(),
+                                                                                        site_longitude_cached_);
+                                          const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
 
-        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
-        const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
-
-        return util::pier_side_for_hour_angle(hour_angle);
+                                          return util::pier_side_for_hour_angle(hour_angle);
+                                      });
     }
 
     EquatorialSystem get_equatorial_system() const override {
@@ -920,13 +1089,13 @@ public:
 
     // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     void set_does_refraction(bool) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
@@ -947,7 +1116,7 @@ public:
     
     void set_side_of_pier(int side) override {
         (void)side;  // Unused - not supported
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw AlpacaException(
             "Setting pier side not supported by iOptron mount",
@@ -956,15 +1125,16 @@ public:
     }
     
     double get_sidereal_time() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        ensure_site_info_cached_locked();
-        auto utc_now = current_utc_time_locked();
-        return util::local_sidereal_hours(utc_now, site_longitude_cached_);
+        return serve_cached_or_refill([&] { return site_info_fresh_locked(); },
+                                      [&] {
+                                          ensure_site_info_cached_locked();
+                                          auto utc_now = current_utc_time_locked();
+                                          return util::local_sidereal_hours(utc_now, site_longitude_cached_);
+                                      });
     }
     
     double get_site_elevation() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         if (!site_elevation_m_) {
             throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
         }
@@ -972,7 +1142,7 @@ public:
     }
     
     void set_site_elevation(double elevation) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException(
                 "Site elevation must be between -300 and 10000 meters",
@@ -983,18 +1153,18 @@ public:
     }
     
     double get_site_latitude() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        
-        ensure_site_info_cached_locked();
-        return site_latitude_cached_;
+        return serve_cached_or_refill([&] { return site_info_fresh_locked(); },
+                                      [&] {
+                                          ensure_site_info_cached_locked();
+                                          return site_latitude_cached_;
+                                      });
     }
 
     void set_site_latitude(double latitude) override {
         util::validate_latitude(latitude);
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         protocol.set_latitude(latitude);
         protocol.set_hemisphere(latitude >= 0.0);
         site_latitude_cached_ = latitude;
@@ -1004,18 +1174,18 @@ public:
     }
 
     double get_site_longitude() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        
-        ensure_site_info_cached_locked();
-        return site_longitude_cached_;
+        return serve_cached_or_refill([&] { return site_info_fresh_locked(); },
+                                      [&] {
+                                          ensure_site_info_cached_locked();
+                                          return site_longitude_cached_;
+                                      });
     }
 
     void set_site_longitude(double longitude) override {
         util::validate_longitude(longitude);
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
         site_info_valid_ = true;
@@ -1040,12 +1210,12 @@ public:
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
         ensure_not_parked_locked("MoveAxis");
 
         const bool was_any_axis_active = axis_move_active_primary_ || axis_move_active_secondary_;
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         if (abs_rate > 0.0) {
             const int arrow_speed = arrow_speed_level_for_rate(abs_rate);
             std::ostringstream cmd;
@@ -1147,92 +1317,101 @@ public:
     }
 
     bool get_slewing() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        // open-astro#575: surface a stored async-slew failure as an error
-        // instead of a silent false, until AbortSlew or a new slew initiator
-        // clears it (see last_slew_error_).
-        if (!last_slew_error_.empty()) {
-            throw AlpacaException(last_slew_error_);
-        }
-        if (axis_move_active_primary_ || axis_move_active_secondary_) {
-            return true;
-        }
-        auto now = clock_.now();
-        if (slew_hold_.active(now)) {
-            return true;
-        }
-        refresh_status_cache_locked();
-        if (cached_status_.is_slewing) {
-            // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
-            // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
-            // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
-            // dispatching and no Park/FindHome still moving (driver_motion_).
-            return !(pulse_window_open() && !slew_in_progress_ && driver_motion_ == DriverMotion::None);
-        }
-        // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
-        // compensating sidereal motion during its final ~1 s approach, so
-        // slews settle a consistent ~11-16 arcsec east of the RA target
-        // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
-        // the firmware deadbands slews shorter than ~15". Instead, close the
-        // residual with a duration-computed pulse-guide trim (guide rate is
-        // known, so err/rate gives the exact pulse length), re-measuring and
-        // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
-        // on this firmware and Dec pulse polarity flips with pier side.
-        // Slewing stays true while a trim pulse runs.
-        if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
-            ++slew_refine_count_;
-            try {
-                auto& protocol = iOptronProtocolWrapper::instance();
-                Position pos = protocol.get_position();
-                double ra_err_hours = pos.ra_hours - slew_target_ra_hours_;
-                if (ra_err_hours > 12.0) {
-                    ra_err_hours -= 24.0;
-                } else if (ra_err_hours < -12.0) {
-                    ra_err_hours += 24.0;
+        return serve_cached_or_refill(
+            [&] {
+                return !last_slew_error_.empty() || axis_move_active_primary_ || axis_move_active_secondary_ ||
+                       slew_hold_.active(clock_.now()) ||
+                       (status_cache_fresh_locked() &&
+                        !(slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines));
+            },
+            [&] {
+                // open-astro#575: surface a stored async-slew failure as an error
+                // instead of a silent false, until AbortSlew or a new slew initiator
+                // clears it (see last_slew_error_).
+                if (!last_slew_error_.empty()) {
+                    throw AlpacaException(last_slew_error_);
                 }
-                const double ra_err_arcsec = ra_err_hours * 15.0 * 3600.0;
-                constexpr double kTrimMinArcsec = 5.0;    // below this: on target
-                constexpr double kTrimMaxArcsec = 120.0;  // above this: not a settle error
-                if (std::fabs(ra_err_arcsec) > kTrimMinArcsec && std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
-                    double guide_fraction = kDefaultGuideRateFraction;
-                    try {
-                        guide_fraction = protocol.get_guide_rates().first;
-                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                        // Unreadable guide rate — fall back to the default fraction.
-                    }
-                    if (guide_fraction < 0.1 || guide_fraction > 1.0) {
-                        guide_fraction = kDefaultGuideRateFraction;
-                    }
-                    const double trim_rate_arcsec_per_s = guide_fraction * 15.041;
-                    int duration_ms = static_cast<int>(std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
-                    duration_ms = std::clamp(duration_ms, 100, 8000);
-                    // Reported RA too large -> mount is east of target -> pulse
-                    // west (RA-, direction 3); too small -> east (RA+, 2).
-                    const int direction = ra_err_arcsec > 0 ? 3 : 2;
-                    ALPACA_LOG_INFO("iOptron", "GOTO settled " + std::to_string(ra_err_arcsec) +
-                                                   " arcsec from RA target; pulse-guide trim " +
-                                                   std::to_string(slew_refine_count_) + "/" +
-                                                   std::to_string(kMaxSlewRefines) + " (" +
-                                                   std::to_string(duration_ms) + " ms, final-approach firmware quirk)");
-                    send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
-                                               [&] { protocol.pulse_guide(direction, duration_ms); });
-                    status_cache_valid_ = false;
-                    position_cache_valid_ = false;
+                if (axis_move_active_primary_ || axis_move_active_secondary_) {
                     return true;
                 }
-            } catch (const std::exception&) {
-                // Best-effort trim; fall through and report slew complete, unless the link was lost: then
-                // NotConnected, never a "not slewing" from a mount that is gone.
-                throw_if_link_lost();
-            }
-        }
-        slew_in_progress_ = false;
-        return false;
+                auto now = clock_.now();
+                if (slew_hold_.active(now)) {
+                    return true;
+                }
+                refresh_status_cache_locked();
+                if (cached_status_.is_slewing) {
+                    // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
+                    // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
+                    // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
+                    // dispatching and no Park/FindHome still moving (driver_motion_).
+                    return !(pulse_window_open() && !slew_in_progress_ && driver_motion_ == DriverMotion::None);
+                }
+                // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
+                // compensating sidereal motion during its final ~1 s approach, so
+                // slews settle a consistent ~11-16 arcsec east of the RA target
+                // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
+                // the firmware deadbands slews shorter than ~15". Instead, close the
+                // residual with a duration-computed pulse-guide trim (guide rate is
+                // known, so err/rate gives the exact pulse length), re-measuring and
+                // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
+                // on this firmware and Dec pulse polarity flips with pier side.
+                // Slewing stays true while a trim pulse runs.
+                if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
+                    ++slew_refine_count_;
+                    try {
+                        const Wire protocol = wire();
+                        Position pos = protocol.get_position();
+                        double ra_err_hours = pos.ra_hours - slew_target_ra_hours_;
+                        if (ra_err_hours > 12.0) {
+                            ra_err_hours -= 24.0;
+                        } else if (ra_err_hours < -12.0) {
+                            ra_err_hours += 24.0;
+                        }
+                        const double ra_err_arcsec = ra_err_hours * 15.0 * 3600.0;
+                        constexpr double kTrimMinArcsec = 5.0;    // below this: on target
+                        constexpr double kTrimMaxArcsec = 120.0;  // above this: not a settle error
+                        if (std::fabs(ra_err_arcsec) > kTrimMinArcsec && std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
+                            double guide_fraction = kDefaultGuideRateFraction;
+                            try {
+                                guide_fraction = protocol.get_guide_rates().first;
+                            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                                // Unreadable guide rate — fall back to the default fraction.
+                            }
+                            if (guide_fraction < 0.1 || guide_fraction > 1.0) {
+                                guide_fraction = kDefaultGuideRateFraction;
+                            }
+                            const double trim_rate_arcsec_per_s = guide_fraction * 15.041;
+                            int duration_ms =
+                                static_cast<int>(std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
+                            duration_ms = std::clamp(duration_ms, 100, 8000);
+                            // Reported RA too large -> mount is east of target -> pulse
+                            // west (RA-, direction 3); too small -> east (RA+, 2).
+                            const int direction = ra_err_arcsec > 0 ? 3 : 2;
+                            ALPACA_LOG_INFO("iOptron", "GOTO settled " + std::to_string(ra_err_arcsec) +
+                                                           " arcsec from RA target; pulse-guide trim " +
+                                                           std::to_string(slew_refine_count_) + "/" +
+                                                           std::to_string(kMaxSlewRefines) + " (" +
+                                                           std::to_string(duration_ms) +
+                                                           " ms, final-approach firmware quirk)");
+                            send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
+                                                       [&] { protocol.pulse_guide(direction, duration_ms); });
+                            status_cache_valid_ = false;
+                            position_cache_valid_ = false;
+                            return true;
+                        }
+                    } catch (const std::exception&) {
+                        // Best-effort trim; fall through and report slew complete, unless the link was lost: then
+                        // NotConnected, never a "not slewing" from a mount that is gone.
+                        throw_if_link_lost();
+                    }
+                }
+                slew_in_progress_ = false;
+                return false;
+            });
     }
     
     double get_target_declination() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -1241,17 +1420,17 @@ public:
     
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
 
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         protocol.set_target_dec(dec);
     }
     
     double get_target_right_ascension() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -1260,35 +1439,40 @@ public:
     
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
 
         target_ra_hours_ = ra;
         target_ra_set_ = true;
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         protocol.set_target_ra(ra);
     }
     
     int get_tracking_rate() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected(LatchProbe::Read);
-        auto now = clock_.now();
-        if (tracking_rate_override_until_ > now && status_cache_valid_) {
-            return static_cast<int>(cached_status_.tracking_rate);
-        }
-        refresh_status_cache_locked();
-        // Alpaca TrackingRate uses DriveRates enum values (0-4).
-        return static_cast<int>(cached_status_.tracking_rate);
+        return serve_cached_or_refill(
+            [&] {
+                return (tracking_rate_override_until_ > clock_.now() && status_cache_valid_) ||
+                       status_cache_fresh_locked();
+            },
+            [&] {
+                auto now = clock_.now();
+                if (tracking_rate_override_until_ > now && status_cache_valid_) {
+                    return static_cast<int>(cached_status_.tracking_rate);
+                }
+                refresh_status_cache_locked();
+                // Alpaca TrackingRate uses DriveRates enum values (0-4).
+                return static_cast<int>(cached_status_.tracking_rate);
+            });
     }
 
     void set_tracking_rate(int rate) override {
         if (rate < 0 || rate > 4) {
             throw AlpacaException("Invalid tracking rate", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
 
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
 
         protocol.set_tracking_rate(rate);
         if (rate == 4) {
@@ -1301,7 +1485,7 @@ public:
     }
 
     std::vector<int> get_tracking_rates() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         
         // Return supported tracking rates as DriveRates enum values:
@@ -1310,7 +1494,7 @@ public:
     }
     
     std::chrono::system_clock::time_point get_utc_date() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
 
         if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
@@ -1319,10 +1503,10 @@ public:
     }
     
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
+
+        const Wire protocol = wire();
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         protocol.set_utc_time(utc);
         utc_offset_.set(utc, clock_.now());
@@ -1334,7 +1518,7 @@ public:
     // Telescope methods
     
     void find_home() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
         
         if (!get_can_find_home()) {
@@ -1349,8 +1533,8 @@ public:
         if (cached_status_.is_at_home) {
             return;
         }
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
+
+        const Wire protocol = wire();
         // Use a direct go-to-zero command to avoid aggressive sensor searches.
         send_with_slew_hold_locked(std::chrono::seconds(5), [&] { protocol.go_to_home(); });
         supersede_slew_dispatch_locked();
@@ -1360,7 +1544,7 @@ public:
     }
 
     void park() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
         
         refresh_status_cache_locked();
@@ -1368,7 +1552,7 @@ public:
             return;
         }
 
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             send_with_slew_hold_locked(std::chrono::seconds(5), [&] {
                 if (!protocol.park(hae29c_quirks_active())) {
@@ -1418,7 +1602,7 @@ public:
         // the handoff lock can wait for a concurrent initiator's in-flight
         // dispatch transaction before the stop can be sent.
         reap_slew_dispatch();
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         // open-astro#728: a latched fault must not stop a client stopping the
         // mount. Skip the latch check, the parked check (a status read) and the
         // cached slewing flag, none of which can be trusted on a faulted link,
@@ -1436,7 +1620,7 @@ public:
         invalidate_slew_error_locked();
         // open-astro#768: the stop is sent even when the cached status says the
         // mount is not slewing; that cache can lag a GOTO the mount accepted.
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             protocol.stop_slewing();
             clear_device_fault_locked();
@@ -1498,11 +1682,11 @@ public:
         if (duration < 0 || duration > 99999) {
             throw AlpacaException("PulseGuide duration must be 0-99999 ms", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
         ensure_not_parked_fast_locked("PulseGuide");
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
+
+        const Wire protocol = wire();
         int calibrated_direction = direction;
         const bool is_dec = (direction == 0 || direction == 1);
         const bool is_ra = (direction == 2 || direction == 3);
@@ -1593,11 +1777,11 @@ public:
     }
     
     void set_park() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
         
         // Get current position and set as park position
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         AltAz altaz = protocol.get_alt_az();
         protocol.set_park_position(altaz.altitude_degrees, altaz.azimuth_degrees);
         status_cache_valid_ = false;
@@ -1607,7 +1791,7 @@ public:
     void slew_to_coordinates(double ra, double dec) override {
         util::validate_ra_dec(ra, dec, "SlewToCoordinates");
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_);
             double phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             double phys_dec = dec - sync_offset_dec_degrees_;
             check_equatorial_slew_allowed_locked("SlewToCoordinates");
@@ -1627,7 +1811,7 @@ public:
         std::uint64_t generation = 0;
         std::string previous_slew_error;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_);
             phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             phys_dec = dec - sync_offset_dec_degrees_;
             previous_slew_error = last_slew_error_;
@@ -1648,7 +1832,7 @@ public:
         double ra = 0.0;
         double dec = 0.0;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
             check_connected();
             if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
@@ -1663,7 +1847,7 @@ public:
         double ra = 0.0;
         double dec = 0.0;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
             check_connected();
             if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
@@ -1676,7 +1860,7 @@ public:
     
     void sync_to_coordinates(double ra, double dec) override {
         util::validate_ra_dec(ra, dec, "SyncToCoordinates");
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
         ensure_not_parked_locked("SyncToCoordinates");
 
@@ -1693,7 +1877,7 @@ public:
     }
     
     void sync_to_target() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
         if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
@@ -1714,7 +1898,7 @@ public:
         std::uint64_t generation = 0;
         std::string previous_slew_error;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_);
             check_connected();
             if (!site_info_valid_) {
                 ensure_site_info_cached_locked();
@@ -1758,7 +1942,7 @@ public:
         double dec_degrees = 0.0;
         validate_alt_az(altitude, azimuth, "SlewToAltAz");
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_);
             check_connected();
             ensure_site_info_cached_locked();
             if (!site_info_valid_) {
@@ -1779,7 +1963,7 @@ public:
     void sync_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
         throw AlpacaException(
             "Alt/Az sync not supported by iOptron driver",
@@ -1788,10 +1972,10 @@ public:
     }
     
     void unpark() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         check_connected();
 
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             send_with_slew_hold_locked(std::chrono::seconds(2), [&] { protocol.unpark(); });
             clear_device_fault_locked();
@@ -1859,22 +2043,78 @@ private:
     // While latched, a LatchProbe::Read call once per kFaultProbeInterval sends one :GLS# status read instead of
     // refusing: a good reply clears the latch (note_device_read_ok_locked()) and the call goes on; a failed one keeps
     // it and throws DriverException; a hangup over serial is a lost link (NotConnected). Between probes it refuses
-    // with nothing sent. Caller holds mutex_, so the probe takes mutex_ -> wrapper mutex like every exchange.
+    // with nothing sent. The probe and the staleness loss are exchanges (the loss takes the wrapper's exchange
+    // mutex), so only a caller that holds the operation lock runs them; a Mode::State member refuses with the
+    // latched text and leaves the loss to the next Mode::Io call, as IsPulseGuiding does (decision 0016).
     void check_connected(LatchProbe probe = LatchProbe::Refuse) const {
         if (!connected_) {
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
         }
         throw_if_link_lost();
         if (device_faulted_) {
-            lose_link_if_fault_stale();
-            if (probe == LatchProbe::Read && clock_.now() >= next_fault_probe_) {
-                next_fault_probe_ = clock_.now() + kFaultProbeInterval;
-                refresh_status_cache_locked(true);
-                return;
+            if (lock_gate_.holds_io()) {
+                lose_link_if_fault_stale();
+                if (probe == LatchProbe::Read && clock_.now() >= next_fault_probe_) {
+                    next_fault_probe_ = clock_.now() + kFaultProbeInterval;
+                    refresh_status_cache_locked(true);
+                    return;
+                }
             }
             throw AlpacaException("Mount communications compromised: " + last_device_error_,
                                   AlpacaError::DriverException);
         }
+    }
+
+    // A getter that may reach the mount checks the lock-free flag before it takes the operation lock, so a
+    // read that lands while a connect holds that lock answers NotConnected at once instead of waiting for the
+    // handshake (decision 0016); check_connected() under the lock then closes the disconnect race.
+    void check_connected_before_lock() const {
+        if (!connected_) {
+            throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
+        }
+    }
+
+    // Decision 0016 rule 1 (#1829): a getter served from a cache takes the state lock alone and answers when its
+    // cache is fresh (the common case: every cache is primed at connect and refilled on a TTL), so it never waits
+    // behind a command, the clock-sync body or another getter's refill on the wire. Only when the cache has
+    // lapsed, or a fault is latched (the probe is an exchange), does it take the operation lock and run `body`
+    // under both locks, where the refill reaches the mount. `fresh` and `body` run under mutex_; `fresh` true
+    // must mean `body` reaches no wire (the refill helpers return early on the same predicates).
+    template <typename Fresh, typename Body>
+    std::invoke_result_t<Body&> serve_cached_or_refill(Fresh&& fresh, Body&& body) const {
+        check_connected_before_lock();
+        {
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            if (!connected_) {
+                throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
+            }
+            throw_if_link_lost();
+            if (!device_faulted_ && fresh()) {
+                return body();
+            }
+        }
+        StateLock lock(lock_gate_);
+        check_connected(LatchProbe::Read);
+        return body();
+    }
+
+    // Whether a cache can be served without a refill: primed and within the post-connect grace or its TTL. The
+    // refill helpers below return early on the same predicate.
+    bool position_cache_fresh_locked() const {
+        const auto now = clock_.now();
+        return position_cache_valid_ && (now < fast_cache_until_ || (now - last_position_update_) < kPositionCacheTtl);
+    }
+    bool altaz_cache_fresh_locked() const {
+        const auto now = clock_.now();
+        return altaz_cache_valid_ && (now < fast_cache_until_ || (now - last_altaz_update_) < kPositionCacheTtl);
+    }
+    bool status_cache_fresh_locked() const {
+        const auto now = clock_.now();
+        return status_cache_valid_ && (now < fast_cache_until_ || (now - last_status_update_) < kStatusCacheTtl);
+    }
+    bool site_info_fresh_locked() const {
+        const auto now = clock_.now();
+        return site_info_valid_ && (now < fast_cache_until_ || (now - last_site_info_fetch_) < kSiteInfoCacheTtl);
     }
 
     // Decision 0009 rule 2a: the wrapper saw the serial port gone (or lose_link() ran) and released it. Lock-free.
@@ -1888,11 +2128,11 @@ private:
     // loss check) and the slew body, which records its failed dispatch, leave a loss to the next call through
     // check_connected(); Connected reads false at once either way.
     static void throw_if_link_lost() {
-        auto& protocol = iOptronProtocolWrapper::instance();
-        if (protocol.link_alive()) {
+        const auto& link = iOptronProtocolWrapper::instance();  // link_alive() and link_fault() do no I/O
+        if (link.link_alive()) {
             return;
         }
-        const std::string reason = protocol.link_fault();
+        const std::string reason = link.link_fault();
         throw AlpacaException(
             reason.empty() ? std::string("Mount link lost; Connect again once the mount is back") : reason,
             AlpacaError::NotConnected);
@@ -1900,17 +2140,17 @@ private:
 
     // Decision 0009 rule 2b: a latched fault that has stood past util::kLinkStalenessBound on the task clock is a lost
     // link, found by the next call through check_connected() (no poll). The wrapper releases the port and keeps the
-    // reason (rules 3 and 5), then this throws NotConnected. No driver lock of its own: under mutex_ the order is
-    // mutex_ -> wrapper mutex, as for every exchange; link_fault_mutex_ is a leaf released before the wrapper call.
+    // reason (rules 3 and 5), then this throws NotConnected. The wrapper call is an exchange for the gate (it
+    // takes the wrapper's exchange mutex), so it runs under io_mutex_ with mutex_ released; link_fault_mutex_ is
+    // a leaf released before it.
     void lose_link_if_fault_stale() const {
         const auto since = std::chrono::steady_clock::time_point(
             std::chrono::steady_clock::duration(device_fault_since_ticks_.load()));
         if (!device_faulted_ || clock_.now() - since < util::kLinkStalenessBound) {
             return;
         }
-        iOptronProtocolWrapper::instance().lose_link("Mount fault stood for " +
-                                                     std::to_string(util::kLinkStalenessBound.count()) +
-                                                     " s with no good reply: " + published_fault_text());
+        wire().lose_link("Mount fault stood for " + std::to_string(util::kLinkStalenessBound.count()) +
+                         " s with no good reply: " + published_fault_text());
         throw_if_link_lost();
     }
 
@@ -2010,7 +2250,7 @@ private:
     }
 
     void prefetch_mount_state_locked() {
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         auto now = clock_.now();
         try {
             Position pos = protocol.get_position();
@@ -2171,7 +2411,7 @@ private:
     // `async_ctx` is the slew slot's context when the GOTO runs on its body: a rejection is then recorded in
     // last_slew_error_ and logged instead of thrown. Null: the synchronous initiators, which throw.
     void dispatch_slew_command_locked(double ra, double dec, util::OperationContext* async_ctx, const char* label) {
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         bool accepted = false;
         try {
             protocol.set_target_ra(ra);
@@ -2230,7 +2470,7 @@ private:
         // reached.  Uses the slew deadline, not a fixed iteration cap.
         bool has_target = false;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
             has_target = target_ra_set_ && target_dec_set_;
         }
         if (has_target) {
@@ -2244,7 +2484,7 @@ private:
                 bool target_reached = false;
                 double cur_ra = 0, cur_dec = 0;
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
+                    StateLock lock(lock_gate_);
                     target_reached = slew_target_reached_locked();
                     cur_ra = cached_ra_hours_;
                     cur_dec = cached_dec_degrees_;
@@ -2279,19 +2519,16 @@ private:
         if (slew_settle_time_seconds_ > 0) {
             clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
+        StateLock lock(lock_gate_, StateLock::Mode::State);
         slew_in_progress_ = false;
     }
     
     void refresh_position_cache_locked(bool force = false) const {
         auto now = clock_.now();
-        if (!force && position_cache_valid_ && now < fast_cache_until_) {
+        if (!force && position_cache_fresh_locked()) {
             return;
         }
-        if (!force && position_cache_valid_ &&
-            (now - last_position_update_) < kPositionCacheTtl) {
-            return;
-        }
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             Position pos = protocol.get_position();
             cached_dec_degrees_ = pos.dec_degrees;
@@ -2310,14 +2547,10 @@ private:
 
     void refresh_altaz_cache_locked(bool force = false) const {
         auto now = clock_.now();
-        if (!force && altaz_cache_valid_ && now < fast_cache_until_) {
+        if (!force && altaz_cache_fresh_locked()) {
             return;
         }
-        if (!force && altaz_cache_valid_ &&
-            (now - last_altaz_update_) < kPositionCacheTtl) {
-            return;
-        }
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             AltAz altaz = protocol.get_alt_az();
             cached_alt_degrees_ = altaz.altitude_degrees;
@@ -2335,14 +2568,10 @@ private:
     
     void refresh_status_cache_locked(bool force = false) const {
         auto now = clock_.now();
-        if (!force && status_cache_valid_ && now < fast_cache_until_) {
+        if (!force && status_cache_fresh_locked()) {
             return;
         }
-        if (!force && status_cache_valid_ &&
-            (now - last_status_update_) < kStatusCacheTtl) {
-            return;
-        }
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             cached_status_ = protocol.get_status();
             status_cache_valid_ = true;
@@ -2381,7 +2610,7 @@ private:
         if (!cached_status_.is_slewing || !park_target_valid_) {
             return;
         }
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             AltAz current = protocol.get_alt_az();
             constexpr double kEpsDeg = 0.01;  // 36 arcsec; GAC/GPC agree to 0.01"
@@ -2409,14 +2638,10 @@ private:
 
     void ensure_site_info_cached_locked(bool force_refresh = false) const {
         auto now = clock_.now();
-        if (!force_refresh && site_info_valid_ && now < fast_cache_until_) {
+        if (!force_refresh && site_info_fresh_locked()) {
             return;
         }
-        if (!force_refresh && site_info_valid_ &&
-            (now - last_site_info_fetch_) < kSiteInfoCacheTtl) {
-            return;
-        }
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             SiteInfo site = protocol.get_site_info();
             if ((std::abs(site.latitude_degrees) > 90.0) ||
@@ -2490,7 +2715,7 @@ private:
             return;
         }
 
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         try {
             const auto start = protocol.get_position();
             dec_guide_calibration_side_ = start.side_of_pier;
@@ -2526,7 +2751,7 @@ private:
     }
 
     GuideRate read_guide_rate_raw_locked() const {
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
         auto [ra_rate, dec_rate] = protocol.get_guide_rates();
         const double scale_ra = guide_rate_calibrated_ ? guide_rate_scale_ra_ : 1.0;
         const double scale_dec = guide_rate_calibrated_ ? guide_rate_scale_dec_ : 1.0;
@@ -2551,7 +2776,7 @@ private:
         const int sample_duration = 5000;
         const auto settle_delay = kGuideCalibrationSettleDelay;
         try {
-            auto& protocol = iOptronProtocolWrapper::instance();
+            const Wire protocol = wire();
             auto [original_ra_rate, original_dec_rate] = protocol.get_guide_rates();
             const double test_ra_rate = std::clamp(0.5, 0.01, 0.90);
             const double test_dec_rate = std::clamp(original_dec_rate, 0.10, 0.99);
@@ -2632,7 +2857,7 @@ private:
     void sync_site_settings_with_mount_locked() {
         if (pending_site_latitude_.has_value()) {
             double latitude = pending_site_latitude_.value();
-            if (retry_mount_command("site latitude", [&]() { iOptronProtocolWrapper::instance().set_latitude(latitude); })) {
+            if (retry_mount_command("site latitude", [&]() { wire().set_latitude(latitude); })) {
                 site_latitude_cached_ = latitude;
                 hemisphere_north_ = (latitude >= 0.0);
                 site_info_valid_ = true;
@@ -2642,7 +2867,7 @@ private:
 
         if (pending_site_longitude_.has_value()) {
             double longitude = pending_site_longitude_.value();
-            if (retry_mount_command("site longitude", [&]() { iOptronProtocolWrapper::instance().set_longitude(longitude); })) {
+            if (retry_mount_command("site longitude", [&]() { wire().set_longitude(longitude); })) {
                 site_longitude_cached_ = longitude;
                 site_info_valid_ = true;
                 last_site_info_fetch_ = clock_.now();
@@ -2651,7 +2876,7 @@ private:
 
         if (pending_site_latitude_.has_value()) {
             bool is_north = pending_site_latitude_.value() >= 0.0;
-            retry_mount_command("hemisphere", [&]() { iOptronProtocolWrapper::instance().set_hemisphere(is_north); });
+            retry_mount_command("hemisphere", [&]() { wire().set_hemisphere(is_north); });
         }
 
         if (pending_site_elevation_.has_value()) {
@@ -2662,7 +2887,7 @@ private:
     void sync_mount_clock_with_host_locked() {
         auto tz_info = compute_local_timezone_info();
         auto now_utc = std::chrono::system_clock::now();
-        auto& protocol = iOptronProtocolWrapper::instance();
+        const Wire protocol = wire();
 
         if (retry_mount_command("timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); })) {
             timezone_offset_minutes_ = tz_info.offset_minutes;
@@ -2732,7 +2957,7 @@ private:
         std::optional<int> elev;
         bool do_clock_sync = false;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                 return;
             }
@@ -2742,16 +2967,24 @@ private:
             do_clock_sync = sync_time_on_connect_;
         }
 
-        auto& protocol = iOptronProtocolWrapper::instance();
+        // Each command takes the operation lock and the state lock for itself, like a client's command, and
+        // releases both before the retry wait: a getter or a command never waits behind a retry.
+        const Wire protocol = wire();
+        auto exchange = [this](auto&& send) {
+            StateLock lock(lock_gate_);
+            send();
+        };
 
         if (lat.has_value()) {
             double latitude = lat.value();
-            retry_mount_command("site latitude", [&]() { protocol.set_latitude(latitude); }, &ctx);
-            retry_mount_command("hemisphere", [&]() { protocol.set_hemisphere(latitude >= 0.0); }, &ctx);
+            retry_mount_command("site latitude", [&]() { exchange([&] { protocol.set_latitude(latitude); }); }, &ctx);
+            retry_mount_command(
+                "hemisphere", [&]() { exchange([&] { protocol.set_hemisphere(latitude >= 0.0); }); }, &ctx);
         }
         if (lon.has_value()) {
             double longitude = lon.value();
-            retry_mount_command("site longitude", [&]() { protocol.set_longitude(longitude); }, &ctx);
+            retry_mount_command(
+                "site longitude", [&]() { exchange([&] { protocol.set_longitude(longitude); }); }, &ctx);
         }
 
         util::UtcOffset synced_time;
@@ -2759,20 +2992,24 @@ private:
             auto tz_info = compute_local_timezone_info();
             auto now_utc = std::chrono::system_clock::now();
             retry_mount_command(
-                "timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); }, &ctx);
-            retry_mount_command("DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); }, &ctx);
+                "timezone offset", [&]() { exchange([&] { protocol.set_timezone_offset(tz_info.offset_minutes); }); },
+                &ctx);
+            retry_mount_command(
+                "DST flag", [&]() { exchange([&] { protocol.set_dst_observed(tz_info.dst_active); }); }, &ctx);
             retry_mount_command(
                 "UTC clock",
                 [&]() {
-                    const auto sent_at = clock_.now();
-                    protocol.set_utc_time(now_utc);
-                    synced_time.set(now_utc, sent_at);
+                    exchange([&] {
+                        const auto sent_at = clock_.now();
+                        protocol.set_utc_time(now_utc);
+                        synced_time.set(now_utc, sent_at);
+                    });
                 },
                 &ctx);
         }
 
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                 return;
             }
@@ -2831,7 +3068,7 @@ private:
             reap_slew_dispatch();
             slew_.start(std::move(body));
         } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(mutex_);
+            StateLock lock(lock_gate_, StateLock::Mode::State);
             if (generation == slew_operation_generation_) {
                 slew_in_progress_ = false;
                 clear_slew_hold_locked();
@@ -2848,7 +3085,7 @@ private:
     template <typename Dispatch>
     void run_slew_body(util::OperationContext& ctx, std::uint64_t generation, const char* label, Dispatch&& dispatch) {
         if (before_slew_worker_lock_) before_slew_worker_lock_();
-        std::lock_guard<std::mutex> lock(mutex_);
+        StateLock lock(lock_gate_);
         // A superseding initiator already cleared/replaced the GOTO state
         // before bumping this generation; never publish or clear state owned
         // by that newer operation.
@@ -3003,7 +3240,13 @@ private:
     std::atomic<bool> published_connected_{false};
     mutable MountInfo mount_info_;
     std::mutex transition_mutex_;
+    // The operation lock (decision 0016): held by every member that reaches the mount for the whole member, and
+    // by set_connected() from its first state write to its end. Taken before mutex_, never under it.
+    mutable std::mutex io_mutex_;
+    // The state lock, a leaf: never held across an exchange (Wire::call drops it for the call).
     mutable std::mutex mutex_;
+    // Which of the two this thread holds (util::LockGate, #1729); it refers to the two mutexes above.
+    const util::LockGate lock_gate_{io_mutex_, mutex_, "iOptron"};
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     // Target coordinates

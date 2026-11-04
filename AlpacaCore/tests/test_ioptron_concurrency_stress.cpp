@@ -46,6 +46,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_ioptron_ieaf.h"
+#include "fake_ioptron_mount.h"
 #include "fake_mount_server.h"
 #include "fake_pty_write.h"
 
@@ -117,6 +118,62 @@ TEST_CASE("iOptron telescope - concurrent connect/disconnect/slew/pulse stress",
     // right after a storm the last async task may still be in flight, so a
     // single sync disconnect can legitimately no-op against the pending-
     // disconnect machinery and a bare CHECK would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+namespace {
+
+// Issue #1829: the members that take the state lock alone, and the commands and cache-backed getters they race
+// over the scripted iOptron fake (a canned FakeMountServer cannot answer the position and status reads).
+void state_only_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
+    auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
+    guard([&] { static_cast<void>(scope.get_name()); });
+    guard([&] { static_cast<void>(scope.get_target_declination()); });
+    guard([&] { static_cast<void>(scope.get_utc_date()); });
+    guard([&] { static_cast<void>(scope.get_guide_rate()); });
+    guard([&] { static_cast<void>(scope.get_site_elevation()); });
+    guard([&] { static_cast<void>(scope.get_tracking_rates()); });
+    guard([&] { scope.set_target_right_ascension(5.0); });
+    guard([&] { static_cast<void>(scope.get_right_ascension()); });
+    guard([&] { static_cast<void>(scope.get_slewing()); });
+    guard([&] { static_cast<void>(scope.get_side_of_pier()); });
+    guard([&] { scope.set_tracking(true); });
+    guard([&] { scope.move_axis(0, 0.0); });
+    guard([&] { scope.park(); });
+    guard([&] { scope.unpark(); });
+    guard([&] { scope.abort_slew(); });
+}
+
+}  // namespace
+
+TEST_CASE("iOptron telescope - members that need no device access race commands and reconnects",
+          "[ioptron][telescope][stress]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    // The scripted fake answers every read the callback makes (:GEP, :GLS; :GAC stays out of it) at once, so
+    // the default response timeout applies, not the 50 ms of ioptron_endpoint().
+    alpacacore::vendor::ioptron::ConnectionInfo info;
+    info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, info);
+
+    // The set REPLACES the default {NotConnected}: a connected driver's commands legitimately answer
+    // InvalidValue, InvalidOperation and InvalidWhileParked when they race a park or a disconnect, and
+    // ValueNotSet and InvalidOperation come from the targets, SiteElevation and UTCDate before they are set.
+    // DriverException is NOT expected: the scripted fake answers every read the callback makes, so one here
+    // is the driver's own (decision 0016: a member that reaches the wire without the operation lock is refused
+    // with DriverException by Wire::call, which this storm would then count).
+    alpacacore::test::StressCallGuard guard{
+        alpacacore::AlpacaError::NotConnected,       alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation,   alpacacore::AlpacaError::ValueNotSet,
+        alpacacore::AlpacaError::InvalidWhileParked, alpacacore::AlpacaError::NotImplemented};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { state_only_operate(guard, d); });
+
     CHECK(alpacacore::test::settle_connected(*driver, false));
 
     INFO(guard.report());

@@ -53,7 +53,7 @@ Symbol: `transition_mutex_`
 | iOptron iFR rotator |  | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_rotator_driver.cpp` | adopted | #2002 | the I/O lock is the shared `IfrLink` session's, under the status cache |
 | iOptron iGuider camera |  | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted |  |  |
 | iOptron switch |  | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp` | adopted |  |  |
-| iOptron telescope |  | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | partial | #1829 | `mutex_` held across connect, getter refills and commands |
+| iOptron telescope |  | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1829 | `util::LockGate` drops `mutex_` per exchange; a getter whose TTL cache lapsed takes the I/O lock for that read |
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | | `util::LockGate` drops `mutex_` per exchange |
 | Player One camera |  | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted |  |  |
 | Player One filter wheel |  | `AlpacaCore/src/vendors/playerone/playerone_filterwheel_driver.cpp` | adopted |  |  |
@@ -95,7 +95,7 @@ Symbol: `transition_mutex_`
 
 - Reviewers check each driver PR against the Rules above. A driver that still holds `mutex_` across device I/O is a defect with its own issue, not an exception.
 - Each slice is one driver family. A getter that must reach the device (a live read) still takes the I/O lock and waits; the rule covers members that need no device access.
-- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (iOptron #1829, the cameras #1841 to #1845, and others).
+- #295 closed with drivers still unconverted. The Adoption table above is the roster, and each `partial` row names its issue (the cameras #1841 to #1845, and others; the iOptron telescope converted in #1829).
 
 ## How to reverse
 

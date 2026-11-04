@@ -13,7 +13,7 @@
 #pragma once
 
 // Scripted iOptron v3-protocol responder for FakeMountServer: enough of
-// :MountInfo / :GLS / :GEP / :SRA / :Sd / :MS1 / :Z* to drive the telescope
+// :MountInfo / :GLS / :GEP / :GAC / :SRA / :Sd / :MS1 / :Z* to drive the telescope
 // driver through connect -> GOTO -> settle and observe the GOTO final-
 // approach RA trim (goto_refine_active()). The mount "lands" every GOTO at
 // the commanded target plus a configurable RA error, exactly the HAE29C /
@@ -77,6 +77,13 @@ public:
     void set_position(double ra_hours, double dec_degrees) {
         ra_units_.store(std::llround(ra_hours * 15.0 * 3600.0 * 100.0));
         dec_units_.store(std::llround(dec_degrees * 3600.0 * 100.0));
+    }
+
+    /// Answers ":GAC" with this Alt/Az (0.01 arcsec units) from now on; unset, the read gets the unparseable "0#".
+    void set_alt_az(double altitude_degrees, double azimuth_degrees) {
+        alt_units_.store(std::llround(altitude_degrees * 3600.0 * 100.0));
+        az_units_.store(std::llround(azimuth_degrees * 3600.0 * 100.0));
+        altaz_enabled_.store(true);
     }
 
     void set_utc_reply(std::string reply) {
@@ -211,6 +218,12 @@ private:
             const long long dec = dec_units_.load();
             return signed_eight(dec) + nine(ra) + "01#";
         }
+        if (cmd == ":GAC#" && altaz_enabled_.load()) {
+            // Altitude (sign + 8 digits) then azimuth (9 digits), 0.01 arcsec: the point set_alt_az() gave, so
+            // the Alt/Az cache is primed at connect like the position and status caches (#1829). Off by default:
+            // the wrapper's HAE29C park pre-check then skips its :GAC/:GPC comparison, as the older cases expect.
+            return signed_eight(alt_units_.load()) + nine(az_units_.load()) + "#";
+        }
         if (cmd.rfind(":SRA", 0) == 0) {
             pending_ra_ = std::atoll(cmd.substr(4, 9).c_str());
             return "1";
@@ -265,6 +278,9 @@ private:
     long long pending_dec_ = 0;
     std::atomic<long long> ra_units_{0};
     std::atomic<long long> dec_units_{0};
+    std::atomic<bool> altaz_enabled_{false};
+    std::atomic<long long> alt_units_{0};
+    std::atomic<long long> az_units_{0};
     std::atomic<bool> reject_goto_{false};
     std::atomic<bool> fail_reads_{false};
     std::atomic<bool> goto_tracks_off_{false};
