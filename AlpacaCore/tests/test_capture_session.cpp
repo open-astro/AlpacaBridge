@@ -1193,7 +1193,7 @@ TEST_CASE("CaptureSession - a start without a margin keeps the constructor margi
     CHECK(h.session->failure().has_value());
 }
 
-// Falsified by: capture_session.h start() storing watchdog_margin into margin_ (#1979).
+// Falsified by: capture_session.h drop `const` from margin_ and have start() store watchdog_margin into it (#1979).
 TEST_CASE("CaptureSession - a per-start margin does not carry over to the next start", "[util][capture-session]") {
     Harness h;
     auto first = std::make_shared<Probe>();
@@ -1213,7 +1213,8 @@ TEST_CASE("CaptureSession - a per-start margin does not carry over to the next s
     CHECK(h.session->failure().has_value());
 }
 
-// Falsified by: capture_session.h start() applying watchdog_margin before require_startable_locked() (#1979).
+// Falsified by: capture_session.h drop `const` from margin_ and have start() write watchdog_margin into it before
+// require_startable_locked() (#1979): the next start without a margin then gets 61 s, not 3 s.
 TEST_CASE("CaptureSession - a refused start leaves the margin alone", "[util][capture-session]") {
     Harness h;
     auto p = std::make_shared<Probe>();
@@ -1227,6 +1228,19 @@ TEST_CASE("CaptureSession - a refused start leaves the margin alone", "[util][ca
     h.clock.advance(2999ms);
     CHECK(h.session->camera_state() == CameraState::Exposing);
     h.clock.advance(1ms);  // still the running exposure's 3 s deadline
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK(h.session->failure().has_value());
+    sdk->open();
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+
+    // The refused start's 60 s did not stick: the next start without a margin ends at 3 s.
+    auto third = std::make_shared<Probe>();
+    auto sdk3 = h.gate();
+    h.session->start(1.0, sdk_blocked_body(third, sdk3));
+    REQUIRE(eventually([&] { return third->entered.load(); }));
+    h.clock.advance(2999ms);
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    h.clock.advance(1ms);
     CHECK(h.session->camera_state() == CameraState::Idle);
     CHECK(h.session->failure().has_value());
 }
