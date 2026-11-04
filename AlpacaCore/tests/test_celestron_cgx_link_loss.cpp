@@ -257,4 +257,187 @@ TEST_CASE("Celestron CGX link loss - a stop in flight at the loss never reopens 
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(rig.path));
 }
 
+namespace {
+
+// A pulled cable (decision 0009 rule 2a, #1940 transport-gone slice): the mount sits behind a by-id style name, so a
+// replugged mount (a new fake on a new pty) comes back under the name the driver was configured with. The poll is
+// paused, as in LinkLossRig; the case runs a poll on the test thread when it needs one.
+struct HangupRig {
+    alpacacore::test::FakeTaskClock clock;
+    std::unique_ptr<alpacacore::test::FakeCelestronCgxMount> mount = plug();
+    alpacacore::test::ReplugPort port{*mount};
+    std::string node = mount->slave_path();  // the pty behind the name, which the port claim is keyed on
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+
+    HangupRig() {
+        cgx::CelestronCgxConnectionInfo info;
+        info.port_path = port.path.string();
+        info.site_latitude_degrees = 45.0;
+        info.site_longitude_degrees = -75.0;
+        driver = cgx::create_celestron_cgx_telescope(0, info, clock);
+        cgx::set_state_poll_paused_for_testing(*driver, true);
+    }
+
+    static std::unique_ptr<alpacacore::test::FakeCelestronCgxMount> plug() {
+        auto fake = std::make_unique<alpacacore::test::FakeCelestronCgxMount>();
+        REQUIRE(fake->ok());
+        fake->set_auto_complete_motions(true);
+        return fake;
+    }
+
+    // Connected and homed, so the reference is valid until the loss.
+    void connect_and_home() {
+        driver->set_connected(true);
+        driver->find_home();
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (driver->get_slewing() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+        REQUIRE(driver->get_at_home());
+        REQUIRE(alpacacore::util::is_serial_port_in_use(node));
+    }
+
+    // A new mount on a new pty, under the configured name.
+    void replug() {
+        mount = plug();
+        port.replug(*mount);
+        node = mount->slave_path();
+    }
+
+    // Rule 3: Connected false, every operation NotConnected, DeviceState empty, the fd and the claim released, and
+    // the reason names the pulled cable.
+    void check_lost() {
+        CHECK_FALSE(driver->get_connected());
+        CHECK(driver->get_device_state().empty());
+        for (const auto& [name, operation] : operations(*driver)) {
+            INFO(name << " after the cable was pulled");
+            require_alpaca_error(operation, AlpacaError::NotConnected);
+        }
+        CHECK_FALSE(alpacacore::util::is_serial_port_in_use(node));
+        CHECK(driver->get_link_fault().find("Celestron CGX mount serial link lost (") != std::string::npos);
+    }
+
+    // Runs `call` on another thread, pulls the cable while its first held reply is in flight, and returns the call's
+    // error code (0 for none) and how long it took after the pull.
+    std::pair<int, std::chrono::steady_clock::duration> pull_during(const std::function<void()>& call) {
+        auto task = std::async(std::launch::async, [&] {
+            try {
+                call();
+                return 0;
+            } catch (const alpacacore::AlpacaException& error) {
+                return error.error_code();
+            }
+        });
+        REQUIRE(mount->wait_for_reply_fragment(2s));
+        const auto pulled = std::chrono::steady_clock::now();
+        mount->sever_link();
+        REQUIRE(task.wait_for(5s) == std::future_status::ready);
+        return {task.get(), std::chrono::steady_clock::now() - pulled};
+    }
+};
+
+// A Length read waits out the 500 ms AUX timeout; a hangup must end the call well before that.
+constexpr auto kAtOnce = 400ms;
+
+}  // namespace
+
+TEST_CASE("Celestron CGX link loss - a cable pulled during a command loses the link at once and Connect reopens it",
+          "[celestron][cgx][link-loss][link-lost]") {
+    HangupRig rig;
+    rig.connect_and_home();
+    rig.mount->fragment_next_reply();  // the Tracking write's ACK is in flight when the cable is pulled
+    const auto [code, took] = rig.pull_during([&] { rig.driver->set_tracking(true); });
+    CHECK(code == AlpacaError::NotConnected);
+    CHECK(took < kAtOnce);
+    rig.check_lost();
+    const auto reason = rig.driver->get_link_fault();
+    CHECK(reason.find("(hangup)") != std::string::npos);
+
+    // The next poll tick ends the poll and stamps the loss once (rule 3).
+    cgx::poll_state_now_for_testing(*rig.driver);
+    const auto lost_at = rig.clock.now();
+
+    // Rule 4: nothing relinks on its own. The poll body ends at its next tick and time reopens nothing.
+    rig.replug();
+    cgx::set_state_poll_paused_for_testing(*rig.driver, false);
+    for (int second = 0; second < 10; ++second) {
+        rig.clock.advance(1s);
+        REQUIRE(rig.clock.wait_for_woken_settled(2s));
+    }
+    CHECK(rig.clock.waiter_count() == 0);  // the poll body has ended
+    CHECK(rig.mount->requests().empty());
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(rig.driver->get_link_fault() == reason);  // rule 5: kept until the next Connect or Disconnect
+    CHECK(cgx::consume_link_lost_at_for_testing(*rig.driver) == lost_at);
+
+    // The client's Connect reopens the replugged port without a Disconnect first, re-runs the identity probe, clears
+    // the reason and keeps no reference (decision 0011 rule 3: FindHome again).
+    rig.driver->set_connected(true);
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.mount->count_command(0x10, 0xfe) == 1);
+    CHECK(rig.driver->get_link_fault().empty());
+    CHECK_FALSE(rig.driver->get_at_home());
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_declination()); }, AlpacaError::DriverException);
+}
+
+TEST_CASE("Celestron CGX link loss - a cable pulled during the state poll ends the poll in that tick",
+          "[celestron][cgx][link-loss][link-lost]") {
+    HangupRig rig;
+    rig.connect_and_home();
+    rig.mount->fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x01});  // the poll's RA position read
+    const auto polled_at = rig.clock.now();
+    const auto [code, took] = rig.pull_during([&] { cgx::poll_state_now_for_testing(*rig.driver); });
+    CHECK(code == 0);  // the poll counts the failure; it does not throw
+    CHECK(took < kAtOnce);
+    rig.check_lost();
+    CHECK(rig.driver->get_link_fault().find("(hangup)") != std::string::npos);
+    // on_lost ran in that tick: the loss is stamped now, not at the 30 s staleness bound.
+    CHECK(cgx::consume_link_lost_at_for_testing(*rig.driver) == polled_at);
+    // A Disconnect clears the reason (rule 5).
+    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
+    CHECK(rig.driver->get_link_fault().empty());
+}
+
+TEST_CASE("Celestron CGX link loss - a cable pulled during the connect fails the Connect with NotConnected",
+          "[celestron][cgx][link-loss][link-lost]") {
+    HangupRig rig;
+    SECTION("the identity query") { rig.mount->fragment_next_reply(); }
+    SECTION("the first state poll, which the connect retries before failing") {
+        rig.mount->fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x01});
+    }
+    const auto [code, took] = rig.pull_during([&] { rig.driver->set_connected(true); });
+    CHECK(code == AlpacaError::NotConnected);
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(rig.node));
+    rig.replug();
+    rig.driver->set_connected(true);
+    CHECK(rig.driver->get_connected());
+}
+
+TEST_CASE("Celestron CGX link loss - a cable pulled mid-operation loses the link and the body ends on its own",
+          "[celestron][cgx][link-loss][link-lost]") {
+    HangupRig rig;
+    rig.connect_and_home();
+    rig.driver->set_tracking(true);
+    rig.mount->set_auto_complete_motions(false);
+    rig.mount->set_hold_guide_until_completed(true);
+    const auto idle = rig.clock.waiter_count();  // the paused poll body
+    const auto waits = rig.clock.wait_count();
+    SECTION("a slew") {
+        double target_ra = rig.driver->get_sidereal_time() - 1.0;
+        if (target_ra < 0.0) target_ra += 24.0;
+        rig.driver->slew_to_coordinates_async(target_ra, 85.0);
+    }
+    SECTION("a park") { rig.driver->park(); }
+    SECTION("a pulse guide") { rig.driver->pulse_guide(0, 1000); }
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, 2s));  // the body is out on the mount and waits on the clock
+    rig.mount->sever_link();
+    // Its next read meets the pulled cable; each further read fails at once on the released port.
+    for (int i = 0; i < 20 && rig.clock.waiter_count() > idle; ++i) {
+        rig.clock.advance(250ms);
+        REQUIRE(rig.clock.wait_for_woken_settled(2s));
+    }
+    CHECK(rig.clock.waiter_count() == idle);  // the body ended on its own
+    rig.check_lost();
+}
+
 #endif  // !_WIN32

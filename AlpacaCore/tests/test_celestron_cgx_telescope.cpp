@@ -769,35 +769,24 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for a
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
     driver->set_connected(true);
 
-    // The adapter goes away: the first stop finds the node gone, closes the
-    // link and fails, which releases the port claim.
+    // The adapter goes away: the first stop finds the node gone, which is a
+    // lost link at once (decision 0009 rule 2a, #1940): the wrapper releases
+    // the port claim and Slewing reads NotConnected.
     mount.sever_link();
     CHECK_NOTHROW(driver->abort_slew());
-    // Slewing raises the link fault before the stop ends (#1950). A site write
-    // sends nothing and is refused until the stop has ended.
-    REQUIRE(wait_until(
-        [&] {
-            try {
-                driver->set_site_latitude(46.0);
-                return true;
-            } catch (const alpacacore::AlpacaException& error) {
-                if (error.error_code() != alpacacore::AlpacaError::InvalidOperation) throw;
-                return false;
-            }
-        },
-        std::chrono::seconds(10)));
-    require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); }, alpacacore::AlpacaError::DriverException);
+    REQUIRE(wait_until([&] { return !driver->get_connected(); }, std::chrono::seconds(10)));
+    require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE_FALSE(util::is_serial_port_in_use(path));
 
-    // Another device's probe now holds the node for 3 s while a second stop
-    // retries its reconnect.
+    // Another device's probe now holds the node for 5 s while a second stop
+    // is asked for: it is refused at once and reopens nothing.
     auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
     REQUIRE(probe);
     auto release = std::async(std::launch::async, [&probe] {
         std::this_thread::sleep_for(std::chrono::seconds(5));
         probe.release();
     });
-    CHECK_NOTHROW(driver->abort_slew());
+    require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::NotConnected);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     const auto started = std::chrono::steady_clock::now();
@@ -2262,8 +2251,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - cached hardware state refuses fa
             else
                 mount.sever_link();
             poll_now(*driver);  // the state poll's read meets the fault; the getters no longer read the axes (#1940)
-            require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
-                                 alpacacore::AlpacaError::DriverException);
             const std::vector<std::function<void()>> hardware_reads{[&] { static_cast<void>(driver->get_at_home()); },
                                                                     [&] { static_cast<void>(driver->get_at_park()); },
                                                                     [&] { static_cast<void>(driver->get_tracking()); },
@@ -2271,6 +2258,19 @@ TEST_CASE("Celestron CGX USB Telescope Driver - cached hardware state refuses fa
                                                                     [&] { static_cast<void>(driver->get_slewing()); },
                                                                     [&] { static_cast<void>(driver->get_is_pulse_guiding()); }};
             const auto requests = mount.requests().size();
+            if (fault == 2) {
+                // A removed device is a lost link at once (decision 0009 rule 2a, #1940), not a fault: every cached
+                // read is NotConnected and sends nothing.
+                require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
+                                     alpacacore::AlpacaError::NotConnected);
+                for (const auto& read : hardware_reads)
+                    require_alpaca_error(read, alpacacore::AlpacaError::NotConnected);
+                CHECK(mount.requests().size() == requests);
+                CHECK_FALSE(driver->get_connected());
+                continue;
+            }
+            require_alpaca_error([&] { static_cast<void>(driver->get_right_ascension()); },
+                                 alpacacore::AlpacaError::DriverException);
             for (const auto& read : hardware_reads)
                 require_alpaca_error(read, alpacacore::AlpacaError::DriverException);
             CHECK(mount.requests().size() == requests);
@@ -2278,7 +2278,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - cached hardware state refuses fa
             CHECK(driver->get_can_find_home());
             CHECK(driver->get_site_latitude() == 45.0);
             CHECK(driver->get_guide_rate().dec > 0.0);
-            if (fault == 2) continue;
             // The failed zero write recovers matching and rolls back to off,
             // but must not revalidate a prior true Home/Park observation.
             require_alpaca_error([&] { driver->set_tracking(false); }, alpacacore::AlpacaError::DriverException);

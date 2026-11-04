@@ -152,12 +152,17 @@ public:
     std::string get_driver_info() const override { return "AlpacaCore Celestron CGX AUX Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 4; }
-    // Lock-free. A poll fault standing for util::kLinkStalenessBound loses the link (decision 0009), and Connected
-    // reads false without a reconnect.
-    bool get_connected() const override { return connected_.load() && !polled_.link_lost(); }
-    // The one fault text (decision 0009 point 5): the latched poll fault, kept after a loss until Connect or
-    // Disconnect.
+    // Lock-free. A poll fault standing for util::kLinkStalenessBound, or a pulled cable at once, loses the link
+    // (decision 0009, link_lost()), and Connected reads false without a reconnect.
+    bool get_connected() const override { return connected_.load() && !link_lost(); }
+    // The one fault text (decision 0009 point 5): the wrapper's loss reason for a pulled cable, else the latched poll
+    // fault, kept after a loss until Connect or Disconnect. The wrapper keeps its reason until the next Connect; a
+    // Disconnect hides it with connected_.
     std::string get_link_fault() const override {
+        if (connected_.load() && !protocol_.link_alive()) {
+            auto lost = protocol_.link_fault();
+            if (!lost.empty()) return lost;
+        }
         auto fault = polled_.fault();
         if (!fault.empty()) return fault;
         return polled_.link_lost() ? "no answer to the state poll" : std::string();
@@ -364,14 +369,23 @@ private:
     }
     // The poll's exchanges, on the poll thread with no driver lock held (decision 0016). A desynchronized stream is
     // flushed on the fd already held; resync never opens a port (decision 0009 rule 4) and never marks the link
-    // healthy, only the next matched reply does.
+    // healthy, only the next matched reply does. A pulled cable, met here or by a control path's exchange, latches
+    // the loss now, so the poll ends in this tick and on_lost stamps it (decision 0009 rule 2a).
     CgxFrame probe() {
-        if (!protocol_.is_healthy()) protocol_.resync();
-        CgxFrame frame;
-        frame.ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
-        frame.dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
-        return frame;
+        try {
+            if (!protocol_.is_healthy()) protocol_.resync();
+            CgxFrame frame;
+            frame.ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
+            frame.dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
+            return frame;
+        } catch (...) {
+            if (!protocol_.link_alive()) polled_.lose_link();
+            throw;
+        }
     }
+    // Lost when the poll latched it (a fault past the staleness bound, or the probe's lose_link()) or when the
+    // wrapper saw the port gone, in any exchange. Lock-free.
+    bool link_lost() const { return polled_.link_lost() || !protocol_.link_alive(); }
     // The disconnect body, shared by Disconnect and a Connect over a lost link. Caller holds transition_mutex_.
     void teardown_locked();
     // A lost link (decision 0009 point 3): stamp it (the first detection wins), then release the fd and the port
@@ -546,7 +560,7 @@ void CelestronCgxTelescopeDriver::require_connected() const {
     if (!connected_.load()) {
         throw AlpacaException("Celestron CGX USB is not connected", AlpacaError::NotConnected);
     }
-    if (polled_.link_lost()) {
+    if (link_lost()) {
         throw AlpacaException("Celestron CGX link lost; set Connected false then true to reconnect",
                               AlpacaError::NotConnected);
     }
@@ -709,7 +723,7 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
         // A lost link counts as disconnected for a connect: Connected=true against it reconnects instead of taking
         // the idempotency return (decision 0009 rule 4). The disconnect gates take the raw connected_, so
         // Connected=false still tears a lost link down.
-        const bool live = connected_.load() && !polled_.link_lost();
+        const bool live = connected_.load() && !link_lost();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) return;
         if (connected && consume_pending_disconnect(live)) return;
         if (connected ? live : !connected_.load()) return;
@@ -842,6 +856,11 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             disconnected_checkpoint_.reset();
         }
         protocol_.disconnect();
+        // A cable pulled during an exchange whose failure the connect turns into another error (the first state
+        // poll, a legacy home-switch query) fails the Connect with NotConnected (decision 0009 rule 2a).
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("Celestron CGX connect failed: " + protocol_.link_fault(), AlpacaError::NotConnected);
+        }
         throw;
     }
 }
@@ -849,9 +868,9 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
 void CelestronCgxTelescopeDriver::teardown_locked() {
     // The poll ends before the stop and checkpoint exchanges, so it neither interleaves with them nor sees the close.
     polled_.stop_and_join();
-    // A link lost by a frame that aged past the bound may not have reached on_lost yet: release it here, so no stop
-    // or checkpoint runs on it.
-    if (polled_.link_lost()) release_lost_link();
+    // A link lost by a frame that aged past the bound, or by a pulled cable a control path met, may not have reached
+    // on_lost yet: stamp and release it here, so no stop or checkpoint runs on it.
+    if (link_lost()) release_lost_link();
 
     std::unique_lock<std::mutex> motion_start_lock(motion_start_mutex_);
     disconnecting_ = true;
