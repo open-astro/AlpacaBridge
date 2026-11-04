@@ -794,7 +794,8 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during a Move loses the lin
     CHECK(move.get() == AlpacaError::NotConnected);
     rig.check_lost();
     const auto reason = rig.driver->get_link_fault();
-    CHECK(reason.find("(hangup)") != std::string::npos);
+    // The pty reports a pull as a hangup or, when the read wins the race, an end of file: both are the cable.
+    CHECK((reason.find("(hangup)") != std::string::npos || reason.find("(end of file)") != std::string::npos));
 
     // No autonomous relink (rule 4): the poll ends at its next tick and time reopens nothing.
     rig.replug();
@@ -825,7 +826,9 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during the state poll ends 
     REQUIRE(rig.clock.wait_for_woken_settled(kBound));
     CHECK(rig.clock.waiter_count() == 0);  // the poll ended in the tick that met the pull, not at the 30 s bound
     rig.check_lost();
-    CHECK(rig.driver->get_link_fault().find("(hangup)") != std::string::npos);
+    const auto fault = rig.driver->get_link_fault();
+    // The pty reports a pull as a hangup or, when the read wins the race, an end of file: both are the cable.
+    CHECK((fault.find("(hangup)") != std::string::npos || fault.find("(end of file)") != std::string::npos));
 
     // A Disconnect clears the reason (rule 5).
     rig.driver->set_connected(false);

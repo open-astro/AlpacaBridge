@@ -355,7 +355,8 @@ TEST_CASE("Celestron CGX link loss - a cable pulled during a command loses the l
     CHECK(took < kAtOnce);
     rig.check_lost();
     const auto reason = rig.driver->get_link_fault();
-    CHECK(reason.find("(hangup)") != std::string::npos);
+    // The pty reports a pull as a hangup or, when the read wins the race, an end of file: both are the cable.
+    CHECK((reason.find("(hangup)") != std::string::npos || reason.find("(end of file)") != std::string::npos));
 
     // The next poll tick ends the poll and stamps the loss once (rule 3).
     cgx::poll_state_now_for_testing(*rig.driver);
@@ -394,7 +395,9 @@ TEST_CASE("Celestron CGX link loss - a cable pulled during the state poll ends t
     CHECK(code == 0);  // the poll counts the failure; it does not throw
     CHECK(took < kAtOnce);
     rig.check_lost();
-    CHECK(rig.driver->get_link_fault().find("(hangup)") != std::string::npos);
+    const auto fault = rig.driver->get_link_fault();
+    // The pty reports a pull as a hangup or, when the read wins the race, an end of file: both are the cable.
+    CHECK((fault.find("(hangup)") != std::string::npos || fault.find("(end of file)") != std::string::npos));
     // on_lost ran in that tick: the loss is stamped now, not at the 30 s staleness bound.
     CHECK(cgx::consume_link_lost_at_for_testing(*rig.driver) == polled_at);
     // A Disconnect clears the reason (rule 5).
