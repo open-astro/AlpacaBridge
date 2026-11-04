@@ -183,10 +183,15 @@ TEST_CASE("Celestron CGX link loss - the next Connect consumes the loss stamp, a
           "[celestron][cgx][link-loss]") {
     LinkLossRig rig;
     const auto lost_at = rig.lose_link();
-    // Decision 0009 alternative E: a client's Disconnect does not consume the stamp; it clears the reason.
+    // Decision 0009 alternative E: a client's Disconnect does not consume the stamp; it clears the reason. Time
+    // moves first, so a Disconnect that consumed the stamp and re-stamped the loss would show a later time.
+    rig.clock.advance(std::chrono::seconds(1));
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.driver->get_link_fault().empty());
+    // The Disconnect kept the stamp. Reading it consumes it, so the Connect below finds none; the relink case
+    // after it shows that the Connect consumes a stamp itself.
+    CHECK(cgx::consume_link_lost_at_for_testing(*rig.driver) == lost_at);
     rig.mount.set_muted(false);
     alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, true);
     CHECK(rig.driver->get_connected());
