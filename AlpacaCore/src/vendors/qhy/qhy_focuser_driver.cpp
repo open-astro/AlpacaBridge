@@ -292,7 +292,16 @@ public:
     double get_temperature() const override {
         const StateFrame frame = served_frame();
         // Decision 0010 rule 8: a value the device has not supplied is a DriverException, never a guess.
-        if (!frame.telemetry_valid || clock_.now() - frame.telemetry_measured_at >= util::kLinkStalenessBound) {
+        if (!frame.telemetry_valid) {
+            // The first request after the connect missed (a connect within about 10 s of a move); the poll
+            // asks again after its hold-off.
+            throw AlpacaException(
+                "The Q-Focuser has not answered a telemetry request since the connect; it answers none for about "
+                "10 s after a move, try again shortly",
+                AlpacaError::DriverException);
+        }
+        if (clock_.now() - frame.telemetry_measured_at >= util::kLinkStalenessBound) {
+            // Stale: no answer for the bound, or a move longer than the bound, during which the poll does not ask.
             throw AlpacaException(
                 "The Q-Focuser has not answered a telemetry request for " +
                     std::to_string(

@@ -245,7 +245,11 @@ inline bool tty_drain_bounded(int fd, int timeout_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
     int pending = 0;
     for (;;) {
-        if (::ioctl(fd, TIOCOUTQ, &pending) != 0) return true;
+        if (::ioctl(fd, TIOCOUTQ, &pending) != 0) {
+            // Fails open: a driver that cannot report its queue is not evidence of a stall.
+            ALPACA_LOG_DEBUG("Serial", "TIOCOUTQ failed (" + errno_string(errno) + "); the drain counts as done");
+            return true;
+        }
         if (pending <= 0) return true;
         if (std::chrono::steady_clock::now() >= deadline) break;
         (void)::poll(nullptr, 0, 2);  // 2 ms, the shape of a bounded sleep on a header with poll.h

@@ -311,7 +311,9 @@ TEST_CASE("QHY Q-Focuser Snapshot - telemetry silence after a move keeps the pos
     CHECK(rig.driver().get_temperature() == Catch::Approx(before));
     CHECK_NOTHROW(rig.driver().move(1200));
     CHECK(rig.fake().count("\"cmd_id\":6") == 2);
-    // Telemetry was asked for at the connect and once after the arrival, then held off; never during the move.
+    // Telemetry was asked for at the connect (the settings read and the first poll) and once after the arrival,
+    // then held off; never during the move.
+    CHECK(rig.fake().count("\"cmd_id\":4}") >= 3);
     CHECK(rig.fake().count("\"cmd_id\":4}") <= 4);
 
     // The firmware answers again: the next request, past the hold-off, refreshes the reading.
@@ -336,6 +338,7 @@ TEST_CASE(
     CHECK(rig.driver().get_position() == 1000);
     require_alpaca_error([&] { (void)rig.driver().get_temperature(); },
                          static_cast<int>(alpacacore::AlpacaError::DriverException));
-    // Asked at most once per hold-off, not on every tick.
+    // Asked again after each hold-off (about six times in 33 s), not on every tick.
+    CHECK(rig.fake().count("\"cmd_id\":4}") >= 4);
     CHECK(rig.fake().count("\"cmd_id\":4}") <= 10);
 }
