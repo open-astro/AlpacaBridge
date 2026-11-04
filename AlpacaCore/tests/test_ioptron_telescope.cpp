@@ -1770,7 +1770,7 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
     mount.set_system_status(2);
     clock.advance(home_at + std::chrono::seconds(2) - clock.now());
     driver->pulse_guide(3, 3000);
-    clock.advance(home_at + std::chrono::milliseconds(5500) - clock.now());
+    clock.advance(home_at + std::chrono::milliseconds(5400) - clock.now());  // inside 3 s + the 500 ms delay
     CHECK(driver->get_is_pulse_guiding());
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
@@ -2046,8 +2046,8 @@ TEST_CASE("iOptron hold window - the GOTO trim holds Slewing for its pulse",
     driver->set_connected(false);
 }
 
-// Rule 4: a North pulse of 2 s. IsPulseGuiding is true until 2 s plus the 1 s completion delay of virtual time;
-// RA is held at its last read until 2 s + 1 s + 2 s; the first Dec read serves the predicted position.
+// Rule 4: a North pulse of 2 s. IsPulseGuiding is true until 2 s plus the 500 ms completion delay of virtual time
+// (#2001); RA is held at its last read until 2 s + 0.5 s + 2 s; the first Dec read serves the predicted position.
 TEST_CASE("iOptron hold window - a pulse keeps its axis while virtual time has not reached its end",
           "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
@@ -2066,14 +2066,36 @@ TEST_CASE("iOptron hold window - a pulse keeps its axis while virtual time has n
     CHECK(driver->get_right_ascension() == Catch::Approx(10.0));                          // held
     CHECK(driver->get_declination() == Catch::Approx(20.0 + 2.0 * kGuideRateDegPerSec));  // predicted, once
     CHECK(driver->get_declination() == Catch::Approx(21.0));                              // then live
-    clock.advance(sent + std::chrono::milliseconds(2999) - clock.now());
+    clock.advance(sent + std::chrono::milliseconds(2499) - clock.now());
     CHECK(driver->get_is_pulse_guiding());
     clock.advance(std::chrono::milliseconds(1));
     CHECK_FALSE(driver->get_is_pulse_guiding());
-    clock.advance(sent + std::chrono::milliseconds(4999) - clock.now());
+    clock.advance(sent + std::chrono::milliseconds(4499) - clock.now());
     CHECK(driver->get_right_ascension() == Catch::Approx(10.0));
     clock.advance(std::chrono::milliseconds(1));
     CHECK(driver->get_right_ascension() == Catch::Approx(11.0));
+    driver->set_connected(false);
+}
+
+// Issue #2001: the HAE29C ends its guiding status 70 to 380 ms after a pulse's duration, so IsPulseGuiding falls
+// 500 ms after it, not 1 s: a guider waiting on it loses half a second less per correction. Falsified by:
+// ioptron_telescope_driver.cpp kPulseGuideCompletionDelay set back to 1000 ms.
+TEST_CASE("iOptron Telescope Driver - IsPulseGuiding falls 500 ms after the pulse duration",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    for (const int duration : {300, 1000, 3000}) {
+        INFO("pulse " << duration << " ms");
+        const auto sent = clock.now();
+        driver->pulse_guide(2, duration);
+        clock.advance(sent + std::chrono::milliseconds(duration + 450) - clock.now());
+        CHECK(driver->get_is_pulse_guiding());
+        clock.advance(sent + std::chrono::milliseconds(duration + 550) - clock.now());
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+    }
     driver->set_connected(false);
 }
 
