@@ -890,7 +890,8 @@ int main() {
         }
         auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
         camera->set_image_array({std::move(pixels), kWidth, kHeight, 2});
-        camera->image_array_delay = std::chrono::milliseconds(300);  // the later GETs join the first build
+        // The first GET's build sits in the getter this long; the others start once it is there, so they join it.
+        camera->image_array_delay = std::chrono::milliseconds(2000);
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         EXPECT(registry.register_device(camera));
         const std::size_t payload_size = 44 + static_cast<std::size_t>(kWidth) * kHeight * sizeof(std::int32_t);
@@ -898,6 +899,9 @@ int main() {
         std::vector<std::string> bodies(kClients);
         std::vector<std::thread> clients;
         for (int i = 0; i < kClients; ++i) {
+            if (i == 1) {
+                while (camera->image_getter_calls.load() == 0) std::this_thread::yield();
+            }
             clients.emplace_back([&, i] {
                 int fd = connect_local(port);
                 EXPECT(fd >= 0);
