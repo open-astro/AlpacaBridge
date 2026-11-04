@@ -342,3 +342,20 @@ TEST_CASE(
     CHECK(rig.fake().count("\"cmd_id\":4}") >= 4);
     CHECK(rig.fake().count("\"cmd_id\":4}") <= 10);
 }
+
+// A move the motor never finishes (stalled, or clamped short by the firmware) leaves the target set; the
+// telemetry poll must follow IsMoving, not the target, or it never asks again and Temperature goes stale.
+TEST_CASE("QHY Q-Focuser Snapshot - a stalled move does not stop the telemetry poll",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    QhyRig rig;
+    REQUIRE(rig.connect());
+    rig.fake().set_steps_per_poll(0);  // the motor never moves
+    rig.driver().move(4000);
+    rig.tick(10);  // past kMotionGrace: the move reads as stopped
+    CHECK(rig.driver().get_is_moving() == false);
+    const int asked = rig.fake().count("\"cmd_id\":4}");
+    rig.tick(110);  // 33 s: past util::kLinkStalenessBound
+    CHECK(rig.fake().count("\"cmd_id\":4}") > asked);
+    CHECK_NOTHROW(rig.driver().get_temperature());
+    CHECK(rig.driver().get_link_fault().empty());
+}

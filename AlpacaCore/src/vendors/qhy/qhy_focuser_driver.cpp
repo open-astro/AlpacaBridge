@@ -427,11 +427,11 @@ private:
         if (frame.target.has_value() && pos == *frame.target) {
             frame.target.reset();  // arrived
         }
-        // Telemetry, best effort (#2031): asked once per period while no move is pending and no miss
-        // is being waited out; otherwise the last reading rides along. A miss is not a failed poll.
-        const bool move_pending = previous.has_value() && previous->value.target.has_value();
+        // Telemetry, best effort (#2031): asked once per period while the motor is not moving (IsMoving,
+        // not the target: a stalled or clamped move keeps its target and reads as stopped after the grace)
+        // and no miss is being waited out; otherwise the last reading rides along. A miss is not a failed poll.
         const bool due = !frame.telemetry_valid || now - frame.telemetry_measured_at >= kTelemetryPeriod;
-        if (due && !move_pending && now >= telemetry_hold_off_until_) {
+        if (due && !frame.moving && now >= telemetry_hold_off_until_) {
             try {
                 frame.telemetry = protocol_.get_telemetry(kTelemetryTimeoutMs);
                 frame.telemetry_valid = true;
