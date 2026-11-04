@@ -77,6 +77,45 @@ TEST_CASE("Celestron CGX USB telescope - connection and motion lifecycle stress"
     CHECK(guard.total_calls() > 0);
 }
 
+// The state poll (#1940) runs on the real clock while connect, disconnect and motion race the getters it feeds. The
+// coordinate getters may refuse with DriverException (decision 0011: no reference before FindHome, a stop still
+// pending, motion not verified), so they have a guard of their own; the motion calls keep the strict set above. No
+// case here loses the link (the fake never stops answering), so NotConnected comes from the disconnects alone.
+TEST_CASE("Celestron CGX USB telescope - getters read the polled frame through connect and motion storms",
+          "[celestron][telescope][stress]") {
+    auto mount = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
+    REQUIRE(mount->ok());
+    mount->set_auto_complete_motions(true);
+
+    alpacacore::test::StressCallGuard motion{
+        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::InvalidWhileParked,
+        alpacacore::AlpacaError::NotImplemented};
+    alpacacore::test::StressCallGuard served{alpacacore::AlpacaError::NotConnected,
+                                             alpacacore::AlpacaError::DriverException};
+    auto driver = make_driver(mount);
+    alpacacore::test::run_lifecycle_stress(*driver, [&](alpacacore::AlpacaDriver& d) {
+        auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
+        motion([&] { scope.find_home(); });
+        served([&] { static_cast<void>(scope.get_right_ascension()); });
+        served([&] { static_cast<void>(scope.get_declination()); });
+        served([&] { static_cast<void>(scope.get_altitude()); });
+        served([&] { static_cast<void>(scope.get_azimuth()); });
+        served([&] { static_cast<void>(scope.get_side_of_pier()); });
+        served([&] { static_cast<void>(scope.get_device_state()); });
+        motion([&] { scope.sync_to_coordinates(6.0, 30.0); });
+        motion([&] { scope.abort_slew(); });
+    });
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(motion.report());
+    CHECK(motion.unexpected_count() == 0);
+    CHECK(motion.total_calls() > 0);
+    INFO(served.report());
+    CHECK(served.unexpected_count() == 0);
+    CHECK(served.total_calls() > 0);
+}
+
 TEST_CASE("Celestron CGX USB telescope - destruction races an in-flight connect", "[celestron][telescope][stress]") {
     auto mount = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
     REQUIRE(mount->ok());

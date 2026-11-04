@@ -50,6 +50,14 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 - Served from the frame: RightAscension, Declination, Altitude, Azimuth, Tracking, AtPark, AtHome, Slewing, SideOfPier (from the frame's RA), DeviceState (`TimeStamp` is `measured_at`). The three 2 s caches and the getters' single read under the operation lock are gone, `util::LockGate::single_read()` with them. Client commands write through; control paths (the slew and sync GOTO checks, Park and FindHome and their body, the synchronous slew's wait, AbortSlew's tracking decision, the MoveAxis re-send tick) keep their direct `:GU#` reads and write them through, a status equal to the frame's left unwritten so a re-reading loop does not drop every tick. The synchronous slew publishes a full measurement where it ends (a failed one counts as a failed tick). The tracking restore an ended GOTO owes is sent by the tick that reads the end.
 - Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies; three failed ticks latch the fault, a tick ends at its first failed exchange, and the poll's failed ticks turn a fault standing past the bound into a lost link (a getter only throws the fault).
 
+#### Celestron CGX telescope adoption (#1940)
+
+- One state poll per connection, 250 ms start to start, through `util::PolledState<CgxFrame>` (rule 7): the raw RA and Dec encoder pair, two `MC_GET_POSITION` exchanges with `mutex_` free. Sky values are computed when a getter reads the frame, from the current UTC, site and mechanical hemisphere, so a frame never carries an old sidereal time. `max_age` is 1 s, and stale is served, never refused. The poll flushes a desynchronized stream with `CelestronCgxProtocol::resync()` on the fd it holds and never reopens a port.
+- Served from the frame: RightAscension, Declination, Altitude, Azimuth, SideOfPier, DeviceState (`TimeStamp` is `measured_at`). Tracking, TrackingRate, Slewing, AtHome, AtPark and IsPulseGuiding stay driver state and read no wire (IsPulseGuiding is the guide slot, which runs until the mount reports its packet inactive). The 30 ms stationary raw-pair cache and its key are gone, and no getter takes `motion_start_mutex_`.
+- The [decision 0011](0011-cgx-logical-reference-continuity.md) guards come before the frame: the site, link health, a pending stop, unverified motion and the session reference. A getter reads the frame under `mutex_`, and every reference change (FindHome, the meridian-flip rebase, Sync) writes its new labels through under the same lock, so a getter never pairs a new reference with old labels. A reference change writes the labels rather than calling `reset()`, which would leave a connected driver with no frame until the next poll.
+- Control-path reads (Sync's branch read and label check, slew planning and arrival, PulseGuide's polarity read) measure the axes directly and write the pair through.
+- Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies through `PolledState` (its Adoption row says what is done). A timed-out poll is a session error: the stream recovers on the next reply and the reference needs FindHome (decision 0011 rule 2).
+
 ## Rules
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
@@ -83,7 +91,7 @@ Each adopter in the Adoption table moved in its own PR; reverting that PR restor
 
 ## Adoption
 
-The roster of drivers that serve polled telemetry from a snapshot. The Symbol column names what the driver's source uses for it: `PolledState` once the driver composes `util::PolledState` (rule 7), `StateSnapshot` where it holds the snapshot itself (Sky-Watcher and ZWO keep their fault and loss handling outside the module, so they stay on it). The sections above record the Sky-Watcher, Celestron and Bisque choices; each other driver's per-getter choices are owned by its instruction file. `scripts/check_docs_drift.py` check 23 holds the roster to the code.
+The roster of drivers that serve polled telemetry from a snapshot. The Symbol column names what the driver's source uses for it: `PolledState` once the driver composes `util::PolledState` (rule 7), `StateSnapshot` where it holds the snapshot itself (Sky-Watcher and ZWO keep their fault and loss handling outside the module, so they stay on it). The sections above record the Sky-Watcher, Celestron, Bisque, OnStep and Celestron CGX choices; each other driver's per-getter choices are owned by its instruction file. `scripts/check_docs_drift.py` check 23 holds the roster to the code.
 
 Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
 Symbol: `StateSnapshot`
@@ -98,6 +106,7 @@ Symbol: `StateSnapshot`
 | QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
 | Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
 | Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320, #1643 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
+| Celestron CGX telescope | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | #1940 | 250 ms; Celestron CGX telescope adoption above |
 | OnStep telescope | `StateSnapshot` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1783 | 1 s; OnStep telescope adoption above |
 | iOptron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
 | ZWO telescope | `StateSnapshot` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1531 | 250 ms after each poll; 5 s freshness threshold; `device_state_age()` uses `mandatory_at` from accepted GU plus a complete RA/Dec pair, independent of later GU-only or optional publication; before the first mandatory pair it uses the partial frame's `measured_at`; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |

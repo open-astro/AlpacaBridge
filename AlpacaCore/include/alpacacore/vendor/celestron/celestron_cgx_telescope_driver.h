@@ -20,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 
 namespace alpacacore::vendor::celestron {
 
@@ -39,5 +40,14 @@ std::unique_ptr<TelescopeDriver> create_celestron_cgx_telescope(int device_numbe
                                                                 const CelestronCgxConnectionInfo& info,
                                                                 util::TaskClock& clock = util::default_task_clock(),
                                                                 CgxSystemNow system_now = {});
+
+/// Test seams of the state poll (`util::PolledState`, decision 0010). The spawn replaces the poll slot's
+/// thread factory (set it before Connect); while paused the poll waits its ticks but probes nothing; one poll
+/// cycle runs on the calling thread, the loss handling included. A driver that is not the CGX is ignored.
+void set_state_poll_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+void set_state_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+void poll_state_now_for_testing(TelescopeDriver& driver);
+/// Reads and clears the link-loss stamp (decision 0009 point 3); nullopt when none is held.
+std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at_for_testing(TelescopeDriver& driver);
 
 }  // namespace alpacacore::vendor::celestron

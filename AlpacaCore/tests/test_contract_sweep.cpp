@@ -75,6 +75,7 @@
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
+#include "cgx_clock_cleanup.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_celestron_focuser.h"
 #endif
@@ -3994,8 +3995,8 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 // pause seam pauses its poll (no failed poll, so no latch); a focuser fake is muted or made to answer garbage
 // so the one poll the clock step wakes fails, which stays under every latch threshold.
 // The loss case fails kSnapshotLatchPolls polls (a latch needs three where an adopter has one), then passes the
-// bound: SynScan, OnStep, Celestron (telescope) and Bisque lose the link from the latched fault's age; Sky-Watcher, QHY
-// and Astroasis also from the age of the frame.
+// bound: SynScan, OnStep, Celestron (telescope and CGX) and Bisque lose the link from the latched fault's age;
+// Sky-Watcher, QHY and Astroasis also from the age of the frame.
 // The roster is kSnapshotAdopterRoster (contract_sweep.h); rule 6 of scripts/check_contract_sweep.py holds it,
 // and the hooks below, to the ADR table.
 #ifndef _WIN32
@@ -4029,6 +4030,9 @@ struct SnapshotRig {
     std::function<void()> tick;
     // Getter names left out; the rig that fills it says why next to the assignment.
     std::vector<std::string> left_out;
+    // Optional: the disconnect at teardown, for a backend whose disconnect waits on the task clock (the CGX
+    // continuity checkpoint); empty means set_connected(false) on the test thread.
+    std::function<void()> disconnect;
 
     SnapshotRig() = default;
     SnapshotRig(const SnapshotRig&) = delete;
@@ -4036,7 +4040,10 @@ struct SnapshotRig {
     ~SnapshotRig() {
         if (!driver) return;
         try {
-            driver->set_connected(false);
+            if (disconnect)
+                disconnect();
+            else
+                driver->set_connected(false);
         } catch (...) {
         }
     }
@@ -4348,6 +4355,40 @@ std::unique_ptr<SnapshotRig> snapshot_rig_celestron_telescope() {
     return rig_owner;
 }
 
+// Recipe of test_celestron_cgx_link_loss.cpp: the AUX fake over a pty, a paused poll to hold the frame. The
+// coordinate getters need a reference, so the hook runs FindHome (the fake completes it at once, no clock wait), and
+// the disconnect's continuity checkpoint sleeps on the task clock, so teardown drains it (cgx_clock_cleanup.h).
+std::unique_ptr<SnapshotRig> snapshot_rig_celestron_cgx_telescope() {
+    namespace cel = alpacacore::vendor::celestron;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
+    REQUIRE(fake->ok());
+    fake->set_auto_complete_motions(true);
+    rig.fake = fake;
+    cel::CelestronCgxConnectionInfo info;
+    info.port_path = fake->slave_path();
+    info.site_latitude_degrees = 45.0;
+    info.site_longitude_degrees = -75.0;
+    rig.driver = cel::create_celestron_cgx_telescope(0, info, *rig.clock);
+    auto* driver = static_cast<alpacacore::TelescopeDriver*>(rig.driver.get());
+    driver->set_connected(true);
+    rig.await_poll();
+    driver->find_home();
+    const auto deadline = snap_chrono::steady_clock::now() + kSnapshotBound;
+    while (driver->get_slewing() && snap_chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(snap_chrono::milliseconds(1));
+    REQUIRE(driver->get_at_home());
+    rig.hold_frame = [driver] { cel::set_state_poll_paused_for_testing(*driver, true); };
+    rig.lose_link = [driver, fake] {
+        fake->set_muted(true);
+        cel::set_state_poll_paused_for_testing(*driver, false);
+    };
+    rig.tick = [driver] { cel::poll_state_now_for_testing(*driver); };
+    rig.disconnect = [driver, clock = rig.clock] { alpacacore::test::set_cgx_connected(*driver, *clock, false); };
+    return rig_owner;
+}
+
 // Recipe of test_celestron_focuser.cpp: the AUX fake over a pty, muted to hold the frame.
 std::unique_ptr<SnapshotRig> snapshot_rig_celestron_focuser() {
     auto rig_owner = std::make_unique<SnapshotRig>();
@@ -4461,7 +4502,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS3_CELESTRON(X) X(celestron_telescope, snapshot_telescope_getters(true)) X(celestron_focuser, snapshot_focuser_getters(false))
+#define CS3_CELESTRON(X) X(celestron_telescope, snapshot_telescope_getters(true)) X(celestron_cgx_telescope, snapshot_telescope_getters(true)) X(celestron_focuser, snapshot_focuser_getters(false))
 #else
 #define CS3_CELESTRON(X)
 #endif

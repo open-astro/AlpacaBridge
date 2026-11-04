@@ -13,16 +13,37 @@
 #pragma once
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
 #include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <future>
 #include <memory>
+#include <thread>
+#include <utility>
 
 #include "catch2_compat.h"
 #include "fake_task_clock.h"
 
 namespace alpacacore::test {
+
+// Holds the CGX state poll (#1940): its slot gets a thread that runs no body, so after Connect's inline first frame
+// no poll exchange reaches the fake and no poll waiter sits on a FakeTaskClock. A case that counts wire requests or
+// clock waiters, or that drives a clock through drain_cgx_clock_task, holds it; such a case reads a new frame only
+// through vendor::celestron::poll_state_now_for_testing(). Set before Connect.
+inline void hold_cgx_state_poll(TelescopeDriver& driver) {
+    vendor::celestron::set_state_poll_spawn_for_testing(driver,
+                                                        [](std::function<void()>) { return std::thread([] {}); });
+}
+
+// create_celestron_cgx_telescope() with the state poll held.
+template <typename... Args>
+std::unique_ptr<TelescopeDriver> create_cgx_telescope_poll_held(Args&&... args) {
+    auto driver = vendor::celestron::create_celestron_cgx_telescope(std::forward<Args>(args)...);
+    hold_cgx_state_poll(*driver);
+    return driver;
+}
 
 // Drain before asserting: a future's destructor cannot join a virtual sleeper unaided.
 inline void drain_cgx_clock_task(std::future<void>& task, FakeTaskClock& clock) {
