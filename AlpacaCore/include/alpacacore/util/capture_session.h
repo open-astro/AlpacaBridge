@@ -96,8 +96,12 @@ public:
     /// NotConnected on a closed session (after disconnect_and_join(), until
     /// open()), and InvalidOperation while exposing, or when the previous body
     /// or an abort's join has not finished within kStartTimeout; a refused
-    /// start changes nothing.
-    void start(double duration_seconds, Body body) {
+    /// start changes nothing. `watchdog_margin`, when given, replaces the
+    /// constructor's margin for this exposure only (deadline = start +
+    /// duration + margin), for a body whose length depends on the exposure
+    /// (retries, a bulb file wait; #1979).
+    void start(double duration_seconds, Body body,
+               std::optional<std::chrono::nanoseconds> watchdog_margin = std::nullopt) {
         std::unique_lock<std::mutex> lock(mutex_);
         apply_watchdog(lock);
         require_startable_locked();
@@ -126,7 +130,7 @@ public:
         deadline_ =
             clock_.now() +
             std::chrono::duration_cast<TaskClock::clock::duration>(std::chrono::duration<double>(duration_seconds)) +
-            margin_;
+            std::chrono::duration_cast<TaskClock::clock::duration>(watchdog_margin.value_or(margin_));
         ++running_;
         lock.unlock();
 
