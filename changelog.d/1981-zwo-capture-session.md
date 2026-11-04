@@ -1,0 +1,8 @@
+### Changed
+- **ZWO Camera Driver** (AlpacaCore): the exposure runs in a `util::CaptureSession` body (decision 0020, issue #1981). The trigger, the status poll, the exposure retries, the USB 2.0 settle wait and the image download run in the body, and the exposure getters read the session, so a client read never waits on the camera. What a client can see:
+  - `StartExposure` returns at once, also when a USB 2.0 camera waits after a download (the wait is in the body). An SDK error while setting the exposure register or triggering the exposure no longer raises from `StartExposure`: it ends the exposure, `ImageReady` and `ImageArray` raise it as `DriverException`, `CameraState` reads Idle, and the previous image is gone (the earlier `LastExposure*` stay).
+  - `ImageReady` is true only after the image is downloaded; before, it was true at the SDK's Success status and `ImageArray` then downloaded the image.
+  - An exposure that never completes now fails at a watchdog deadline of the start plus three times the duration plus 15 s, with `ZWO: the exposure did not complete before its deadline`; before, it read Exposing for ever.
+  - `LastExposureDuration` and `LastExposureStartTime` are committed with the downloaded image, not at the SDK's Success status. A download that fails keeps the values of the last good image.
+  - A geometry write (`BinX`/`BinY`, `NumX`/`NumY`, `StartX`/`StartY`) is refused while an exposure runs, and with an image ready it drops that image (it was refused until the image had been read). An idle `AbortExposure` or `StopExposure` keeps a failed exposure's error until the next `StartExposure`.
+  - `StartExposure` while exposing raises `InvalidOperation`, as before, now from the session.

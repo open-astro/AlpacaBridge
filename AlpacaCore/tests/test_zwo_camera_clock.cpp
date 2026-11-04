@@ -27,6 +27,7 @@
 #include "catch2_compat.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_sdk.h"
+#include "zwo_exposure_wait.h"
 
 namespace {
 
@@ -230,26 +231,23 @@ TEST_CASE("ZWO camera clock - exposure retries are paced by the task clock", "[z
     sdk.frame_bytes = std::vector<std::uint8_t>(16 * 8 * 2, 1);
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
     camera->set_connected(true);
-    // The retry window is measured from the epoch before the first retry.
     clock.advance(std::chrono::seconds(1));
 
-    camera->start_exposure(0.001, true);
-    const int starts = sdk.call_count("start_exposure");
     // One Failed per poll: a retry's restart resets the fake's own status.
     sdk.script_exposure_status(std::vector<FakeZWOSDK::ExposureStatus>(5, FakeZWOSDK::ExposureStatus::Failed));
-
-    CHECK_FALSE(camera->get_image_ready());  // retry 1
-    CHECK(sdk.call_count("start_exposure") == starts + 1);
-    CHECK_FALSE(camera->get_image_ready());  // inside the 250 ms window: no retry
-    CHECK(sdk.call_count("start_exposure") == starts + 1);
+    camera->start_exposure(0.001, true);
+    // The first poll fails and retry 1 runs at once; the next poll fails inside the 250 ms window, so the exposure
+    // body waits on the clock for the rest of it.
+    REQUIRE(sdk.wait_for_call_count("start_exposure", 2, kRendezvous));
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
     clock.advance(milliseconds(249));
-    CHECK_FALSE(camera->get_image_ready());
-    CHECK(sdk.call_count("start_exposure") == starts + 1);
+    CHECK(sdk.call_count("start_exposure") == 2);
     clock.advance(milliseconds(1));
-    CHECK_FALSE(camera->get_image_ready());  // retry 2
-    CHECK(sdk.call_count("start_exposure") == starts + 2);
-    clock.advance(milliseconds(250));
+    REQUIRE(sdk.wait_for_call_count("start_exposure", 3, kRendezvous));  // retry 2
+    // The third failure has no retry left: the exposure fails at once.
+    REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(sdk.call_count("start_exposure") == 3);
 }
 
 namespace {
@@ -270,6 +268,7 @@ struct SettleRig {
         camera->set_connected(true);
         clock.advance(std::chrono::seconds(1));
         camera->start_exposure(0.001, true);
+        REQUIRE(alpacacore::test::wait_exposure_end(*camera));
         REQUIRE(camera->get_image_ready());
         static_cast<void>(camera->get_image_array());
     }
@@ -285,7 +284,7 @@ TEST_CASE("ZWO camera clock - USB 2.0 start waits 600 ms after the previous down
     SettleRig rig(false);
     const auto downloaded_at = rig.clock.now();
 
-    std::thread starter([&] { rig.camera->start_exposure(kLongExposure, true); });
+    rig.camera->start_exposure(kLongExposure, true);  // the settle runs in the exposure body (issue #1981)
     const bool waiting = rig.clock.wait_for_waiters(1, kRendezvous);
     CHECK(waiting);
     if (waiting) {
@@ -293,7 +292,7 @@ TEST_CASE("ZWO camera clock - USB 2.0 start waits 600 ms after the previous down
         CHECK(rig.sdk.call_count("start_exposure") == 1);  // still inside the settle window
         rig.clock.advance(milliseconds(1));
     }
-    starter.join();
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera));
 
     REQUIRE(rig.sdk.call_count("start_exposure") == 2);
     const auto starts = rig.sdk.start_times();
@@ -304,13 +303,13 @@ TEST_CASE("ZWO camera clock - USB 2.0 start waits 600 ms after the previous down
 
 namespace {
 
-// Starts exposure 2 on a thread and reports whether it parked on the clock. A start that wrongly waits is
-// released after the check, so a broken driver fails the case instead of hanging it.
+// Starts exposure 2 and reports whether its body parked on the clock before the trigger. A body that wrongly waits
+// is released after the check, so a broken driver fails the case instead of hanging it.
 bool start_parks_on_clock(SettleRig& rig, double duration = kLongExposure) {
-    std::thread starter([&] { rig.camera->start_exposure(duration, true); });
+    rig.camera->start_exposure(duration, true);
     const bool waited = rig.clock.wait_for_waiters(1, milliseconds(200));
     if (waited) rig.clock.advance(milliseconds(600));
-    starter.join();
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera));
     return waited;
 }
 
@@ -358,4 +357,139 @@ TEST_CASE("ZWO camera clock - USB 2.0 exposure of 3 s or less does not wait afte
     const auto starts = rig.sdk.start_times();
     REQUIRE(starts.size() == 2);
     CHECK(starts[1] - starts[0] < std::chrono::milliseconds(600));
+}
+
+// ---- The exposure body on the task clock (decision 0020, issue #1981) ----
+
+namespace {
+
+// A connected camera whose exposures stay Working until the case says otherwise.
+struct WorkingRig {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    std::unique_ptr<alpacacore::CameraDriver> camera;
+
+    WorkingRig() {
+        sdk.auto_complete_exposure = false;
+        sdk.frame_bytes = std::vector<std::uint8_t>(16 * 8 * 2, 1);
+        camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+        camera->set_connected(true);
+        clock.advance(std::chrono::seconds(1));
+    }
+};
+
+}  // namespace
+
+// Rule 4.3: the body polls the exposure status once per 50 ms wait on the task clock, and delivers the frame at the
+// first poll that reads Success.
+TEST_CASE("ZWO camera clock - the status poll waits on the task clock in 50 ms steps",
+          "[zwo][camera][unit][clock][capture-session]") {
+    WorkingRig rig;
+    rig.camera->start_exposure(1.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+    const int polls = rig.sdk.call_count("get_exposure_status");
+    for (std::uint64_t step = 1; step <= 3; ++step) {
+        rig.clock.advance(milliseconds(50));
+        REQUIRE(rig.clock.wait_for_wait_count(step + 1, kRendezvous));
+        CHECK(rig.sdk.call_count("get_exposure_status") == polls + static_cast<int>(step));
+    }
+    CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_FALSE(rig.camera->get_image_ready());
+    rig.sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Success);
+    rig.clock.advance(milliseconds(50));
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera));
+    CHECK(rig.camera->get_image_ready());
+    CHECK(rig.sdk.call_count("get_exposure_status") == polls + 4);
+}
+
+// Rule 2: the per-start margin is kExposureRetries x duration + 15 s, so the deadline of a 1 s exposure is 18 s; an
+// exposure that never leaves Working is failed there.
+TEST_CASE("ZWO camera clock - the watchdog covers both retries and ends a stuck exposure",
+          "[zwo][camera][unit][clock][capture-session]") {
+    WorkingRig rig;
+    rig.camera->start_exposure(1.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+    rig.clock.advance(milliseconds(17999));
+    CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_FALSE(rig.camera->get_image_ready());
+    rig.clock.advance(milliseconds(1));
+    CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Idle);
+    std::string message;
+    try {
+        static_cast<void>(rig.camera->get_image_ready());
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::DriverException);
+        message = ex.what();
+    }
+    CHECK(message.find("did not complete before its deadline") != std::string::npos);
+    // The body the watchdog cancelled stops the SDK exposure it started.
+    CHECK(rig.sdk.wait_for_call_count("stop_exposure", 1, kRendezvous));
+}
+
+// Rule 5: AbortExposure stops the SDK exposure, then cancels the body parked in the status poll and joins it, with no
+// clock advance; the body sends no second stop.
+TEST_CASE("ZWO camera clock - AbortExposure wakes the status poll without a clock advance",
+          "[zwo][camera][unit][clock][capture-session]") {
+    WorkingRig rig;
+    rig.camera->start_exposure(10.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+    const int stops = rig.sdk.call_count("stop_exposure");
+    CHECK(alpacacore::test::zwo_returns_without_advance(rig.clock, [&] { rig.camera->abort_exposure(); }));
+    CHECK(rig.sdk.call_count("stop_exposure") == stops + 1);
+    CHECK(rig.clock.waiter_count() == 0);
+    CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(rig.camera->get_image_ready());
+    rig.camera->set_connected(false);
+}
+
+// Rules 5 and 7.2: a Disconnect stops the SDK exposure and joins the body before the close, with no clock advance.
+TEST_CASE("ZWO camera clock - disconnect wakes the status poll without a clock advance",
+          "[zwo][camera][unit][clock][capture-session]") {
+    WorkingRig rig;
+    rig.camera->start_exposure(10.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+    const int stops = rig.sdk.call_count("stop_exposure");
+    CHECK(alpacacore::test::zwo_returns_without_advance(rig.clock, [&] { rig.camera->set_connected(false); }));
+    CHECK_FALSE(rig.camera->get_connected());
+    CHECK(rig.sdk.call_count("stop_exposure") == stops + 1);
+    CHECK(rig.clock.waiter_count() == 0);
+    CHECK(rig.sdk.open_count() == 0);
+}
+
+// Rules 5 and 7.5: the destructor stops the SDK exposure and joins the body before the close, with no clock advance.
+TEST_CASE("ZWO camera clock - destruction wakes the status poll without a clock advance",
+          "[zwo][camera][unit][clock][capture-session]") {
+    WorkingRig rig;
+    rig.camera->start_exposure(10.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+    const int stops = rig.sdk.call_count("stop_exposure");
+    CHECK(alpacacore::test::zwo_returns_without_advance(rig.clock, [&] { rig.camera.reset(); }));
+    CHECK(rig.sdk.call_count("stop_exposure") > stops);
+    CHECK(rig.clock.waiter_count() == 0);
+    CHECK(rig.sdk.open_count() == 0);
+}
+
+// Rule 4.1: the USB 2.0 settle wait runs in the body, so StartExposure returns at once; the trigger waits for the
+// settle on the task clock.
+TEST_CASE("ZWO camera clock - StartExposure returns before the USB 2.0 settle ends",
+          "[zwo][camera][unit][clock][capture-session]") {
+    SettleRig rig(false);
+    const auto downloaded_at = rig.clock.now();
+
+    CHECK(alpacacore::test::zwo_returns_without_advance(rig.clock,
+                                                        [&] { rig.camera->start_exposure(kLongExposure, true); }));
+    const bool parked = rig.clock.wait_for_waiters(1, kRendezvous);
+    CHECK(parked);
+    if (parked) {
+        rig.clock.advance(milliseconds(599));
+        CHECK(rig.sdk.call_count("start_exposure") == 1);  // still inside the settle window
+        rig.clock.advance(milliseconds(1));
+    }
+    // The fake counts a call before its body runs, and start_times() is filled in the body: wait for the time.
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return rig.sdk.start_times().size() == 2; }));
+    const auto starts = rig.sdk.start_times();
+    REQUIRE(starts.size() == 2);
+    CHECK(starts[1] - downloaded_at >= milliseconds(600));
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera));
+    CHECK(rig.camera->get_image_ready());
 }

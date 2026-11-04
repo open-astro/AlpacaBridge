@@ -68,7 +68,7 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
-  the exposure workers of cameras not yet on `util::CaptureSession` (Player One is; decision 0020),
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One and ZWO are; decision 0020),
   the QHY cooler-off and temperature workers and the GPIO
   soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later

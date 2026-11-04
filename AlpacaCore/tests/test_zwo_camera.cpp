@@ -34,6 +34,7 @@
 #include "fake_task_clock.h"
 #include "fake_zwo_sdk.h"
 #include "getter_stall_probe.h"
+#include "zwo_exposure_wait.h"
 
 namespace {
 
@@ -206,20 +207,18 @@ TEST_CASE("ZWO Camera Driver - PercentCompleted only while Exposing", "[zwo][cam
     SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*camera); }
     SECTION("idle after a completed exposure") {
         camera->start_exposure(0.001, true);
+        REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
         REQUIRE(camera->get_image_ready());
         alpacacore::test::require_percent_completed_unavailable(*camera);
     }
     SECTION("after a failed exposure") {
-        // Three Failed statuses exhaust the retries (the driver waits 250 ms on the task clock between them);
+        // Three Failed statuses exhaust the retries (the body waits 250 ms on the task clock between them);
         // the old value here was 100 because the failed frame still counted as an image.
-        camera->start_exposure(0.001, true);
         sdk.script_exposure_status({alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
                                     alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
                                     alpacacore::vendor::zwo::ZWOExposureStatus::Failed});
-        CHECK_FALSE(camera->get_image_ready());
-        clock.advance(std::chrono::milliseconds(250));
-        CHECK_FALSE(camera->get_image_ready());
-        clock.advance(std::chrono::milliseconds(250));
+        camera->start_exposure(0.001, true);
+        REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
         alpacacore::test::require_error_code([&] { (void)camera->get_image_ready(); },
                                              alpacacore::AlpacaError::DriverException);
         alpacacore::test::require_percent_completed_unavailable(*camera);
@@ -227,6 +226,7 @@ TEST_CASE("ZWO Camera Driver - PercentCompleted only while Exposing", "[zwo][cam
     SECTION("while exposing") {
         sdk.auto_complete_exposure = false;
         camera->start_exposure(30.0, true);
+        REQUIRE(alpacacore::test::zwo_eventually([&] { return sdk.call_count("get_exposure_status") > 0; }));
         alpacacore::test::require_percent_completed_available(*camera);
     }
 }
@@ -240,16 +240,18 @@ TEST_CASE("ZWO Camera Driver - LastExposure values follow successful images only
     camera->set_connected(true);
     clock.advance(std::chrono::seconds(1));
     const auto fail_exposure = [&](double duration) {
-        camera->start_exposure(duration, true);
         sdk.script_exposure_status({alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
                                     alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
                                     alpacacore::vendor::zwo::ZWOExposureStatus::Failed});
-        CHECK_FALSE(camera->get_image_ready());
-        clock.advance(std::chrono::milliseconds(250));
-        CHECK_FALSE(camera->get_image_ready());
-        clock.advance(std::chrono::milliseconds(250));
+        camera->start_exposure(duration, true);
+        REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
         alpacacore::test::require_error_code([&] { (void)camera->get_image_ready(); },
                                              alpacacore::AlpacaError::DriverException);
+    };
+    const auto succeed = [&](double duration) {
+        camera->start_exposure(duration, true);
+        REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
+        REQUIRE(camera->get_image_ready());
     };
 
     SECTION("before any exposure") { alpacacore::test::require_last_exposure_unset(*camera); }
@@ -258,8 +260,7 @@ TEST_CASE("ZWO Camera Driver - LastExposure values follow successful images only
         alpacacore::test::require_last_exposure_unset(*camera);
     }
     SECTION("a later failure keeps the earlier success") {
-        camera->start_exposure(0.001, true);
-        REQUIRE(camera->get_image_ready());
+        succeed(0.001);
         const auto start = camera->get_last_exposure_start_time();
         CHECK(camera->get_last_exposure_duration() == 0.001);
         fail_exposure(0.002);
@@ -267,10 +268,8 @@ TEST_CASE("ZWO Camera Driver - LastExposure values follow successful images only
         CHECK(camera->get_last_exposure_start_time() == start);
     }
     SECTION("a new success replaces the earlier one") {
-        camera->start_exposure(0.001, true);
-        REQUIRE(camera->get_image_ready());
-        camera->start_exposure(0.002, true);
-        REQUIRE(camera->get_image_ready());
+        succeed(0.001);
+        succeed(0.002);
         CHECK(camera->get_last_exposure_duration() == 0.002);
     }
 }
@@ -442,10 +441,12 @@ struct ExposingCamera {
         clock.advance(std::chrono::seconds(1));
         sdk.auto_complete_exposure = false;
         camera->start_exposure(30.0, true);
+        // The exposure body triggers, then waits between two status polls (issue #1981).
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
     }
 };
 
-// Only armed for poll_exposure_status's unlocked call, never a loss under mutex_ or the trigger lock.
+// Only armed for the exposure body's status poll, which holds no driver lock, never a loss under mutex_.
 struct LossPublicationGate {
     std::mutex mutex;
     std::condition_variable cv;
@@ -479,8 +480,9 @@ void check_loss_publication_after_transition(bool reconnect) {
     camera->set_connected(true);
     sdk.auto_complete_exposure = false;
     camera->start_exposure(30.0, true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(2)));  // the exposure body waits between two polls
 
-    // A peer observes removal first, retiring the shared open. The camera's next status call
+    // A peer observes removal first, retiring the shared open. The body's next status call
     // therefore throws NotConnected before its raw SDK body, without entering the retry burst.
     const int id = sdk.camera.camera_id;
     const auto peer = sdk.open_camera_link(id);
@@ -496,23 +498,13 @@ void check_loss_publication_after_transition(bool reconnect) {
         NotConnected);
     sdk.close_camera_link(id, peer.link);
 
-    std::packaged_task<void()> report([&] {
-        try {
-            (void)camera->get_image_ready();
-        } catch (const alpacacore::AlpacaException&) {
-            // The racing lifecycle may clear the pending exposure; only LinkFault/state are asserted here.
-        }
-    });
-    auto report_done = report.get_future();
-    std::thread reporter(std::move(report));
-    struct ReleaseAndJoin {
+    // The reporter is the exposure body (issue #1981): its status poll meets the retired open, and the gate holds
+    // its report after the loss is latched.
+    struct ReleaseOnExit {
         LossPublicationGate& gate;
-        std::thread& reporter;
-        ~ReleaseAndJoin() {
-            gate.release();
-            reporter.join();
-        }
-    } cleanup{*gate, reporter};
+        ~ReleaseOnExit() { gate.release(); }
+    } cleanup{*gate};
+    clock.advance(std::chrono::milliseconds(50));
     REQUIRE(gate->wait_for_arrival());
     CHECK_FALSE(camera->get_connected());
 
@@ -525,17 +517,20 @@ void check_loss_publication_after_transition(bool reconnect) {
     });
     auto transition_done = transition.get_future();
     std::thread lifecycle(std::move(transition));
+    if (reconnect) {
+        // The Connect joins the body first (decision 0020 rule 6), so it waits for the held report.
+        CHECK(transition_done.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout);
+    } else {
+        // The idempotent Disconnect joins nothing and completes while the report is held.
+        CHECK(transition_done.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+        CHECK_FALSE(camera->get_connected());
+        CHECK(camera->get_link_fault().empty());
+    }
+    gate->release();
     const bool completed = transition_done.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
-    if (!completed) gate->release();
     lifecycle.join();
     REQUIRE(completed);
     transition_done.get();
-    CHECK(camera->get_connected() == reconnect);
-    CHECK(camera->get_link_fault().empty());
-
-    gate->release();
-    REQUIRE(report_done.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
-    report_done.get();
     CHECK_FALSE(gate->timed_out);
     CHECK(camera->get_connected() == reconnect);
     CHECK(camera->get_link_fault().empty());
@@ -556,19 +551,21 @@ TEST_CASE("ZWO Camera Driver - a delayed loss reporter cannot restore LinkFault 
     check_loss_publication_after_transition(false);
 }
 
-// Falsified by: zwo_camera_driver.cpp poll_exposure_status() running the retry burst after the stop met a removal
+// Falsified by: zwo_camera_driver.cpp run_exposure() retrying after the status read or the retry's stop met a removal
 // error (the exposure fails with 1280 and Connected stays true, as on the rig); on_link() not calling note_loss().
-// Decision 0009 rule 2a: the first removal error drops the link, and no retry re-triggers the exposure.
+// Decision 0009 rule 2a: the first removal error drops the link, and no retry re-triggers the exposure. The exposure
+// body's status poll meets it (issue #1981).
 TEST_CASE("ZWO Camera Driver - a pulled cable during an exposure loses the link at once", "[zwo][camera][unit][link]") {
     WarnCapture log;
     ExposingCamera rig;
     const int starts = rig.sdk.call_count("start_exposure");
     const int writes = rig.sdk.call_count("set_control_value");
-    rig.sdk.removed = true;  // the status read answers Failed, the retry's stop ASI_ERROR_CAMERA_REMOVED
+    rig.sdk.removed = true;  // the status read answers Failed on a camera that no longer enumerates
+    rig.clock.advance(std::chrono::milliseconds(50));  // the body's next status poll
 
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return !rig.camera->get_connected(); }));
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return rig.clock.waiter_count() == 0; }));  // the body ended
     require_alpaca_error([&] { (void)rig.camera->get_image_ready(); }, NotConnected);
-
-    CHECK_FALSE(rig.camera->get_connected());
     CHECK(rig.sdk.call_count("start_exposure") == starts);  // no retry re-triggered the exposure
     CHECK(rig.sdk.call_count("set_control_value") == writes);
     require_alpaca_error([&] { (void)rig.camera->get_camera_state(); }, NotConnected);
@@ -609,6 +606,8 @@ TEST_CASE("ZWO Camera Driver - Disconnect after a loss completes and Connect reo
     ExposingCamera rig;
     const int old_id = rig.sdk.camera.camera_id;
     rig.sdk.removed = true;
+    rig.clock.advance(std::chrono::milliseconds(50));  // the body's next status poll finds the removal
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return !rig.camera->get_connected(); }));
     require_alpaca_error([&] { (void)rig.camera->get_image_ready(); }, NotConnected);
 
     rig.camera->set_connected(false);
@@ -621,6 +620,7 @@ TEST_CASE("ZWO Camera Driver - Disconnect after a loss completes and Connect reo
     CHECK(rig.sdk.holders(old_id) == 0);
     rig.sdk.auto_complete_exposure = true;
     rig.camera->start_exposure(0.001, true);
+    REQUIRE(alpacacore::test::wait_exposure_end(*rig.camera, rig.clock));
     CHECK(rig.camera->get_image_ready());
     CHECK(rig.sdk.open_count() == 1);
 
@@ -667,7 +667,7 @@ std::vector<std::string> lost_warnings(const WarnCapture& log) {
 // starts the retry burst, whose stop finds the pull one SDK call later).
 // Decision 0009 rule 2a: ASI SDK 1.41 answered a bare pull with ASI_EXP_FAILED and generic errors on the rig; the
 // failed status on a camera that no longer enumerates is the evidence, so no retry stop, register write or re-trigger
-// is sent.
+// is sent. The exposure body's status poll meets it (issue #1981).
 TEST_CASE("ZWO Camera Driver - a bare cable pull during an exposure loses the link at the failed status",
           "[zwo][camera][unit][link]") {
     WarnCapture log;
@@ -676,10 +676,11 @@ TEST_CASE("ZWO Camera Driver - a bare cable pull during an exposure loses the li
     const int stops = rig.sdk.call_count("stop_exposure");
     const int writes = rig.sdk.call_count("set_control_value");
     rig.sdk.pulled = true;
+    rig.clock.advance(std::chrono::milliseconds(50));
 
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return !rig.camera->get_connected(); }));
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return rig.clock.waiter_count() == 0; }));  // the body ended
     require_alpaca_error([&] { (void)rig.camera->get_image_ready(); }, NotConnected);
-
-    CHECK_FALSE(rig.camera->get_connected());
     CHECK(rig.sdk.call_count("stop_exposure") == stops);
     CHECK(rig.sdk.call_count("start_exposure") == starts);
     CHECK(rig.sdk.call_count("set_control_value") == writes);
@@ -690,28 +691,28 @@ TEST_CASE("ZWO Camera Driver - a bare cable pull during an exposure loses the li
     CHECK(lost.front().find(kSerial) != std::string::npos);
 }
 
-// Falsified by: shared_open_table.h call(id, fn, failed) skipping the failed() check (the not-readable answer
-// leaves Connected true).
-// Falsified by: zwo_camera_driver.cpp get_camera_state() not checking the link after poll_exposure_status() (the read
-// that finds the pull answers Idle, as on the rig at fa99a25e).
-TEST_CASE("ZWO Camera Driver - the CameraState read that finds a bare cable pull answers NotConnected",
+// Falsified by: zwo_camera_driver.cpp:422 get_camera_state() delete the ensure_connected() check (the session reads
+// Idle after the body found the pull, as the old poll did on the rig at fa99a25e).
+TEST_CASE("ZWO Camera Driver - CameraState answers NotConnected once the exposure body finds a bare cable pull",
           "[zwo][camera][unit][link]") {
     ExposingCamera rig;
     rig.sdk.pulled = true;
+    rig.clock.advance(std::chrono::milliseconds(50));
 
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return !rig.camera->get_connected(); }));
     require_alpaca_error([&] { (void)rig.camera->get_camera_state(); }, NotConnected);
-    CHECK_FALSE(rig.camera->get_connected());
 }
 
-// Falsified by: zwo_camera_driver.cpp get_image_array() not checking the link in its failed-status branch (the read
-// that finds the pull answers the latched DriverException).
-TEST_CASE("ZWO Camera Driver - the ImageArray read that finds a bare cable pull answers NotConnected",
+// Falsified by: zwo_camera_driver.cpp:576 get_image_array() delete the ensure_connected() checks (the read answers
+// the body's kept DriverException).
+TEST_CASE("ZWO Camera Driver - ImageArray answers NotConnected once the exposure body finds a bare cable pull",
           "[zwo][camera][unit][link]") {
     ExposingCamera rig;
     rig.sdk.pulled = true;
+    rig.clock.advance(std::chrono::milliseconds(50));
 
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return !rig.camera->get_connected(); }));
     require_alpaca_error([&] { (void)rig.camera->get_image_array(); }, NotConnected);
-    CHECK_FALSE(rig.camera->get_connected());
 }
 
 // The idle case: a temperature read the SDK answers as not readable, on a camera it no longer enumerates. A replug
@@ -738,7 +739,8 @@ TEST_CASE("ZWO Camera Driver - a bare cable pull on an idle camera is found by t
 }
 
 // Falsified by: shared_open_table.h unlisted_locked() ignoring what Ops::listed answers.
-// A generic error is not evidence on its own: a camera the SDK still enumerates keeps its link and its open.
+// A generic error is not evidence on its own: a camera the SDK still enumerates keeps its link and its open. The
+// trigger runs in the exposure body, so ImageReady raises the error (issue #1981).
 TEST_CASE("ZWO Camera Driver - a generic SDK error on a camera that still enumerates keeps the link",
           "[zwo][camera][unit][link]") {
     FakeZWOSDK sdk;
@@ -747,77 +749,64 @@ TEST_CASE("ZWO Camera Driver - a generic SDK error on a camera that still enumer
     const int listings = sdk.call_count("listed");
     sdk.fail_exposure_start = true;
 
-    require_alpaca_error([&] { camera->start_exposure(0.001, true); }, alpacacore::AlpacaError::DriverException);
+    camera->start_exposure(0.001, true);
+    REQUIRE(alpacacore::test::wait_exposure_end(*camera));
+    require_alpaca_error([&] { (void)camera->get_image_ready(); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(sdk.call_count("listed") == listings + 1);  // the enumeration was asked, and answered "still there"
     CHECK(camera->get_connected());
     CHECK(camera->get_link_fault().empty());
     CHECK(sdk.holders(sdk.camera.camera_id) == 1);
     camera->start_exposure(0.001, true);
+    REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     CHECK(camera->get_image_ready());
     camera->set_connected(false);
 }
 
 // Falsified by: shared_open_table.h call_unserialised() rethrowing a generic failure without asking Ops::listed.
 // The download runs with no table lock (call_unserialised()); a generic failure from it on a pulled camera is a loss,
-// the download answers NotConnected as every member does while lost, and the dead handle is closed only after the
-// download returned.
+// every member answers NotConnected while lost, and the dead handle is closed only after the download returned.
 TEST_CASE("ZWO Camera Driver - a bare cable pull during the image download loses the link",
           "[zwo][camera][unit][link]") {
     FakeZWOSDK sdk;
     sdk.stop_releases_download = false;
     auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
     camera->set_connected(true);
-    camera->start_exposure(0.001, true);
-    REQUIRE(camera->get_image_ready());
     sdk.hold_download();
+    camera->start_exposure(0.001, true);
 
-    std::atomic<int> code{0};
-    std::thread download([&] {
-        try {
-            (void)camera->get_image_array();
-        } catch (const alpacacore::AlpacaException& e) {
-            code = e.error_code();
-        }
-    });
     const bool started = sdk.wait_for_download(std::chrono::seconds(2));
     sdk.download_error = "ASIGetDataAfterExp: ASI_ERROR_GENERAL_ERROR";
     sdk.pulled = true;
     sdk.release_download();
-    download.join();
 
     REQUIRE(started);
-    CHECK(code.load() == NotConnected);
-    CHECK_FALSE(camera->get_connected());
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return !camera->get_connected(); }));
     require_alpaca_error([&] { (void)camera->get_image_ready(); }, NotConnected);
+    require_alpaca_error([&] { (void)camera->get_image_array(); }, NotConnected);
     CHECK_FALSE(sdk.closed_during_download());
-    CHECK(sdk.open_count() == 0);
+    CHECK(alpacacore::test::zwo_eventually([&] { return sdk.open_count() == 0; }));
 }
 
-// Falsified by: zwo_camera_driver.cpp set_connected() taking exposure_trigger_mutex_ before it publishes the closed
-// state (a retry burst stuck in a hung SDK call keeps Connected true through every Disconnect, as on the rig).
+// Falsified by: zwo_camera_driver.cpp set_connected() taking exposure_sdk_mutex_ (or mutex_) before it publishes the
+// closed state (a retry burst stuck in a hung SDK call keeps Connected true through every Disconnect, as on the rig).
+// The exposure body, not a getter, is stuck in the SDK call (issue #1981).
 TEST_CASE("ZWO Camera Driver - Disconnect reads false while a retry burst is stuck in the SDK",
           "[zwo][camera][unit][link]") {
     ExposingCamera rig;
     std::atomic<bool> stuck{false};
     std::atomic<bool> release{false};
-    static thread_local bool is_poller = false;
+    std::atomic<int> stops{0};
     rig.sdk.before_call = [&](const std::string& call) {
-        if (call != "stop_exposure" || !is_poller) return;
+        if (call != "stop_exposure" || stops.fetch_add(1) != 0) return;  // only the retry's stop sticks
         stuck = true;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!release.load() && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     };
-    rig.sdk.set_exposure_status(ZWOExposureStatus::Failed);  // the retry burst starts at the next poll
-    std::thread poller([&] {
-        is_poller = true;
-        try {
-            (void)rig.camera->get_image_ready();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): any outcome after Disconnect
-        }
-    });
+    rig.sdk.set_exposure_status(ZWOExposureStatus::Failed);  // the retry burst starts at the body's next poll
+    rig.clock.advance(std::chrono::milliseconds(50));
     REQUIRE(alpacacore::test::wait_for_flag(stuck));
 
     std::thread disconnect([&] { rig.camera->set_connected(false); });
@@ -827,7 +816,6 @@ TEST_CASE("ZWO Camera Driver - Disconnect reads false while a retry burst is stu
     }
     const bool connected_while_stuck = rig.camera->get_connected();
     release = true;
-    poller.join();
     disconnect.join();
 
     CHECK_FALSE(connected_while_stuck);
@@ -884,8 +872,8 @@ TEST_CASE("ZWO Camera Driver - a lost link is stamped once on the task clock and
 }
 
 // Falsified by: zwo_camera_driver.cpp note_loss() stamping the OnStep record_loss() way (consume(), then note()) before
-// its mark_lost() check, so a removal reported after the loss moves the stamp. The status read below captured the open
-// link before the loss and reports the removal after it: the first detection wins.
+// its mark_lost() check, so a removal reported after the loss moves the stamp. The exposure body's status read below
+// captured the open link before the loss and reports the removal after it: the first detection wins.
 TEST_CASE("ZWO Camera Driver - a removal reported after the loss does not move the loss stamp",
           "[zwo][camera][unit][link]") {
     FakeZWOSDK sdk;
@@ -896,40 +884,32 @@ TEST_CASE("ZWO Camera Driver - a removal reported after the loss does not move t
     clock.advance(std::chrono::seconds(1));
     sdk.auto_complete_exposure = false;
     camera->start_exposure(30.0, true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the body waits between two polls
 
-    // The next status read is held in the SDK, on the poller thread with no driver lock, until released.
+    // The body's next status read is held in the SDK, with no driver lock, until released.
     LossPublicationGate gate;
     std::atomic<bool> hold_next_status{true};
     sdk.before_call = [&](const std::string& call) {
         if (call == "get_exposure_status" && hold_next_status.exchange(false)) gate.pause();
     };
-    std::thread poller([&] {
-        try {
-            (void)camera->get_image_ready();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): NotConnected after the loss
-        }
-    });
-    struct ReleaseAndJoin {
+    struct ReleaseOnExit {
         LossPublicationGate& gate;
-        std::thread& poller;
-        ~ReleaseAndJoin() {
-            gate.release();
-            if (poller.joinable()) poller.join();
-        }
-    } cleanup{gate, poller};
+        ~ReleaseOnExit() { gate.release(); }
+    } cleanup{gate};
+    clock.advance(std::chrono::milliseconds(50));
     REQUIRE(gate.wait_for_arrival());
 
     const StampTime lost_at = clock.now();
     sdk.removed = true;
     require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, NotConnected);  // the loss
     clock.advance(std::chrono::seconds(5));
-    gate.release();
-    poller.join();  // its held read now meets the removal: a second report of the same loss
+    gate.release();  // the held read now meets the removal: a second report of the same loss
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return clock.waiter_count() == 0; }));
     CHECK_FALSE(gate.timed_out);
 
     camera->set_connected(false);
     sdk.replug({{23, kSerial}});
-    camera->set_connected(true);
+    camera->set_connected(true);  // joins the body
 
     REQUIRE(relinks.stamps.size() == 2);
     REQUIRE(relinks.stamps[1].has_value());
@@ -957,4 +937,26 @@ TEST_CASE("ZWO Camera Driver - a removal met by the Disconnect itself stamps no 
     REQUIRE(relinks.stamps.size() == 2);
     CHECK_FALSE(relinks.stamps[1].has_value());
     camera->set_connected(false);
+}
+
+// Rule 4 (issue #1981): the exposure body's status poll meets the removal; the link drops at once and no retry
+// re-triggers the exposure. One WARN names the serial.
+TEST_CASE("ZWO Camera Driver - a link loss during the status poll ends the body and retries nothing",
+          "[zwo][camera][unit][capture-session][link]") {
+    WarnCapture log;
+    ExposingCamera rig;
+    REQUIRE(rig.clock.wait_for_wait_count(1, std::chrono::seconds(5)));  // the body waits between two polls
+    const int starts = rig.sdk.call_count("start_exposure");
+    const int writes = rig.sdk.call_count("set_control_value");
+    rig.sdk.removed = true;
+    rig.clock.advance(std::chrono::milliseconds(50));
+
+    CHECK(alpacacore::test::zwo_eventually([&] { return !rig.camera->get_connected(); }));
+    CHECK(alpacacore::test::zwo_eventually([&] { return rig.clock.waiter_count() == 0; }));  // the body ended
+    CHECK(rig.sdk.call_count("start_exposure") == starts);
+    CHECK(rig.sdk.call_count("set_control_value") == writes);
+    require_alpaca_error([&] { (void)rig.camera->get_image_ready(); }, NotConnected);
+    const auto lost = lost_warnings(log);
+    REQUIRE(lost.size() == 1);
+    CHECK(lost.front().find(kSerial) != std::string::npos);
 }
