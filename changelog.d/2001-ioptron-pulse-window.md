@@ -1,0 +1,2 @@
+### Fixed
+- **iOptron mount** (AlpacaCore): `IsPulseGuiding` now falls 500 ms after a guide pulse's duration instead of 1 s, so a guider that waits for it (PHD2 with an asynchronous mount, NINA) loses about half a second less per correction. Measured on the HAE29C: the firmware's guiding status ends 70 to 380 ms after the duration. The Slewing mask during a pulse and the position holds follow the same window (issue #2001).

@@ -644,7 +644,7 @@ public:
         return pulse_window_open();
     }
 
-    // True from PulseGuide until its duration plus kPulseGuideCompletionDelay has passed (decision 0022).
+    // True from PulseGuide until its duration plus kPulseGuideCompletionDelay (500 ms) has passed (decision 0022).
     bool pulse_window_open() const { return pulse_guide_hold_.load(std::memory_order_acquire).active(clock_.now()); }
 
     bool get_can_set_declination_rate() const override {
@@ -1820,7 +1820,13 @@ private:
     static constexpr std::chrono::seconds kSlewTimeout{300};
     static constexpr std::chrono::seconds kFastCacheGrace{30};
     static constexpr std::chrono::seconds kUnparkGrace{120};
-    static constexpr std::chrono::milliseconds kPulseGuideCompletionDelay{1000};
+    // How long past its duration a pulse is still reported (IsPulseGuiding, the #843 Slewing mask and the position
+    // holds). Measured on the HAE29C (issue #2001, 2026-11-03): the firmware's guiding status (:GLS# system status 3)
+    // ends 70 to 380 ms after the duration (300 ms pulses at 440-680 ms, 1 s at 1100-1280 ms, 3 s at 3350 ms). The
+    // 1 s delay before it cost a guider about 0.6 s per correction.
+    static constexpr std::chrono::milliseconds kPulseGuideCompletionDelay{500};
+    // The guide-rate calibration's settle after its sample pulses; kept at the old 1 s, not re-measured.
+    static constexpr std::chrono::milliseconds kGuideCalibrationSettleDelay{1000};
     static constexpr std::chrono::milliseconds kPulseGuideHoldGrace{2000};
     static constexpr std::chrono::milliseconds kPulseGuideCorrectionGrace{5000};
     static constexpr double kSlewCompletionToleranceArcsec = 60.0;
@@ -2543,7 +2549,7 @@ private:
         }
 
         const int sample_duration = 5000;
-        const auto settle_delay = kPulseGuideCompletionDelay;
+        const auto settle_delay = kGuideCalibrationSettleDelay;
         try {
             auto& protocol = iOptronProtocolWrapper::instance();
             auto [original_ra_rate, original_dec_rate] = protocol.get_guide_rates();
