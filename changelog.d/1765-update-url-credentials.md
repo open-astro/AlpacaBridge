@@ -1,0 +1,3 @@
+### Fixed
+- **Software update** (AlpacaHTTP): the update status, the check error texts and the log no longer show a `user:password@` part of a mirror URL set in `update_packages_url`, `update_release_notes_url` or `update_release_url`; any LAN client could read it from `GET /management/v1/update/status` (issue #1765).
+- **Software update** (AlpacaHTTP): a "Check for Updates" that arrives while another check is fetching answers at once with the new `CheckInProgress` status field instead of holding an HTTP worker until the first check ends, so a slow mirror and many tabs can no longer tie up the server's workers; the web UI shows "Checking for updates..." and waits for the result (issue #1765).

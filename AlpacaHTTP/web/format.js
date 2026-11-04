@@ -216,6 +216,9 @@ function updateStatusText(status) {
     if (source.CheckEnabled === false) {
         return 'Checking for updates is turned off in the server configuration.';
     }
+    if (source.CheckInProgress) {
+        return 'Checking for updates...';
+    }
     if (source.CheckError) {
         return 'Check failed: ' + source.CheckError;
     }
