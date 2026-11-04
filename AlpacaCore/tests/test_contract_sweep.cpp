@@ -262,7 +262,8 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
     return p;
 }
 
-// The tier-1 probe list: the type's probes plus the focuser move(-1) of a driver that checks a static range.
+// The tier-1 probe list is the type's probes; a focuser adds none, since every focuser clamps a Move to
+// 0..MaxStep (contract_sweep.h with_clamping_focuser).
 std::vector<Probe> invalid_value_probes(AlpacaDriver& d, const ContractEntry& e) {
     return invalid_value_probes(d, e.type);
 }
