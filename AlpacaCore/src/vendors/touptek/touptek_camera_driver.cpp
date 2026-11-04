@@ -1208,6 +1208,7 @@ public:
             // session_.start() has published Exposing, so a register or geometry
             // write cannot slip in between.
             exposure_starting_ = true;
+            abort_pending_ = false;
         }
 
         auto body = [this, generation, exposure_us, active_bin, active_num_x, active_num_y, expected_w, expected_h,
@@ -1385,6 +1386,7 @@ public:
             // ran, so the stream and the settings still need what they needed.
             std::lock_guard<std::mutex> lock(mutex_);
             exposure_starting_ = false;
+            abort_pending_ = false;  // nothing started, so there is nothing to abort
             // Not on a camera a disconnect has closed or is closing: its stop already
             // ended the stream, and handle_ stays set until after disconnect_and_join().
             if (handle_ && !closing_) stream_clean_ = saved_stream_clean;
@@ -1392,8 +1394,16 @@ public:
             roi_dirty_ = roi_dirty_ || dirty_roi;
             throw;
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        exposure_starting_ = false;
+        bool abort_now = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            exposure_starting_ = false;
+            abort_now = std::exchange(abort_pending_, false);
+        }
+        // An AbortExposure or StopExposure that arrived while this start waited in session_.start() (behind a body
+        // the watchdog left in the SDK) was recorded, not dropped (issue #1996): act on it now that Exposing is
+        // published, with the same stop-then-join (or frame discard) as a direct call.
+        if (abort_now) stop_exposure();
     }
 
     void stop_exposure() override {
@@ -1406,10 +1416,15 @@ public:
             if (exposing) {
                 session_.set_stopping(true);  // a frame wait the stop breaks is not a failure
             } else {
-                // Nothing has begun yet; the start goes ahead. An abort that races a
-                // StartExposure inside this window is a deliberate no-op (the client
-                // sent the two calls concurrently, so either order is valid).
-                if (exposure_starting_) return;
+                // A StartExposure is between its settings snapshot and session_.start()
+                // publishing Exposing, which can take up to the start timeout behind a
+                // body the watchdog left in the SDK. Record the abort; that start runs
+                // it once Exposing is published, so the exposure never runs to the end
+                // after the client was told it was aborted (issue #1996).
+                if (exposure_starting_) {
+                    abort_pending_ = true;
+                    return;
+                }
                 // A completed exposure: drop its frame. A kept failure stays until the
                 // next StartExposure or a reconnect (decision 0020 rule 3).
                 session_.discard_image();
@@ -1489,6 +1504,9 @@ private:
     // Guarded by mutex_. True from a StartExposure's settings snapshot until
     // session_.start() has published Exposing (or refused).
     bool exposure_starting_{false};
+    // Guarded by mutex_. An AbortExposure or StopExposure that arrived while exposure_starting_ was set; the start
+    // acts on it after session_.start() returns, and clears it when it starts or is refused (issue #1996).
+    bool abort_pending_{false};
     // Guarded by mutex_. Set with the disconnect's SDK stop, cleared on connect:
     // a StartExposure in the gap before disconnect_and_join() closes the session
     // would otherwise run a body that parks in Toupcam_WaitImageV4 and holds the
