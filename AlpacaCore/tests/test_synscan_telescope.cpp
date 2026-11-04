@@ -930,8 +930,24 @@ TEST_CASE("SynScan Telescope Driver - a cancelled pulse whose stop fails logs th
 
     driver->pulse_guide(2, 300);  // East, RA
     REQUIRE(server.drop_connections());
-    driver.reset();  // destruction cancels the pulse; its stop cannot be sent on the dropped link
-    CHECK(errors == 1);
+
+    SECTION("destruction logs the failed stop") {
+        driver.reset();  // destruction cancels the pulse; its stop cannot be sent on the dropped link
+        CHECK(errors == 1);
+    }
+
+    // Falsified by: synscan_telescope_driver.cpp run_pulse_stop_body cancel branch, drop the manual_axis_slewing_
+    // write: the replacement is then refused with the link error instead of InvalidOperation.
+    SECTION("a replacement pulse is refused while the axis may still be moving") {
+        try {
+            driver->pulse_guide(2, 300);  // cancels and joins the first pulse; its stop fails
+            FAIL("PulseGuide started although the cancelled pulse's stop failed");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        }
+        CHECK(errors == 1);
+        driver.reset();
+    }
 }
 
 // Steps the fake clock until `pred` holds, so a pulse timer parked on it fires without a sleep. Each step waits for
