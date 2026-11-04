@@ -1339,6 +1339,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./scripts/ci_preflight.sh --self-test
 
+      - name: ShellCheck - host setup self-test (install script groups, setup stamp)
+        if: ${{ !cancelled() }}
+        # install_alpaca_service.sh install over shims (sudo records, runs nothing): the dialout and gpio
+        # groups and the udev rules build_and_run.sh also sets up, through scripts/host_setup.sh (#1698).
+        run: ./scripts/test_host_setup.sh
+
       - name: JavaScript - Syntax-check web UI JavaScript
         if: ${{ !cancelled() }}
         # The web UI is hand-written static JS served as-is (no bundler/build

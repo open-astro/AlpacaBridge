@@ -28,13 +28,12 @@ Non-camera vendors (focusers, mounts, switches, rotators) also ship their `.so` 
 
 ### Mandatory Checklist — New Vendor SDK with `.so`
 
-Do **all** of the following when adding a new vendor SDK. Skipping any step will either silently break companion projects (step 1), break CI / clean clones (step 2), or break runtime loading on installed systems (steps 3–5).
+Do **all** of the following when adding a new vendor SDK. Skipping any step will either silently break companion projects (step 1), break CI / clean clones (step 2), or break runtime loading on installed systems (steps 3–4).
 
 1. **Store** static (`.a`) and shared (`.so`) libraries under `AlpacaCore/external/<VENDOR>/` in the arm64 subdirectory the upstream SDK uses (commonly `lib/linux/armv8/`, `lib/linux/arm64/`, or `lib/armv8/`). Document the exact path in the vendor-specific notes section below. Do not commit x86_64/x64 SDK binaries — AlpacaBridge is arm64-only and they would only bloat the repo.
 2. **Allowlist in `.gitignore`**: add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore` **before** committing the SDK files. The global `*.so` ignore rule will silently drop the library from the commit otherwise. Verify with `git check-ignore -v <path-to-.so>` — the output must show the `!external/<VENDOR>/**` rule winning.
 3. **`debian/rules`** — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/` in `override_dh_auto_install`, alongside existing QHY/ZWO/SVBONY entries. Add a `<VENDOR>_LIB_DIR` variable at the top of the file pointing at the arm64 SDK path.
-4. **`build_and_run.sh`** — copy `.so*` to `/usr/local/lib/`, run `ldconfig`. Add inside the udev rules block alongside existing QHY/ZWO/SVBONY install logic.
-5. **`install_alpaca_service.sh`** — same as `build_and_run.sh`, inside the `install_udev_rules()` function. Keep the two scripts in sync — they must install the same set of vendor libraries.
+4. **`scripts/host_setup.sh`** — add a `dir|lib|what` entry to the library loop in `host_setup_install_vendor_runtime()` (it copies `.so*` to `/usr/local/lib/` and runs `ldconfig`) and the library's name to `host_setup_input_hash()`. `build_and_run.sh` and `install_alpaca_service.sh` both source this file, so they install the same libraries, rules and groups (#1698); `scripts/test_host_setup.sh` (a `static-checks` step) checks the install path and the stamp.
 
 ### Bundled library built from a vendored tarball (libgphoto2)
 
