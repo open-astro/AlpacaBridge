@@ -1446,10 +1446,47 @@ public:
             throw AlpacaException(std::string("AbortSlew failed: ") + e.what(),
                                   AlpacaError::DriverException);
         }
+        // Issue #2000, ITelescopeV4 AbortSlew: an equatorial slew ends with Tracking on, and an aborted MoveAxis
+        // returns Tracking to its state before the motion. The firmware reports tracking off for a whole GOTO and
+        // :Q# leaves it as it is, so a stopped GOTO would otherwise stay untracked. An Alt/Az slew needs Tracking
+        // off (#1377) and Park and FindHome end without it, so those are left as the stop leaves them.
+        std::optional<bool> restore_tracking;
+        if (slew_in_progress_ && equatorial_slew_) {
+            restore_tracking = true;
+        } else if ((axis_move_active_primary_ || axis_move_active_secondary_) &&
+                   tracking_state_before_move_.has_value()) {
+            restore_tracking = tracking_state_before_move_;
+        }
         slew_in_progress_ = false;
+        equatorial_slew_ = false;
         driver_motion_ = DriverMotion::None;
+        axis_move_active_primary_ = false;
+        axis_move_active_secondary_ = false;
+        tracking_state_before_move_.reset();
         status_cache_valid_ = false;
         clear_slew_hold_locked();
+        if (restore_tracking.has_value()) {
+            try {
+                if (*restore_tracking) {
+                    protocol.start_tracking();
+                } else {
+                    protocol.stop_tracking();
+                }
+            } catch (const std::exception& e) {
+                throw_if_link_lost();
+                record_device_fault_locked("AbortSlew", e.what());
+                throw AlpacaException(
+                    std::string("AbortSlew stopped the mount but could not restore Tracking: ") + e.what(),
+                    AlpacaError::DriverException);
+            }
+            // The mount is stopped: the cache that serves the read-back window must not keep the GOTO's status.
+            cached_status_.is_tracking = *restore_tracking;
+            cached_status_.is_slewing = false;
+            cached_status_.system_status = *restore_tracking ? 1 : 0;
+            status_cache_valid_ = true;
+            last_status_update_ = clock_.now();
+            tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
+        }
     }
     
     void pulse_guide(int direction, int duration) override {
@@ -1575,6 +1612,7 @@ public:
             double phys_dec = dec - sync_offset_dec_degrees_;
             check_equatorial_slew_allowed_locked("SlewToCoordinates");
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
+            equatorial_slew_ = true;
             dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
         }
         wait_for_slew_completion("SlewToCoordinates");
@@ -1595,6 +1633,7 @@ public:
             previous_slew_error = last_slew_error_;
             check_equatorial_slew_allowed_locked("SlewToCoordinatesAsync");
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
+            equatorial_slew_ = true;
             generation = slew_operation_generation_;
         }
         start_slew_body(generation, previous_slew_error, "Failed to start async slew",
@@ -2090,6 +2129,7 @@ private:
         // The slew window is left to the caller: every initiator but MoveAxis arms its own, and MoveAxis clears it.
         invalidate_slew_error_locked();
         slew_in_progress_ = false;
+        equatorial_slew_ = false;
         driver_motion_ = DriverMotion::None;
     }
 
@@ -3057,6 +3097,10 @@ private:
     // past the initiator's override, and by AbortSlew, any new initiator but MoveAxis
     // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
     enum class DriverMotion : std::uint8_t { None, Park, Home, Goto };
+    // Under mutex_: the GOTO in slew_in_progress_ came from SlewToCoordinates* or SlewToTarget* (which route through
+    // them), so AbortSlew turns Tracking back on (issue #2000). False for an Alt/Az slew, cleared by a superseding
+    // initiator and by AbortSlew.
+    bool equatorial_slew_ = false;
     mutable DriverMotion driver_motion_ = DriverMotion::None;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to

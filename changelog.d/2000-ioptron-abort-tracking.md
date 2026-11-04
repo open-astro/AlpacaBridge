@@ -1,0 +1,2 @@
+### Fixed
+- **iOptron mount** (AlpacaCore): `AbortSlew` during an equatorial GOTO now leaves the mount tracking, as ITelescopeV4 requires ("equatorial slews ... always start and finish with Tracking on"). The firmware reports tracking off for a whole GOTO and the stop command leaves it so, so a NINA user who aborted a GOTO was left with a stopped mount and the next slew was refused for Tracking. An aborted `MoveAxis` now returns Tracking to its state before the move; Alt/Az slews, Park and FindHome are unchanged (issue #2000).
