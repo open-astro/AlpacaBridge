@@ -540,8 +540,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Configuration**: `focuserIndex` (0-based among AAF devices) or `focuserId` (opaque SDK id; overrides index).
 - **Capabilities**: Absolute positioning, halt, max-step query, on-board temperature (tenths of °C), backlash and reverse direction supported by the firmware. `StepSize` is not exposed because the AAF firmware does not report mechanically-valid microns-per-step for arbitrary focuser setups.
 - **Temperature compensation**: Not implemented — the AAF action set does not expose a temp-comp control.
-- **ConformU**: the committed report is from a linux-arm64 build of ConformU `main` (`4.6.0-rc.1+56718.f9ae65c`) on a Raspberry Pi, 2026-11-04, after issue #2028: the first ConformU build that runs the focuser range sweep and halt-while-moving on a focuser without temperature compensation. 0 errors, 0 issues, 0 timing issues; a full-range leg (25000 steps) takes well under ConformU's default 60 s `FocuserTimeout`.
-- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on Linux arm64. Re-validated with ConformU 4.5.3 on SDK 60.31488.20260519 (ToupTek StellaVita, Raspberry Pi CM4, PR #1147, 2026-10-25): 0 errors, 0 issues, 0 timing issues.
+- **ConformU**: validated with ConformU 4.3.0 (0 errors, 0 issues on Linux arm64) and re-validated with ConformU 4.5.3 on SDK 60.31488.20260519 (ToupTek StellaVita, Raspberry Pi CM4, PR #1147, 2026-10-25: 0 errors, 0 issues, 0 timing issues). The committed report is from a linux-arm64 build of ConformU `main` (`4.6.0-rc.1+56718.f9ae65c`) on a Raspberry Pi, 2026-11-04, after issue #2028: the first ConformU build that runs the focuser range sweep and halt-while-moving on a focuser without temperature compensation. 0 errors, 0 issues, 0 timing issues; a full-range leg (25000 steps) takes well under ConformU's default 60 s `FocuserTimeout`.
 
 </details>
 

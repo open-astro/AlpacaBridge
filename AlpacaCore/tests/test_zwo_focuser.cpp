@@ -351,6 +351,8 @@ TEST_CASE("ZWO EAF Focuser Driver - A stored max step of 0 with none configured 
     CHECK(driver->get_max_step() == 0);
     CHECK(sdk.set_max_step_calls == 0);
     require_alpaca_error([&] { driver->move(0 + 1); }, alpacacore::AlpacaError::InvalidValue);
+    // A Move to 0 is refused as well (#2028): the guard is the stored limit, not the position.
+    require_alpaca_error([&] { driver->move(0); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 // Falsified by: zwo_focuser_driver.cpp set_connected() skipping
