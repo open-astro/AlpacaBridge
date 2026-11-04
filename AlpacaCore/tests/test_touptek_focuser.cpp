@@ -171,8 +171,9 @@ TEST_CASE("ToupTek AAF Focuser Driver - disconnect with a move in flight closes 
 }
 
 // Falsified by: touptek_focuser_driver.cpp connected_max_step() MUTATION: replaced the NotConnected throw with
-// return max_step_current_.load(), move() then reports InvalidValue for the zero limit instead of NotConnected. The
-// race itself is covered by the [stress] case "ToupTek AAF focuser - concurrent connect/disconnect/operate stress".
+// return max_step_current_.load(), MaxStep and MaxIncrement then answer the stale limit instead of NotConnected
+// (move() clamps to it and still meets ensure_connected() under the I/O lock). The race itself is covered by the
+// [stress] case "ToupTek AAF focuser - concurrent connect/disconnect/operate stress".
 TEST_CASE("ToupTek AAF Focuser Driver - a disconnected move or limit read is NotConnected, never out of range",
           "[touptek][focuser][unit]") {
     alpacacore::test::FakeToupTekSDK fake;
