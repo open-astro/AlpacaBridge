@@ -453,6 +453,34 @@ int main() {
         ::unlink(path.c_str());
     }
 
+    // #1741: http.port in the file takes the same 1-65535 check as ALPACAHTTP_PORT and discovery.port. A value
+    // outside it (0 binds a random port no client can find) keeps the default, with a warning.
+    {
+        // case: http.port in the file rejects 0 and other out-of-range values
+        char path_template[] = "/tmp/alpacahttp_test_http_port_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        ::close(fd);
+        const auto loaded_port = [&path](const char* value) {
+            {
+                std::ofstream out(path);
+                out << "http:\n  port: " << value << "  # a comment\n";
+            }
+            alpacahttp::Config config;
+            EXPECT(config.load(path));
+            return config.http_port();
+        };
+        ::unsetenv("ALPACAHTTP_PORT");
+        EXPECT(loaded_port("6810") == 6810);
+        EXPECT(loaded_port("1") == 1);
+        EXPECT(loaded_port("65535") == 65535);
+        for (const char* bad : {"0", "65536", "-5", "abc", "99999999999", "68 00"}) {
+            EXPECT(loaded_port(bad) == alpacahttp::Config().http_port());
+        }
+        ::unlink(path.c_str());
+    }
+
     // #1509: discovery.port defaults to 32227 (Alpaca API Reference s5.8.1),
     // is read from the file and ALPACAHTTP_DISCOVERY_PORT, and a value outside
     // 1-65535 keeps the default.
