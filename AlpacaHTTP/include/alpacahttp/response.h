@@ -12,10 +12,13 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace alpacahttp {
@@ -58,14 +61,23 @@ public:
     // Set body
     void set_body(std::string body);
     void set_body(const AlpacaResponse& alpaca_response);
+    // A body made of `head` followed by `*tail` from byte `tail_offset` on. The
+    // tail is shared, not copied: parallel camera imagearray GETs that joined one
+    // build each carry their own transaction ids in `head` and point at one
+    // encoded frame (#1716). Content-Length covers both parts.
+    void set_body(std::string head, std::shared_ptr<const std::string> tail, std::size_t tail_offset);
 
     // Get formatted HTTP response
     // Serialize the status line and headers, including the terminating blank line.
     std::string to_header_string() const;
     std::string to_string() const;
 
-    // Getters
+    // Getters. body() is the response's own bytes; a response built with the
+    // shared-tail set_body() goes on with body_tail(), which is empty otherwise.
+    // The bytes on the wire are body() then body_tail() (to_string() joins them).
     const std::string& body() const { return body_; }
+    std::string_view body_tail() const;
+    std::size_t body_size() const { return body_.size() + body_tail().size(); }
     const std::string& get_header(const std::string& key) const;
 
 private:
@@ -73,6 +85,8 @@ private:
     std::string reason_phrase_ = "OK";
     std::unordered_map<std::string, std::string> headers_;
     std::string body_;
+    std::shared_ptr<const std::string> tail_;
+    std::size_t tail_offset_ = 0;
 
     static std::string status_to_reason_phrase(std::uint16_t code);
 };

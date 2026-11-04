@@ -3653,7 +3653,7 @@ Response Router::dispatch_camera_method(std::shared_ptr<alpacacore::CameraDriver
                     build_shared(camera.get(), [&camera] { return camera->get_image_array(); }, accept, call);
                 Response response;
                 response.set_content_type(payload.content_type);
-                response.set_body(std::move(payload.body));
+                response.set_body(std::move(payload.body), std::move(payload.tail), payload.tail_offset);
                 return response;
             } else if (method_name == "imagearrayvariant") {
                 if (camera->get_connecting() || !camera->get_connected()) {

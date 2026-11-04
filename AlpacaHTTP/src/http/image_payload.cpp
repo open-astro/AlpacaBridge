@@ -387,20 +387,22 @@ void write_uint32_le(std::string& out, std::size_t offset, std::uint32_t value) 
     }
 }
 
-// The builder's body with this request's transaction ids.
-ImagePayload materialize(const SharedBuild& build, const DeviceCall& call) {
+// The builder's body with this request's transaction ids: a head of its own and
+// the rest of the shared body as the tail, so N joined GETs hold one frame, not N.
+ImagePayload materialize(const std::shared_ptr<const SharedBuild>& build, const DeviceCall& call) {
     ImagePayload payload;
-    payload.content_type = build.content_type;
-    if (build.imagebytes) {
-        payload.body = build.body;
+    payload.content_type = build->content_type;
+    if (build->imagebytes) {
+        payload.body = build->body.substr(0, kImageBytesMetadataSize);
         write_uint32_le(payload.body, 8, call.client_tx_id());
         write_uint32_le(payload.body, 12, call.server_tx_id());
+        payload.tail_offset = kImageBytesMetadataSize;
     } else {
-        const std::string head = call.success_head();
-        payload.body.reserve(head.size() + build.body.size() - build.json_head_len);
-        payload.body.append(head);
-        payload.body.append(build.body, build.json_head_len, std::string::npos);
+        payload.body = call.success_head();
+        payload.tail_offset = build->json_head_len;
     }
+    // Aliasing: the tail keeps the whole SharedBuild alive and points at its body.
+    payload.tail = std::shared_ptr<const std::string>(build, &build->body);
     return payload;
 }
 
@@ -431,7 +433,7 @@ ImagePayload build_shared(const void* device, const std::function<alpacacore::Im
         }
     }
     if (joined_existing) {
-        return materialize(*entry->result.get(), call);  // rethrows the builder's failure
+        return materialize(entry->result.get(), call);  // rethrows the builder's failure
     }
 
     // Removes the entry so later GETs build afresh; returns how many GETs joined it.
@@ -459,7 +461,7 @@ ImagePayload build_shared(const void* device, const std::function<alpacacore::Im
     }
     const auto shared = std::make_shared<const SharedBuild>(std::move(build));
     promise.set_value(shared);
-    return materialize(*shared, call);
+    return materialize(shared, call);
 }
 
 }  // namespace alpacahttp
