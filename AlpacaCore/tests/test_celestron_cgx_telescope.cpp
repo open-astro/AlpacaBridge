@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
@@ -31,6 +32,7 @@
 #include <numbers>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -2321,6 +2323,68 @@ TEST_CASE("Celestron CGX USB Telescope Driver - failed tracking shutdown leaves 
     CHECK(std::isfinite(driver->get_declination()));
     CHECK_NOTHROW(driver->set_tracking(true));
     CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a failed slew start keeps its error when the tracking restore fails",
+          "[celestron][cgx][telescope][integration]") {
+    // A start that fails on the wire moves the session generation, and the handler then skips the restore. An
+    // MC_GOTO_FAST ack with a payload fails the start and leaves the reference valid, so the restore runs. The
+    // southern site makes the restore's RA command 0x07, which the slew's own tracking-off write never sends.
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    info.site_latitude_degrees = -33.9;
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    driver->set_connected(true);
+    driver->find_home();
+    REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + (driver->get_side_of_pier() == 0 ? -1.0 : 1.0) + 24.0, 24.0);
+    const int restores_before = mount.count_command(0x10, 0x07);
+    mount.ack_next_with_payload(0x10, 0x02, {0x00});
+    bool restore_fails = false;
+    SECTION("the restore fails") {
+        restore_fails = true;
+        mount.drop_next_reply(0x10, 0x07, false);
+    }
+    SECTION("the restore succeeds") {}
+
+    std::vector<std::string> errors;
+    {
+        struct SinkGuard {
+            alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            ~SinkGuard() {
+                alpacacore::logging::set_log_sink(previous);
+                alpacacore::logging::set_log_level(level);
+            }
+        } sink_guard;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Error);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Error && component == "Celestron CGX")
+                    errors.emplace_back(message);
+            });
+        try {
+            driver->slew_to_coordinates_async(target_ra, -25.0);
+            FAIL_CHECK("Expected the slew start to fail");
+        } catch (const alpacacore::AlpacaException& error) {
+            INFO(error.what());
+            CHECK(error.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(error.what()).find("MC_GOTO_FAST returned an unexpected payload") != std::string::npos);
+        }
+    }
+    CHECK(mount.count_command(0x10, 0x07) == restores_before + 1);
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(driver->get_tracking() == !restore_fails);
+    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string& message) {
+              return message.find("Could not restore tracking") != std::string::npos;
+          }) == restore_fails);
     driver->set_connected(false);
 }
 

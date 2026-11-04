@@ -1992,7 +1992,16 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
             const bool restore_tracking = restore_tracking_after_slew_ && reference_valid_locked();
             slew_in_progress_ = false;
             restore_tracking_after_slew_ = false;
-            if (restore_tracking) set_tracking_locked(true, lock);
+            if (restore_tracking) {
+                // The client must see why the slew did not start, not the restore's error (#1945).
+                try {
+                    set_tracking_locked(true, lock);
+                } catch (const std::exception& error) {
+                    ALPACA_LOG_ERROR(
+                        "Celestron CGX",
+                        std::string("Could not restore tracking after a failed slew start: ") + error.what());
+                }
+            }
         }
         throw;
     }
