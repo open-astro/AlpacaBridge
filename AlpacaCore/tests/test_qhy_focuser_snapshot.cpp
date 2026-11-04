@@ -17,7 +17,6 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/util/serial_link.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
 
 #include <chrono>
@@ -31,6 +30,7 @@
 #include "driver_rig.h"
 #include "fake_qhy_qfocuser.h"
 #include "fake_task_clock.h"
+#include "stalled_outq_probe.h"
 
 using alpacacore::test::FakeQhyQFocuser;
 using alpacacore::test::FakeTaskClock;
@@ -380,28 +380,15 @@ TEST_CASE("QHY Q-Focuser Snapshot - a Halt after a long move restarts the teleme
     CHECK(rig.driver().get_link_fault().empty());
 }
 
-namespace {
-// A transmit queue that never empties (#2040): the Q-Focuser enumerated without its 12 V supply (#2030). A pty
-// always drains, so the stall is injected through util::tty_outq_probe_for_testing().
-bool stalled_outq_probe(int, int& pending) {
-    pending = 5;
-    return true;
-}
-struct StalledOutqGuard {
-    StalledOutqGuard() { alpacacore::util::tty_outq_probe_for_testing().store(&stalled_outq_probe); }
-    ~StalledOutqGuard() { alpacacore::util::tty_outq_probe_for_testing().store(nullptr); }
-};
-}  // namespace
-
 // #2030, pinned hardware-free by #2040: a unit that is not taking data fails the exchange inside the drain
 // bound and names the replug. The poll is parked on the fake clock, so the Move is the only exchange and the
 // fault latch (three failed polls) is never reached.
 TEST_CASE("QHY Q-Focuser Snapshot - a unit not taking data is refused inside the drain bound, naming the replug",
-          "[qhy][focuser][unit]") {
+          "[qhy][focuser][snapshot][unit][fake]") {
     QhyRig rig;
     REQUIRE(rig.connect());
 
-    StalledOutqGuard stalled;
+    alpacacore::test::StalledOutqGuard stalled;
     const auto started = std::chrono::steady_clock::now();
     std::string message;
     try {

@@ -268,7 +268,14 @@ inline bool tty_drain_bounded(int fd, int timeout_ms) {
     const TtyOutqProbe probe = tty_outq_probe_for_testing().load();
     int pending = 0;
     for (;;) {
-        if (probe != nullptr ? !probe(fd, pending) : ::ioctl(fd, TIOCOUTQ, &pending) != 0) {
+        bool reported = false;
+        if (probe != nullptr) {
+            reported = probe(fd, pending);
+            if (!reported) errno = ENOTTY;  // no ioctl ran: the log below must not show a stale errno
+        } else {
+            reported = ::ioctl(fd, TIOCOUTQ, &pending) == 0;
+        }
+        if (!reported) {
             // Fails open: a driver that cannot report its queue is not evidence of a stall.
             ALPACA_LOG_DEBUG("Serial", "TIOCOUTQ failed (" + errno_string(errno) + "); the drain counts as done");
             return true;

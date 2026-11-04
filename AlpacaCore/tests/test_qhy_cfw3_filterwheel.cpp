@@ -11,7 +11,6 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/util/serial_link.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -25,6 +24,7 @@
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_qhy_cfw3.h"
+#include "stalled_outq_probe.h"
 
 namespace {
 
@@ -639,19 +639,6 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - Connect with empty serial port names p
     CHECK_FALSE(driver->get_connected());
 }
 
-namespace {
-// A transmit queue that never empties (#2038): a CP2102 bridge whose endpoint has stopped taking data, the
-// Q-Focuser's #2030 shape. Injected through util::tty_outq_probe_for_testing(); a pty always drains.
-bool stalled_outq_probe(int, int& pending) {
-    pending = 5;
-    return true;
-}
-struct StalledOutqGuard {
-    StalledOutqGuard() { alpacacore::util::tty_outq_probe_for_testing().store(&stalled_outq_probe); }
-    ~StalledOutqGuard() { alpacacore::util::tty_outq_probe_for_testing().store(nullptr); }
-};
-}  // namespace
-
 // #2038: a goto on a wheel that is not taking data fails inside the drain bound and Position raises the kept
 // failure naming the replug, instead of the exchange parking in tcdrain() forever with the port held.
 TEST_CASE("QHY CFW3 Filter Wheel Driver - A wheel not taking data fails the move inside the drain bound",
@@ -661,7 +648,7 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A wheel not taking data fails the move
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    StalledOutqGuard stalled;
+    alpacacore::test::StalledOutqGuard stalled;
     const auto started = std::chrono::steady_clock::now();
     driver->set_position(3);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
