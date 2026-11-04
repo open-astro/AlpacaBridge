@@ -1277,11 +1277,12 @@ void CelestronCgxTelescopeDriver::set_site_longitude(double longitude) {
 }
 bool CelestronCgxTelescopeDriver::get_slewing() const {
     require_connected();
+    require_healthy_transport();  // Before the stop checks: a faulted link raises even with a stop pending (#1950).
     if (stop_pending_ || stop_slot_.running()) return true;
     std::lock_guard<std::mutex> lock(mutex_);
     require_connected();
+    require_healthy_transport();  // Again under the lock: a fault after the first check must not read a cached value.
     if (stop_pending_ || stop_slot_.running()) return true;
-    require_healthy_transport();
     if (const auto failure = stop_slot_.last_failure())
         throw AlpacaException("Celestron CGX stop failed: " + *failure, AlpacaError::DriverException);
     if (motion_state_unverified_)
