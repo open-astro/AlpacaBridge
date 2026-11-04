@@ -542,8 +542,7 @@ Checklist:
 1. Store `.a` and `.so` under `AlpacaCore/external/<VENDOR>/` in the arm64 subdir the upstream SDK uses.
 2. Add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore` before committing SDK files.
 3. Update `debian/rules` — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/`.
-4. Update `build_and_run.sh` — copy `.so*` to `/usr/local/lib/`, run `ldconfig`.
-5. Update `install_alpaca_service.sh` — same as `build_and_run.sh`, keep in sync.
+4. Update `scripts/host_setup.sh` — add a `dir|lib|what` entry to the library loop in `host_setup_install_vendor_runtime()` (it copies `.so*` to `/usr/local/lib/` and runs `ldconfig`) and the library's name to `host_setup_input_hash()`. `build_and_run.sh` and `install_alpaca_service.sh` both source it; never add a copy block to either script (#1698).
 
 ## Step 6 — AlpacaHTTP integration
 
