@@ -418,3 +418,16 @@ TEST_CASE("Serial link - a stalled line restore on one port does not block close
     REQUIRE(tcgetattr(pty_a.keepalive_fd(), &now) == 0);
     CHECK(cfgetospeed(&now) == B19200);
 }
+
+// #2030: tcdrain() has no timeout and parked a Q-Focuser connect forever; the bounded drain returns at once
+// on a line that takes data and never later than its deadline.
+TEST_CASE("Serial link - tty_drain_bounded returns at once on a pty that takes data", "[serial][serial_link]") {
+    alpacacore::test::PtyPair pty("drain-bounded");
+    const int fd = ::open(pty.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    REQUIRE(fd >= 0);
+    const auto started = std::chrono::steady_clock::now();
+    REQUIRE(alpacacore::util::tty_write_all(fd, std::string("{\"cmd_id\":1}"), 200));
+    CHECK(alpacacore::util::tty_drain_bounded(fd, 500));
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+    ::close(fd);
+}

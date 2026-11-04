@@ -58,6 +58,8 @@ struct QFocuserTelemetry {
     double external_temperature_c = 0.0;  // o_t / 1000
     double chip_temperature_c = 0.0;      // c_t / 1000
     double voltage_v = 0.0;               // c_r / 10
+    // False when o_t is the no-probe sentinel (about -111 C with nothing in the probe socket, #2032).
+    bool external_probe_present = true;
 };
 
 /**
@@ -126,6 +128,11 @@ public:
 
     /** @brief {"cmd_id":4} -> temperatures and supply voltage. */
     QFocuserTelemetry get_telemetry();
+    /**
+     * @brief get_telemetry() with its own reply deadline. The firmware answers no telemetry for about
+     * 10 s after a move (#2031), so the state poll asks with a short one and treats a miss as a miss.
+     */
+    QFocuserTelemetry get_telemetry(int timeout_ms);
 
     /** @brief {"cmd_id":6,"tar":N} absolute move. Returns once acknowledged, not once complete. */
     void move_to(std::int32_t position);

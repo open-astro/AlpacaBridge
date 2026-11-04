@@ -74,6 +74,13 @@ constexpr int kKickSliceMs = 200;  // fallback read window before sending anothe
 // until the transaction deadline (issue #527).
 constexpr int kEmptyReplyPauseMs = 50;
 constexpr int kProbeTimeoutMs = 1500;
+// Bound on the drain before the kick (#2030): a unit whose CDC endpoint has stopped taking data
+// never empties the TX queue, and a bare tcdrain() parked the connect forever with the port held.
+// A command is one USB packet, so a healthy unit drains in well under a millisecond.
+constexpr int kDrainTimeoutMs = 500;
+// o_t at or below this is the firmware's no-probe sentinel (-111311 and -105846 seen on the rig
+// with the probe socket empty, #2032); a real probe never reads below -100 C.
+constexpr std::int32_t kNoProbeFloorMilliC = -100000;
 
 // Command ids (INDI create_cmd()).
 constexpr int kCmdVersion = 1;
@@ -261,7 +268,11 @@ static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
         // attempt rather than only on the next one. Without it the probe burns
         // the full kProbeTimeoutMs on attempt 0 on real hardware (~2 s per
         // candidate port); the kick brings it back to the handshake latency.
-        tcdrain(fd);
+        if (!util::tty_drain_bounded(fd, kDrainTimeoutMs)) {
+            // Not taking data: not this device, or a stalled Q-Focuser (#2030); the next attempt tries again.
+            ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser probe: the port is not taking data (USB endpoint stalled); skipped");
+            continue;
+        }
         static const char kick = '\n';
         (void)util::tty_write_all(fd, &kick, sizeof(kick));
         bool link_dead = false;
@@ -409,6 +420,7 @@ public:
 
         QFocuserDeviceInfo info;
         bool success = false;
+        std::string last_error;  // the last attempt's reason, carried into the refusal the client reads
         in_connect_ = true;
         for (int attempt = 0; attempt < kHandshakeRetries && !success; ++attempt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(attempt == 0 ? 100 : 500));
@@ -418,7 +430,9 @@ public:
                 // ({"idx":-1}) message before it services the command.
                 auto fields = transact_locked("{\"cmd_id\":1}", kCmdVersion, kHandshakeTimeoutMs);
                 success = parse_device_info(fields, info);
+                if (!success) last_error = "the reply carried no version";
             } catch (const std::exception& e) {
+                last_error = e.what();
                 ALPACA_LOG_WARN(kLogTag,
                                 "Q-Focuser handshake attempt " + std::to_string(attempt + 1) + " failed: " + e.what());
             }
@@ -427,7 +441,7 @@ public:
         if (!success) {
             close_port_locked();
             throw AlpacaException("Q-Focuser handshake failed after " + std::to_string(kHandshakeRetries) +
-                                      " attempts on " + config_.serial_port,
+                                      " attempts on " + config_.serial_port + ": " + last_error,
                                   AlpacaError::NotConnected);
         }
 
@@ -464,10 +478,12 @@ public:
         return pos;
     }
 
-    QFocuserTelemetry get_telemetry() {
+    QFocuserTelemetry get_telemetry() { return get_telemetry(config_.serial_timeout_ms); }
+
+    QFocuserTelemetry get_telemetry(int timeout_ms) {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
-        auto fields = transact_locked("{\"cmd_id\":4}", kCmdTelemetry, config_.serial_timeout_ms);
+        auto fields = transact_locked("{\"cmd_id\":4}", kCmdTelemetry, timeout_ms);
         std::int32_t o_t = 0, c_t = 0, c_r = 0;
         if (!parse_int(fields, "o_t", o_t) || !parse_int(fields, "c_t", c_t) || !parse_int(fields, "c_r", c_r)) {
             throw AlpacaException("Q-Focuser telemetry reply missing o_t/c_t/c_r", AlpacaError::DriverException);
@@ -476,6 +492,7 @@ public:
         t.external_temperature_c = o_t / 1000.0;
         t.chip_temperature_c = c_t / 1000.0;
         t.voltage_v = c_r / 10.0;
+        t.external_probe_present = o_t > kNoProbeFloorMilliC;
         return t;
     }
 
@@ -597,14 +614,21 @@ private:
             if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
             throw AlpacaException("Q-Focuser write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-        // tcdrain forces the command out as its OWN USB OUT packet before the
-        // kick is written; without it the kernel coalesces the command and
+        // The bounded drain (util::tty_drain_bounded) forces the command out as
+        // its OWN USB OUT packet before the kick is written; without it the
+        // kernel coalesces the command and
         // the kick into one packet and the reply is never clocked out (the
         // device only transmits on a packet boundary). Draining then kicking
         // brings the reply back in ~1 ms on a Raspberry Pi, versus the ~150 ms
         // a wait-then-kick costs -- which is what blew ConformU's 0.1 s FAST
         // target on DeviceState/IsMoving.
-        tcdrain(serial_fd_);
+        if (!util::tty_drain_bounded(serial_fd_, kDrainTimeoutMs)) {
+            // The unit is not taking data (#2030): the kernel queued the command and nothing clocked it out.
+            // Not a removed node, so no loss latch; the poll's fault latch and staleness bound decide.
+            throw AlpacaException("Q-Focuser on " + config_.serial_port +
+                                      " is not taking data (USB endpoint stalled); unplug and replug it",
+                                  AlpacaError::DriverException);
+        }
         static const char kick = '\n';
         (void)util::tty_write_all(serial_fd_, &kick, sizeof(kick));
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -635,17 +659,21 @@ private:
                 ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply without idx ignored: " + printable(reply));
                 continue;
             }
-            // Return on the first matching idx. Known bounded staleness: when
-            // two consecutive commands share an idx (e.g. back-to-back
-            // {"cmd_id":5} position polls), the command's own OUT first
-            // re-transmits the PREVIOUS reply -- same idx -- and this returns
-            // it, so the value lags by exactly one poll while the kick's fresh
-            // reply is dropped by the next command's tcflush. Harmless in
-            // practice (a one-poll lag in Position/IsMoving during a move,
-            // ConformU-clean) because distinct-idx commands never collide and
-            // the driver's poll sends cmd_id 5 then cmd_id 4 each tick, so two
-            // position polls are never adjacent; revisit if the poll sends
-            // two commands with one idx back to back.
+            // Return on the first matching idx. Bounded staleness: when two
+            // consecutive commands share an idx (back-to-back {"cmd_id":5}
+            // position polls), the command's own OUT first re-transmits the
+            // PREVIOUS reply -- same idx -- and this returns it, so the value
+            // lags by exactly one exchange while the kick's fresh reply is
+            // dropped by the next command's tcflush. Since #2031 the poll sends
+            // cmd_id 5 on every tick and cmd_id 4 at most once a second, never
+            // during a move, so back-to-back position polls are the norm:
+            // Position and IsMoving lag one poll period (250 ms) during a move
+            // and on idle ticks without telemetry, and an arrival shows one
+            // tick late. Accepted: the lag is one period, the getters are
+            // served from the snapshot anyway, and the rig's ConformU sweep
+            // (2026-11-04) passed with it. Waiting a few ms for the kicked
+            // fresh reply when the idx repeats would remove the lag; that
+            // needs a rig run, so it is not done here.
             if (idx == expected_idx || idx == alt_idx) return fields;
             ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply idx " + std::to_string(idx) + " while waiting for " +
                                           std::to_string(expected_idx) + "; skipping");
@@ -684,6 +712,7 @@ bool QFocuserProtocolWrapper::is_connected() const { return impl_->is_connected(
 bool QFocuserProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
 std::int32_t QFocuserProtocolWrapper::get_position() { return impl_->get_position(); }
 QFocuserTelemetry QFocuserProtocolWrapper::get_telemetry() { return impl_->get_telemetry(); }
+QFocuserTelemetry QFocuserProtocolWrapper::get_telemetry(int timeout_ms) { return impl_->get_telemetry(timeout_ms); }
 void QFocuserProtocolWrapper::move_to(std::int32_t position) { impl_->move_to(position); }
 void QFocuserProtocolWrapper::halt() { impl_->halt(); }
 void QFocuserProtocolWrapper::set_reverse(bool reversed) { impl_->set_reverse(reversed); }
