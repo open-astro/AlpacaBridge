@@ -1841,11 +1841,14 @@ TEST_CASE("GPhoto camera fake - the MLU exposure deadline includes the settle an
     // 90.02 s and without the file wait 70.01 s; each would already have declared a valid MLU exposure Idle at
     // the first check below that it does not reach.
     fake.bulb_file_polls_before_ready = 1;
-    alpacacore::CameraState at_65s = alpacacore::CameraState::Idle;
-    alpacacore::CameraState at_95s = alpacacore::CameraState::Idle;
-    alpacacore::CameraState at_101s = alpacacore::CameraState::Exposing;
-    bool settled = false;
-    int polls = 0;
+    // The hook runs on the exposure thread and this thread reads what it records, so every shared value is
+    // atomic, and `recorded` is set only after the last reading is stored (issue #2005).
+    std::atomic<alpacacore::CameraState> at_65s{alpacacore::CameraState::Idle};
+    std::atomic<alpacacore::CameraState> at_95s{alpacacore::CameraState::Idle};
+    std::atomic<alpacacore::CameraState> at_101s{alpacacore::CameraState::Exposing};
+    std::atomic<bool> recorded{false};
+    bool settled = false;  // the exposure thread's own
+    int polls = 0;         // the exposure thread's own
     fake.before_call = [&](const std::string& name) {
         if (name == "drain_events" && !settled) {
             settled = true;
@@ -1858,16 +1861,17 @@ TEST_CASE("GPhoto camera fake - the MLU exposure deadline includes the settle an
             } else if (polls == 2) {
                 clock.advance(std::chrono::seconds(6));
                 at_101s = driver->get_camera_state();
+                recorded = true;
             }
         }
     };
     driver->start_exposure(0.01, true);
-    for (int i = 0; i < 500 && polls < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    REQUIRE(polls >= 2);
+    for (int i = 0; i < 500 && !recorded; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE(recorded);
 
-    CHECK(at_65s == alpacacore::CameraState::Exposing);
-    CHECK(at_95s == alpacacore::CameraState::Exposing);
-    CHECK(at_101s == alpacacore::CameraState::Idle);
+    CHECK(at_65s.load() == alpacacore::CameraState::Exposing);
+    CHECK(at_95s.load() == alpacacore::CameraState::Exposing);
+    CHECK(at_101s.load() == alpacacore::CameraState::Idle);
 
     driver->set_connected(false);
 }
