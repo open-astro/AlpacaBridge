@@ -424,6 +424,11 @@ excess or qualify southern/CGX-L behavior.
 
 ### Stationary telemetry and DeviceState timing
 
+The two paragraphs below describe the 30 ms raw-pair cache as it was when
+these timings were measured (superseded by #1940: the state poll's snapshot
+replaced the raw-pair cache; see the
+[Celestron instructions](../.github/instructions/celestron.instructions.md)).
+
 Only public coordinate telemetry may reuse a raw encoder pair, when **AtHome or
 AtPark**, tracking is **known off**, the link/reference are healthy and valid,
 and no operation, transition or retained operation failure is present. The
