@@ -457,8 +457,9 @@ TEST_CASE("ZWO fake SDK - a cancelled body never re-triggers the exposure",
     camera->start_exposure(0.01, true);
     REQUIRE(sdk.wait_for_call_count("start_exposure", 2, std::chrono::seconds(2)));
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(2)));  // the 250 ms pacing wait before retry 2
-    camera->abort_exposure();
+    // Counted before the abort: AbortExposure joins the body, so a re-trigger that slips past the cancel lands inside.
     const int starts = sdk.call_count("start_exposure");
+    camera->abort_exposure();
     clock.advance(std::chrono::seconds(1));
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     CHECK(sdk.call_count("start_exposure") == starts);
