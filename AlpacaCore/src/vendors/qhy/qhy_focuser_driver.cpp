@@ -180,6 +180,10 @@ public:
                     }
                 },
                 kLogTag);
+            // The poll is stopped and the old frame went with the teardown; the hold-off and the deferred hold
+            // settings apply_settings() may set (#2041) must survive into the first poll, so the state is reset
+            // before it, not after.
+            reset_state();
             try {
                 apply_settings();
             } catch (...) {
@@ -193,7 +197,6 @@ public:
             }
             // First frame before Connected reads true, so a getter has an
             // answer the moment Connect returns.
-            reset_state();
             // A lost or dropped first reply gets one retry. A connect whose
             // retry also publishes nothing fails: Connected true means the
             // getters have a frame to serve (decisions 0010 and 0016).
@@ -451,6 +454,8 @@ private:
                 frame.telemetry_valid = true;
                 frame.telemetry_measured_at = now;
                 frame.telemetry_idle_since = now;
+                // The first reading since a connect that got none (#2041) decides the deferred hold settings.
+                if (hold_settings_pending_) apply_hold_settings(frame.telemetry);
             } catch (const AlpacaException& e) {
                 if (e.error_code() == AlpacaError::NotConnected) throw;  // the link is gone: a failed poll
                 telemetry_hold_off_until_ = now + kTelemetryBackoff;
@@ -463,22 +468,55 @@ private:
         return frame;
     }
 
-    // At connect and disconnect: drop the frame, the fault and the target. The poll is stopped here.
+    // At connect and disconnect: drop the frame, the fault, the target and the deferred hold settings. The poll
+    // is stopped here.
     void reset_state() {
         state_.reset();  // the target and last change go with the frame
         telemetry_hold_off_until_ = {};
+        hold_settings_pending_ = false;
     }
 
     // Push the user's settings to the firmware right after the handshake.
-    // Reverse and speed always; the hold settings only on a 12 V supply.
+    // Reverse and speed always; the hold settings only on a 12 V supply, which
+    // the telemetry says. The firmware answers no telemetry for about 10 s after
+    // a move (#2031), so the connect reads it with the poll's short deadline
+    // (#2041): a miss defers the hold settings to the first reading the poll
+    // gets, under the same hold-off as a missed poll, instead of waiting out the
+    // 3 s serial timeout and failing a reconnect made right after a move.
     void apply_settings() {
         protocol_.set_reverse(settings_.reverse);
         protocol_.set_speed(settings_.speed);
+        hold_settings_pending_ = false;
+        try {
+            apply_hold_settings(protocol_.get_telemetry(kTelemetryTimeoutMs));
+        } catch (const AlpacaException& e) {
+            if (e.error_code() == AlpacaError::NotConnected) throw;  // the link is gone: the connect fails
+            hold_settings_pending_ = true;
+            telemetry_hold_off_until_ = clock_.now() + kTelemetryBackoff;
+            ALPACA_LOG_INFO(kLogTag,
+                            "Q-Focuser gave no telemetry at connect (the firmware is silent for about 10 s after a "
+                            "move); the hold settings wait for the first reading: " +
+                                std::string(e.what()));
+        }
+    }
 
-        const QFocuserTelemetry t = protocol_.get_telemetry();
+    // The 12 V-only hold settings, from a telemetry reading. At connect, or from the poll thread for a connect
+    // that got no reading (#2041). A failed write keeps them pending for the next reading; the position poll
+    // is not what failed, so it counts toward no fault latch.
+    void apply_hold_settings(const QFocuserTelemetry& t) {
+        hold_settings_pending_ = false;
         if (t.voltage_v > kHoldVoltageThreshold) {
-            protocol_.set_hold_current(settings_.hold_ihold, settings_.hold_irun);
-            protocol_.set_hold_force(settings_.hold_force);
+            try {
+                protocol_.set_hold_current(settings_.hold_ihold, settings_.hold_irun);
+                protocol_.set_hold_force(settings_.hold_force);
+            } catch (const AlpacaException& e) {
+                if (e.error_code() == AlpacaError::NotConnected) throw;
+                hold_settings_pending_ = true;
+                ALPACA_LOG_WARN(kLogTag,
+                                "Q-Focuser hold settings not applied; they are retried on the next telemetry "
+                                "reading: " +
+                                    std::string(e.what()));
+            }
         } else if (settings_.hold_force) {
             ALPACA_LOG_WARN(kLogTag, "Q-Focuser supply is " + std::to_string(t.voltage_v) +
                                          " V; hold force needs a 12 V supply and was not enabled");
@@ -520,6 +558,9 @@ private:
     // When the poll may ask for telemetry again after a miss (#2031). Touched by the poll thread and,
     // with the poll stopped, by reset_state(); never read by a getter.
     util::TaskClock::clock::time_point telemetry_hold_off_until_{};
+    // The hold settings wait for a telemetry reading the connect did not get (#2041). Same ownership as
+    // telemetry_hold_off_until_: the connect (poll stopped) and then the poll thread.
+    bool hold_settings_pending_ = false;
     // Position, motion and telemetry served to the getters (open-astro#1310).
     // Declared after clock_ and protocol_: it is destroyed first and joins its
     // poll body while both are still alive.

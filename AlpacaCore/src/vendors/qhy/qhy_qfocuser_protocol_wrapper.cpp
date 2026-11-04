@@ -22,12 +22,14 @@
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -66,8 +68,15 @@ constexpr int kHandshakeTimeoutMs = 3000;  // full runtime budget for the first 
 // appears, skipping the previous command's reply that the kick shakes loose
 // first. A newline never computes a new reply, so it only re-transmits the
 // last one; alignment is therefore done per command and never by draining in
-// a loop (which would re-read the same reply forever).
+// a loop (which would re-read the same reply forever). When a command's idx
+// repeats the last reply's, the first matching reply is that stale one and
+// the read goes on for the kicked fresh one (#2042, kFreshReplyWaitMs).
 constexpr int kKickSliceMs = 200;  // fallback read window before sending another kick
+// #2042: when a command's idx repeats the last reply's, the first matching reply is that previous reply
+// (re-transmitted on this command's own OUT) and the kick's fresh one follows within about a millisecond on
+// the Pi. transact_locked() reads on for it this long and returns it; a link that is not one behind (the pty
+// fake, VMware's USB proxy) answers once and pays this wait per repeated exchange.
+constexpr int kFreshReplyWaitMs = 50;
 // Floor on the gap between fallback kicks. read_json_object() returns early
 // (not just at the slice deadline) on a poll() error or an overlong reply
 // with no closing brace; without a floor those paths re-kick in a tight loop
@@ -416,6 +425,7 @@ public:
         }
         config_ = config;
         link_lost_.store(false);
+        last_reply_idx_ = -2;
         open_port_locked();
 
         QFocuserDeviceInfo info;
@@ -631,13 +641,37 @@ private:
         }
         static const char kick = '\n';
         (void)util::tty_write_all(serial_fd_, &kick, sizeof(kick));
+        // #2042: this command's idx repeats the last reply's, so the first matching reply is that stale one and
+        // the kicked fresh one follows; `stale` holds the first match while the read goes on for the second.
+        const bool repeats = last_reply_idx_ == expected_idx || last_reply_idx_ == alt_idx;
+        std::optional<std::map<std::string, std::string>> stale;
+        std::chrono::steady_clock::time_point fresh_deadline{};
+        auto finish = [&](std::int32_t idx) { last_reply_idx_ = idx; };
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         while (std::chrono::steady_clock::now() < deadline) {
             bool link_dead = false;
             const auto slice_start = std::chrono::steady_clock::now();
-            const std::string reply = read_json_object(serial_fd_, kKickSliceMs, link_dead);
+            int slice_ms = kKickSliceMs;
+            if (stale.has_value()) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(fresh_deadline - slice_start);
+                if (left.count() <= 0) {
+                    finish(expected_idx);
+                    return *stale;
+                }
+                slice_ms = static_cast<int>(std::min<long long>(slice_ms, left.count()));
+            }
+            const std::string reply = read_json_object(serial_fd_, slice_ms, link_dead);
             if (link_dead) fail_link_locked();
             if (reply.empty()) {
+                if (stale.has_value()) {
+                    // No fresh reply inside the window: the link is not one behind (or the fresh reply was lost),
+                    // so the first match stands. No re-kick: a kick only re-transmits what is already read.
+                    if (std::chrono::steady_clock::now() >= fresh_deadline) {
+                        finish(expected_idx);
+                        return *stale;
+                    }
+                    continue;
+                }
                 // Fallback: the proactive kick did not clock the reply out
                 // (should not happen once the command packet is drained), so
                 // send another. A newline is ignored by the firmware parser
@@ -659,24 +693,28 @@ private:
                 ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply without idx ignored: " + printable(reply));
                 continue;
             }
-            // Return on the first matching idx. Bounded staleness: when two
-            // consecutive commands share an idx (back-to-back {"cmd_id":5}
-            // position polls), the command's own OUT first re-transmits the
-            // PREVIOUS reply -- same idx -- and this returns it, so the value
-            // lags by exactly one exchange while the kick's fresh reply is
-            // dropped by the next command's tcflush. Since #2031 the poll sends
-            // cmd_id 5 on every tick and cmd_id 4 at most once a second, never
-            // during a move, so back-to-back position polls are the norm:
-            // Position and IsMoving lag one poll period (250 ms) during a move
-            // and on idle ticks without telemetry, and an arrival shows one
-            // tick late. Accepted: the lag is one period, the getters are
-            // served from the snapshot anyway, and the rig's ConformU sweep
-            // (2026-11-04) passed with it. Waiting a few ms for the kicked
-            // fresh reply when the idx repeats would remove the lag; that
-            // needs a rig run, so it is not done here.
-            if (idx == expected_idx || idx == alt_idx) return fields;
+            // Return on the first matching idx, unless this command's idx repeats the last reply's (#2042):
+            // then the command's own OUT re-transmitted the PREVIOUS reply, same idx, and the kick's fresh
+            // reply is on its way, so the first match is kept aside and the read goes on for the second one for
+            // kFreshReplyWaitMs. Before #2042 the stale one was returned and the fresh one dropped by the next
+            // command's tcflush: since #2031 the poll sends cmd_id 5 on every tick and cmd_id 4 at most once a
+            // second, so back-to-back position polls were the norm and Position/IsMoving lagged one poll period
+            // during a move, with an arrival shown one tick late.
+            if (idx == expected_idx || idx == alt_idx) {
+                if (repeats && !stale.has_value()) {
+                    stale = std::move(fields);
+                    fresh_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kFreshReplyWaitMs);
+                    continue;
+                }
+                finish(idx);
+                return fields;
+            }
             ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply idx " + std::to_string(idx) + " while waiting for " +
                                           std::to_string(expected_idx) + "; skipping");
+        }
+        if (stale.has_value()) {
+            finish(expected_idx);
+            return *stale;
         }
         throw AlpacaException("Q-Focuser timed out waiting for reply to " + cmd, AlpacaError::DriverException);
 #else
@@ -695,6 +733,10 @@ private:
     // connect(). Atomic so link_alive() never takes mutex_ (issue #527).
     std::atomic<bool> link_lost_{false};
     bool in_connect_ = false;  // guarded by mutex_; see fail_link_locked()
+    // The idx of the last reply a transaction returned (#2042): the one the firmware re-transmits on the next
+    // command's OUT. -2 after a connect (no reply yet); a timeout leaves it, since the firmware's held reply is
+    // still that one. Guarded by mutex_.
+    std::int32_t last_reply_idx_ = -2;
 #ifndef _WIN32
     util::SerialLink link_;  // the connected port (#1202): registry claim + fd + TIOCEXCL
     int serial_fd_ = -1;     // link_.fd() while the link is open, else -1
