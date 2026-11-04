@@ -264,6 +264,35 @@ TEST_CASE("CGX RightAscension holds between polls while tracking", "[celestron][
     CHECK(rig.driver->get_right_ascension() - still == Catch::Approx(0.2 * 1.0027379 / 3600.0).epsilon(0).margin(1e-8));
 }
 
+// The pulse moves an axis between polls. The slot publishes where it stopped before IsPulseGuiding reads false.
+TEST_CASE("CGX the first read after a pulse guide shows where it ended", "[celestron][cgx][telemetry]") {
+    namespace cgx = alpacacore::vendor::celestron;
+    TelemetryRig rig;
+    rig.driver->set_tracking(true);
+    rig.mount.set_auto_complete_motions(false);
+    rig.mount.set_hold_guide_until_completed(true);
+    const double before = rig.driver->get_declination();
+    rig.driver->pulse_guide(0, 100);
+    REQUIRE(rig.driver->get_is_pulse_guiding());
+    // The fake moves its encoder only when told: the guide's Dec motion.
+    rig.mount.set_encoder_position(0x11, (rig.mount.axis_position(0x11) + 2000) & 0x00ffffffU);
+    rig.mount.complete_axis_guide(0x11);
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (rig.driver->get_is_pulse_guiding() && std::chrono::steady_clock::now() < deadline) {
+        rig.clock.advance(20ms);
+        std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE_FALSE(rig.driver->get_is_pulse_guiding());
+    const double lst = rig.driver->get_sidereal_time();
+    const double expected =
+        cgx::cgx_encoder_position_to_sky(rig.mount.axis_position(0x10), rig.mount.axis_position(0x11), lst,
+                                         cgx::CgxHemisphere::North)
+            .declination_degrees;
+    CHECK(std::abs(expected - before) > 0.01);
+    CHECK(rig.driver->get_declination() == Catch::Approx(expected).epsilon(0).margin(1e-9));
+    rig.mount.set_auto_complete_motions(true);
+}
+
 TEST_CASE("CGX FindHome and reconnect replace the served frame", "[celestron][cgx][telemetry]") {
     TelemetryRig rig;
     rig.coordinates();

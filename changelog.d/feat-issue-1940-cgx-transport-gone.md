@@ -10,3 +10,4 @@
 
 ### Fixed
 - **Celestron CGX/CGX-L direct USB: RightAscension no longer drifts by up to a poll period while tracking** (AlpacaCore, issue #1940): the getters computed the sky position from the last state poll's encoders at the current sidereal time, so while tracking RightAscension rose by up to 250 ms of sidereal time and dropped back at each poll (ConformU flagged a Dec-only PulseGuide for an RA change). With Tracking on, the position is now computed at the time the encoders were read; with Tracking off, at the current time as before.
+- **Celestron CGX/CGX-L direct USB: the first read after a pulse guide shows its final position** (AlpacaCore, issue #1940): a pulse guide now reads both axes when it ends and publishes them before IsPulseGuiding reads false, so RightAscension and Declination no longer lag the guide motion until the next state poll.

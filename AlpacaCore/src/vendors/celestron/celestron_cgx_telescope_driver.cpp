@@ -424,6 +424,7 @@ private:
     void run_slew_operation(util::OperationContext& context, double ra, double dec, CgxPointingSide destination_side);
     void run_flip_slew_operation(util::OperationContext& context, double ra, double dec,
                                  CgxPointingSide destination_side);
+    void publish_guide_end_frame();
     void run_pulse_guide(util::OperationContext& context, CgxAxis axis, int velocity_percent,
                          int first_chunk_centiseconds, int remaining_centiseconds,
                          const std::shared_future<PulseGuideStart>& start_result);
@@ -2225,6 +2226,19 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
     }
 }
 
+// The pulse moved an axis since the last frame. Publish the pair where it stopped before the slot ends, so the first
+// read after IsPulseGuiding goes false shows it without waiting for the next poll. One write per pulse is occasional
+// (#2035). mutex_ stays free (decision 0016); a failed read publishes nothing, and the poll reports the link.
+void CelestronCgxTelescopeDriver::publish_guide_end_frame() {
+    try {
+        const auto ra = protocol_.get_axis_position(CgxAxis::RightAscension);
+        const auto dec = protocol_.get_axis_position(CgxAxis::Declination);
+        write_frame(ra, dec);
+    } catch (const AlpacaException& error) {
+        ALPACA_LOG_WARN("Celestron CGX", std::string("Could not read the axes after a pulse guide: ") + error.what());
+    }
+}
+
 void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& context, CgxAxis axis, int velocity_percent,
                                                   int first_chunk_centiseconds, int remaining_centiseconds,
                                                   const std::shared_future<PulseGuideStart>& start_result) {
@@ -2258,7 +2272,10 @@ void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& contex
             }
             continue;
         }
-        if (cancelled || remaining_centiseconds == 0) return;
+        if (cancelled || remaining_centiseconds == 0) {
+            publish_guide_end_frame();
+            return;
+        }
         current_chunk = std::min(255, remaining_centiseconds);
         if (!run_motion_stage(context, [this, axis, velocity_percent, current_chunk] {
                 protocol_.pulse_guide_axis(axis, velocity_percent, current_chunk);
