@@ -1406,3 +1406,64 @@ TEST_CASE("FakeZWOSDK - only a generic not-readable control answer asks the enum
     CHECK(sdk.call_count("listed") == 1);
     sdk.close_camera_link(id, opened.link);
 }
+
+// User report (5.0.2, issue #1958): the SDK gives the bound camera's id to another body while the bound one is away,
+// and the disconnected name was read by that id. Falsified by: zwo_camera_driver.cpp
+// refresh_cached_camera_info_if_needed() adopting the by-id read without comparing its model to
+// expected_model_locked().
+TEST_CASE("ZWO fake SDK - the disconnected name follows the bound camera, not another one at its id",
+          "[zwo][camera][unit]") {
+    FakeZWOSDK sdk;
+    sdk.camera.name = "ZWO ASI432MM";
+    sdk.serial = "aaaa";
+    alpacacore::vendor::zwo::ZwoCameraBinding binding;
+    binding.identity.serial = "aaaa";
+    binding.identity.camera_name = "ZWO ASI432MM";
+    binding.identity.camera_id = sdk.camera.camera_id;
+    binding.unique_id = "ZWO_UID_0123456789abcdef";
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(1, binding, sdk);
+    // The real by-id read needs no open (issue #738); the fake answers only for an open id.
+    const auto held = sdk.open_camera_link(sdk.camera.camera_id);
+    CHECK(camera->get_name() == "ZWO ASI432MM");
+
+    sdk.camera.name = "ZWO ASI533MC Pro";
+    sdk.serial = "bbbb";
+    CHECK(camera->get_name() == "ZWO ASI432MM");
+    sdk.close_camera_link(sdk.camera.camera_id, held.link);
+}
+
+// With nothing read from the SDK yet, the card shows the stored model rather than the generic name (issue #1958).
+// Falsified by: zwo_camera_driver.cpp get_name() returning "ZWO Camera" without consulting expected_model_locked().
+TEST_CASE("ZWO fake SDK - a camera that never answered by id is named by its stored model", "[zwo][camera][unit]") {
+    FakeZWOSDK sdk;  // no open link: the fake's by-id read answers nothing
+    alpacacore::vendor::zwo::ZwoCameraBinding binding;
+    binding.identity.serial = "aaaa";
+    binding.identity.camera_name = "ZWO ASI432MM ";  // padded, as the SDK pads model names
+    binding.unique_id = "ZWO_UID_0123456789abcded";
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(3, binding, sdk);
+    CHECK(camera->get_name() == "ZWO ASI432MM");
+
+    alpacacore::vendor::zwo::ZwoCameraBinding unnamed;
+    unnamed.identity.camera_index = 4;
+    unnamed.unique_id = "ZWO_UID_0123456789abcdec";
+    auto generic = alpacacore::vendor::zwo::create_zwo_camera_bound(4, unnamed, sdk);
+    CHECK(generic->get_name() == "ZWO Camera");
+}
+
+// The preload at construction applies the same rule as the refresh (issue #1958). Falsified by:
+// zwo_camera_driver.cpp preload_camera_info_locked() adopting the by-id read without comparing its model.
+TEST_CASE("ZWO fake SDK - the construction preload ignores another camera at the bound id", "[zwo][camera][unit]") {
+    FakeZWOSDK sdk;
+    sdk.camera.name = "ZWO ASI533MC Pro";  // the camera that now holds the id
+    alpacacore::vendor::zwo::ZwoCameraBinding binding;
+    binding.identity.serial = "aaaa";
+    binding.identity.camera_name = "ZWO ASI432MM";
+    binding.identity.camera_id = sdk.camera.camera_id;
+    binding.unique_id = "ZWO_UID_0123456789abcdeb";
+    auto held = sdk.open_camera_link(sdk.camera.camera_id);
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(5, binding, sdk);
+    // Close before the first Name read, so only the preload could have cached a model.
+    sdk.close_camera_link(sdk.camera.camera_id, held.link);
+    CHECK(camera->get_name() == "ZWO ASI432MM");
+    CHECK(camera->get_sensor_name().empty());
+}
