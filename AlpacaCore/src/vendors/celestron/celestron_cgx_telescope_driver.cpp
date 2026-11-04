@@ -480,7 +480,8 @@ private:
     bool sync_correction_active_ = false;
     // The pre-Sync pair, held while Sync writes and verifies the labels with mutex_ free: a poll in that window can
     // read a new RA label beside an old Dec label, so the getters serve this pair instead until Sync publishes the
-    // verified one or fails. Guarded by mutex_.
+    // verified one or fails. Guarded by mutex_. Its read_at is recorded but never shifts the position: Sync turns
+    // Tracking off before the label writes, so the served age is zero while this pair is held.
     std::optional<CgxFrame> sync_served_pair_;
     bool motion_state_unverified_ = false;
     bool slew_in_progress_ = false;
@@ -2234,7 +2235,7 @@ void CelestronCgxTelescopeDriver::publish_guide_end_frame() {
         const auto ra = protocol_.get_axis_position(CgxAxis::RightAscension);
         const auto dec = protocol_.get_axis_position(CgxAxis::Declination);
         write_frame(ra, dec);
-    } catch (const AlpacaException& error) {
+    } catch (const std::exception& error) {
         ALPACA_LOG_WARN("Celestron CGX", std::string("Could not read the axes after a pulse guide: ") + error.what());
     }
 }
