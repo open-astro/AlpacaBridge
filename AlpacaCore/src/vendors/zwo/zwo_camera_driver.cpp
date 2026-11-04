@@ -141,7 +141,9 @@ public:
         if (camera_info_valid_ && !camera_info_.name.empty()) {
             return camera_info_.name;
         }
-        return "ZWO Camera";
+        // Never read from the SDK: the model the entry is bound to (issue #1958).
+        const std::string expected = expected_model();
+        return expected.empty() ? "ZWO Camera" : expected;
     }
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
@@ -1925,6 +1927,11 @@ private:
                 ZWOCameraInfo info;
                 if (sdk_.get_camera_info_by_id(camera_id.value(), info)) {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    // Same rule as the refresh below: another camera at this id is not this entry (#1958).
+                    const std::string expected = expected_model();
+                    if (!expected.empty() && trim_zwo_name(info.name) != expected) {
+                        return;
+                    }
                     camera_info_ = info;
                     camera_info_valid_ = true;
                 }
@@ -1933,6 +1940,12 @@ private:
             ALPACA_LOG_DEBUG("ZWO", "Unable to preload camera info: " + std::string(e.what()));
         }
     }
+
+    // The model this entry is bound to: its stored cameraName, trimmed. Empty when the entry has none, and then a
+    // by-id read is taken as it is. Only an entry that has not connected since it was registered reads by id: a
+    // Disconnect clears camera_id_, and the camera_info_ of the last Connect stays. binding_ is written only by the
+    // constructor, so this needs no lock.
+    std::string expected_model() const { return trim_zwo_name(binding_.identity.camera_name); }
 
     void refresh_cached_camera_info_if_needed() {
         // A connect in flight owns the SDK: the by-id read would wait out its open.
@@ -1957,6 +1970,12 @@ private:
                     // A connect ran while the by-id read was out: it owns camera_info_ now
                     // (decision 0016 rule 6), and this read may come from a stale id.
                     if (link_.is_open() || connect_in_flight_.load() || camera_id_ != camera_id) {
+                        return;
+                    }
+                    // The id is only a hint: while the bound camera is away the SDK can give the same id to
+                    // another camera, and its model must not become this entry's name (issue #1958).
+                    const std::string expected = expected_model();
+                    if (!expected.empty() && trim_zwo_name(info.name) != expected) {
                         return;
                     }
                     camera_info_ = info;
