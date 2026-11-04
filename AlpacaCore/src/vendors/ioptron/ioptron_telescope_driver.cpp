@@ -2082,7 +2082,9 @@ private:
     // behind a command, the clock-sync body or another getter's refill on the wire. Only when the cache has
     // lapsed, or a fault is latched (the probe is an exchange), does it take the operation lock and run `body`
     // under both locks, where the refill reaches the mount. `fresh` and `body` run under mutex_; `fresh` true
-    // must mean `body` reaches no wire (the refill helpers return early on the same predicates).
+    // must mean `body` reaches no wire: the refill helpers return early on the same predicates, and, since the
+    // check and the refill read the clock separately, a primed cache that lapsed between the two (a 1 Hz poller
+    // lands on the TTL edge) is served as it stands under the state lock alone (serve_as_is_locked()).
     template <typename Fresh, typename Body>
     std::invoke_result_t<Body&> serve_cached_or_refill(Fresh&& fresh, Body&& body) const {
         check_connected_before_lock();
@@ -2103,6 +2105,12 @@ private:
 
     // Whether a cache can be served without a refill: primed and within the post-connect grace or its TTL. The
     // refill helpers below return early on the same predicate.
+    //
+    // A refill under the state lock alone comes from serve_cached_or_refill(), whose freshness check passed a
+    // moment earlier on its own clock read; the cache lapsed in between. It is served as it stands and the next
+    // read refills it under the operation lock. A cache that was never primed still reaches Wire, which refuses
+    // the exchange as the defect it is.
+    bool serve_as_is_locked(bool cache_valid) const { return cache_valid && !lock_gate_.holds_io(); }
     bool position_cache_fresh_locked() const {
         const auto now = clock_.now();
         return position_cache_valid_ && (now < fast_cache_until_ || (now - last_position_update_) < kPositionCacheTtl);
@@ -2528,7 +2536,7 @@ private:
     
     void refresh_position_cache_locked(bool force = false) const {
         auto now = clock_.now();
-        if (!force && position_cache_fresh_locked()) {
+        if (!force && (position_cache_fresh_locked() || serve_as_is_locked(position_cache_valid_))) {
             return;
         }
         const Wire protocol = wire();
@@ -2550,7 +2558,7 @@ private:
 
     void refresh_altaz_cache_locked(bool force = false) const {
         auto now = clock_.now();
-        if (!force && altaz_cache_fresh_locked()) {
+        if (!force && (altaz_cache_fresh_locked() || serve_as_is_locked(altaz_cache_valid_))) {
             return;
         }
         const Wire protocol = wire();
@@ -2571,7 +2579,7 @@ private:
     
     void refresh_status_cache_locked(bool force = false) const {
         auto now = clock_.now();
-        if (!force && status_cache_fresh_locked()) {
+        if (!force && (status_cache_fresh_locked() || serve_as_is_locked(status_cache_valid_))) {
             return;
         }
         const Wire protocol = wire();
@@ -2641,7 +2649,7 @@ private:
 
     void ensure_site_info_cached_locked(bool force_refresh = false) const {
         auto now = clock_.now();
-        if (!force_refresh && site_info_fresh_locked()) {
+        if (!force_refresh && (site_info_fresh_locked() || serve_as_is_locked(site_info_valid_))) {
             return;
         }
         const Wire protocol = wire();

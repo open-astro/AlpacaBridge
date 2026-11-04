@@ -20,10 +20,15 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -67,6 +72,30 @@ void check_answers_at_once(const char* label, Fn&& fn) {
     });
     CHECK(elapsed < kGetterBudget);
 }
+
+// A clock that moves by one tick on every read, over a FakeTaskClock that keeps the waits parked. The
+// time-of-check case below needs the clock to move between a getter's freshness check and its refill.
+class TickingClock final : public alpacacore::util::TaskClock {
+public:
+    explicit TickingClock(alpacacore::test::FakeTaskClock& inner) : inner_(inner) {}
+
+    // Sets the tick and restarts the count: the next read is inner.now() exactly.
+    void set_tick(std::chrono::nanoseconds tick) {
+        tick_ = tick;
+        reads_ = 0;
+    }
+    clock::time_point now() const override { return inner_.now() + tick_ * static_cast<std::int64_t>(reads_++); }
+    bool wait_for(std::unique_lock<std::mutex>& lock, std::condition_variable& cv, std::chrono::nanoseconds timeout,
+                  const std::function<bool()>& pred) override {
+        return inner_.wait_for(lock, cv, timeout, pred);
+    }
+    void sleep_for(std::chrono::nanoseconds duration) override { inner_.sleep_for(duration); }
+
+private:
+    alpacacore::test::FakeTaskClock& inner_;
+    std::chrono::nanoseconds tick_{0};
+    mutable std::atomic<std::uint64_t> reads_{0};
+};
 
 }  // namespace
 
@@ -268,6 +297,41 @@ TEST_CASE("iOptron telescope - cache-backed getters answer from a fresh cache wh
     writer.join();
     INFO(write_error);
     CHECK(write_ok);
+    driver->set_connected(false);
+}
+
+// Review of #1829: a cache-backed getter checks its cache under the state lock and refills it under both. The
+// check and the refill read the clock separately, so a cache right at its TTL (a 1 Hz poller lands there every
+// read) can be fresh for the check and lapsed for the refill, which then reached the mount holding the state lock
+// alone: Wire refused the exchange, and the refusal counted toward the fault latch. A cache that lapsed between
+// the two is served as it stands; the next read refills it under the operation lock.
+TEST_CASE("iOptron telescope - a cache that lapses between its freshness check and its refill is served as it is",
+          "[ioptron][telescope][getter-locks]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    mount.set_alt_az(45.0, 180.0);
+    alpacacore::test::FakeTaskClock inner;
+    TickingClock clock(inner);
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
+                                                              std::nullopt, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    inner.advance(std::chrono::seconds(31));  // past the post-connect grace: a lapsed cache now refills
+
+    // Each pass primes the Alt/Az cache with a refill under the operation lock, ages it to just under its 1 s
+    // TTL, then reads it on a clock that moves 1 ms per read: with a few reads between the getter's check and
+    // the refill's own, one of these ages lapses in between. None of them may reach the mount.
+    for (int age_ms = 995; age_ms < 1000; ++age_ms) {
+        INFO("cache age " << age_ms << " ms at the check");
+        clock.set_tick(std::chrono::nanoseconds::zero());
+        inner.advance(std::chrono::seconds(2));
+        REQUIRE_NOTHROW(static_cast<void>(driver->get_altitude()));
+        const auto sent_before = mount.commands().size();
+        inner.advance(milliseconds(age_ms));
+        clock.set_tick(milliseconds(1));
+        REQUIRE_NOTHROW(static_cast<void>(driver->get_altitude()));
+        CHECK(mount.commands().size() == sent_before);
+    }
     driver->set_connected(false);
 }
 
