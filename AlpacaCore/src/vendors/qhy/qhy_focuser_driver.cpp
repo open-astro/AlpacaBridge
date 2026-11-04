@@ -291,6 +291,15 @@ public:
 
     double get_temperature() const override {
         const StateFrame frame = served_frame();
+        const bool external = settings_.temperature_source != "chip";
+        if (frame.telemetry_valid && external && !frame.telemetry.external_probe_present) {
+            // The firmware reports about -111 C with nothing in the probe socket (#2032). Checked before the
+            // age of the reading, so a client that asks once whether the property is implemented gets one answer.
+            throw AlpacaException(
+                "No external temperature probe is plugged into the Q-Focuser; plug one in, or set temperatureSource "
+                "to chip to report the controller board's sensor",
+                AlpacaError::PropertyNotImplemented);
+        }
         // Decision 0010 rule 8: a value the device has not supplied is a DriverException, never a guess.
         if (!frame.telemetry_valid) {
             // The first request after the connect missed (a connect within about 10 s of a move); the poll
@@ -300,8 +309,10 @@ public:
                 "10 s after a move, try again shortly",
                 AlpacaError::DriverException);
         }
-        if (clock_.now() - frame.telemetry_measured_at >= util::kLinkStalenessBound) {
-            // Stale: no answer for the bound, or a move longer than the bound, during which the poll does not ask.
+        // Stale: the firmware has had the bound to answer and did not. A move is exempt (the poll does not ask
+        // during one, and a full-range move takes about 40 s), and the bound counts from the end of motion
+        // when a move came between, so a long move is not reported as a silent unit the moment it ends.
+        if (!frame.moving && clock_.now() - frame.telemetry_idle_since >= util::kLinkStalenessBound) {
             throw AlpacaException(
                 "The Q-Focuser has not answered a telemetry request for " +
                     std::to_string(
@@ -309,15 +320,7 @@ public:
                     " s",
                 AlpacaError::DriverException);
         }
-        if (settings_.temperature_source == "chip") return frame.telemetry.chip_temperature_c;
-        if (!frame.telemetry.external_probe_present) {
-            // The firmware reports about -111 C with nothing in the probe socket (#2032).
-            throw AlpacaException(
-                "No external temperature probe is plugged into the Q-Focuser; plug one in, or set temperatureSource "
-                "to chip to report the controller board's sensor",
-                AlpacaError::PropertyNotImplemented);
-        }
-        return frame.telemetry.external_temperature_c;
+        return external ? frame.telemetry.external_temperature_c : frame.telemetry.chip_temperature_c;
     }
 
     void halt() override {
@@ -374,6 +377,9 @@ private:
         QFocuserTelemetry telemetry;
         bool telemetry_valid = false;
         util::TaskClock::clock::time_point telemetry_measured_at{};
+        // The later of the reading and the end of the last motion: Temperature's staleness counts from here,
+        // because the firmware answers no telemetry during a move and the poll does not ask for it then.
+        util::TaskClock::clock::time_point telemetry_idle_since{};
     };
 
     // The single fault text (decision 0009, point 5): the latched poll fault,
@@ -420,12 +426,16 @@ private:
             frame.telemetry = previous->value.telemetry;
             frame.telemetry_valid = previous->value.telemetry_valid;
             frame.telemetry_measured_at = previous->value.telemetry_measured_at;
+            frame.telemetry_idle_since = previous->value.telemetry_idle_since;
         } else {
             frame.last_change = now;
         }
         frame.moving = frame.target.has_value() && pos != *frame.target && (now - frame.last_change) < kMotionGrace;
         if (frame.target.has_value() && pos == *frame.target) {
             frame.target.reset();  // arrived
+        }
+        if (previous.has_value() && previous->value.moving && !frame.moving) {
+            frame.telemetry_idle_since = now;  // motion ended: the firmware can answer telemetry again from here
         }
         // Telemetry, best effort (#2031): asked once per period while the motor is not moving (IsMoving,
         // not the target: a stalled or clamped move keeps its target and reads as stopped after the grace)
@@ -436,6 +446,7 @@ private:
                 frame.telemetry = protocol_.get_telemetry(kTelemetryTimeoutMs);
                 frame.telemetry_valid = true;
                 frame.telemetry_measured_at = now;
+                frame.telemetry_idle_since = now;
             } catch (const AlpacaException& e) {
                 if (e.error_code() == AlpacaError::NotConnected) throw;  // the link is gone: a failed poll
                 telemetry_hold_off_until_ = now + kTelemetryBackoff;
