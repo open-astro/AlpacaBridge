@@ -36,13 +36,17 @@ Connection types: Serial (RS-232 on hand control base) and Network (WiFi bridge 
 ### CGX / CGX-L direct USB backend
 
 The [published ConformU report](../../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
-records a complete ConformU 4.5.3.56334 pass on 2026-10-31 with both guide rates at 0.25x
-sidereal: binary `e833bc39`, zero errors/warnings/issues and timing misses, all 16 extended
-guide tests and all 98 timing rows passing; DeviceState 55 ms. Motor firmware was not
-recorded for that run; the last recorded change is the
-[operator-approved firmware update](../../docs/celestron-cgx-cgxl-usb-review.md#operator-approved-firmware-update--2026-10-15).
-Two attempts at the default 0.5x guide rate on the same binary stopped at a PulseGuide North
-ISSUE (+39.2" measured, +37.6" expected, 1.0" tolerance); that result is recorded, not waived.
+records a complete ConformU 4.6.0.56430 (4.6.0-rc.1) pass on 2026-11-04 with both guide rates at
+0.25x sidereal: binary `af6dfd1c` (#1940 revision `d39058fb`), motor firmware RA/Dec 7.18.2214,
+zero errors/warnings/issues and timing misses, all 16 extended guide tests and all 98 timing rows
+passing; DeviceState 17 ms (served from the state snapshot). The CGX serves `UTCDate` only after a
+client writes it, so the rig setup writes `UTCDate` before a run (and starts from a fresh
+connection, since leftover targets fail ConformU's read-before-write check). On this mount the
+first Dec guide pulse after a North-to-South reversal moves more than commanded, typically
+0.2-0.7" and intermittently 1.7-2.7", with identical AUX guide commands and anti-backlash 0, so
+the extra motion is mount-side; it fails ConformU's 1.0" PulseGuide tolerance on some runs (three
+earlier runs of this revision stopped on it), and the 2026-10-31 0.5x PulseGuide North ISSUE
+fits the same effect. That limit is recorded, not waived.
 This qualifies the tested bare northern CGX/backend, not CGX-L, southern operation
 or optical accuracy, and does not establish a fix for intermittent guide or AUX faults.
 
