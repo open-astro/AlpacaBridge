@@ -205,7 +205,7 @@ The printed version line must name 4.6.0 and build 56430 (it was not run when th
 check on one camera and one telescope run: then update the URL, sha256 and build line above, the
 `conformu` watch in `scripts/dependency_sdk_versions.json` and the version `.github/instructions/testing.instructions.md` names ("ConformU version").
 A release that only adds a fix on the same ReadyToRun (`PublishReadyToRun`) publish build as the current standard (4.5.3 over 4.5.2) may be pinned provisionally before that check; record the
-camera and telescope run in `SUPPORTED-DRIVERS.md` afterwards. 4.6.0-rc.1 was pinned provisionally on a board instruction, before the one-camera plus one-telescope rig check; those runs are recorded in `SUPPORTED-DRIVERS.md` afterwards.
+camera and telescope run in `SUPPORTED-DRIVERS.md` afterwards. 4.6.0-rc.1 was pinned on a board instruction and has had its one-camera (ZWO ASI6200MM Pro, 2026-11-01) plus one-telescope (iOptron HAE29C EQ, 2026-11-04) rig check, recorded in `SUPPORTED-DRIVERS.md`.
 
 (If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/`
 directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a
