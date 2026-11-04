@@ -216,4 +216,38 @@ TEST_CASE("iOptron AbortSlew - with no equatorial motion Tracking is not changed
     driver->set_connected(false);
 }
 
+// Issue #2000, review of #2016: an equatorial GOTO that landed and was superseded by an Alt/Az slew must not leave
+// AbortSlew turning tracking on: Alt/Az slews need Tracking off (#1377), and the abort leaves it so. Falsified by:
+// ioptron_telescope_driver.cpp supersede_slew_dispatch_locked() not clearing equatorial_slew_.
+TEST_CASE("iOptron AbortSlew - an aborted Alt/Az slew after an equatorial GOTO sends no tracking command",
+          "[ioptron][telescope][abort][unit]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    mount.set_gps(0, 40.0, -105.0);  // the stored site the Alt/Az conversion reads
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+
+    // An equatorial GOTO that lands (the default fake lands at once) and is seen landing.
+    driver->slew_to_coordinates_async(6.0, 45.0);
+    REQUIRE(wait_for_command(mount, ":MS1#", 1));
+    clock.advance(std::chrono::seconds(31));  // past the slew hold and the status TTL
+    REQUIRE_FALSE(driver->get_slewing());
+
+    driver->set_tracking(false);
+    mount.set_system_status(0);
+    driver->slew_to_alt_az_async(45.0, 200.0);
+    REQUIRE(wait_for_command(mount, ":MS1#", 2));
+    const int on_before = mount.count(":ST1#");
+    const int off_before = mount.count(":ST0#");
+    driver->abort_slew();
+    CHECK(mount.count(":ST1#") == on_before);
+    CHECK(mount.count(":ST0#") == off_before);
+    clock.advance(std::chrono::seconds(3));
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
 #endif
