@@ -233,6 +233,7 @@ TEST_CASE("ToupTek Thermal Switch Driver - fan off is refused while the cooler r
     CHECK(thermal->get_switch_value(1) > 0.0);
     try {
         thermal->set_switch_value(1, 0.0);
+        FAIL("fan off was accepted while the cooler runs");
     } catch (const alpacacore::AlpacaException& e) {
         CHECK(std::string(e.what()).find("Turn the cooler off") != std::string::npos);
     }
