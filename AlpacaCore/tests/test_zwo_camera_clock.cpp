@@ -485,7 +485,8 @@ TEST_CASE("ZWO camera clock - StartExposure returns before the USB 2.0 settle en
         CHECK(rig.sdk.call_count("start_exposure") == 1);  // still inside the settle window
         rig.clock.advance(milliseconds(1));
     }
-    REQUIRE(rig.sdk.wait_for_call_count("start_exposure", 2, kRendezvous));
+    // The fake counts a call before its body runs, and start_times() is filled in the body: wait for the time.
+    REQUIRE(alpacacore::test::zwo_eventually([&] { return rig.sdk.start_times().size() == 2; }));
     const auto starts = rig.sdk.start_times();
     REQUIRE(starts.size() == 2);
     CHECK(starts[1] - downloaded_at >= milliseconds(600));
