@@ -356,6 +356,9 @@ private:
     CgxSkyPosition read_sky_position(std::unique_lock<std::mutex>& lock, std::uint32_t* ra_encoder = nullptr,
                                      std::uint32_t* dec_encoder = nullptr) const;
     // A verified encoder pair a control path wrote or read, published to the frame at once (decision 0010 point 3).
+    // Each write drops the poll in flight and keeps measured_at, so the frame still ages by the poll alone. A control
+    // loop that called this every few milliseconds would starve the poll and, after util::kLinkStalenessBound, read
+    // as a lost link mid-motion: keep the callers occasional (arrival, Sync, PulseGuide polarity, slew planning).
     void write_frame(std::uint32_t ra_encoder, std::uint32_t dec_encoder) const {
         polled_.write([ra_encoder, dec_encoder](CgxFrame& frame) {
             frame.ra_encoder = ra_encoder;
