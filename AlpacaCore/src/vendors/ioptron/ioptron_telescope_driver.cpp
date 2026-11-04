@@ -68,8 +68,10 @@ class iOptronTelescopeDriver : public TelescopeDriver, protected alpacacore::Asy
     //
     // A member that needs no device access (Name, the targets, SiteElevation, UTCDate, the guide-rate cache,
     // the capability and limit getters) takes mutex_ alone (StateLock::Mode::State) and never waits behind
-    // the wire. State such a member reads was written under mutex_ and io_mutex_ together; a command that
-    // read a value before an exchange and uses it after relies only on state that Mode::Io members write.
+    // the wire. Every write to driver state happens under mutex_, so such a member never reads a torn value.
+    // Most writers hold io_mutex_ as well, but some hold mutex_ alone (the clock-sync body publishing the
+    // site and UTC offset, the slew-landing and failed-dispatch writes to slew_in_progress_), so a command
+    // that read a value before an exchange and uses it after relies only on state that Mode::Io members write.
     //
     // The gate itself (which locks this thread holds, StateLock's two modes, dropping mutex_ around an
     // exchange) is util::LockGate (lock_gate.h, #1729). A full lock table refuses the StateLock with
