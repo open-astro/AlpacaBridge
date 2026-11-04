@@ -475,3 +475,35 @@ TEST_CASE("QHY Q-Focuser Snapshot - an arrival on one-behind firmware shows on i
     CHECK(rig.driver().get_position() == 1500);
     CHECK(rig.driver().get_is_moving() == false);
 }
+
+// #2041, the write that fails: a hold write the firmware does not answer (the wrapper's 3 s timeout) no longer
+// fails the connect; the settings stay pending and go out once more on the next telemetry reading, then stop.
+TEST_CASE("QHY Q-Focuser Snapshot - a hold write that times out at connect is retried once on the next reading",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    alpacacore::vendor::qhy::QFocuserSettings settings;
+    settings.hold_force = true;
+    settings.hold_ihold = 6;
+    settings.hold_irun = 10;
+    alpacacore::test::PolledRig<FakeQhyQFocuser, alpacacore::FocuserDriver> rig(
+        {kTick, kBound}, [settings](FakeQhyQFocuser& fake, FakeTaskClock& clock) {
+            return alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), settings, clock);
+        });
+    // The 12 V unit answers the first hold-current write 3.5 s late: past the 3 s serial timeout, so the write
+    // throws DriverException inside the connect (the reply, when it comes, is stale and flushed).
+    rig.fake().hold_next_reply_to(16, 3500ms);
+
+    REQUIRE(rig.connect());
+    CHECK(rig.driver().get_connected());
+    CHECK(rig.driver().get_position() == 1000);
+    // The next telemetry reading carries the retry: the connect's own first poll asks for one (no miss held it
+    // off), so both hold writes have gone out once more by the time Connected reads true, and the force write
+    // (which follows the current write that threw) exactly once.
+    CHECK(rig.fake().count("\"cmd_id\":16,\"ihold\":6,\"irun\":10}") == 2);
+    CHECK(rig.fake().count("\"cmd_id\":12,\"force\":1}") == 1);
+
+    // Later readings (one per second) do not repeat them.
+    rig.tick(12);  // 3.6 s on the task clock
+    CHECK(rig.fake().count("\"cmd_id\":16") == 2);
+    CHECK(rig.fake().count("\"cmd_id\":12") == 1);
+    CHECK(rig.driver().get_link_fault().empty());
+}
