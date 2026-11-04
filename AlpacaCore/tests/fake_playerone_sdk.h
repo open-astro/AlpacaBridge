@@ -105,6 +105,9 @@ public:
                                               alpacacore::AlpacaError::NotConnected);
         }
         require_open_locked("init_camera", camera_id);
+        // POAInitCamera restores the camera's defaults: cooler off, setpoint 0 (Uranus-C PRO, issue #1998).
+        cooler_on_ = false;
+        target_c_ = 0;
     }
     void close_camera(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -324,20 +327,33 @@ public:
     bool get_cooler_on(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_cooler_on");
-        return false;
+        return cooler_on_;
     }
-    void set_cooler_on(int, bool) override {
+    void set_cooler_on(int, bool on) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("set_cooler_on");
+        cooler_on_ = on;
+        ++cooler_writes_;
     }
     int get_target_temp_c(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_target_temp_c");
-        return -10;
+        return target_c_;
     }
-    void set_target_temp_c(int, int) override {
+    void set_target_temp_c(int, int target_c) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("set_target_temp_c");
+        target_c_ = target_c;
+        ++target_writes_;
+    }
+    // Writes of POA_COOLER / POA_TARGET_TEMP since the fake was made.
+    int cooler_writes() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return cooler_writes_;
+    }
+    int target_writes() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return target_writes_;
     }
     int get_cooler_power_percent(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -545,6 +561,10 @@ private:
     }
 
     mutable std::mutex mutex_;
+    bool cooler_on_ = false;
+    int target_c_ = 0;
+    int cooler_writes_ = 0;
+    int target_writes_ = 0;
     std::condition_variable start_readback_cv_;
     CameraInfo camera_{};
     ConfigCaps caps_{};
