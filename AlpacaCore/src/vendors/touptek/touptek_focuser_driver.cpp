@@ -294,7 +294,7 @@ private:
     // The connection flag and the limit are read in one state-lock hold. Connect publishes the limit under
     // the lock before it sets the flag; disconnect clears both under the lock. A disconnected reading throws
     // NotConnected without a second read: a reconnect and disconnect between two reads would yield a zero
-    // limit, which turns NotConnected into an out-of-range InvalidValue.
+    // limit, and move() would clamp its target to 0 before ensure_connected() under the I/O lock refuses it.
     int connected_max_step() const {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!connected_.load()) {
