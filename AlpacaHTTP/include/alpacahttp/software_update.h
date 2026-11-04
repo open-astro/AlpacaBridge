@@ -49,7 +49,6 @@
 // SystemSoftwareUpdateBackend.
 
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -218,6 +217,14 @@ struct SoftwareUpdateSettings {
 // how the tag and the docs/releases/ notes file are named.
 std::string expand_version_template(std::string url_template, const std::string& version);
 
+// `url` without its userinfo part ("https://user:secret@host/x" gives
+// "https://host/x"). An operator may put mirror credentials in an update URL
+// (libcurl accepts them); every copy that reaches a client or the log goes
+// through this (issue #1765, decision 0007 rule 8). Only the authority, up to
+// the first '/', '?' or '#' after "://", is searched; a string with no "://"
+// is returned unchanged.
+std::string redact_url_userinfo(const std::string& url);
+
 // Policy over the backend. Thread-safe. The cached result (latest version,
 // check time, error, notes) is read and written under one mutex, and no
 // network or sd-bus call runs while it is held: check() fetches (index,
@@ -225,9 +232,9 @@ std::string expand_version_template(std::string url_template, const std::string&
 // and status() reads the installer state, all before taking the lock, so a
 // status() poll never queues behind a slow mirror or a slow polkitd. The
 // settings read meanwhile are immutable after construction. A check that
-// arrives while another is fetching waits for it and returns its result
-// (one fetch, one answer for both callers); an install that arrives while
-// another is starting is refused.
+// arrives while another is fetching returns the current status at once with
+// CheckInProgress set (one fetch, and no caller parked on it); an install
+// that arrives while another is starting is refused.
 class SoftwareUpdateManager {
 public:
     static constexpr std::chrono::milliseconds kFetchTimeout{15000};
@@ -242,14 +249,17 @@ public:
     // {"InstalledVersion", "CheckEnabled" (false when packages_url is empty),
     //  "LatestVersion" (null until a check succeeded),
     //  "UpdateAvailable", "CheckedAt" (Unix seconds, null until checked),
-    //  "CheckError" (null unless the last check failed), "PackagesUrl",
+    //  "CheckError" (null unless the last check failed),
+    //  "CheckInProgress" (a check is fetching now), "PackagesUrl",
     //  "ReleaseNotes" (the newer version's plain-language notes, Markdown;
     //  null when no update is available or the notes could not be fetched),
     //  "ReleaseNotesUrl", "ReleaseUrl" (both null without an update),
     //  "Installer": {"State", "Detail", "Log"},
     //  "Channel" ("stable" | "beta"), "ChannelOverridden" (packages_url is an
     //  explicit override), "ChannelSwitch": {"State", "Detail", "Log"}}
-    // PackagesUrl is the URL the check uses. A cached check made for the other
+    // PackagesUrl is the URL the check uses, without any userinfo; the release
+    // links and CheckError are redacted the same way (redact_url_userinfo).
+    // A cached check made for the other
     // channel is not reported: LatestVersion is null, UpdateAvailable false.
     nlohmann::json status();
 
@@ -258,9 +268,10 @@ public:
     // check is disabled; nothing is fetched or recorded), and (DRIVER_ERROR)
     // on a failed fetch or an index with no stanza for the package; that
     // failure is also recorded as CheckError. Single-flight: a check that
-    // arrives while another is fetching waits for it and returns its result
-    // instead of fetching again, so repeated presses from several tabs pin
-    // one worker thread, not one per press.
+    // arrives while another is fetching returns status() at once, with
+    // CheckInProgress true, instead of fetching again or waiting, so repeated
+    // presses from several tabs pin no worker thread beyond the first
+    // (issue #1765); the caller reads the result from a later status().
     // When a newer version is found the release notes are fetched too, best
     // effort: a failure there is logged and leaves ReleaseNotes null, since
     // the operator can still read them on the release page.
@@ -291,9 +302,9 @@ private:
     std::string effective_url(UpdateChannel channel) const;
 
     std::mutex mutex_;
-    // Single-flight state for check() and install(), under mutex_; cv_ wakes
-    // waiters when a check finishes.
-    std::condition_variable cv_;
+    // Single-flight state for check() and install(), under mutex_. A check
+    // that finds one in flight returns status() at once (CheckInProgress)
+    // rather than parking its HTTP worker on it (issue #1765).
     bool check_in_flight_ = false;
     bool install_in_flight_ = false;
     bool switch_in_flight_ = false;

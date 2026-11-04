@@ -156,6 +156,7 @@ are not allowed". `GET status` is exempt, like every other GET.
     "UpdateAvailable": true,
     "CheckedAt": 1790535600,
     "CheckError": null,
+    "CheckInProgress": false,
     "PackagesUrl": "https://apt.openastro.net/dists/trixie/main/binary-arm64/Packages",
     "Channel": "stable",
     "ChannelOverridden": false,
@@ -176,7 +177,9 @@ are not allowed". `GET status` is exempt, like every other GET.
   0x400 (`NotImplemented`) without fetching anything.
   `LatestVersion` and `CheckedAt` are `null` until a check has run.
   `CheckError` carries the last failed check's message and is `null`
-  otherwise. `Installer.State` is one of `idle`, `running`, `succeeded`,
+  otherwise. `CheckInProgress` is `true` while a check is fetching.
+  `PackagesUrl`, `ReleaseNotesUrl`, `ReleaseUrl` and every check error text
+  carry the URL without any `user:password@` part, and so does the log. `Installer.State` is one of `idle`, `running`, `succeeded`,
   `failed` and `unavailable` (the helper unit is not installed on this host,
   which is what a source build reports). `Installer.Log` is the last 8 KiB of
   the transcript. `ReleaseNotes` is the newer version's notes as Markdown
@@ -190,10 +193,10 @@ are not allowed". `GET status` is exempt, like every other GET.
 
 - `POST /management/v1/update/check` fetches the index and answers the same
   payload. It is single-flight: a check arriving while another is fetching
-  waits for it and returns its result rather than fetching again, so repeated
-  presses from several tabs pin one worker thread, not one per press (a
-  failure in the shared run is then reported as `CheckError` in the returned
-  payload rather than as an error envelope). A failed fetch or an index with no `alpacabridge` stanza answers
+  answers the current payload at once, with `CheckInProgress` `true`, rather
+  than fetching again or waiting, so repeated presses from several tabs hold
+  no worker thread beyond the first; the caller reads the result with
+  `GET status` (the web UI polls it until `CheckInProgress` clears). A failed fetch or an index with no `alpacabridge` stanza answers
   `ErrorNumber` 0x500 (`DriverException`) with the reason, and the reason is
   also kept in `CheckError`.
 
@@ -226,7 +229,10 @@ update channel": leave the key out (it is a commented example in the shipped
 file) unless you mirror the repository. Any other non-empty value is an
 override that pins the check and disables the channel selector. Only the check
 uses it; the install always goes through the host's own apt sources. An empty
-value disables the check.
+value disables the check. Credentials do not belong in this URL: any client on
+the LAN can read the status, and although the server removes a
+`user:password@` part from every URL and error it reports or logs, a mirror
+that needs a login is better kept behind the host's own apt configuration.
 
 `update_release_notes_url` and `update_release_url` (environment
 `ALPACAHTTP_UPDATE_RELEASE_NOTES_URL`, `ALPACAHTTP_UPDATE_RELEASE_URL`) are

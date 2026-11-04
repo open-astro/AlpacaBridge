@@ -327,14 +327,16 @@ std::string SystemSoftwareUpdateBackend::fetch_url(const std::string& url, std::
 
     const CURLcode result = curl_easy_perform(curl.handle);
     if (result != CURLE_OK) {
-        throw SoftwareUpdateError(ErrorCode::DRIVER_ERROR,
-                                  std::string("Update check failed: ") + curl_easy_strerror(result) + " (" + url + ")");
+        throw SoftwareUpdateError(
+            ErrorCode::DRIVER_ERROR,
+            std::string("Update check failed: ") + curl_easy_strerror(result) + " (" + redact_url_userinfo(url) + ")");
     }
     long status_code = 0;
     curl_easy_getinfo(curl.handle, CURLINFO_RESPONSE_CODE, &status_code);
     if (status_code >= 400) {
         throw SoftwareUpdateError(ErrorCode::DRIVER_ERROR, "Update check failed: the repository answered HTTP " +
-                                                               std::to_string(status_code) + " for " + url);
+                                                               std::to_string(status_code) + " for " +
+                                                               redact_url_userinfo(url));
     }
     return body;
 }
@@ -589,6 +591,19 @@ std::string expand_version_template(std::string url_template, const std::string&
     return url_template;
 }
 
+std::string redact_url_userinfo(const std::string& url) {
+    const std::size_t scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) return url;
+    const std::size_t authority = scheme_end + 3;
+    std::size_t authority_end = url.find_first_of("/?#", authority);
+    if (authority_end == std::string::npos) authority_end = url.size();
+    // The last '@' in the authority ends the userinfo (RFC 3986 3.2.1: a
+    // password may itself contain an unencoded '@' in a hand-written URL).
+    const std::size_t at = url.rfind('@', authority_end - 1);
+    if (at == std::string::npos || at < authority) return url;
+    return url.substr(0, authority) + url.substr(at + 1);
+}
+
 SoftwareUpdateManager::SoftwareUpdateManager(SoftwareUpdateSettings settings,
                                              std::unique_ptr<SoftwareUpdateBackend> backend)
     : settings_(std::move(settings)), backend_(std::move(backend)) {}
@@ -621,19 +636,22 @@ nlohmann::json SoftwareUpdateManager::status_locked(const InstallerState& instal
             ? nlohmann::json(std::chrono::duration_cast<std::chrono::seconds>(checked_at_->time_since_epoch()).count())
             : nlohmann::json(nullptr);
     out["CheckError"] = check_error_ ? nlohmann::json(*check_error_) : nlohmann::json(nullptr);
-    out["PackagesUrl"] = effective_url(channel);
+    out["CheckInProgress"] = check_in_flight_;
+    out["PackagesUrl"] = redact_url_userinfo(effective_url(channel));
     out["CheckEnabled"] = !settings_.packages_url.empty();
     out["Channel"] = channel_name(channel);
     out["ChannelOverridden"] = overridden();
     out["ReleaseNotes"] = available && release_notes_ ? nlohmann::json(*release_notes_) : nlohmann::json(nullptr);
     // `available` implies latest_version_ is set; spelled out for clang-tidy.
     const std::string latest = latest_version_.value_or("");
-    out["ReleaseNotesUrl"] = available && !settings_.release_notes_url_template.empty()
-                                 ? nlohmann::json(expand_version_template(settings_.release_notes_url_template, latest))
-                                 : nlohmann::json(nullptr);
-    out["ReleaseUrl"] = available && !settings_.release_url_template.empty()
-                            ? nlohmann::json(expand_version_template(settings_.release_url_template, latest))
-                            : nlohmann::json(nullptr);
+    out["ReleaseNotesUrl"] =
+        available && !settings_.release_notes_url_template.empty()
+            ? nlohmann::json(redact_url_userinfo(expand_version_template(settings_.release_notes_url_template, latest)))
+            : nlohmann::json(nullptr);
+    out["ReleaseUrl"] =
+        available && !settings_.release_url_template.empty()
+            ? nlohmann::json(redact_url_userinfo(expand_version_template(settings_.release_url_template, latest)))
+            : nlohmann::json(nullptr);
     out["Installer"] = nlohmann::json{{"State", installer.state}, {"Detail", installer.detail}, {"Log", installer.log}};
     out["ChannelSwitch"] =
         nlohmann::json{{"State", channel_switch.state}, {"Detail", channel_switch.detail}, {"Log", channel_switch.log}};
@@ -656,24 +674,27 @@ nlohmann::json SoftwareUpdateManager::check() {
                                   "Checking for updates is turned off in the server configuration "
                                   "(update_packages_url is empty)");
     }
-    // Single flight: a check that arrives while another is fetching waits
-    // for that one and returns its result (a failure there is reported as
-    // CheckError in the returned status, not thrown here).
+    // Single flight: a check that arrives while another is fetching returns
+    // the current status at once, with CheckInProgress set. It never waits
+    // for the first: that parked one HTTP worker per caller for up to two
+    // fetch timeouts (issue #1765). The caller reads the result from status().
+    bool already_running = false;
     {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (check_in_flight_) {
-            cv_.wait(lock, [&] { return !check_in_flight_; });
-            lock.unlock();
-            return status();
-        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        already_running = check_in_flight_;
         check_in_flight_ = true;
     }
+    if (already_running) return status();
+    // Clears the flag on a failure path. The success path clears it itself,
+    // under the lock that builds its answer, so that answer does not report
+    // its own finished check as still in progress.
     struct ClearInFlight {
         SoftwareUpdateManager& self;
+        bool armed = true;
         ~ClearInFlight() {
+            if (!armed) return;
             std::lock_guard<std::mutex> lock(self.mutex_);
             self.check_in_flight_ = false;
-            self.cv_.notify_all();
         }
     } clear_in_flight{*this};
 
@@ -696,7 +717,8 @@ nlohmann::json SoftwareUpdateManager::check() {
     const auto version = find_package_version(index, settings_.package);
     if (!version) {
         SoftwareUpdateError error(ErrorCode::DRIVER_ERROR, "Update check failed: no '" + settings_.package +
-                                                               "' package listed at " + packages_url);
+                                                               "' package listed at " +
+                                                               redact_url_userinfo(packages_url));
         std::lock_guard<std::mutex> lock(mutex_);
         checked_at_ = std::chrono::system_clock::now();
         check_error_ = error.what();
@@ -731,6 +753,8 @@ nlohmann::json SoftwareUpdateManager::check() {
     checked_at_ = std::chrono::system_clock::now();
     check_error_.reset();
     release_notes_ = std::move(notes);
+    check_in_flight_ = false;
+    clear_in_flight.armed = false;
     return status_locked(installer, channel_switch, channel);
 }
 
