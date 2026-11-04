@@ -1599,7 +1599,7 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false in the settle window a
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    // The pulse duration has passed but the driver's 1 s completion delay has not: the firmware is still
+    // The pulse duration has passed but the driver's 500 ms completion delay has not: the firmware is still
     // reporting the pulse, as a guider reading Slewing right after its pulse sees it.
     driver->pulse_guide(3, 50);
     clock.advance(std::chrono::milliseconds(300));
