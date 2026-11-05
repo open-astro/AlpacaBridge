@@ -24,17 +24,36 @@
 #include <iomanip>
 #include <mutex>
 #include <sstream>
+#include <string>
 #include <unordered_map>
 
 namespace alpacacore::vendor::qhy {
 
 namespace {
 
+std::string failure_text(uint32_t ret, const char* context) {
+    std::ostringstream oss;
+    oss << context << " failed (code=0x" << std::hex << ret << ")";
+    return oss.str();
+}
+
 void check_result(uint32_t ret, const char* context) {
     if (ret != QHYCCD_SUCCESS) {
-        std::ostringstream oss;
-        oss << context << " failed (code=0x" << std::hex << ret << ")";
-        throw AlpacaException(oss.str(), AlpacaError::DriverException);
+        throw AlpacaException(failure_text(ret, context), AlpacaError::DriverException);
+    }
+}
+
+// Issue #1985: the removal code on a CFW call is the one answer that means the
+// camera is gone (decision 0009 point 2(a)), so it throws NotConnected for the
+// wheel driver to treat as a lost link. Only the CFW calls map it: the camera's
+// calls keep check_result() and their DriverException until the camera adopts
+// the same rule (after #1736).
+constexpr uint32_t kDeviceLost = static_cast<uint32_t>(QHYCCD_ERROR_DEVICELOSE);
+static_assert(QHYCCD_ERROR_DEVICELOSE == -3);
+
+void throw_if_device_lost(uint32_t ret, const char* context) {
+    if (ret == kDeviceLost) {
+        throw AlpacaException(failure_text(ret, context), AlpacaError::NotConnected);
     }
 }
 
@@ -627,7 +646,9 @@ void QHYSDKWrapper::move_cfw(const std::string& camera_id, int position) {
     // SDK convention (per the 25.09.29 SDK's ControlCFW.cpp sample): the order is a
     // single ASCII digit '0'-'9' for the target slot, not a raw byte.
     char order = static_cast<char>('0' + position);
-    check_result(SendOrder2QHYCCDCFW(ref.handle.get(), &order, 1), "SendOrder2QHYCCDCFW");
+    const uint32_t ret = SendOrder2QHYCCDCFW(ref.handle.get(), &order, 1);
+    throw_if_device_lost(ret, "SendOrder2QHYCCDCFW");
+    check_result(ret, "SendOrder2QHYCCDCFW");
 }
 
 int QHYSDKWrapper::get_cfw_position(const std::string& camera_id) {
@@ -644,8 +665,10 @@ int QHYSDKWrapper::get_cfw_position(const std::string& camera_id) {
     std::lock_guard<std::mutex> call_lock(*ref.call_mutex);
 
     char status[64] = {};
-    if (GetQHYCCDCFWStatus(ref.handle.get(), status) != QHYCCD_SUCCESS) {
-        return -1;
+    const uint32_t ret = GetQHYCCDCFWStatus(ref.handle.get(), status);
+    throw_if_device_lost(ret, "GetQHYCCDCFWStatus");
+    if (ret != QHYCCD_SUCCESS) {
+        return -1;  // any other failure is the moving answer, as before (no failed-read latch)
     }
     // Settled position is reported as an ASCII digit; any other value means
     // the wheel is still moving or the status is not yet known.

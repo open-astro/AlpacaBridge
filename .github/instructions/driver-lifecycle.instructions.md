@@ -385,7 +385,10 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   (`ASI_ERROR_CAMERA_REMOVED`, `ASI_ERROR_CAMERA_CLOSED`, `ASI_ERROR_INVALID_ID`, a status or temperature read included; its
   exposure retry stops at the first one), and on a generic failure from a camera the SDK no longer enumerates (a bare
   cable pull, which ASI SDK 1.41 answers with no removal code), with no staleness bound; its dew heater switch drops
-  `Connected` on its next call. The Astroasis focuser follows it since #1756
+  `Connected` on its next call. The QHY integrated filter wheel drops it on `QHYCCD_ERROR_DEVICELOSE` from its own call since #1985
+  ([QHY](qhy.instructions.md)). A second owner of a shared open whose close counts opens, not owners (the QHY
+  wrapper's `close_camera()`), releases its reference exactly once, at the loss or the Disconnect, whichever comes first:
+  a second release drops the other owner's reference. The Astroasis focuser follows it since #1756
   (`AstroasisProtocolWrapper::link_alive()`, a lock-free latch set by a HID write or read error on the next transaction, which is the
   state poll; `test_astroasis_focuser.cpp`, `a removed transport drops Connected at once`). The #237 drivers still treat a
   removed node as a fault; that has not been changed. Tests: `sever_link()` on

@@ -282,12 +282,15 @@ public:
     /**
      * @brief Move the integrated color filter wheel to a slot.
      * @param position 0-based slot index.
+     * @throws AlpacaException NotConnected for QHYCCD_ERROR_DEVICELOSE (the camera is gone, issue #1985),
+     *         DriverException for any other failure.
      */
     virtual void move_cfw(const std::string& camera_id, int position) = 0;
 
     /**
      * @brief Read the CFW's current settled position.
-     * @return 0-based slot index, or -1 if the wheel is still moving/unsettled.
+     * @return 0-based slot index, or -1 if the wheel is still moving/unsettled or the read failed.
+     * @throws AlpacaException NotConnected for QHYCCD_ERROR_DEVICELOSE (the camera is gone, issue #1985).
      */
     virtual int get_cfw_position(const std::string& camera_id) = 0;
 
