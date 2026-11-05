@@ -168,8 +168,8 @@ TEST_CASE("Celestron Telescope Driver - Disconnected Behavior", "[celestron][tel
     CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
 
-    // Slew requires target set (throws before connection check)
-    CHECK_THROWS_AS(driver->slew_to_target_async(), alpacacore::AlpacaException);
+    // NotConnected precedes the unset-target error (#2075)
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
 
     // Park requires connection
     CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
