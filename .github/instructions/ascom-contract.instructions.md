@@ -47,7 +47,7 @@ revision, not a new telescope interface version. The direct CGX backend follows 
 The existing Celestron NexStar, SynScan, iOptron, OnStep, ZWO, Bisque and SkyWatcher
 backends and their tests still use `ValueNotSet`, a known migration gap not repaired
 by the CGX PR. Do not copy that legacy error into new implementations.
-In every backend, a disconnected read answers `NotConnected` before the unset-target error (#2075).
+In every backend, a disconnected read, `SlewToTarget`, `SlewToTargetAsync` or `SyncToTarget` answers `NotConnected` before the unset-target error (#2075).
 Every driver therefore carries `target_ra_set_`
 **and** `target_dec_set_`, each set only by its own setter. One flag for both is a
 review-blocking regression — it was the original shape in all seven drivers and took two

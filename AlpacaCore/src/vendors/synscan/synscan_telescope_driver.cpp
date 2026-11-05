@@ -1653,6 +1653,7 @@ public:
         double ra, dec;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();  // before the unset target (#2075)
             if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
             }
@@ -1666,6 +1667,7 @@ public:
         double ra, dec;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();  // before the unset target (#2075)
             if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
             }
@@ -1719,6 +1721,7 @@ public:
         double ra, dec;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();  // before the unset target (#2075)
             if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
             }

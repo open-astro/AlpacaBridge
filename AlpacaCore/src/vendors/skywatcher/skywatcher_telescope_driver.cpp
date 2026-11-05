@@ -2402,6 +2402,7 @@ public:
     // motion call, which takes the same lock itself (open-astro#391).
     std::pair<double, double> target_or_throw() const {
         StateLock lock(lock_gate_);
+        check_connected();  // before the unset target (#2075)
         if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }

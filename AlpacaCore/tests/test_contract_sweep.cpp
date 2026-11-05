@@ -287,6 +287,9 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_right_ascension_rate", [&] { (void)t.get_right_ascension_rate(); }});
             p.push_back({"get_declination_rate", [&] { (void)t.get_declination_rate(); }});
             p.push_back({"get_target_right_ascension", [&] { (void)t.get_target_right_ascension(); }});
+            p.push_back({"sync_to_target", [&] { t.sync_to_target(); }});
+            p.push_back({"slew_to_target_async", [&] { t.slew_to_target_async(); }});
+            p.push_back({"slew_to_target", [&] { t.slew_to_target(); }});
             p.push_back({"get_target_declination", [&] { (void)t.get_target_declination(); }});
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
@@ -389,12 +392,9 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
             p.push_back({"unpark", [&] { t.unpark(); }});
             p.push_back({"set_tracking", [&] { t.set_tracking(false); }});
             p.push_back({"sync_to_coordinates", [&] { t.sync_to_coordinates(1.0, 1.0); }});
-            p.push_back({"sync_to_target", [&] { t.sync_to_target(); }});
             p.push_back({"slew_to_coordinates_async", [&] { t.slew_to_coordinates_async(1.0, 1.0); }});
-            p.push_back({"slew_to_target_async", [&] { t.slew_to_target_async(); }});
             p.push_back({"pulse_guide", [&] { t.pulse_guide(0, 0); }});
             p.push_back({"set_park", [&] { t.set_park(); }});
-            p.push_back({"slew_to_target", [&] { t.slew_to_target(); }});
             p.push_back({"slew_to_alt_az", [&] { t.slew_to_alt_az(1.0, 1.0); }});
             p.push_back({"slew_to_alt_az_async", [&] { t.slew_to_alt_az_async(1.0, 1.0); }});
             p.push_back({"sync_to_alt_az", [&] { t.sync_to_alt_az(1.0, 1.0); }});

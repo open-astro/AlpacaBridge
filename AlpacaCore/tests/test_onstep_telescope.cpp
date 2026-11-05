@@ -138,7 +138,7 @@ TEST_CASE("OnStep Telescope Driver - Not connected throws", "[onstep][telescope]
     require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->slew_to_coordinates_async(1.0, 1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
@@ -243,13 +243,11 @@ TEST_CASE("OnStep Telescope Driver - the two target properties are independent",
     // independence is checked on a connected driver below.
     driver->set_target_right_ascension(7.25);
 
-    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves:
-    // a half-set pair must refuse rather than slew to a default Dec. These
-    // guards run before the connection check, so they hold on a disconnected
-    // driver.
-    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    // Disconnected, SlewToTarget, SlewToTargetAsync and SyncToTarget answer NotConnected before the unset
+    // target (#2075); the half-set refusal is pinned on a connected driver below.
+    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::NotConnected);
 
     driver->set_target_declination(-30.25);
     require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
@@ -266,6 +264,12 @@ TEST_CASE("OnStep Telescope Driver - the two target properties are independent",
     connected.set_target_right_ascension(7.25);
     CHECK(connected.get_target_right_ascension() == 7.25);
     require_alpaca_error([&]() { (void)connected.get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves: a half-set pair must refuse
+    // rather than slew to a default Dec.
+    require_alpaca_error([&]() { connected.slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { connected.slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { connected.sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // Once Dec is written too, both read back.
     connected.set_target_declination(-30.25);
