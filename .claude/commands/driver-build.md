@@ -352,7 +352,7 @@ Existing examples:
 Every new `.h`, `.hpp`, `.cpp` file must include the AGPL-3.0-or-later license header. Copy it from any existing source file in the same directory — do not write it from scratch or modify it.
 
 ### Boundary rules
-- `AlpacaCore` has NO HTTP/REST/sockets/JSON transport code.
+- `AlpacaCore` has NO server code (no listening socket, router or inbound request parsing, decision 0023); a vendor whose wire is HTTP reaches it through `util::HttpClient`.
 - `AlpacaHTTP` has NO vendor SDK usage and NO duplicated device logic.
 - Call flow: `AlpacaHTTP -> AlpacaCore driver -> vendor implementation`.
 - Raw vendor SDK headers must NOT be included outside wrapper implementation files.
