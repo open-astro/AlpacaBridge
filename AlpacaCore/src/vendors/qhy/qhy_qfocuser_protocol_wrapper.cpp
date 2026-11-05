@@ -643,7 +643,9 @@ private:
         (void)util::tty_write_all(serial_fd_, &kick, sizeof(kick));
         // #2042: this command's idx repeats the last reply's, so the first matching reply is that stale one and
         // the kicked fresh one follows; `stale` holds the first match while the read goes on for the second.
-        const bool repeats = last_reply_idx_ == expected_idx || last_reply_idx_ == alt_idx;
+        // last_reply_idx_ is -2 after a connect and the default alt_idx is -2 too: a reply idx is never negative
+        // (the reboot notice's -1 is skipped above), so only a recorded idx counts.
+        const bool repeats = last_reply_idx_ >= 0 && (last_reply_idx_ == expected_idx || last_reply_idx_ == alt_idx);
         std::optional<std::map<std::string, std::string>> stale;
         std::int32_t stale_idx = -2;  // the stale reply's own idx: what the firmware holds when no fresh one comes
         std::chrono::steady_clock::time_point fresh_deadline{};
