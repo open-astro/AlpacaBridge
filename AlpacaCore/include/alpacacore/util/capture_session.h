@@ -265,7 +265,10 @@ public:
     /// CaptureControl::token() always finds the stopping mark set too, and its
     /// early return is dropped, not kept. A start() mints a new token each time,
     /// so a stop marks the exposure it found and never one a later start begins
-    /// (#2043). Applies the watchdog first.
+    /// (#2043). Applies the watchdog first, so like the state getters it can
+    /// fail an exposure past its deadline and cancel its body (with the session
+    /// mutex released, the slot being a leaf); a caller holding its own lock
+    /// above the session, the ZWO driver's exposure_sdk_mutex_, keeps that order.
     std::uint64_t begin_stop() {
         std::unique_lock<std::mutex> lock(mutex_);
         apply_watchdog(lock);
