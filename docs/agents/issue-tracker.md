@@ -45,3 +45,21 @@ Rules:
 - **Change the label when new evidence changes the impact** (`gh issue edit
   <number> --repo open-astro/AlpacaBridge --remove-label P4 --add-label P2`), and
   say why in a comment.
+
+## Sub-issues and blocking
+
+- **Sub-issue**: `gh issue edit <parent> --repo open-astro/AlpacaBridge --add-sub-issue <child>`, or `gh issue create --parent <parent> ...`. Without sub-issues, put `Part of #<parent>` at the top of the child body.
+- **Blocking**: `gh issue edit <child> --repo open-astro/AlpacaBridge --add-blocked-by <blocker>`, or `--blocked-by <n>,<n>` on create. A ticket is unblocked when every blocker is closed.
+- **Count open blockers**: `gh api repos/open-astro/AlpacaBridge/issues/<n> --jq .issue_dependencies_summary.blocked_by` (0 means startable).
+
+## Pull requests as a triage surface
+
+**PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
+
+## When a skill says "publish to the issue tracker"
+
+Create a GitHub issue as in **Create an issue** above, with all three label groups set.
+
+## When a skill says "fetch the relevant ticket"
+
+Read it as in **Read an issue** above.
