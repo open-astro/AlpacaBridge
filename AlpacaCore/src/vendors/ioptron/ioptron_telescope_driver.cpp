@@ -465,7 +465,9 @@ public:
             // when a Wi-Fi mount has often not joined the network yet (#659).
             // The scan and the open run as one exchange: the state lock is released for them and taken
             // back before the outcome or its exception leaves. The connection members the scan writes are
-            // read only under transition_mutex_, which this call holds; io_mutex_ stays held.
+            // read only under transition_mutex_, which this call holds; io_mutex_ stays held. The nested
+            // exchanges inside rely on LockGate::exchange going straight through once the state lock is
+            // dropped, and fallback_unique_id() takes mutex_ again inside the scan.
             protocol.call([&](auto&) {
                 util::connect_resolved(
                     connection_info_, connection_resolved_, connection_resolver_,
@@ -554,7 +556,8 @@ public:
                 ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
             }
             utc_offset_ = mount_time;
-            connected_ = true;
+            // The caches are primed before connected_ is published: a getter that arrives during these reads
+            // answers NotConnected at once (check_connected_before_lock()) instead of waiting behind them.
             prefetch_mount_state_locked();
             try {
                 mount_info_ = protocol.get_mount_info();
@@ -566,10 +569,10 @@ public:
             // publishing a mount that is gone. The reason goes with the failure and is not kept.
             if (link_lost()) {
                 const std::string reason = protocol.link_fault();
-                connected_ = false;
                 protocol.disconnect();
                 throw AlpacaException("Failed to connect to iOptron mount: " + reason, AlpacaError::NotConnected);
             }
+            connected_ = true;
             fast_cache_until_ = clock_.now() + kFastCacheGrace;
             std::string mount_desc = mount_info_.model_name.empty()
                                          ? "unknown model"
