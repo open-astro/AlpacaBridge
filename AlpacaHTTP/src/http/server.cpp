@@ -1697,10 +1697,18 @@ void Server::handle_restart_request() {
     // itself and is_running() drops for real -- the embedder exits 1 and
     // systemd respawns.
     ++restart_epoch_;
+    // A throw from stop() or start_async() still makes the epoch even and then
+    // clears restart_requested_, in that order (restart_in_progress_for_test()
+    // relies on restart_requested_ being the last write); the exception propagates.
+    struct RestartEnd {
+        Server& server;
+        ~RestartEnd() {
+            ++server.restart_epoch_;
+            server.restart_requested_ = false;
+        }
+    } restart_end{*this};
     stop();
     start_async();
-    ++restart_epoch_;
-    restart_requested_ = false;
 }
 
 } // namespace alpacahttp

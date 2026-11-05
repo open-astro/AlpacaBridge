@@ -1257,11 +1257,13 @@ std::shared_ptr<const Router::NowFn> Router::current_now_fn() const {
 }
 
 void Router::set_shutdown_callback(std::function<void()> callback) {
-    shutdown_callback_ = callback;
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    shutdown_callback_ = std::move(callback);
 }
 
 void Router::set_restart_callback(std::function<void()> callback) {
-    restart_callback_ = callback;
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    restart_callback_ = std::move(callback);
 }
 
 void Router::start_delayed_callback(std::function<void()> callback) {
@@ -5598,15 +5600,19 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         return response;
     }
     
-    // Call shutdown callback if set
-    if (shutdown_callback_) {
+    std::function<void()> shutdown_callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        shutdown_callback = shutdown_callback_;
+    }
+    if (shutdown_callback) {
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = std::string("Shutdown initiated");
         response.set_body(alpaca_response);
 
         // Call callback asynchronously (after response is sent). The delay
         // lets the response go out first; the Router owns and joins the thread.
-        start_delayed_callback(shutdown_callback_);
+        start_delayed_callback(std::move(shutdown_callback));
 
         return response;
     } else {
@@ -5695,10 +5701,10 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // open-astro#674: an ID sent only in the JSON body is echoed on every
     // reply, not only on the cross-origin 403 (#509), with the same
     // precedence: a non-zero query-string ID wins.
-    if (client_tx_id == 0 && !request.body().empty()) {
-        if (auto json_opt = parse_json(request.body())) {
-            client_tx_id = extract_client_transaction_id(*json_opt);
-        }
+    // Parsed once: the ID here and Epoch/Value below read the same body.
+    const auto body_json = request.body().empty() ? decltype(parse_json(request.body())){} : parse_json(request.body());
+    if (client_tx_id == 0 && body_json) {
+        client_tx_id = extract_client_transaction_id(*body_json);
     }
 
     // Since open-astro#291 a successful set has a second effect beyond the
@@ -5745,8 +5751,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // {"Value": n} for compatibility with the other management endpoints.
     std::int64_t epoch_seconds = -1;
     try {
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
+        if (const auto& json_opt = body_json) {
             if (const auto* val = find_json_value(*json_opt, "Epoch")) {
                 if (val->is_number_integer() || val->is_number_unsigned()) {
                     epoch_seconds = val->get<std::int64_t>();
@@ -6058,12 +6063,17 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
         return response;
     }
 
-    if (restart_callback_) {
+    std::function<void()> restart_callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        restart_callback = restart_callback_;
+    }
+    if (restart_callback) {
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = std::string("Restart initiated");
         response.set_body(alpaca_response);
 
-        start_delayed_callback(restart_callback_);
+        start_delayed_callback(std::move(restart_callback));
 
         return response;
     }
@@ -6082,17 +6092,6 @@ namespace {
 // telescope 1". Kept in one place so the two lines read alike in the log.
 std::string persisted_device_subject(const std::string& vendor, const std::string& device_type, int device_number) {
     return "Persisted " + vendor + " " + device_type + " " + std::to_string(device_number);
-}
-
-// open-astro#664: the catalog consult in register_device_from_config() below.
-// DeviceCatalog::find_schema is private, so the router can only ask
-// describe() for the DescriptorView of a key.
-std::optional<alpacacore::catalog::DescriptorView> find_descriptor(const alpacacore::catalog::DeviceCatalog& catalog,
-                                                                   const alpacacore::catalog::DeviceKey& key) {
-    for (const auto& view : catalog.describe()) {
-        if (view.key == key) return view;
-    }
-    return std::nullopt;
 }
 
 // The vendor as the deleted arm texts spelled it: Schema::vendor_label when the
@@ -6149,7 +6148,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
     }
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
-        if (auto view = find_descriptor(catalog_, key)) {
+        if (auto view = catalog_.describe(key)) {
             nlohmann::json prepared =
                 with_object_record_entries(without_unknown_alignment_mode(config, view->fields), view->fields);
             if (view->forget_dropped_selectors && source == ConfigSource::Persisted) {
@@ -6350,7 +6349,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     // kept for any config, as they were through the deleted arms.
     try {
         const alpacacore::catalog::DeviceKey key{vendor, string_to_device_type(device_type)};
-        if (auto view = find_descriptor(catalog_, key)) {
+        if (auto view = catalog_.describe(key)) {
             const auto extra = sanitize_fields_json(without_unknown_alignment_mode(config, view->fields), view->fields);
             for (const auto& [k, v] : extra.items()) {
                 sanitized[k] = v;
