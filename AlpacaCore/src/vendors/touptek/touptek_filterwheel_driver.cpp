@@ -303,15 +303,18 @@ public:
 
     int get_position() const override {
         ensure_connected();
-        const HToupcam handle = handle_value();
-        // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
-        // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
-        const Status status = status_cache_.get([this, handle] {
+        // The refill runs under the cache's own mutex, then the I/O lock, then mutex_ (lock order: cache mutex,
+        // I/O lock, mutex_), so no caller may hold mutex_ or the I/O lock around the cache.
+        const Status status = status_cache_.get([this] {
             std::lock_guard<std::mutex> io(io_mutex_);
             Status fresh;
-            if (!connected_.load()) {
-                // A disconnect that won the I/O lock has closed the handle. Returning (not throwing) keeps it
-                // out of the link-health count; the disconnect's reset() drops this frame.
+            // The handle is read under the I/O lock (#2037): a disconnect clears it under mutex_ and closes it
+            // under the I/O lock, so a value read before this lock can be the closed handle of a previous
+            // session while a reconnect has made Connected true again. A null here means a disconnect won the
+            // I/O lock; returning (not throwing) keeps that out of the link-health count, and the disconnect's
+            // reset() drops this frame.
+            const HToupcam handle = open_handle_locked();
+            if (!handle) {
                 fresh.closed = true;
                 return fresh;
             }
@@ -339,11 +342,11 @@ public:
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         ensure_connected();
-        HToupcam handle = nullptr;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // Check the disconnect sentinel first so a concurrent disconnect yields
-            // NotConnected, not a generic DriverException (matches get_position).
+            // NotConnected, not a generic DriverException (matches get_position). An early exit only: the
+            // handle this move uses is the one read under the I/O lock below (#2037), never this one.
             if (!handle_) {
                 throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
             }
@@ -353,13 +356,16 @@ public:
             if (position >= slot_count_) {
                 throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
             }
-            handle = handle_;
         }
         try {
             std::lock_guard<std::mutex> io(io_mutex_);
             // Race (invariant B4 i): mutex_ was released after validation, so a disconnect can win the I/O
-            // lock first and close the wheel; moving a closed handle would be a use-after-close. Re-check here.
-            ensure_connected();
+            // lock first and close the wheel, and a reconnect can open another handle (#2037); moving the handle
+            // read above would be a use-after-close. The handle is read again here, under the I/O lock.
+            const HToupcam handle = open_handle_locked();
+            if (!handle) {
+                throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
+            }
             // Single absolute move; the wheel was homed at connect so the firmware
             // can traverse to any slot. get_position() reports -1 until it arrives.
             sdk_.set_filter_wheel_position(handle, position);
@@ -412,12 +418,13 @@ private:
         }
     }
 
-    HToupcam handle_value() const {
+    // The handle an SDK call may use, read under mutex_ while the caller holds the I/O lock (#2037): a disconnect
+    // clears handle_ and connected_ under mutex_ and closes the handle only under the I/O lock, so a non-null
+    // value here is open for as long as the caller holds that lock. Null when no session is connected, including
+    // the window of a reconnect that has opened a wheel but not yet published Connected.
+    HToupcam open_handle_locked() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!handle_) {
-            throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
-        }
-        return handle_;
+        return connected_.load() ? handle_ : nullptr;
     }
 
     void set_connecting_homing(bool value) {

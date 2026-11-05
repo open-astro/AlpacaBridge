@@ -30,6 +30,7 @@
 #include "driver_rig.h"
 #include "fake_qhy_qfocuser.h"
 #include "fake_task_clock.h"
+#include "stalled_outq_probe.h"
 
 using alpacacore::test::FakeQhyQFocuser;
 using alpacacore::test::FakeTaskClock;
@@ -506,4 +507,30 @@ TEST_CASE("QHY Q-Focuser Snapshot - a hold write that times out at connect is re
     CHECK(rig.fake().count("\"cmd_id\":16") == 2);
     CHECK(rig.fake().count("\"cmd_id\":12") == 1);
     CHECK(rig.driver().get_link_fault().empty());
+// #2030, pinned hardware-free by #2040: a unit that is not taking data fails the exchange inside the drain
+// bound and names the replug. The poll is parked on the fake clock, so the Move is the only exchange and the
+// fault latch (three failed polls) is never reached.
+TEST_CASE("QHY Q-Focuser Snapshot - a unit not taking data is refused inside the drain bound, naming the replug",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    QhyRig rig;
+    REQUIRE(rig.connect());
+
+    alpacacore::test::StalledOutqGuard stalled;
+    const auto started = std::chrono::steady_clock::now();
+    std::string message;
+    try {
+        rig.driver().move(1500);
+        FAIL("the Move went through on a unit that takes no data");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        message = ex.what();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(message.find("not taking data") != std::string::npos);
+    CHECK(message.find("unplug and replug") != std::string::npos);
+    CHECK(elapsed >= 400ms);              // the 500 ms drain bound, not an instant refusal
+    CHECK(elapsed < 2500ms);              // and not the 3 s reply timeout a transaction that went on would cost
+    CHECK(rig.driver().get_connected());  // the node is still there: not a lost link
+    // The pty delivered the command bytes before the (faked) queue depth was read, so the fake saw the move; on
+    // hardware the deadline's TCOFLUSH discards the queued command, which no pty can show.
 }

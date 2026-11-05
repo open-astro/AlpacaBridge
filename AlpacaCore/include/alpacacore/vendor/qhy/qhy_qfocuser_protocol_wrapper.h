@@ -93,6 +93,14 @@ std::map<std::string, std::string> parse_qfocuser_reply(std::string_view text);
 std::vector<QFocuserPortInfo> enumerate_qfocuser_ports();
 
 /**
+ * @brief The scan's probe of one port: the {"cmd_id":1} handshake under a probe
+ * claim (#1202). True, with @p info filled, only for a reply with idx 1 and a
+ * version. A port whose endpoint is not taking data (the drain never empties,
+ * #2030) is not this device. Exposed for hardware-free tests on a pty (#2040).
+ */
+bool probe_qfocuser_port(const std::string& port_path, QFocuserDeviceInfo& info);
+
+/**
  * @brief Protocol wrapper for the QHY Q-Focuser.
  *
  * Every command is a JSON object {"cmd_id":N,...} with no terminator; every

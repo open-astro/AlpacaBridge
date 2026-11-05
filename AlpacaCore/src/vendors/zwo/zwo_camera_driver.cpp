@@ -119,7 +119,6 @@ public:
         shutdown_connection();
         // The SDK stop first, then the join: the exposure body is gone before the camera closes (decision 0020 rule 5).
         // A stop on a camera that is not open is refused by on_link() without touching the SDK.
-        session_.set_stopping(true);
         stop_sdk_exposure(current_camera_id());
         session_.disconnect_and_join();
         if (link_.is_open()) {
@@ -229,7 +228,6 @@ public:
             // before the close. A body in ASIGetDataAfterExp is joined when its transfer returns (that call takes no
             // timeout, the 0020 `partial` note). The join is last and closes the session, so a StartExposure that
             // passed its connection check before this Disconnect raises NotConnected and runs no body.
-            session_.set_stopping(true);
             stop_sdk_exposure(current_camera_id());
             session_.disconnect_and_join();
         } else {
@@ -889,10 +887,6 @@ public:
                 driver.exposure_starting_ = false;
             }
         } starting_done{*this};
-        {
-            std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
-            request.token = ++exposure_token_;
-        }
 
         const double exposure_s = static_cast<double>(exposure_us) / 1'000'000.0;
         // Decision 0020 rule 4: the deadline holds the first attempt, both retries, their pacing, the USB 2.0 settle
@@ -927,7 +921,6 @@ private:
         ExposureFrame frame{};
         std::vector<ZWOImageType> formats;
         bool usb3{false};
-        std::uint64_t token{0};
     };
 
     // The exposure body (decision 0020 rule 4), on the session's thread with no driver lock held across an SDK call:
@@ -1051,7 +1044,7 @@ private:
     // again on a retry: the SDK is not guaranteed to keep it across an ASI_EXP_FAILED.
     bool trigger_exposure(util::CaptureControl& c, const ExposureRequest& request, bool retry) {
         std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
-        if (stop_token_ == request.token) {
+        if (stop_token_ == c.token()) {
             return false;
         }
         if (retry) {
@@ -1085,11 +1078,12 @@ private:
         }
     }
 
-    // The driver's SDK stop for a Disconnect or the destructor: marks the newest exposure stopped, so a body that has
-    // not triggered yet never does, then stops the camera. Best effort: a failure is logged. Called without mutex_.
+    // The driver's SDK stop for a Disconnect or the destructor: marks the exposure that owns the session as
+    // stopping (its failure is dropped, not kept) and records its token, so a body that has not triggered yet
+    // never does, then stops the camera. Best effort: a failure is logged. Called without mutex_.
     void stop_sdk_exposure(std::optional<int> camera_id) {
         std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
-        stop_token_ = exposure_token_;
+        stop_token_ = session_.begin_stop();
         sdk_running_ = false;
         if (!camera_id.has_value()) return;
         try {
@@ -1130,15 +1124,23 @@ private:
         if (state != CameraState::Exposing) {
             return;
         }
-        session_.set_stopping(true);  // a body failure the stop causes is dropped, not kept (#1745)
-        try {
+        {
             std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
-            dev_.stop_exposure(stop_id);
-            stop_token_ = exposure_token_;
+            // The exposure that owns the session is the one stopped, and its stopping mark (a body failure the
+            // stop causes is dropped, not kept, #1745) is set in the same session hold as its token is read
+            // (#2043). Before, the mark was the newest StartExposure's token, minted before its session start,
+            // and set_stopping(true) ran apart from it: a StartExposure that began between this stop's state read
+            // and its mark found the mark against its own token with no stopping flag, refused its trigger and
+            // returned, and the session kept "the exposure ended without an image".
+            stop_token_ = session_.begin_stop();
+            try {
+                dev_.stop_exposure(stop_id);
+            } catch (...) {
+                stop_token_ = 0;
+                session_.set_stopping(false);  // the exposure runs on
+                throw;
+            }
             sdk_running_ = false;
-        } catch (...) {
-            session_.set_stopping(false);  // the exposure runs on
-            throw;
         }
         // Cancels and joins the body: bounded by one status poll step or one SDK call.
         session_.abort();
@@ -1217,9 +1219,10 @@ private:
     // exposure the driver stopped is never triggered after it, and a stopped one is not stopped twice. Lock order:
     // exposure_sdk_mutex_ -> session mutex -> SDK-wrapper mutex.
     mutable std::mutex exposure_sdk_mutex_;
-    std::uint64_t exposure_token_{0};  // the newest StartExposure's token
-    std::uint64_t stop_token_{0};      // the token of the exposure the driver stopped last
-    bool sdk_running_{false};          // the body triggered an SDK exposure nothing has stopped yet
+    // The session token of the exposure the driver stopped last (CaptureSession::begin_stop(), #2043); 0 when
+    // the stop found no exposure. A body compares it with its own CaptureControl::token().
+    std::uint64_t stop_token_{0};
+    bool sdk_running_{false};  // the body triggered an SDK exposure nothing has stopped yet
 
     // Cleared by the timer after the last pending turn-off, so a fire-and-forget client that never polls
     // IsPulseGuiding does not leave it latched true (round 9); the getter also self-clears at pulse_guiding_end_, the

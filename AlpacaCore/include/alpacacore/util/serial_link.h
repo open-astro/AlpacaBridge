@@ -58,6 +58,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -233,6 +234,21 @@ inline bool tty_write_all(int fd, const std::string& data, int timeout_ms = 2000
 }
 
 /**
+ * @brief Test seam for tty_drain_bounded(): what reports the transmit queue depth.
+ *
+ * A pty always drains, so the stalled-endpoint path (#2030) has no hardware-free test without
+ * one (#2040). Null, the default, asks the kernel with TIOCOUTQ. A test installs a probe that
+ * reports a queue that never empties; it returns false when the tty cannot report its queue,
+ * which counts as drained, as the ioctl failure does. Set with nothing draining, and reset to
+ * null before the test ends.
+ */
+using TtyOutqProbe = bool (*)(int fd, int& pending);
+inline std::atomic<TtyOutqProbe>& tty_outq_probe_for_testing() {
+    static std::atomic<TtyOutqProbe> probe{nullptr};
+    return probe;
+}
+
+/**
  * @brief Waits until the tty's transmit queue is empty, at most @p timeout_ms.
  *
  * tcdrain() has no timeout: a USB CDC device whose bulk OUT endpoint has stopped taking data (a
@@ -240,13 +256,26 @@ inline bool tty_write_all(int fd, const std::string& data, int timeout_ms = 2000
  * every later connect queued behind it. This polls the queue depth (TIOCOUTQ) instead. True once
  * the queue is empty; on the deadline it discards the queued bytes (TCOFLUSH) and returns false,
  * so the caller fails the exchange. A tty whose driver cannot report its queue counts as drained.
- * A @p timeout_ms of 0 or less polls once and then flushes: it is not a "check only" mode.
+ * Every drain in a wrapper goes through this, never a bare tcdrain()
+ * (scripts/check_serial_port_ownership.py, #2038).
+ *
+ * A @p timeout_ms of 0 or less polls once: a queue that is not empty at that poll is flushed at
+ * once and the call returns false. It never means "check without flushing"; a caller that only
+ * wants the depth asks TIOCOUTQ itself (#2040; no caller passes 0 today).
  */
 inline bool tty_drain_bounded(int fd, int timeout_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
+    const TtyOutqProbe probe = tty_outq_probe_for_testing().load();
     int pending = 0;
     for (;;) {
-        if (::ioctl(fd, TIOCOUTQ, &pending) != 0) {
+        bool reported = false;
+        if (probe != nullptr) {
+            reported = probe(fd, pending);
+            if (!reported) errno = ENOTTY;  // no ioctl ran: the log below must not show a stale errno
+        } else {
+            reported = ::ioctl(fd, TIOCOUTQ, &pending) == 0;
+        }
+        if (!reported) {
             // Fails open: a driver that cannot report its queue is not evidence of a stall.
             ALPACA_LOG_DEBUG("Serial", "TIOCOUTQ failed (" + errno_string(errno) + "); the drain counts as done");
             return true;

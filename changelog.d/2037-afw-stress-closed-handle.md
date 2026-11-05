@@ -1,0 +1,2 @@
+### Fixed
+- **ToupTek AFW: a move or Position read could use the closed handle of a previous session** (AlpacaCore, issue #2037): both read the handle before taking the I/O lock, so a disconnect and a reconnect in that gap left them calling the SDK on the old handle. The handle is now read under the I/O lock, where a disconnect cannot close it. Seen as the "SDK call on a closed handle" flake of the AFW connect/disconnect/operate stress case.
