@@ -201,8 +201,8 @@ other device setter, on the verb it accepts, is unguarded.
 
 Since issue #348 this is not specific to the WiFi endpoints: every
 state-changing management endpoint carries the same guard — `synctime`,
-`restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
-`description` `PUT`/`POST` (as with `configuredevice` and `removedevice`, the
+`restart`, `shutdown`, `configuredevice`, `updatedevice`, `removedevice`, `loglevel`, the
+`description` `PUT`/`POST` (as with `configuredevice`, `updatedevice` and `removedevice`, the
 handler accepts both and the guard covers both), and both
 `DELETE /management/v1/logfiles` (all files) and
 `DELETE /management/v1/logfiles/<name>` (one file), and since 4.2.0 the
