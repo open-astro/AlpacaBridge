@@ -763,6 +763,11 @@ public:
                 if (park_override_until_ > now) {
                     return false;
                 }
+                // The Unpark override closed between the freshness check and the read of `now` above (the
+                // Slewing landing's sibling): a status from inside the window is not served as the answer.
+                if (!lock_gate_.holds_io() && !status_cache_fresh_locked()) {
+                    throw RefillNeedsOperationLock{};
+                }
                 refresh_status_cache_locked();
                 return cached_status_.is_parked;
             });
@@ -1340,6 +1345,12 @@ public:
                 auto now = clock_.now();
                 if (slew_hold_.active(now)) {
                     return true;
+                }
+                // The hold closed between the freshness check and the read of `now` above, and the status the
+                // state lock could serve as it stands predates the hold. The mount, not the window, says when
+                // the slew ended (decision 0022): ask it, under the operation lock.
+                if (!lock_gate_.holds_io() && !status_cache_fresh_locked()) {
+                    throw RefillNeedsOperationLock{};
                 }
                 refresh_status_cache_locked();
                 if (cached_status_.is_slewing) {

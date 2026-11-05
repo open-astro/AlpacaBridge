@@ -421,4 +421,44 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
+// The landing decision itself, on a model with no GOTO trim: once the slew hold has closed, the mount says whether
+// the slew ended (decision 0022), never a status fetched inside the hold. With the hold open for the check and
+// closed for the body, that stale status was served as it stood under the state lock alone, and Slewing reported
+// the GOTO landed while the mount was still moving.
+TEST_CASE(
+    "iOptron telescope - a slew hold that closes between the check and the body asks the mount whether the "
+    "slew ended",
+    "[ioptron][telescope][getter-locks]") {
+    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);  // HEM27: no GOTO trim
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock inner;
+    TickingClock clock(inner);
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
+                                                              std::nullopt, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Each pass: a GOTO arms the 5 s slew hold at its dispatch, a status read inside the hold caches "stopped"
+    // under the operation lock, then the mount starts reporting the slew (only a fresh read sees it), and Slewing
+    // is read on a clock that moves 1 ms per read with the hold 1-5 ms from closing. Every read must report the
+    // slew in progress: from the hold, or from the mount.
+    for (int before_ms = 5; before_ms >= 1; --before_ms) {
+        INFO("hold closes " << before_ms << " ms after the check");
+        clock.set_tick(std::chrono::nanoseconds::zero());
+        inner.advance(std::chrono::seconds(31));  // the post-connect grace and every earlier window are over
+        const int sent_before = mount.count(":MS1#");
+        driver->slew_to_coordinates_async(12.0, 20.0);
+        REQUIRE(wait_for_goto_dispatch(mount, sent_before));
+        CHECK_FALSE(driver->get_at_home());  // refills the status cache: stopped
+        mount.set_system_status(2);          // slewing from now on
+        inner.advance(std::chrono::seconds(5) - milliseconds(before_ms));
+        clock.set_tick(milliseconds(1));
+        CHECK(driver->get_slewing());
+        clock.set_tick(std::chrono::nanoseconds::zero());
+        mount.set_system_status(1);
+        driver->abort_slew();
+    }
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
