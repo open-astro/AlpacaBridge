@@ -7,7 +7,7 @@ A vendor-neutral C++ core library implementing ASCOM Alpaca device models and be
 **AlpacaCore** is a powerful system for astrophotography that leverages AI-assisted development to build a comprehensive, vendor-neutral device driver framework. It is a protocol-level library that:
 
 - Implements ASCOM Alpaca device models and behavior
-- Contains **no server** (no listening socket, router or inbound request parsing; outbound vendor clients go through `util::HttpClient`, decision 0023)
+- Contains **no server** (no listening socket, router or inbound request parsing; outbound vendor clients go through the `util::HttpClient` seam planned in decision 0023)
 - Avoids platform-specific hacks
 - Exposes a clean API that higher-level servers (e.g. **AlpacaHTTP** inside **AlpacaOS**) use
 - Follows the [ASCOM Alpaca API specification](https://ascom-standards.org/api/)
