@@ -507,6 +507,8 @@ TEST_CASE("QHY Q-Focuser Snapshot - a hold write that times out at connect is re
     CHECK(rig.fake().count("\"cmd_id\":16") == 2);
     CHECK(rig.fake().count("\"cmd_id\":12") == 1);
     CHECK(rig.driver().get_link_fault().empty());
+}
+
 // #2030, pinned hardware-free by #2040: a unit that is not taking data fails the exchange inside the drain
 // bound and names the replug. The poll is parked on the fake clock, so the Move is the only exchange and the
 // fault latch (three failed polls) is never reached.
