@@ -6570,9 +6570,8 @@ int main() {
         }
     }
 
-    // Static files (#1741): the content type comes from the file's extension, and
-    // a directory under web/ is 404, not an empty 200.
     {
+        // case: static files take the content type from the extension and a web/ directory is 404 (#1741)
         const auto index = route_request(router, "GET", "/web/index.html");
         EXPECT(index.status_code() == 200);  // the web root resolves from the test's cwd
         EXPECT(index.get_header("Content-Type") == "text/html");
