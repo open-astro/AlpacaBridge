@@ -23,7 +23,7 @@ AlpacaBridge is a complete ASCOM Alpaca server for Linux, built from two main co
              v
 +---------------------------+
 |        AlpacaCore         |  <- Device driver library
-|  (drivers, wrappers,      |     (no HTTP, no sockets)
+|  (drivers, wrappers,      |     (no server)
 |   device registry)        |
 +------------+--------------+
              |
