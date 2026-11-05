@@ -839,6 +839,8 @@ public:
 
     double get_target_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        throw_if_link_faulted();  // as GetTracking (decision 0009 rule 1)
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -854,6 +856,8 @@ public:
 
     double get_target_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        throw_if_link_faulted();  // as GetTracking (decision 0009 rule 1)
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }

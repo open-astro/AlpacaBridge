@@ -286,6 +286,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_at_home", [&] { (void)t.get_at_home(); }});
             p.push_back({"get_right_ascension_rate", [&] { (void)t.get_right_ascension_rate(); }});
             p.push_back({"get_declination_rate", [&] { (void)t.get_declination_rate(); }});
+            p.push_back({"get_target_right_ascension", [&] { (void)t.get_target_right_ascension(); }});
+            p.push_back({"get_target_declination", [&] { (void)t.get_target_declination(); }});
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
             break;
