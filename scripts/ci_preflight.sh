@@ -160,6 +160,53 @@ ensure_tool() {
   command -v "${cmd}" >/dev/null 2>&1
 }
 
+# clang_format_pair: prints "<clang-format> <git-clang-format>". CI's format job
+# runs ubuntu-24.04's clang-format 18, so the -18 pair wins when both exist; a
+# newer host default formats some code differently (#1755).
+clang_format_pair() {
+  if command -v clang-format-18 >/dev/null 2>&1 && command -v git-clang-format-18 >/dev/null 2>&1; then
+    echo "clang-format-18 git-clang-format-18"
+  else
+    echo "clang-format git-clang-format"
+  fi
+}
+
+# Pinned PMD release for the duplication gate (keep PMD_VER / PMD_SHA256 in sync
+# with the `duplication` job in .github/workflows/ci.yml; docs-drift check 2).
+PMD_VER="7.7.0"
+PMD_SHA256="be8bf68f6c1d66984bd9645a93e631b78a1c2f42f5f0f8719082fead67553940"
+
+# ensure_pmd: prints the path of the pinned PMD launcher, downloading the
+# checksum-verified release into the cache once. Never installs a JRE.
+ensure_pmd() {
+  local cache_dir zip launcher sum
+  cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/alpacabridge-preflight"
+  launcher="${cache_dir}/pmd-bin-${PMD_VER}/bin/pmd"
+  if [ -x "${launcher}" ]; then
+    echo "${launcher}"
+    return 0
+  fi
+  if [ "${PREFLIGHT_NO_INSTALL:-0}" = "1" ]; then
+    return 1
+  fi
+  mkdir -p "${cache_dir}"
+  zip="${cache_dir}/pmd-dist-${PMD_VER}-bin.zip"
+  echo ">> Downloading PMD ${PMD_VER}..." >&2
+  if ! curl -fsSL "https://github.com/pmd/pmd/releases/download/pmd_releases%2F${PMD_VER}/pmd-dist-${PMD_VER}-bin.zip" \
+      -o "${zip}"; then
+    echo ">> PMD download failed." >&2
+    return 1
+  fi
+  sum="$( (sha256sum "${zip}" 2>/dev/null || shasum -a 256 "${zip}") | cut -d' ' -f1)"
+  if [ "${sum}" != "${PMD_SHA256}" ]; then
+    echo ">> PMD checksum mismatch -- refusing to use the download." >&2
+    rm -f "${zip}"
+    return 1
+  fi
+  unzip -q -o "${zip}" -d "${cache_dir}" && rm -f "${zip}"
+  [ -x "${launcher}" ] && echo "${launcher}"
+}
+
 # Pinned zizmor release (keep in sync with .github/workflows/ci.yml). GitHub
 # release assets are immutable, so the hash is stable for a given version.
 ZIZMOR_VER="1.31.1"
@@ -321,7 +368,7 @@ self_test() {
   done
   for n in 'unicode scan' 'stress-test registration' 'falsified-by' 'pr-template' 'ConformU report validation' \
     'docs drift check' 'connect-error hook' 'serial port ownership' 'layering gate' 'contract sweep registration' \
-    'beta VERSION split'; do
+    'beta VERSION split' 'duplication'; do
     if ! printf '%s\n' "${summary}" | grep -qE "^  \[(PASS|SKIP|FAIL)\] ${n}"; then
       st_fail "summary does not list ${n}"
     fi
@@ -363,6 +410,25 @@ self_test() {
   else
     st_fail "unguarded_gate_lines fixture: expected '4:cmake --build AlpacaHTTP/build', got '${hits}'"
   fi
+  # Gate 1 prefers clang-format 18, the version CI's format job runs (#1755).
+  local stub_dir
+  stub_dir="$(mktemp -d)"
+  for n in clang-format git-clang-format clang-format-18 git-clang-format-18; do
+    printf '#!/bin/sh\n' > "${stub_dir}/${n}"
+    chmod +x "${stub_dir}/${n}"
+  done
+  if [ "$(PATH="${stub_dir}" clang_format_pair)" = "clang-format-18 git-clang-format-18" ]; then
+    st_ok "clang_format_pair picks clang-format-18 when both -18 tools exist"
+  else
+    st_fail "clang_format_pair did not pick clang-format-18 with both -18 tools on PATH"
+  fi
+  rm -f "${stub_dir}/git-clang-format-18"
+  if [ "$(PATH="${stub_dir}" clang_format_pair)" = "clang-format git-clang-format" ]; then
+    st_ok "clang_format_pair falls back to the unversioned pair"
+  else
+    st_fail "clang_format_pair did not fall back to the unversioned pair"
+  fi
+  rm -rf "${stub_dir}"
   if [ "${failed}" -eq 0 ]; then
     st_ok "empty-diff and quick-run summary lists every gate; every build gate (build+test, clang-tidy, sanitizers) is quick-run guarded"
   fi
@@ -459,8 +525,10 @@ section "clang-format (changed lines)"
 if ! have_cpp_changes; then
   echo "No C/C++ changes -- skipping."
   record SKIP "clang-format (no C/C++ changes)"
-elif ensure_tool clang-format clang-format; then
-  fmt_diff="$(git-clang-format --commit "${MERGE_BASE}" --diff \
+elif read -r fmt_cmd gcf_cmd <<<"$(clang_format_pair)" \
+     && { [ "${fmt_cmd}" = "clang-format-18" ] || ensure_tool clang-format clang-format; }; then
+  echo "Using $("${fmt_cmd}" --version 2>/dev/null | head -1)"
+  fmt_diff="$("${gcf_cmd}" --binary "$(command -v "${fmt_cmd}")" --commit "${MERGE_BASE}" --diff \
     --extensions c,cc,cpp,cxx,h,hh,hpp,hxx 2>/dev/null)"
   if [ "${fmt_diff}" = "no modified files to format" ] || \
      [ "${fmt_diff}" = "clang-format did not modify any files" ]; then
@@ -468,7 +536,7 @@ elif ensure_tool clang-format clang-format; then
     record PASS "clang-format"
   else
     echo "${fmt_diff}"
-    echo "Fix with: git-clang-format ${MERGE_BASE}"
+    echo "Fix with: ${gcf_cmd} --binary $(command -v "${fmt_cmd}") ${MERGE_BASE}"
     record FAIL "clang-format"
   fi
 else
@@ -815,6 +883,26 @@ else
     echo "zizmor unavailable -- CI will still audit the changed workflow(s)."
     record SKIP "zizmor (tool missing)"
   fi
+fi
+
+# --- gate 9b: duplicated-line ratchet (PMD CPD) ----------------------------
+# Mirrors the duplication CI job (#1755). Needs a Java runtime, which this
+# script never installs.
+
+section "duplication (PMD CPD)"
+if ! java -version >/dev/null 2>&1; then
+  record SKIP "duplication (no java)"
+elif ! python3 scripts/check_duplication.py --self-test >/dev/null; then
+  record FAIL "duplication (self-test)"
+elif pmd_bin="$(ensure_pmd)" && [ -n "${pmd_bin}" ]; then
+  if python3 scripts/check_duplication.py --pmd "${pmd_bin}"; then
+    record PASS "duplication"
+  else
+    record FAIL "duplication"
+  fi
+else
+  echo "PMD unavailable -- CI will still run the duplication check."
+  record SKIP "duplication (tool missing)"
 fi
 
 # --- sanitizers (ASan+UBSan: on by default in a full run; RUN_SANITIZERS=0 opts out) -----

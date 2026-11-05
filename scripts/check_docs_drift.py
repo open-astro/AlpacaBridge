@@ -24,8 +24,8 @@ Badge (check 25's number): python3 scripts/check_docs_drift.py --badge
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
      docs/development.md build-options table.
-  2. The zizmor pinned version + sha256 are identical between ci.yml and
-     ci_preflight.sh.
+  2. The zizmor and PMD pinned versions + sha256 are identical between ci.yml
+     and ci_preflight.sh.
   3. The cppcheck --suppress list is identical between ci.yml and
      ci_preflight.sh (ci-gates instructions, Docs drift bullet: "keep the
      cppcheck --suppress lists identical").
@@ -298,6 +298,30 @@ def check_zizmor_pin_sync():
             "zizmor sha256 mismatch: ci.yml has %s, ci_preflight.sh has %s"
             % (ci_sha.group(1), pf_sha.group(1))
         )
+    failures.extend(_pmd_pin_findings(ci, preflight))
+    return failures
+
+
+def _pmd_pin_findings(ci, preflight):
+    """The PMD pins of the duplication job and ci_preflight.sh agree (#1755). Pure,
+    so --self-test can drive it."""
+    ci_block = _scoped_block(ci, "- name: Install PMD", ("- name:",))
+    if ci_block is None:
+        return ["could not find the 'Install PMD' step in ci.yml"]
+    pins = {
+        "ci.yml version": re.search(r"^\s*ver=([0-9.]+)\s*$", ci_block, re.MULTILINE),
+        "ci.yml sha256": re.search(r"^\s*sha256=([0-9a-f]{64})\s*$", ci_block, re.MULTILINE),
+        "ci_preflight.sh version": re.search(r'^PMD_VER="([0-9.]+)"', preflight, re.MULTILINE),
+        "ci_preflight.sh sha256": re.search(r'^PMD_SHA256="([0-9a-f]{64})"', preflight, re.MULTILINE),
+    }
+    missing = [name for name, m in pins.items() if not m]
+    if missing:
+        return ["could not find the PMD pin(s): %s" % ", ".join(missing)]
+    failures = []
+    for what in ("version", "sha256"):
+        a, b = pins["ci.yml " + what].group(1), pins["ci_preflight.sh " + what].group(1)
+        if a != b:
+            failures.append("PMD %s mismatch: ci.yml has %s, ci_preflight.sh has %s" % (what, a, b))
     return failures
 
 
@@ -2819,7 +2843,7 @@ def print_badge(root=ROOT):
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
-    ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
+    ("zizmor and PMD pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
     ("cppcheck --suppress sync (ci.yml vs ci_preflight.sh)", check_cppcheck_suppress_sync),
     ("VERSION matches README badge", check_version_matches_readme),
     ("Blocking get_connected() list matches the code", check_blocking_get_connected_list),
@@ -3865,6 +3889,15 @@ def self_test():
     f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing, with one exception."))
     check("decision records: the word `exception` in a rule is reported (#2080)",
           any("rule 1 says `exception`" in x for x in f))
+
+    pmd_ci = ("      - name: Install PMD\n        run: |\n          ver=7.7.0\n          sha256=" + "a" * 64 +
+              "\n      - name: Next\n          ver=9.9.9\n")
+    pmd_pf = 'PMD_VER="7.7.0"\nPMD_SHA256="' + "a" * 64 + '"\n'
+    check("PMD pins: equal pins pass, scoped to the Install PMD step", _pmd_pin_findings(pmd_ci, pmd_pf) == [])
+    check("PMD pins: a sha256 mismatch is reported",
+          any("PMD sha256 mismatch" in x for x in _pmd_pin_findings(pmd_ci, pmd_pf.replace("a" * 64, "b" * 64))))
+    check("PMD pins: a missing preflight pin is reported",
+          any("could not find the PMD pin" in x for x in _pmd_pin_findings(pmd_ci, "")))
     f = records(first=good_record.replace("1. Do a thing. Scope: `src/a.cpp`. Checked by: review.",
                                           "1. Do a thing until told. Scope: `src/a.cpp`. Checked by: review. <!-- allowed -->"))
     check("decision records: the allowed marker admits a bounded rule", f == [])
