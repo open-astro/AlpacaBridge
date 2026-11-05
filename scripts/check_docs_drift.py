@@ -2366,7 +2366,7 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0009-link-loss-and-relink-policy.md": 0,
     "0011-cgx-logical-reference-continuity.md": 0,
     "0012-bundled-libgphoto2.md": 1,
-    "0013-designs-to-avoid.md": 7,
+    "0013-designs-to-avoid.md": 6,
     "0014-utc-offset.md": 2,
     "0015-sdk-seams.md": 4,
     "0016-getters-never-wait-on-device-io.md": 0,
