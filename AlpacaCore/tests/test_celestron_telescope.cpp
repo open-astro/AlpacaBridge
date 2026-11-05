@@ -524,9 +524,6 @@ TEST_CASE("Celestron Telescope Driver - a Dec pulse does not cut the chunk chain
     // this case is about the pulse timers, so the poll stays off.
     alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
-    // The paused poll body may still be inside its first tick and not yet parked. Count it before the pulses, or its
-    // later parking is taken for a pulse body and the Dec chain starts its wait after the clock has moved on.
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
     const std::size_t idle_waiters = clock.waiter_count();
     driver->pulse_guide(2, 5000);  // East, RA: 255 cs now, 245 cs chained at 2.55 s
     REQUIRE(clock.wait_for_waiters(idle_waiters + 1, std::chrono::seconds(5)));
@@ -535,6 +532,13 @@ TEST_CASE("Celestron Telescope Driver - a Dec pulse does not cut the chunk chain
     REQUIRE(clock.wait_for_waiters(idle_waiters + 2, std::chrono::seconds(5)));
     step_clock(clock, std::chrono::milliseconds(4300));  // t0 + 4.6 s
 
+    // The chain body returns once it sends a chunk, but the fake server logs that chunk later, on its own thread: wait
+    // for the log (a fake-server event, not a driver timer). A cut chain never sends its second chunk and fails here.
+    const auto log_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((log->guide_chunks_cs('\x10').size() < 2 || log->guide_chunks_cs('\x11').size() < 2) &&
+           std::chrono::steady_clock::now() < log_deadline) {
+        std::this_thread::yield();
+    }
     CHECK(driver->get_is_pulse_guiding());
     CHECK(log->guide_chunks_cs('\x10') == std::vector<int>{255, 245});
     CHECK(log->guide_chunks_cs('\x11') == std::vector<int>{255, 45});
