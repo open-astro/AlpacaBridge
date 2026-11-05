@@ -1467,12 +1467,12 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        util::validate_ra_dec(ra, dec, "SlewToCoordinates");  // InvalidValue precedes the connection check
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinates");
-            util::validate_ra_dec(ra, dec, "SlewToCoordinates");
             // open-astro#775: same Tracking precondition as the async forms.
             refresh_tracking_mode_locked(lock);
             if (!get_tracking_locked(lock)) {
@@ -1502,6 +1502,8 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        // Argument validation precedes the connection and state checks (ASCOM contract).
+        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
         {
             // Gate BEFORE claiming: the claim ends a park in flight (clearing
@@ -1509,8 +1511,6 @@ public:
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
-            // Argument validation precedes the state check (ASCOM contract).
-            util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             // open-astro#775: ITelescopeV4 raises InvalidOperation when a slew
             // is requested with Tracking false.
             refresh_tracking_mode_locked(lock);
@@ -1537,7 +1537,6 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
-            util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             displaced = claim_slew_slot_locked();
             parking_ = false;  // a park body in flight no longer clears it: the claim ended it
             owner_generation = bump_motion_generation();
@@ -1679,11 +1678,11 @@ public:
     // write. The `s` goes out in its wire turn with mutex_ released, so it follows any motion command a body has
     // already committed to send, and the checks run again at the turn.
     void sync_to_coordinates(double ra, double dec) override {
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");  // InvalidValue precedes the connection check
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t ra_raw = encode_ra_raw(ra, bits);

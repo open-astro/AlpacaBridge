@@ -121,6 +121,24 @@ TEST_CASE("SynScan Telescope Driver - Target Range Validation", "[synscan][teles
     require_alpaca_error([&]() { driver->set_target_declination(45.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
+TEST_CASE("SynScan Telescope Driver - slew and sync arguments are checked before the connection",
+          "[synscan][telescope][unit]") {
+    // AGENTS.md: InvalidValue precedes the connection check (open-astro#2084).
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    require_alpaca_error([&]() { driver->slew_to_coordinates(25.0, 10.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(25.0, 10.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(25.0, 10.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 91.0); }, alpacacore::AlpacaError::InvalidValue);
+    // A valid pair still reports the connection.
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 10.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
 TEST_CASE("SynScan Telescope Driver - Axis Rate Ranges", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
     conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;

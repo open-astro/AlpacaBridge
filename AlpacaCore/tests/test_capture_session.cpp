@@ -1078,8 +1078,9 @@ TEST_CASE("CaptureSession - a refused body thread rolls the start back and the n
         CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
     }
     SECTION("bad_alloc") {
+        // The slot reports an allocation failure as DriverException, like EAGAIN (#2084).
         h.session->set_spawn_for_testing([](std::function<void()>) -> std::thread { throw std::bad_alloc(); });
-        CHECK_THROWS_AS(h.session->start(1.0, polling_body(p)), std::bad_alloc);
+        CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
     }
     CHECK_FALSE(h.session->busy());
     CHECK(h.session->image_ready());  // the earlier frame, not Exposing

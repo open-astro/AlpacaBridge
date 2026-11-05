@@ -37,6 +37,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -468,9 +469,15 @@ TEST_CASE("AsyncOperation - a refused thread is an AlpacaException and changes n
     const auto generation_before = h.generation.current();
     const auto failure_before = h.op->last_failure();
 
-    h.op->set_spawn_for_testing([](std::function<void()>) -> std::thread {
-        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
-    });
+    // An allocation failure on the start path is refused the same way (#2084).
+    SECTION("EAGAIN") {
+        h.op->set_spawn_for_testing([](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+    }
+    SECTION("bad_alloc") {
+        h.op->set_spawn_for_testing([](std::function<void()>) -> std::thread { throw std::bad_alloc(); });
+    }
     int code = 0;
     std::string message;
     try {

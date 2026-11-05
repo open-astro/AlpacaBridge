@@ -59,6 +59,8 @@ struct FakeMountProfile {
     // EQ-AL55i Pro. Kept opt-in so the existing profiles are untouched.
     uint32_t cpr_dec = 0;
     uint32_t timer_freq = 14000000;
+    // ":D" (sidereal step period). 0 derives it from timer_freq and the axis CPR.
+    uint32_t sidereal_period = 0;
     std::string version_reply = "033A44";  // ":e" payload: fw 3.58, mount code 0x44
     std::string high_speed_ratio_reply = "01";
     uint32_t features = 0x100C;  // ":q" 0x000001: POLAR_LED | IS_AZEQ | HOME_INDEXER
@@ -84,6 +86,7 @@ struct FakeMountProfile {
         FakeMountProfile p;
         p.cpr = 9216000;
         p.timer_freq = 16000000;
+        p.sidereal_period = 149592;  // the EQM-35 Pro capture
         p.version_reply = "032732";
         p.high_speed_ratio_reply = "01";
         p.features = 0x7000;
@@ -842,6 +845,12 @@ public:
                 }
                 return "=";
             }
+            case 'D':
+                return "=" + u24(profile_.sidereal_period != 0
+                                     ? profile_.sidereal_period
+                                     : static_cast<uint32_t>(std::llround(kTimerFreq * 360.0 / a.cpr / kSiderealDegPerSec)));
+            case 'h':
+                return "=" + u24(static_cast<uint32_t>(a.goto_target));
             case 'O':
             case 'P':
             case 'V':

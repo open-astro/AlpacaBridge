@@ -1807,3 +1807,13 @@ TEST_CASE("SkyWatcher serial - a muted board's refused connect names the port an
     CHECK(last.find(path) != std::string::npos);
     CHECK(last.find("Serial Port setting") != std::string::npos);
 }
+
+TEST_CASE("SkyWatcher fake board - answers :D and :h (#2084)", "[skywatcher][unit]") {
+    alpacacore::test::FakeSkyWatcherBoard board(FakeMountProfile::eqm35_pro());
+    // ":D" is the board's sidereal step period; the EQM-35 Pro capture reads 149592 (0x024858).
+    CHECK(board.handle(":D1") == "=584802");
+    // ":h" reads back the goto target last written with ":S".
+    CHECK(board.handle(":S1563412") == "=");
+    CHECK(board.handle(":h1") == "=563412");
+    CHECK(board.handle(":h2") == "=000080");  // untouched axis: kHome 0x800000
+}

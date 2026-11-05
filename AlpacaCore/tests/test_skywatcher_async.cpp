@@ -1313,12 +1313,12 @@ TEST_CASE("SkyWatcher async - a refused MoveAxis(Dec) during a Dec pulse leaves 
 // 500 ms, pinning real axis-on time to a ~40 ms window and turning ordinary
 // scheduling jitter into a flaky failure -- the first fix for that (a flat
 // +-1 count) was itself still spent entirely on overshoot, since undershoot
-// is structurally impossible here: task_wait_for(remaining) never returns
+// is structurally impossible here: the slot wait ctx.wait_for(remaining) never returns
 // early and the fake starts integrating at ":J", before the driver's own
 // dispatch cost is paid, so delivered counts can only be AT LEAST
 // trunc(rate x duration) (Axis::advance()'s remainder carry keeps that
 // floor under one count at any duration) and can exceed it by however long
-// task_wait_for's wakeup, the ":K" round trip and stop_axis()'s mutex
+// the slot wait's (ctx.wait_for) wakeup, the ":K" round trip and stop_axis()'s mutex
 // acquisition take. A flat +-1 band therefore left ~70-90 ms of real budget
 // entirely on the overshoot side while still failing on a few ms of it --
 // four review rounds on open-astro#603 measured the same ~80 ms figure
@@ -1358,7 +1358,7 @@ TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a b
             // the header comment), so the lower bound stays at the fake's own
             // quantisation floor -- tight enough to catch the ~21% shortfall
             // this branch fixes -- while the upper bound absorbs the real
-            // overshoot budget (task_wait_for wakeup + the ":K" round trip +
+            // overshoot budget (ctx.wait_for wakeup + the ":K" round trip +
             // stop_axis()'s mutex) instead of spending a flat +-1 band
             // entirely on one side of a symmetric check.
             CHECK(moved_counts >= expected_counts - 1.0);
@@ -1552,7 +1552,7 @@ struct WatchdogLogGuard {
 }  // namespace
 
 // open-astro#743 rules 2 and 3: the MoveAxis(axis, 0) stop task polls the
-// board's braking ramp through task_wait_for and gives up at kAxisStopTimeout
+// board's braking ramp through the slot wait (ctx.wait_for) and gives up at kAxisStopTimeout
 // (5 s), both on the injected clock. The fake's ramp is on the same clock, so
 // the poll sees the axis stop exactly when virtual time reaches the ramp's
 // end, and the timeout fires at 5 s of virtual time while the board still
@@ -1942,6 +1942,10 @@ struct SlotGate {
     std::mutex m;
     std::condition_variable cv;
     bool open = true;
+
+    // A REQUIRE that throws before release() would leave the driver's join waiting
+    // on a gated thread forever.
+    ~SlotGate() { release(); }
 
     std::function<std::thread(std::function<void()>)> spawn() {
         return [this](std::function<void()> f) {
