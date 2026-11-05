@@ -110,6 +110,7 @@ Symbol: `StateSnapshot`
 | OnStep telescope | `StateSnapshot` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1783 | 1 s; OnStep telescope adoption above |
 | iOptron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
 | ZWO telescope | `StateSnapshot` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1531 | 250 ms after each poll; 5 s freshness threshold; `device_state_age()` uses `mandatory_at` from accepted GU plus a complete RA/Dec pair, independent of later GU-only or optional publication; before the first mandatory pair it uses the partial frame's `measured_at`; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |
+| remotealpaca (proxied devices) | `StateSnapshot` | — | planned | #1753 | getters served from the upstream poll ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) |
 
 ## Links
 

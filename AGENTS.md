@@ -98,7 +98,9 @@ Each line is a summary; the linked topic file holds the rule and its history.
 ## Core Architecture
 
 - `AlpacaCore` is vendor-neutral Alpaca logic and device behavior only:
-  - No HTTP/REST/sockets/JSON transport code.
+  - No server: no listening socket, router or inbound request parsing. An outbound client inside a
+    vendor wrapper is that vendor's wire protocol, reached through `util::HttpClient`
+    ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)).
   - Vendor SDKs isolated to `external/` + `src/vendors/<vendor>/` + `include/alpacacore/vendor/<vendor>/`.
 - `AlpacaHTTP` is transport/routing/config/discovery only:
   - No vendor SDK use.
@@ -179,7 +181,8 @@ Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.
 
 ## Out of Scope Guardrails
 
-- Do not add HTTP/server code to AlpacaCore.
+- Do not add server code to AlpacaCore: no listening socket, router or inbound request parsing
+  ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)). Outbound vendor clients go through `util::HttpClient`.
 - Do not add vendor SDK usage to AlpacaHTTP.
 - Do not add desktop GUI frameworks (Qt, GTK, wxWidgets, etc.). The web UI in `AlpacaHTTP/web/` is the only user interface.
 - Do not invent device types outside the ASCOM Alpaca standard set (Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope). Shutter control is part of the **Dome** interface (`OpenShutter`/`CloseShutter`/`ShutterStatus`), not a standalone device. A non-standard `Shutter` device type existed as unused scaffolding and was removed 2026-06-09 — clients (NINA, ConformU) cannot consume non-standard types, so they break interoperability.

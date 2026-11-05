@@ -96,6 +96,7 @@ Symbol: `kLinkStalenessBound`
 | Filter wheel and focuser SDK drivers (SVBONY, ToupTek, Player One) and the QHY, SVBONY, ToupTek and Player One cameras |  | — | planned | — | SDK error on the next call |
 | GPhoto camera |  | — | planned | — | A failed exposure is reported by `ImageReady`/`ImageArray` (`CameraState` stays Idle); a camera gone from the USB bus mid-exposure reports `Connected` false; no automatic reopen (#1064, #1204) |
 | WeeWX |  | — | planned | — | HTTP fetch staleness |
+| remotealpaca (proxied devices) |  | — | planned | #1753 | `PolledLinkHealth` on the upstream poll; a refused connection is a loss at once ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) |
 
 Drivers adopt this record in their own later changes; the telescope state-snapshot slices apply point 3 when they land.
 

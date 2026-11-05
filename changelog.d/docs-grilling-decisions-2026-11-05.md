@@ -1,0 +1,3 @@
+### Added
+
+- **Decision 0023, outbound clients in vendor wrappers** (docs, issue #1753): AlpacaCore's guardrail now says what it protects, no server, and an outbound client inside a vendor wrapper is that vendor's wire protocol reached through one `util::HttpClient` seam. The record fixes the `remotealpaca` proxy vendor's rules (self-loop refusal, snapshot-served getters, link loss, pass-through errors, own `UniqueID`) and its slices; planned rows are added in decisions 0009, 0010, 0015 and 0016. `CONTEXT.md` defines native device, proxied device and upstream server. A `.out-of-scope/` record explains why firmware update checkers (#1763) were declined.
