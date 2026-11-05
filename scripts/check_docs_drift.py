@@ -1167,6 +1167,10 @@ MEMORY_COMMENT_PATH_RE = re.compile(r"\bdocs/(?:failures|decisions)/[A-Za-z0-9._
 # A comment may cite a record by number only (`docs/decisions/0008`, PR #1410 audit):
 # the number must name exactly one record.
 MEMORY_COMMENT_ID_RE = re.compile(r"\bdocs/(failures|decisions)/(\d{4})(?!-|\w|\.\w)")
+# A record cited in words (`decision 0009`), in a source comment or anywhere in a
+# docs page; about 1,100 such citations exist and a renumbered record would
+# otherwise pass (#2080).
+DECISION_WORD_RE = re.compile(r"\bdecision (\d{4})\b", re.I)
 FIRST_PARTY_COMMENT_EXTENSIONS = {".cpp", ".h", ".js", ".py", ".sh"}
 # The real tree has ~330 candidate files; the self-test fixture has a handful.
 MIN_MEMORY_COMMENT_FILES = 5
@@ -1180,11 +1184,12 @@ def check_memory_comment_paths_exist(root=ROOT):
     """
     failures = []
     scanned = 0
-    for component in ("AlpacaCore", "AlpacaHTTP", "scripts"):
+    for component in ("AlpacaCore", "AlpacaHTTP", "scripts", "docs"):
         if not (root / component).is_dir():
             continue
         for path in (root / component).rglob("*"):
-            if not path.is_file() or path.suffix not in FIRST_PARTY_COMMENT_EXTENSIONS:
+            is_doc = component == "docs" and path.suffix == ".md"
+            if not path.is_file() or (path.suffix not in FIRST_PARTY_COMMENT_EXTENSIONS and not is_doc):
                 continue
             rel = path.relative_to(root)
             # Exclusions match repo-relative DIRECTORY components only. The
@@ -1195,14 +1200,16 @@ def check_memory_comment_paths_exist(root=ROOT):
             directories = rel.parts[:-1]
             if "external" in directories or any(part.startswith("build") for part in directories):
                 continue
-            scanned += 1
+            if not is_doc:
+                scanned += 1
             for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                if not line.lstrip().startswith(("//", "#", "*")):
+                if not is_doc and not line.lstrip().startswith(("//", "#", "*")):
                     continue
                 for reference in MEMORY_COMMENT_PATH_RE.findall(line):
                     if not (root / reference).is_file():
                         failures.append("%s:%d references a missing memory record: %s" % (rel, lineno, reference))
-                for directory, number in MEMORY_COMMENT_ID_RE.findall(line):
+                cited = MEMORY_COMMENT_ID_RE.findall(line) + [("decisions", n) for n in DECISION_WORD_RE.findall(line)]
+                for directory, number in cited:
                     hits = list((root / "docs" / directory).glob(number + "-*.md"))
                     if len(hits) != 1:
                         failures.append("%s:%d cites docs/%s/%s, which names %d records (expected 1)"
@@ -2351,7 +2358,7 @@ DECISION_INDEX_LINK_RE = re.compile(r"^- \[[^\]]+\]\((\d{4}-[^)]+\.md)\)( \(reti
 # defect with an issue, never a clause (README.md, "Rules"). A rule whose bound
 # needs one of these words ends with ` <!-- allowed -->` (DECISION_RULE_RE's
 # `allowed` group, so check_adr_scope.py reads a marked rule as any other).
-DECISION_EXCEPTION_WORD_RE = re.compile(r"\b(except|unless|until|for now)\b", re.I)
+DECISION_EXCEPTION_WORD_RE = re.compile(r"\b(except|exception|unless|until|for now)\b", re.I)
 # `Checked by: review` names no evidence, so the bot has nothing to apply. New
 # rules write `review (<what to look for>)`; the records below keep the bare
 # form they had when the form changed, and this baseline may only fall: lower
@@ -3058,6 +3065,12 @@ def self_test():
             "AlpacaCore/build/gen.cpp": "// See docs/failures/0005-missing.md\n",
             "AlpacaCore/external/sdk.h": "// See docs/failures/0006-missing.md\n",
             "AlpacaCore/src/notes.txt": "// See docs/failures/0007-missing.md\n",
+            # A record cited by its number in words (#2080): the number must
+            # name exactly one record, in a source comment and in a docs page.
+            "docs/decisions/0001-present.md": "# present\n",
+            "AlpacaCore/src/word_ok.cpp": "// decision 0001 rule 2\n",
+            "AlpacaCore/src/word_bad.cpp": "// Decision 0099 rule 2\n",
+            "docs/page.md": "See decision 0098 for the rule.\n",
         }
         for name, text in fixture.items():
             (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -3075,7 +3088,13 @@ def self_test():
               not any("gen.cpp" in f or "sdk.h" in f for f in found))
         check("memory comment check: only first-party source extensions are scanned",
               not any("notes.txt" in f for f in found))
-        check("memory comment check: exactly the two expected findings", len(found) == 2)
+        check("memory comment check: a `decision NNNN` citation of a present record is not reported",
+              not any("word_ok.cpp" in f for f in found))
+        check("memory comment check: a `decision NNNN` citation of a missing record is reported",
+              any(f.startswith("AlpacaCore/src/word_bad.cpp:1 ") and "decisions/0099" in f for f in found))
+        check("memory comment check: a `decision NNNN` citation in a docs page is checked",
+              any(f.startswith("docs/page.md:1 ") and "decisions/0098" in f for f in found))
+        check("memory comment check: exactly the four expected findings", len(found) == 4)
         empty = Path(tmp) / "empty"
         empty.mkdir()
         check("memory comment check: a root with no first-party files trips the floor",
@@ -3843,6 +3862,9 @@ def self_test():
           any("0 bare `Checked by: review` rules remain but DECISION_BARE_REVIEW_BASELINE allows 1" in x for x in f))
     f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing unless asked."))
     check("decision records: an exception word in a rule is reported", any("rule 1 says `unless`" in x for x in f))
+    f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing, with one exception."))
+    check("decision records: the word `exception` in a rule is reported (#2080)",
+          any("rule 1 says `exception`" in x for x in f))
     f = records(first=good_record.replace("1. Do a thing. Scope: `src/a.cpp`. Checked by: review.",
                                           "1. Do a thing until told. Scope: `src/a.cpp`. Checked by: review. <!-- allowed -->"))
     check("decision records: the allowed marker admits a bounded rule", f == [])

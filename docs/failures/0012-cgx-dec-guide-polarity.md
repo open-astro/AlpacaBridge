@@ -1,20 +1,14 @@
 # CGX USB reversed Dec guide polarity
 
-## Hardware finding
+## Summary
 
-On 2026-10-13, the northern CGX in the lab (motor firmware 7.17.25, model
-0x1788 on both axes, direct USB from the RPi4) was homed, then positioned at
-Dec +89 degrees on the Normal pointing branch. A two-second Dec baseline showed
-zero drift. One `PulseGuide(Direction=0, Duration=1000)` requested North at the
-configured half-sidereal guide rate, 7.52055 arcsec/s. Dec instead changed by
-**-7.5702667 arcsec**. IsPulseGuiding was true during the pulse and false after it.
-Tracking was disabled and FindHome returned the mount to its reference position.
+On 2026-10-13 a one-second North `PulseGuide` on the lab CGX moved Dec South. The
+driver took positive native Dec velocity as North, copying the hand-controller
+shorthand, while its encoder geometry makes positive counts decrease Dec. The sign
+is corrected and pinned by a regression test; the measured first-pulse magnitude
+excess seen afterwards is recorded here and remains unresolved.
 
-This is a direction failure, not evidence for an empirical rate multiplier. The
-rate discrepancy is less than one 24-bit encoder count (~0.07725 arcsec), and a
-single pulse cannot separate quantization, timing and mechanical effects.
-
-## Root cause and fix
+## Root Cause
 
 The driver interpreted native positive Dec velocity as North, copying the HC
 direction shorthand. In its northern Normal encoder geometry,
@@ -24,12 +18,12 @@ velocity; South needs positive. The existing hemisphere and BeyondPole reversals
 still follow the derivative of that geometry. RA's West-positive/East-negative
 convention is separate and stays unchanged.
 
+## Prevention
+
 Sibling set: North and South, both hemisphere signs, both pointing branches,
 single and segmented pulses (the signed velocity is calculated once and carried
 through every chunk). The common change covers all of them. HC pass-through and
 the unfinished WiFi backend are different implementations and are not changed.
-
-## Regression and limits
 
 The old test pinned the same incorrect byte convention as the driver. It is now
 corrected and strengthened: for each Dec pulse it applies an explicit signed
@@ -46,7 +40,23 @@ evidence only. The later [larger-movement session](../celestron-cgx-usb-motion.m
 adds northern BeyondPole direction and flip evidence; southern behavior remains
 unqualified, and the first-issue ConformU attempt is not a pass.
 
-## Verification after the fix
+## Evidence
+
+### Hardware finding
+
+On 2026-10-13, the northern CGX in the lab (motor firmware 7.17.25, model
+0x1788 on both axes, direct USB from the RPi4) was homed, then positioned at
+Dec +89 degrees on the Normal pointing branch. A two-second Dec baseline showed
+zero drift. One `PulseGuide(Direction=0, Duration=1000)` requested North at the
+configured half-sidereal guide rate, 7.52055 arcsec/s. Dec instead changed by
+**-7.5702667 arcsec**. IsPulseGuiding was true during the pulse and false after it.
+Tracking was disabled and FindHome returned the mount to its reference position.
+
+This is a direction failure, not evidence for an empirical rate multiplier. The
+rate discrepancy is less than one 24-bit encoder count (~0.07725 arcsec), and a
+single pulse cannot separate quantization, timing and mechanical effects.
+
+### Verification after the fix
 
 - Native arm64 focused CGX suite: 57 cases / 693 assertions passed, including
   the corrected byte matrix, eight sky-direction assertions, and modern-profile
@@ -144,7 +154,7 @@ after 0/2/10 s waits. One-count-then-flat baselines and persistent settled exces
 do not support leftover GOTO drift as the explanation. The mechanism remains
 unresolved; no arrival sleep or coordinate compensation was introduced.
 
-## Other measurements from the same session
+### Other measurements from the same session
 
 | Basic lab check | Result |
 | --- | --- |

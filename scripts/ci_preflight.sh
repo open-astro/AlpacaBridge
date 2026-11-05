@@ -234,6 +234,25 @@ read_lines() {
 
 # --- self-test (issue #1453) -----------------------------------------------
 
+# unguarded_gate_lines <file>: prints "line:text" for each gate command (a
+# run_all_tests.sh, cmake -S or cmake --build call) that is not inside a top-level
+# if-chain whose if/elif tests full_only, RUN_TSAN or RUN_SCAN_BUILD. Comment
+# lines are ignored. Empty output means every build gate is quick-run guarded.
+unguarded_gate_lines() {
+  awk '
+    # shortcut: function bodies are skipped (the gates run at top level), so a
+    # gate call added inside a helper is not seen; widen if one ever moves there.
+    /^[A-Za-z_]+\(\) *\{/ { infn = 1 }
+    infn && /^\}/ { infn = 0; next }
+    infn { next }
+    /^if / { depth = 1; guarded = 0 }
+    depth == 1 && /^(if|elif) / && /full_only|RUN_TSAN|RUN_SCAN_BUILD/ { guarded = 1 }
+    /^fi([ ;]|$)/ { depth = 0; guarded = 0 }
+    /^[ \t]*#/ { next }
+    /run_all_tests\.sh|cmake +(--build|-S) / && !(depth == 1 && guarded) { print NR ":" $0 }
+  ' "$1"
+}
+
 # The single-quoted test strings are meant literally ($(...) must not expand).
 # shellcheck disable=SC2016
 self_test() {
@@ -267,7 +286,7 @@ self_test() {
   # Check 4: no bash 4 construct anywhere in the script (the bracketed letters keep
   # this pattern from matching its own line).
   local hits
-  if hits="$(grep -nE 'map[f]ile|read[a]rray|declare +-[a-zA-Z]*A|\$\{[A-Za-z_]+(,,|\^\^)\}|\|[&]|[&]>>' "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
+  if hits="$(grep -nE 'map[f]ile|read[a]rray|(declare|local) +-[a-zA-Z]*[An]\b|\$\{[A-Za-z_]+(,,?|\^\^?)\}|\$\{[A-Za-z_]+\[-[0-9]+\]\}|\|[&]|[&]>>|\bco[p]roc\b' "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
     st_fail "bash 4 construct in scripts/ci_preflight.sh:"
     echo "${hits}" >&2
   else
@@ -285,6 +304,7 @@ self_test() {
 
   # Checks 2 and 3: a quick run against an empty diff (base = HEAD).
   out="$(PREFLIGHT_BASE=HEAD PREFLIGHT_NO_INSTALL=1 PREFLIGHT_FULL=0 PREFLIGHT_SELF_TEST_REEXEC='' \
+    RUN_TSAN=0 RUN_SCAN_BUILD=0 PR_BODY_FILE='' \
     /bin/bash "${ROOT_DIR}/scripts/ci_preflight.sh" 2>&1 </dev/null)" || true
   if printf '%s\n' "${out}" | grep -qE 'unbound variable|(map[f]ile|read[a]rray): command not found'; then
     st_fail "empty-diff run aborted:"
@@ -311,6 +331,16 @@ self_test() {
       st_fail "quick run: ${n} did not record the quick-run SKIP"
     fi
   done
+  # The inner run must not inherit the caller's RUN_TSAN, RUN_SCAN_BUILD or
+  # PR_BODY_FILE: with them the self-test would build or read files (issue #2089).
+  for n in 'falsified-by \(no PR body\)' 'pr-template \(no PR body\)'; do
+    if ! printf '%s\n' "${summary}" | grep -qE "^  \[SKIP\] ${n}"; then
+      st_fail "inner quick run read the caller's PR_BODY_FILE: ${n} not recorded as SKIP"
+    fi
+  done
+  if printf '%s\n' "${summary}" | grep -qiE '^  \[(PASS|SKIP|FAIL)\] (TSan|scan-build)'; then
+    st_fail "inner quick run inherited RUN_TSAN or RUN_SCAN_BUILD from the caller"
+  fi
   # Check 3, clang-tidy: the empty diff never reaches its full_only call (no C++ changes),
   # so check statically that each build gate is only run through full_only "<name>".
   for n in 'build+test (vendors OFF)' 'build+test (vendors ON)' 'clang-tidy' 'sanitizers'; do
@@ -318,6 +348,21 @@ self_test() {
       st_fail "build gate ${n} is not guarded by full_only"
     fi
   done
+  # One guarded call per gate is not enough: a second build call elsewhere would
+  # still pass the loop above (issue #2089). Every gate command in the script must
+  # sit in a top-level if-chain that tests full_only, RUN_TSAN or RUN_SCAN_BUILD.
+  hits="$(unguarded_gate_lines "${ROOT_DIR}/scripts/ci_preflight.sh")"
+  if [ -n "${hits}" ]; then
+    st_fail "build gate command outside a full_only branch:"
+    echo "${hits}" >&2
+  fi
+  hits="$(printf '%s\n' 'if full_only "x"; then' '  ./run_all_tests.sh' 'fi' 'cmake --build AlpacaHTTP/build' \
+    'if [ "${RUN_TSAN:-0}" = "1" ]; then' '  cmake -S AlpacaCore -B t' 'fi' | unguarded_gate_lines /dev/stdin)"
+  if [ "${hits}" = "4:cmake --build AlpacaHTTP/build" ]; then
+    st_ok "unguarded_gate_lines reports only the unguarded build call"
+  else
+    st_fail "unguarded_gate_lines fixture: expected '4:cmake --build AlpacaHTTP/build', got '${hits}'"
+  fi
   if [ "${failed}" -eq 0 ]; then
     st_ok "empty-diff and quick-run summary lists every gate; every build gate (build+test, clang-tidy, sanitizers) is quick-run guarded"
   fi
