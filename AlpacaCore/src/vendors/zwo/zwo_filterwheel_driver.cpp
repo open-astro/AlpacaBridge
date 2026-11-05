@@ -185,6 +185,10 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     lost_reason_.clear();
                 }
+                {
+                    std::lock_guard<std::mutex> lock(firmware_mutex_);
+                    firmware_.clear();  // a connect that fails reports no firmware
+                }
                 const auto opened = bind_wheel_locked();
                 try {
                     sdk_.with_link(open_id_, open_link_, [&] { publish_connect_state(open_id_, opened.serial); });
@@ -211,10 +215,25 @@ public:
                 serial_number_.clear();
             }
         }
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
+        }
         status_cache_.reset();
         // Waits for an exchange in flight: the handle is never closed under one.
         std::lock_guard<std::mutex> io(io_mutex_);
         release_open_locked();
+    }
+
+    // EFW firmware read once at connect; web UI only, never DriverInfo. Cheap getter: no SDK call, and only the
+    // leaf firmware_mutex_ (decision 0016). Empty (unread, or cleared by Connect or Disconnect) is no firmware; no
+    // Connected check, the cache is empty while disconnected.
+    std::optional<std::string> get_device_firmware() const override {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (firmware_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_;
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -358,6 +377,14 @@ private:
     // resolved to, the info and slot data, then the serial read at the open (decision 0016 rule 3: a connect that
     // throws before this publish leaves the pre-connect values). Caller holds io_mutex_ and not mutex_.
     void publish_connect_state(int wheel_id, const std::string& serial) {
+        // Informational: a failed read never fails the connect, the hook then reports no firmware. Published
+        // last, after every throw point, so only a finished connect reports one (decision 0016 rule 3).
+        std::string firmware;
+        try {
+            firmware = sdk_.get_firmware_version(wheel_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "EFW firmware unavailable: " + std::string(e.what()));
+        }
         ZWOEFWInfo info;
         if (!sdk_.get_wheel_info_by_id(wheel_id, info)) {
             throw AlpacaException("Failed to read filter wheel info", AlpacaError::DriverException);
@@ -366,6 +393,10 @@ private:
             ALPACA_LOG_WARN("ZWO",
                             "EFW serial number unavailable: Connect cannot tell this wheel from another after a "
                             "replug");
+        }
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_ = firmware;
         }
         std::lock_guard<std::mutex> lock(mutex_);
         if (wheel_index_.has_value()) {
@@ -672,6 +703,9 @@ private:
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
+    // Leaf lock for firmware_ alone (the hook never waits on mutex_ or the I/O lock).
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_;
     mutable util::TtlStatusCache<Status> status_cache_;
 };
 

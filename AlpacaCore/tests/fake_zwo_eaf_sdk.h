@@ -54,6 +54,12 @@ public:
 
     int id{3};
     int slot_index{0};
+    // What get_firmware_version() answers; an empty string is an unreadable one. fail_firmware makes it throw.
+    std::string firmware{"1.0"};
+    bool fail_firmware{false};
+    std::atomic<int> firmware_calls{0};
+    // The connect's info read fails (after the firmware read).
+    bool fail_info{false};
     std::string serial{"EAF-SN-1"};
     // A second focuser on the same SDK (issue #1500 id swap); -1 = none.
     int second_id{-1};
@@ -126,7 +132,7 @@ public:
     bool get_focuser_info_by_id(int focuser_id, Info& info) override {
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (removed || (focuser_id != id && focuser_id != second_id)) {
+        if (fail_info || removed || (focuser_id != id && focuser_id != second_id)) {
             return false;
         }
         info = Info{focuser_id, "EAF", max_step};
@@ -286,7 +292,9 @@ private:
     std::string raw_firmware(int focuser_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         check_unit(focuser_id);
-        return "1.0";
+        ++firmware_calls;
+        if (fail_firmware) throw AlpacaException("EAF firmware read failed", AlpacaError::DriverException);
+        return firmware;
     }
 
     void throw_if_removed() const {
