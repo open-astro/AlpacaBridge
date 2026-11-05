@@ -369,8 +369,11 @@ constexpr auto kRealLimit = std::chrono::seconds(60);
 // One step: once the driver is parked on the clock, advance it by kVirtualStep and wait for the woken task to
 // settle, so no step lands between two of its waits. Returns false when nothing was parked within 20 ms of real
 // time (the driver is on the socket or the op is done).
-bool step_virtual(alpacacore::test::FakeTaskClock& clock) {
-    if (!clock.wait_for_waiters(1, std::chrono::milliseconds(20))) {
+// `min_waiters` is the number of parked tasks that counts as "the driver is parked": a case whose paused status poll
+// keeps one wait of its own on the clock passes its count plus one, or every step advances while the driver is on
+// the socket and the virtual time it measures grows with the real time the socket took (#2049).
+bool step_virtual(alpacacore::test::FakeTaskClock& clock, std::size_t min_waiters = 1) {
+    if (!clock.wait_for_waiters(min_waiters, std::chrono::milliseconds(20))) {
         return false;
     }
     clock.advance(kVirtualStep);
@@ -385,9 +388,9 @@ void advance_idle(alpacacore::test::FakeTaskClock& clock, std::chrono::milliseco
 }
 
 // Runs a blocking driver call on its own thread and steps virtual time until it returns, then rethrows what it
-// threw. Bounded by 120 s of real time.
+// threw. Bounded by 120 s of real time. `min_waiters` is step_virtual's.
 template <typename Fn>
-void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn) {
+void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn, std::size_t min_waiters = 1) {
     std::exception_ptr error;
     std::atomic<bool> done{false};
     std::thread caller([&] {
@@ -400,7 +403,7 @@ void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn) {
     });
     const auto real_deadline = Clock::now() + std::chrono::seconds(120);
     while (!done.load() && Clock::now() < real_deadline) {
-        step_virtual(clock);
+        step_virtual(clock, min_waiters);
     }
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));  // release a hung caller so the thread can join
@@ -2003,6 +2006,10 @@ namespace {
 
 // Virtual time one slew_to_coordinates takes, stepped to completion. With `poll_in_flight` a poll tick is parked
 // between its sample and its publish for the whole slew, so probe_sampling_ stays set at every tick hunt.
+// The paused status poll keeps its period wait on the clock for the whole slew, so a step counts only once the
+// slew's own thread is parked beside it: a step taken while the driver is on the socket adds 10 ms of virtual time
+// per loop turn, and a baseline whose poll was still on its connect cycle when the slew began spent 1 to 3 s of
+// virtual time before its GOTO went out; on a loaded runner it measured 6 to 11 s more than the held run (#2049).
 std::chrono::nanoseconds virtual_slew_duration(bool poll_in_flight) {
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<LandingOffsetHandset>();
@@ -2038,8 +2045,11 @@ std::chrono::nanoseconds virtual_slew_duration(bool poll_in_flight) {
         REQUIRE(cv.wait_for(lock, std::chrono::seconds(10), [&] { return entered; }));
     }
 
+    // The pause stops the next cycle, not one in flight: the poll parks on its period wait once that cycle ends.
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(10)));
+    const std::size_t parked = clock.waiter_count();  // the paused poll's period wait
     const auto started = clock.now();
-    REQUIRE_NOTHROW(run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }));
+    REQUIRE_NOTHROW(run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }, parked + 1));
     const auto elapsed = clock.now() - started;
 
     if (poll.joinable()) {
@@ -2063,6 +2073,7 @@ TEST_CASE("SynScan GOTO landing - the tick hunt waits out a poll tick in flight 
     const auto held = virtual_slew_duration(true);
     // Each hunt waits kPollSampleWaitBound (1500 ms) for the parked tick; the wait is virtual time, so it shows in
     // the clock. A wait on the steady clock would add no virtual time (and 1.5 s of real time).
+    CAPTURE(baseline.count(), held.count());
     CHECK(held - baseline >= std::chrono::milliseconds(1400));
 }
 

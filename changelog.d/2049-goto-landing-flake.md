@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **SynScan GOTO landing: the tick-hunt case no longer measures a negative hold on a loaded runner** (tests, issue #2049): `virtual_slew_duration` stepped virtual time whenever any task was parked on the fake clock, and the paused status poll always is, so every loop turn the driver spent on the socket added 10 ms of virtual time to the run; a baseline whose poll was still on its connect cycle when the slew began spent 1 to 3 s before its GOTO went out, and on a loaded CI shard the baseline measured 6 to 25 s more than the held run. The helper now waits for the poll to park, counts it, and steps only once the slew's own thread is parked beside it; both runs are now the same to the millisecond (11.27 s and 14.27 s) idle and under a 12-process CPU load.
