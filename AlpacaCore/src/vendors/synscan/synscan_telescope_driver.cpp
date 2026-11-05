@@ -245,7 +245,6 @@ public:
           target_ra_hours_(0.0),
           target_dec_degrees_(0.0),
           aperture_diameter_m_(0.0),
-          aperture_area_m2_(0.0),
           focal_length_m_(0.0),
           site_latitude_cached_(0.0),
           site_longitude_cached_(0.0),
@@ -489,16 +488,12 @@ public:
             throw AlpacaException("Aperture diameter must be non-negative", AlpacaError::InvalidValue);
         }
         aperture_diameter_m_ = meters;
-        if (meters > 0.0) {
-            double radius = meters / 2.0;
-            aperture_area_m2_ = radius * radius * std::numbers::pi;
-        } else {
-            aperture_area_m2_ = 0.0;
-        }
     }
 
     double get_aperture_area() const override {
-        return aperture_area_m2_;
+        // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
+        const double d = aperture_diameter_m_;
+        return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
     }
 
     bool get_at_home() const override {
@@ -3796,9 +3791,8 @@ private:
     double guide_position_ra_hours_ = 0.0;
     double guide_position_dec_degrees_ = 0.0;
     mutable bool guide_position_valid_ = false;
-    double aperture_diameter_m_;
-    double aperture_area_m2_;
-    double focal_length_m_;
+    std::atomic<double> aperture_diameter_m_;
+    std::atomic<double> focal_length_m_;
     // The polled frame the getters serve, with the fault latch and the loss latch (decision 0010, module
     // util::PolledState). One publisher (the poll, plus the control path's write-through), any number of readers.
     // The hunt/probe exclusion (see probe() and hunt_readback_tick_locked()). hold_mutex_ is a leaf: taken under

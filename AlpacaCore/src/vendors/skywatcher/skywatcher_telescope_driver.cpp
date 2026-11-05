@@ -833,15 +833,12 @@ public:
             throw AlpacaException("Aperture diameter must be non-negative", AlpacaError::InvalidValue);
         }
         aperture_diameter_m_ = meters;
-        if (meters > 0.0) {
-            double radius = meters / 2.0;
-            aperture_area_m2_ = radius * radius * std::numbers::pi;
-        } else {
-            aperture_area_m2_ = 0.0;
-        }
     }
 
-    double get_aperture_area() const override { return aperture_area_m2_; }
+    double get_aperture_area() const override {
+        const double d = aperture_diameter_m_;
+        return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
+    }
 
     bool get_at_home() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
@@ -6460,9 +6457,8 @@ private:
     bool target_ra_set_ = false;
     bool target_dec_set_ = false;
 
-    double aperture_diameter_m_ = 0.0;
-    double aperture_area_m2_ = 0.0;
-    double focal_length_m_ = 0.0;
+    std::atomic<double> aperture_diameter_m_ = 0.0;
+    std::atomic<double> focal_length_m_ = 0.0;
 
     // Lock-free, like the elevation: the setter writes the value before the flag, and the acquire load of
     // the flag orders the value read after it. Written under io_mutex_ and mutex_.

@@ -137,6 +137,18 @@ TEST_CASE("Bisque UTCDate - writes are explicitly unsupported without a transact
     CHECK(rig.mount.transactions == before);
 }
 
+TEST_CASE("Bisque ApertureArea follows the diameter and returns to 0 (#2057)", "[bisque][telescope][unit]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+
+    driver->set_aperture_diameter(0.2);
+    CHECK(driver->get_aperture_area() == Catch::Approx(0.0314159265).epsilon(1e-6));
+    driver->set_aperture_diameter(0.0);
+    CHECK(driver->get_aperture_area() == 0.0);
+}
+
 TEST_CASE("Bisque Telescope Driver - Defaults", "[bisque][telescope][unit]") {
     alpacacore::vendor::bisque::ConnectionInfo conn;
     conn.host = "localhost";
