@@ -1260,3 +1260,75 @@ TEST_CASE("CaptureSession - a shorter per-start margin ends the exposure earlier
     CHECK(h.session->camera_state() == CameraState::Idle);
     CHECK(h.session->failure().has_value());
 }
+
+// #2043: a driver that stops the SDK exposure marks the exposure in flight as stopping and records its token in
+// one session hold (begin_stop()), and the body compares the token with its own. The token names the exposure in
+// flight and nothing else: 0 while idle, the running body's own token while it exposes, 0 again once it has
+// published or been aborted, and a new start mints a new one. A body that returns without a frame after it was
+// marked has its failure dropped, as after set_stopping(true). A token minted before the session start, or a
+// stopping mark set apart from the token read (the ZWO driver's old scheme), left a body refusing its trigger
+// and the session keeping "the exposure ended without an image".
+TEST_CASE("CaptureSession - begin_stop marks the body that owns the exposure, returns its token and 0 otherwise",
+          "[util][capture-session]") {
+    Harness h;
+    CHECK(h.session->begin_stop() == 0);
+
+    std::atomic<std::uint64_t> seen{0};
+    auto p = std::make_shared<Probe>();
+    h.session->start(10.0, [p, &seen](CaptureControl& c) {
+        c.exposure_started();
+        seen = c.token();
+        p->entered = true;
+        bool more = true;
+        while (more) {
+            more = c.wait_for(50ms);
+        }
+        p->exited = true;
+    });
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    const std::uint64_t first = h.session->begin_stop();
+    CHECK(first != 0);
+    CHECK(first == seen.load());
+    CHECK(h.session->camera_state() == CameraState::Exposing);  // marked, not ended: abort() ends it
+    h.session->abort();
+    REQUIRE(eventually([&] { return p->exited.load(); }));
+    CHECK(h.session->begin_stop() == 0);
+    CHECK_NOTHROW(h.session->image_ready());  // no failure kept
+
+    // A body that returns without a frame after the mark: dropped, not kept (the stopping mark came with it).
+    auto q = std::make_shared<Probe>();
+    auto gate = h.gate();
+    h.session->start(10.0, [q, gate](CaptureControl& c) {
+        c.exposure_started();
+        q->entered = true;
+        gate->wait();  // the driver marks the stop while the body is in the SDK
+        q->exited = true;
+    });
+    REQUIRE(eventually([&] { return q->entered.load(); }));
+    const std::uint64_t second = h.session->begin_stop();
+    CHECK(second != 0);
+    CHECK(second != first);
+    gate->open();
+    REQUIRE(eventually([&] { return q->exited.load(); }));
+    // The mark alone ends nothing: the driver's abort() (or disconnect_and_join()) does, as after set_stopping(true).
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    h.session->abort();
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+    CHECK_NOTHROW(h.session->image_ready());  // dropped: no "ended without an image"
+    CHECK(h.session->camera_state() == CameraState::Idle);
+
+    // A refused start mints nothing; the next accepted one is a new token, never an old one.
+    auto r = std::make_shared<Probe>();
+    h.session->start(1.0, instant_body(r, 7));
+    REQUIRE(eventually([&] { return r->exited.load(); }));
+    CHECK(h.session->image_ready());
+    CHECK(h.session->begin_stop() == 0);  // Ready, not exposing
+    auto u = std::make_shared<Probe>();
+    h.session->start(10.0, polling_body(u));
+    REQUIRE(eventually([&] { return u->entered.load(); }));
+    CHECK_THROWS_AS(h.session->start(1.0, instant_body(std::make_shared<Probe>(), 8)), AlpacaException);
+    const std::uint64_t fourth = h.session->begin_stop();
+    CHECK(fourth != 0);
+    CHECK(fourth != second);
+    h.session->abort();
+}

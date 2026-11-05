@@ -50,6 +50,9 @@ public:
     /// Waits `d` on the TaskClock, never past the watchdog deadline. False when the body must stop.
     inline bool wait_for(std::chrono::nanoseconds d);
     StopReason stop_reason() const { return ctx_.stop_reason(); }
+    /// This body's session token: what begin_stop() returns while the body owns the session, so a
+    /// driver can tell a stop meant for this exposure from one meant for an earlier one (#2043).
+    std::uint64_t token() const { return token_; }
     /// The SDK exposure has begun: stamps LastExposureStartTime and the PercentCompleted base.
     inline void exposure_started();
     /// The frame is being downloaded: CameraState Download.
@@ -253,6 +256,27 @@ public:
             default:
                 return CameraState::Idle;
         }
+    }
+    /// The driver is about to stop the SDK exposure itself (an AbortExposure,
+    /// a disconnect): marks the exposure in flight as stopping, as
+    /// set_stopping(true) does, and returns the token of the body that owns it
+    /// (Exposing or Download), 0 when none does. One hold of the session mutex,
+    /// so a body that finds this token recorded against its own
+    /// CaptureControl::token() always finds the stopping mark set too, and its
+    /// early return is dropped, not kept. A start() mints a new token each time,
+    /// so a stop marks the exposure it found and never one a later start begins
+    /// (#2043). Applies the watchdog first, so like the state getters it can
+    /// fail an exposure past its deadline and cancel its body (with the session
+    /// mutex released, the slot being a leaf); a caller holding its own lock
+    /// above the session, the ZWO driver's exposure_sdk_mutex_, keeps that order.
+    std::uint64_t begin_stop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        apply_watchdog(lock);
+        if (!is_exposing_locked()) {
+            return 0;
+        }
+        stopping_ = true;
+        return owner_;
     }
     /// True while a body has not returned or a join is in flight: the
     /// exposure settings stay locked.
