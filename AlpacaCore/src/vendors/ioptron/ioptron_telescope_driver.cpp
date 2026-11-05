@@ -334,6 +334,8 @@ public:
         return DeviceType::Telescope;
     }
 
+    // Takes the state lock itself: call it with mutex_ released (the connect scan does, inside Wire::call), never
+    // from a *_locked helper, since mutex_ is not recursive.
     std::string fallback_unique_id() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         if (mount_info_.model_code.empty()) {
@@ -2113,7 +2115,9 @@ private:
     // the refill read the clock separately, so a TTL, hold window or override can lapse between the two (a 1 Hz
     // poller lands on the TTL edge). A refill reached that way serves a primed cache as it stands, and when the
     // cache it would serve was never primed or was invalidated it signals RefillNeedsOperationLock instead of
-    // reaching the wire: the body is then run again under both locks (serve_as_is_locked()).
+    // reaching the wire: the body is then run again under both locks (serve_as_is_locked()). A body signals
+    // before it writes any state, because the second run repeats everything before the signal: Declination and
+    // RightAscension write their last_*_read_ after the refill, Slewing counts a refine after its signal.
     template <typename Fresh, typename Body>
     std::invoke_result_t<Body&> serve_cached_or_refill(Fresh&& fresh, Body&& body) const {
         check_connected_before_lock();
