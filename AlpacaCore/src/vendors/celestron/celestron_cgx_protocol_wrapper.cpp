@@ -348,8 +348,8 @@ void CelestronCgxProtocol::disconnect_locked() {
     desynchronized_ = false;
 }
 
-// Decision 0009 rule 2a: the port is gone. Release it so a replugged device can be reopened, latch link_lost_ for the
-// driver (its Connected getter, its poll and its connect) and fail with NotConnected. Caller holds mutex_ inside an
+// Decision 0009 rule 2a: the port is gone. Release it so a replugged device can be reopened, then latch link_lost_ for
+// the driver (its Connected getter, its poll and its connect) and fail with NotConnected. Caller holds mutex_ inside an
 // exchange; the drivers call the wrapper with their own mutex_ free, so no driver lock is taken under this one.
 void CelestronCgxProtocol::lose_link_locked(const std::string& reason) {
     ALPACA_LOG_ERROR("Celestron CGX", owner_ + " link lost: " + reason + " (port released; reconnect to resume)");
@@ -357,8 +357,8 @@ void CelestronCgxProtocol::lose_link_locked(const std::string& reason) {
         std::lock_guard<std::mutex> loss(loss_mutex_);
         loss_reason_ = owner_ + " serial link lost (" + reason + ")";
     }
-    link_lost_.store(true);
     disconnect_locked();
+    link_lost_.store(true);  // after the release: a reader that sees the flag finds the port free
     throw AlpacaException(link_fault(), AlpacaError::NotConnected);
 }
 
