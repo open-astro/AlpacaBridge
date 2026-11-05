@@ -1,0 +1,3 @@
+### Fixed
+
+- **QHY integrated filter wheel: a move that never finishes now fails instead of reading "moving" forever**, QHY filter wheel driver, issue #2052. If the wheel keeps answering `-1` past a deadline (slot count × 2 s, at least 15 s), for example after a USB pull mid-move, `Position` raises a `DriverException` until the next move, Connect or Disconnect (`QHY Filter Wheel Driver - A move still reading -1 at its deadline fails and keeps the error`). `Connected` stays true, as decision 0009 requires. Covered by `AlpacaCore/tests/test_qhy_filterwheel.cpp` on a fake SDK; the mid-move USB pull on a rig and ConformU are still to do.
