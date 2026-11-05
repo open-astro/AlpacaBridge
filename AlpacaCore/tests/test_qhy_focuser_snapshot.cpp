@@ -380,6 +380,135 @@ TEST_CASE("QHY Q-Focuser Snapshot - a Halt after a long move restarts the teleme
     CHECK(rig.driver().get_link_fault().empty());
 }
 
+// #2041: the firmware answers no telemetry for about 10 s after a move, so a reconnect inside that window used
+// to wait out the 3 s serial timeout at connect and then fail. The connect now reads with the poll's short
+// deadline; a miss defers the 12 V hold settings to the first reading the poll gets, and applies them once.
+TEST_CASE(
+    "QHY Q-Focuser Snapshot - a connect inside the post-move telemetry silence succeeds and applies the "
+    "hold settings on the first reading",
+    "[qhy][focuser][snapshot][unit][fake]") {
+    alpacacore::vendor::qhy::QFocuserSettings settings;
+    settings.hold_force = true;
+    settings.hold_ihold = 6;
+    settings.hold_irun = 10;
+    alpacacore::test::PolledRig<FakeQhyQFocuser, alpacacore::FocuserDriver> rig(
+        {kTick, kBound}, [settings](FakeQhyQFocuser& fake, FakeTaskClock& clock) {
+            return alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), settings, clock);
+        });
+    rig.fake().set_telemetry_muted(true);
+
+    const auto started = std::chrono::steady_clock::now();
+    REQUIRE(rig.connect());
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(rig.driver().get_connected());
+    CHECK(elapsed < 2500ms);  // one 500 ms telemetry deadline, not the 3 s serial timeout
+    CHECK(rig.fake().count("\"cmd_id\":7,\"rev\":0}") == 1);  // reverse and speed went out as before
+    CHECK(rig.fake().count("\"cmd_id\":13") == 1);
+    CHECK(rig.fake().count("\"cmd_id\":16") == 0);  // the hold settings wait for a reading
+    CHECK(rig.fake().count("\"cmd_id\":12") == 0);
+    CHECK(rig.driver().get_position() == 1000);
+    CHECK(rig.driver().get_link_fault().empty());
+
+    // The firmware answers again. The poll asks past the miss hold-off (5 s) and the hold settings go out once.
+    rig.fake().set_telemetry_muted(false);
+    rig.tick(24);  // 7.2 s on the task clock
+    CHECK(rig.fake().count("\"cmd_id\":16,\"ihold\":6,\"irun\":10}") == 1);
+    CHECK(rig.fake().count("\"cmd_id\":12,\"force\":1}") == 1);
+    CHECK(rig.driver().get_temperature() == Catch::Approx(23.881));
+    rig.tick(8);
+    CHECK(rig.fake().count("\"cmd_id\":16") == 1);  // once, not on every reading
+}
+
+// #2041, the USB-powered half: a deferred reading below the 12 V threshold skips the hold settings, as a connect
+// reading does, and nothing is sent later.
+TEST_CASE("QHY Q-Focuser Snapshot - hold settings deferred at connect are skipped on a USB-powered reading",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    alpacacore::vendor::qhy::QFocuserSettings settings;
+    settings.hold_force = true;
+    alpacacore::test::PolledRig<FakeQhyQFocuser, alpacacore::FocuserDriver> rig(
+        {kTick, kBound}, [settings](FakeQhyQFocuser& fake, FakeTaskClock& clock) {
+            return alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), settings, clock);
+        });
+    rig.fake().set_telemetry_muted(true);
+    rig.fake().set_voltage_tenths(50);  // 5.0 V: USB-powered
+    REQUIRE(rig.connect());
+    rig.fake().set_telemetry_muted(false);
+    rig.tick(32);
+    CHECK(rig.fake().count("\"cmd_id\":4}") >= 1);
+    CHECK(rig.fake().count("\"cmd_id\":16") == 0);
+    CHECK(rig.fake().count("\"cmd_id\":12") == 0);
+}
+
+// #2042: on the one-behind firmware a command whose idx repeats the last reply's gets that stale reply first,
+// then the kicked fresh one. Back-to-back position polls (every tick without telemetry since #2031) used to
+// return the stale reply, so Position lagged one tick; the wrapper now reads on for the fresh one.
+TEST_CASE("QHY Q-Focuser Snapshot - back-to-back position polls on one-behind firmware do not lag a tick",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    QhyRig rig;
+    rig.fake().set_one_behind(true);
+    REQUIRE(rig.connect());
+    CHECK(rig.driver().get_position() == 1000);
+    // The connect's first poll asked for position and telemetry; this tick's poll follows telemetry (distinct
+    // idx), the next one follows a position poll (the repeated idx the lag came from).
+    rig.tick();
+    CHECK(rig.driver().get_position() == 1000);
+    rig.fake().set_position(1234);
+    rig.tick();
+    CHECK(rig.driver().get_position() == 1234);  // the fresh reply, not last tick's
+    rig.fake().set_position(1300);
+    rig.tick();
+    CHECK(rig.driver().get_position() == 1300);
+}
+
+// #2042, the arrival: with the fresh reply read, a move's arrival shows on the tick it happens, not one later.
+TEST_CASE("QHY Q-Focuser Snapshot - an arrival on one-behind firmware shows on its own tick",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    QhyRig rig;
+    rig.fake().set_one_behind(true);
+    rig.fake().set_steps_per_poll(250);
+    REQUIRE(rig.connect());
+    rig.tick();
+    rig.driver().move(1500);  // 1000 -> 1500 in two position polls
+    CHECK(rig.driver().get_is_moving());
+    rig.tick();
+    CHECK(rig.driver().get_position() == 1250);
+    rig.tick();
+    CHECK(rig.driver().get_position() == 1500);
+    CHECK(rig.driver().get_is_moving() == false);
+}
+
+// #2041, the write that fails: a hold write the firmware does not answer (the wrapper's 3 s timeout) no longer
+// fails the connect; the settings stay pending and go out once more on the next telemetry reading, then stop.
+TEST_CASE("QHY Q-Focuser Snapshot - a hold write that times out at connect is retried once on the next reading",
+          "[qhy][focuser][snapshot][unit][fake]") {
+    alpacacore::vendor::qhy::QFocuserSettings settings;
+    settings.hold_force = true;
+    settings.hold_ihold = 6;
+    settings.hold_irun = 10;
+    alpacacore::test::PolledRig<FakeQhyQFocuser, alpacacore::FocuserDriver> rig(
+        {kTick, kBound}, [settings](FakeQhyQFocuser& fake, FakeTaskClock& clock) {
+            return alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), settings, clock);
+        });
+    // The 12 V unit answers the first hold-current write 3.5 s late: past the 3 s serial timeout, so the write
+    // throws DriverException inside the connect (the reply, when it comes, is stale and flushed).
+    rig.fake().hold_next_reply_to(16, 3500ms);
+
+    REQUIRE(rig.connect());
+    CHECK(rig.driver().get_connected());
+    CHECK(rig.driver().get_position() == 1000);
+    // The next telemetry reading carries the retry: the connect's own first poll asks for one (no miss held it
+    // off), so both hold writes have gone out once more by the time Connected reads true, and the force write
+    // (which follows the current write that threw) exactly once.
+    CHECK(rig.fake().count("\"cmd_id\":16,\"ihold\":6,\"irun\":10}") == 2);
+    CHECK(rig.fake().count("\"cmd_id\":12,\"force\":1}") == 1);
+
+    // Later readings (one per second) do not repeat them.
+    rig.tick(12);  // 3.6 s on the task clock
+    CHECK(rig.fake().count("\"cmd_id\":16") == 2);
+    CHECK(rig.fake().count("\"cmd_id\":12") == 1);
+    CHECK(rig.driver().get_link_fault().empty());
+}
+
 // #2030, pinned hardware-free by #2040: a unit that is not taking data fails the exchange inside the drain
 // bound and names the replug. The poll is parked on the fake clock, so the Move is the only exchange and the
 // fault latch (three failed polls) is never reached.
