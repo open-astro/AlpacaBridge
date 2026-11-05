@@ -53,6 +53,10 @@ public:
 
     int id{7};
     int slot_index{0};
+    // What get_firmware_version() answers; an empty string is an unreadable one. fail_firmware makes it throw.
+    std::string firmware{"1.0"};
+    bool fail_firmware{false};
+    std::atomic<int> firmware_calls{0};
     std::string serial{"CAA-SN-1"};
     // A second rotator on the same SDK (issue #1668 id swap); -1 = none.
     int second_id{-1};
@@ -258,7 +262,9 @@ public:
         return table_.call(rotator_id, [&] {
             std::lock_guard<std::mutex> lock(mutex_);
             check_unit(rotator_id);
-            return std::string("1.0");
+            ++firmware_calls;
+            if (fail_firmware) throw AlpacaException("firmware read failed", AlpacaError::DriverException);
+            return firmware;
         });
     }
     std::string get_rotator_type(int rotator_id) override {

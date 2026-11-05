@@ -168,7 +168,7 @@ TEST_CASE("AlpacaDriver firmware and SDK version are independent hooks", "[drive
     REQUIRE(firmware_only.get_device_firmware() == std::optional<std::string>("2025-05-04"));
     REQUIRE(firmware_only.get_device_sdk_version() == std::nullopt);
 
-    // Vendor SDK version only (e.g. ZWO/QHY/Player One — no device firmware API).
+    // Vendor SDK version only (e.g. ZWO ASI camera, no firmware call in its SDK).
     FirmwareDriver sdk_only(std::nullopt, std::string("1.7.7.0"));
     REQUIRE(sdk_only.get_device_firmware() == std::nullopt);
     REQUIRE(sdk_only.get_device_sdk_version() == std::optional<std::string>("1.7.7.0"));
