@@ -12,14 +12,17 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <exception>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace alpacacore::vendor::qhy {
@@ -99,7 +102,14 @@ public:
 
     int get_interface_version() const override { return 3; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the link (decision 0009, issue #1985): a removal answer
+    // from the wheel's own SDK call closes link_ at once. Lock-free.
+    bool get_connected() const override { return connected_.load() && util::LinkEpoch::is_open(link_.load()); }
+
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return link_fault_;
+    }
 
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
@@ -113,47 +123,30 @@ public:
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
-        // newer pending disconnect by staying down.
+        // newer pending disconnect by staying down. The disconnect gate reads the
+        // raw flag, so a lost wheel still runs its teardown; the connect gate reads
+        // the link-aware value, so Connected=true over a lost link reconnects
+        // (decision 0009 point 4, the CFW3 shape).
+        // Qualified: the destructor reaches here, where virtual dispatch is gone anyway.
+        const bool live = QHYFilterWheelDriver::get_connected();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            if (connected_.load()) {
+                teardown();  // a lost link: its open is already released, so nothing closes here
+            }
             connect_locked();
             return;
         }
-
-        // Clear driver state under mutex_ and release it BEFORE the SDK close:
-        // if the close throws (e.g. device unplugged) the error still surfaces,
-        // but the driver must not stay half-connected. The close then takes the
-        // I/O lock, so a Position read or a move in flight never sees a closed
-        // handle (the camera driver shares it; see get_position()).
-        std::optional<std::string> close_id;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            close_id = camera_id_;
-            if (camera_index_.has_value()) {
-                // Re-resolved from the index on the next connect (matches the ZWO
-                // EFW / QHY camera pattern); an explicit camera_id_ config stays
-                // fixed across reconnects instead.
-                camera_id_.reset();
-            }
-            slot_count_valid_ = false;
-            cached_position_.reset();
-            pending_target_.reset();
-            rest_candidate_.reset();
-            connected_.store(false);
-        }
-        if (close_id.has_value()) {
-            std::lock_guard<std::mutex> io(io_mutex_);
-            sdk_.close_camera(close_id.value());
-        }
+        teardown();
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }
@@ -202,7 +195,8 @@ public:
         // another slot (below), do we consider it settled and start serving
         // it from cache.
         std::string id;
-        if (const auto cached = cached_or_id(id)) {
+        util::LinkEpoch::Word word = 0;
+        if (const auto cached = cached_or_id(id, word)) {
             return *cached;
         }
         // The live read runs under the I/O lock, not mutex_. set_connected(false)
@@ -212,15 +206,15 @@ public:
         std::lock_guard<std::mutex> io(io_mutex_);
         // Another reader may have settled the move while this one waited for the
         // lock, and a disconnect may have run: look again.
-        if (const auto cached = cached_or_id(id)) {
+        if (const auto cached = cached_or_id(id, word)) {
             return *cached;
         }
-        const int pos = sdk_.get_cfw_position(id);
+        const int pos = on_link(word, [&] { return sdk_.get_cfw_position(id); });
         std::lock_guard<std::mutex> lock(mutex_);
         // A disconnect between the check above and here cleared the state; do
         // not write a reading back into it. A reconnect cannot have run: it
         // needs the I/O lock this read holds.
-        if (!connected_.load()) {
+        if (!get_connected()) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
         }
         if (pending_target_.has_value()) {
@@ -272,6 +266,7 @@ public:
         // wheel with fewer slots can run between the early check above and here.
         std::lock_guard<std::mutex> io(io_mutex_);
         std::string id;
+        util::LinkEpoch::Word word = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             validate_position_locked(position);
@@ -279,6 +274,7 @@ public:
                 throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
             }
             id = *camera_id_;
+            word = link_.load();
             // Set BEFORE issuing the move (not after): if move_cfw throws mid-
             // call the catch below clears it again. Assumption: a failing
             // SendOrder2QHYCCDCFW means the order never reached the wheel, so
@@ -291,7 +287,7 @@ public:
             rest_candidate_.reset();
         }
         try {
-            sdk_.move_cfw(id, position);
+            on_link(word, [&] { sdk_.move_cfw(id, position); });
         } catch (...) {
             // The move failed, so no pending target exists: Position goes back
             // to live reads instead of -1 until a slot that can never match.
@@ -332,24 +328,99 @@ public:
 
 private:
     void ensure_connected() const {
-        if (!connected_.load()) {
+        if (!get_connected()) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
         }
     }
 
     // Under mutex_: the connection check, then the settled-position cache, else
-    // the id for a live read. Throws NotConnected (also for a disconnect that ran
-    // since the caller's ensure_connected()).
-    std::optional<int> cached_or_id(std::string& id) const {
+    // the id and link word for a live read. Throws NotConnected (also for a
+    // disconnect or a loss since the caller's ensure_connected()).
+    std::optional<int> cached_or_id(std::string& id, util::LinkEpoch::Word& word) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load() || !camera_id_.has_value()) {
+        if (!get_connected() || !camera_id_.has_value()) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
         }
         if (cached_position_.has_value() && !pending_target_.has_value()) {
             return cached_position_;
         }
         id = camera_id_.value();
+        word = link_.load();
         return std::nullopt;
+    }
+
+    // Runs one device call on the shared handle. Caller holds io_mutex_, not
+    // mutex_. Only the wrapper's NotConnected (a removal code, or the handle gone
+    // from the map) is loss evidence (decision 0009 point 2(a)); the driver's own
+    // NotConnected never reaches here. A word from before a transition cannot
+    // close the newer link (LinkEpoch), and a loss is applied once.
+    template <typename Fn>
+    auto on_link(util::LinkEpoch::Word word, Fn&& fn) const -> decltype(fn()) {
+        try {
+            return fn();
+        } catch (const std::exception& e) {
+            if (util::is_link_loss(e) && link_.mark_lost(word)) {
+                lose_link(e.what());
+            }
+            throw;
+        }
+    }
+
+    // The link is lost (decision 0009 point 3): the reason stays for
+    // get_link_fault() until the next Connect or Disconnect, and the wheel's one
+    // reference on the shared handle is released here, so the teardown later has
+    // nothing to close and never drops the paired camera's reference
+    // (close_camera() counts opens, not owners). The move state needs no clearing
+    // here: every member refuses while lost, and the teardown that runs before any
+    // reconnect clears it. Caller holds io_mutex_.
+    void lose_link(const std::string& reason) const {
+        std::optional<std::string> released;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            link_fault_ = reason;
+            released = std::move(open_id_);
+            open_id_.reset();
+        }
+        ALPACA_LOG_WARN("QHY", "CFW link lost on camera " + released.value_or("?") + ": " + reason);
+        if (released.has_value()) {
+            try {
+                sdk_.close_camera(*released);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "CFW close after link loss failed: " + std::string(e.what()));
+            }
+        }
+    }
+
+    // Disconnect, or the stale state before a reconnect. Caller holds
+    // transition_mutex_. Clears driver state under mutex_ and releases it BEFORE
+    // the SDK close: if the close throws (e.g. device unplugged) the error still
+    // surfaces, but the driver must not stay half-connected. The close then takes
+    // the I/O lock, so a Position read or a move in flight never sees a closed
+    // handle (the camera driver shares it; see get_position()).
+    void teardown() {
+        link_.begin_transition();
+        std::optional<std::string> close_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_id = std::move(open_id_);
+            open_id_.reset();
+            if (camera_index_.has_value()) {
+                // Re-resolved from the index on the next connect (matches the ZWO
+                // EFW / QHY camera pattern); an explicit camera_id_ config stays
+                // fixed across reconnects instead.
+                camera_id_.reset();
+            }
+            slot_count_valid_ = false;
+            cached_position_.reset();
+            pending_target_.reset();
+            rest_candidate_.reset();
+            link_fault_.clear();
+            connected_.store(false);
+        }
+        if (close_id.has_value()) {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            sdk_.close_camera(close_id.value());
+        }
     }
 
     void validate_position(int position) const {
@@ -361,7 +432,7 @@ private:
     void validate_position_locked(int position) const {
         // A disconnect since ensure_connected() clears the slot count: report it as
         // NotConnected, not as a missing slot count.
-        if (!connected_.load() || !camera_id_.has_value()) {
+        if (!get_connected() || !camera_id_.has_value()) {
             throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
         if (!slot_count_valid_ || slot_count_ <= 0) {
@@ -388,6 +459,7 @@ private:
     // under the I/O lock with mutex_ free; identity, limits and names are
     // published under mutex_ at the end, then Connected flips (decision 0016).
     void connect_locked() {
+        link_.begin_transition();
         std::lock_guard<std::mutex> io(io_mutex_);
         std::optional<std::string> known_id;
         {
@@ -488,7 +560,9 @@ private:
             }
             pending_target_.reset();
             rest_candidate_.reset();
+            open_id_ = id;
             connected_.store(true);
+            link_.publish_open();
         } catch (...) {
             // Nothing was published, so a failed index-based connect pins no
             // resolved ID: the next connect re-resolves from the index, and a
@@ -587,6 +661,16 @@ private:
     mutable util::TaskClock::clock::time_point rest_since_{};
     mutable int rest_reads_ = 0;
     std::atomic<bool> connected_;
+    // Connected's link half (decision 0009, issue #1985): opened last in a
+    // connect, closed by a loss or a transition. mutable: a const Position read
+    // can lose the link.
+    mutable util::LinkEpoch link_;
+    // Guarded by mutex_. The id whose shared-handle reference this driver holds,
+    // set at the end of a connect and taken by whichever comes first, the loss
+    // or the teardown, so the reference is released exactly once.
+    mutable std::optional<std::string> open_id_;
+    // Guarded by mutex_. Why the link was lost; kept until the next Connect or Disconnect.
+    mutable std::string link_fault_;
     // Lock order (decision 0016): transition_mutex_ -> io_mutex_ -> mutex_ -> SDK wrapper.
     // transition_mutex_ serialises whole connect/disconnect transitions; no getter takes it.
     std::mutex transition_mutex_;

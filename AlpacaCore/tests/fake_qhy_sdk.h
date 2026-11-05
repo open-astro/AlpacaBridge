@@ -45,6 +45,10 @@ namespace alpacacore::test {
  * Capabilities:
  * - Fault injection: add a method name to `throw_from` and that call throws
  *   AlpacaException(DriverException).
+ * - Removal: add a method name to `remove_from` and that call throws the
+ *   NotConnected QHYSDKWrapper throws for QHYCCD_ERROR_DEVICELOSE on a CFW call
+ *   (issue #1985). The mapping itself is in the wrapper and is not reachable
+ *   from here; this is the answer it gives.
  * - `sdk_resource_available = false` makes the three resource-dependent entry
  *   points (enumerate_cameras, get_camera_model, open_camera) throw the
  *   wrapper's "QHY SDK resource not initialized" DriverException — the path
@@ -147,6 +151,9 @@ public:
 
     // --- scripting knobs ---------------------------------------------------
     std::set<std::string> throw_from;
+    // Issue #1985: these calls throw the wrapper's removal answer (NotConnected).
+    // Set before any driver thread runs, like throw_from.
+    std::set<std::string> remove_from;
 
     /// Makes every later call of `fn` throw, until clear_fail_from(). Unlike throw_from it is locked, so a case
     /// may set and clear it while the driver runs (contract sweep tier 3).
@@ -811,6 +818,9 @@ private:
         }
         if (failing || throw_from.count(fn) != 0) {
             throw AlpacaException(std::string("fake: injected failure in ") + fn, AlpacaError::DriverException);
+        }
+        if (remove_from.count(fn) != 0) {
+            throw AlpacaException(std::string(fn) + " failed (code=0xfffffffd)", AlpacaError::NotConnected);
         }
     }
 

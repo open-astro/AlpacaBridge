@@ -12,6 +12,8 @@
 
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/version.h>
@@ -21,6 +23,7 @@
 #include <functional>
 #include <future>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -618,5 +621,286 @@ TEST_CASE("QHY Filter Wheel Driver - concurrent connect/disconnect/operate stres
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
+    CHECK(fake.underflow_closes == 0);
+}
+
+// ── Link loss (decision 0009, issue #1985) ──────────────────────────────────
+// Only the wrapper's removal answer (NotConnected from the wheel's own SDK
+// call, QHYCCD_ERROR_DEVICELOSE on hardware) loses the link. The fake's
+// remove_from throws that answer; the -3 mapping itself is in the wrapper.
+
+namespace {
+
+// Counts the QHY WARNs that announce a lost link, and restores the sink after.
+struct LossWarnCounter {
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    std::atomic<int> warns{0};
+    std::string last;
+    LossWarnCounter() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn && component == "QHY" &&
+                    message.find("link lost") != std::string_view::npos) {
+                    ++warns;
+                    last = std::string(message);
+                }
+            });
+    }
+    ~LossWarnCounter() { alpacacore::logging::set_log_sink(previous); }
+    LossWarnCounter(const LossWarnCounter&) = delete;
+    LossWarnCounter& operator=(const LossWarnCounter&) = delete;
+};
+
+}  // namespace
+
+// Falsified by: qhy_filterwheel_driver.cpp get_connected() returning connected_ alone, ignoring the lost link.
+TEST_CASE("QHY Filter Wheel Driver - A removal on a move drops Connected", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    LossWarnCounter warns;
+    driver->set_connected(true);
+
+    fake.remove_from.insert("move_cfw");
+    require_alpaca_error([&] { driver->set_position(1); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(warns.warns.load() == 1);
+    CHECK(warns.last.find("fake-qhy-0") != std::string::npos);
+    CHECK(driver->get_link_fault().find("0xfffffffd") != std::string::npos);
+    driver->set_connected(false);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp get_position() calling sdk_.get_cfw_position() outside on_link(), so a
+// removal on the status read is rethrown without losing the link.
+TEST_CASE("QHY Filter Wheel Driver - A removal on a status read drops Connected", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_position(3);
+    fake.cfw_position_script = {-1};
+    CHECK(driver->get_position() == -1);  // a pending move reads live
+
+    fake.remove_from.insert("get_cfw_position");
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_device_state().empty());
+    driver->set_connected(false);
+}
+
+// Design limit, GREEN on the parent by intent: an idle wheel serves Position from
+// its cache and makes no SDK call, so it cannot see a removal until a move.
+// Falsified by: qhy_filterwheel_driver.cpp cached_or_id() never serving cached_position_, so idle reads go live.
+TEST_CASE("QHY Filter Wheel Driver - An idle Position read makes no SDK call and keeps the link",
+          "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    const int reads = fake.call_count("get_cfw_position");
+
+    fake.remove_from.insert("get_cfw_position");
+    CHECK(driver->get_position() == 0);
+    CHECK(fake.call_count("get_cfw_position") == reads);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp on_link() losing the link on any exception, not only util::is_link_loss.
+TEST_CASE("QHY Filter Wheel Driver - Failed reads and generic SDK errors keep the link", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, clock);
+    LossWarnCounter warns;
+    driver->set_connected(true);
+
+    // -1 is the moving answer whether the wheel moves or the read failed: no
+    // count of them loses the link, however long it lasts (no latch, no bound).
+    driver->set_position(3);
+    fake.cfw_position_script = {-1};
+    for (int i = 0; i < 100; ++i) {
+        clock.advance(alpacacore::util::kLinkStalenessBound);
+        CHECK(driver->get_position() == -1);
+    }
+    CHECK(driver->get_connected());
+
+    fake.throw_from.insert("move_cfw");
+    require_alpaca_error([&] { driver->set_position(1); }, alpacacore::AlpacaError::DriverException);
+    fake.throw_from.clear();
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(warns.warns.load() == 0);
+    driver->set_connected(false);
+
+    // The driver's own NotConnected while disconnected is not evidence either.
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_link_fault().empty());
+    CHECK(warns.warns.load() == 0);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp lose_link() copying open_id_ instead of taking it, so the teardown closes a
+// second time and drops the paired camera's reference.
+TEST_CASE("QHY Filter Wheel Driver - A lost wheel releases only its own reference", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto camera = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    auto wheel = alpacacore::vendor::qhy::create_qhy_filterwheel(1, "fake-qhy-0", sdk);
+    camera->set_connected(true);
+    wheel->set_connected(true);
+    REQUIRE(fake.ref_count("fake-qhy-0") == 2);
+
+    fake.remove_from.insert("move_cfw");
+    require_alpaca_error([&] { wheel->set_position(1); }, alpacacore::AlpacaError::NotConnected);
+    fake.remove_from.clear();
+    CHECK(fake.ref_count("fake-qhy-0") == 1);  // released once, at the loss
+
+    const int closes = fake.call_count("close_camera");
+    wheel->set_connected(false);
+    wheel.reset();
+    CHECK(fake.call_count("close_camera") == closes);
+    CHECK(fake.ref_count("fake-qhy-0") == 1);
+    CHECK(fake.physical_closes == 0);
+    CHECK(camera->get_connected());
+    CHECK(camera->get_camera_x_size() == 64);
+
+    camera->set_connected(false);
+    CHECK(fake.physical_closes == 1);
+    CHECK(fake.underflow_closes == 0);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp get_position() calling sdk_.get_cfw_position() outside on_link(), so the
+// loss is never applied and Position keeps answering.
+TEST_CASE("QHY Filter Wheel Driver - While lost, members refuse and the move state is gone",
+          "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_position(3);
+    fake.cfw_position_script = {-1};
+    fake.remove_from.insert("get_cfw_position");
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::NotConnected);
+    fake.remove_from.clear();
+
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_position(1); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_device_state().empty());
+    // Names and offsets are driver-side configuration and stay readable (FilterWheel semantics).
+    CHECK(driver->get_names().size() == 5);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp teardown() not clearing link_fault_, so the reason outlives a Disconnect.
+TEST_CASE("QHY Filter Wheel Driver - The loss reason stays until Connect or Disconnect", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, clock);
+    driver->set_connected(true);
+    fake.remove_from.insert("move_cfw");
+    require_alpaca_error([&] { driver->set_position(1); }, alpacacore::AlpacaError::NotConnected);
+    fake.remove_from.clear();
+
+    clock.advance(std::chrono::minutes(5));
+    require_alpaca_error([&] { driver->set_position(1); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_link_fault().find("move_cfw failed") != std::string::npos);
+
+    SECTION("Disconnect clears it") {
+        driver->set_connected(false);
+        CHECK(driver->get_link_fault().empty());
+    }
+    SECTION("Connect clears it") {
+        driver->set_connected(true);
+        CHECK(driver->get_connected());
+        CHECK(driver->get_link_fault().empty());
+        driver->set_connected(false);
+    }
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp set_connected(true) gating on connected_ alone, so Connected=true over a
+// lost link returns at the idempotency check.
+TEST_CASE("QHY Filter Wheel Driver - Connect after a loss reconnects without a Disconnect",
+          "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(0, 0, sdk);
+
+    SECTION("synchronous") {
+        driver->set_connected(true);
+        driver->set_position(2);
+        fake.cfw_position_script = {-1};
+        fake.remove_from.insert("get_cfw_position");
+        CHECK_THROWS(driver->get_position());
+        fake.remove_from.clear();
+        REQUIRE_FALSE(driver->get_connected());
+        const int enumerations = fake.call_count("enumerate_cameras");
+
+        fake.cfw_position_script = {4};
+        driver->set_connected(true);
+        CHECK(driver->get_connected());
+        CHECK(fake.call_count("enumerate_cameras") == enumerations + 1);
+        CHECK(fake.ref_count("fake-qhy-0") == 1);
+        CHECK(driver->get_position() == 4);  // the reconnect's warm-up read, not -1 from the old move
+        driver->set_connected(false);
+    }
+    SECTION("asynchronous") {
+        driver->set_connected(true);
+        fake.remove_from.insert("move_cfw");
+        CHECK_THROWS(driver->set_position(1));
+        fake.remove_from.clear();
+        REQUIRE_FALSE(driver->get_connected());
+
+        driver->connect();
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(fake.ref_count("fake-qhy-0") == 1);
+        driver->disconnect();
+        REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(5)));
+    }
+    CHECK(fake.ref_count("fake-qhy-0") == 0);
+    CHECK(fake.underflow_closes == 0);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp lose_link() copying open_id_ instead of taking it, so the Disconnect of a
+// lost wheel closes again and a throwing close fails it.
+TEST_CASE("QHY Filter Wheel Driver - Disconnect of a lost wheel completes", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    fake.remove_from.insert("move_cfw");
+    CHECK_THROWS(driver->set_position(1));
+    fake.remove_from.clear();
+
+    // The loss released the reference, so Disconnect has nothing to close and
+    // cannot fail on the close, even one that would throw.
+    fake.throw_from.insert("close_camera");
+    CHECK_NOTHROW(driver->set_connected(false));
+    fake.throw_from.clear();
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.ref_count("fake-qhy-0") == 0);
+    CHECK(fake.underflow_closes == 0);
+
+    driver->set_connected(true);
+    CHECK(fake.ref_count("fake-qhy-0") == 1);
+    CHECK(fake.physical_opens == 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp connect_locked()'s catch not calling sdk_.close_camera(id), so a removal on
+// the warm-up read leaks the open.
+TEST_CASE("QHY Filter Wheel Driver - A removal during Connect fails it and leaks nothing", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+
+    fake.remove_from.insert("get_cfw_position");
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    fake.remove_from.clear();
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.ref_count("fake-qhy-0") == 0);
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
     CHECK(fake.underflow_closes == 0);
 }

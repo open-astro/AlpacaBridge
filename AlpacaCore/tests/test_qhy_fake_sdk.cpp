@@ -128,6 +128,23 @@ TEST_CASE("FakeQHYSDK - throw_from injects a failure into one named call", "[qhy
     CHECK(fake.call_count("open_camera") == 1);
 }
 
+TEST_CASE("FakeQHYSDK - remove_from throws the wrapper's removal answer", "[qhy][fake][unit]") {
+    auto fake = make_fake();
+    fake.open_camera("fake-qhy-0");
+    fake.remove_from.insert("get_cfw_position");
+    try {
+        static_cast<void>(fake.get_cfw_position("fake-qhy-0"));
+        FAIL("expected a throw");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::NotConnected);
+        CHECK(std::string(ex.what()).find("0xfffffffd") != std::string::npos);
+    }
+    // Only the named call: a move still goes through, and the handle stays open.
+    fake.move_cfw("fake-qhy-0", 1);
+    CHECK(fake.last_cfw_target == 1);
+    CHECK(fake.ref_count("fake-qhy-0") == 1);
+}
+
 TEST_CASE("FakeQHYSDK - an unavailable SDK resource fails the three entry points", "[qhy][fake][unit]") {
     // On real hardware this state is only reachable by segfaulting inside
     // libqhyccd's libusb hotplug init (issue #321), so it has never had a test.
