@@ -577,10 +577,11 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect mid-move waits out the arr
     driver->set_connected(true);
     driver->set_position(5);
     CHECK(driver->get_position() == -1);
-    // On a pty tcdrain() returns while the goto byte is still unread in the
-    // buffer, and the held-port reconnect flushes the line (tcflush); a real
-    // UART would have sent it. Wait until the fake has taken the byte so the
-    // wheel is really mid-travel when the reconnect lands.
+    // On a pty the bounded drain sees an empty TIOCOUTQ and returns while the
+    // goto byte is still unread in the buffer, and the held-port reconnect
+    // flushes the line (tcflush); a real UART would have sent it. Wait until the
+    // fake has taken the byte so the wheel is really mid-travel when the
+    // reconnect lands.
     const auto seen_by = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (fake.count("5") == 0 && std::chrono::steady_clock::now() < seen_by) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
