@@ -14,12 +14,20 @@
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <optional>
+#include <string>
+#include <thread>
 #include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_task_clock.h"
+#include "fake_zwo_efw_sdk.h"
+#include "getter_stall_probe.h"
 
 namespace {
 
@@ -99,4 +107,94 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Unique IDs", "[zwo][filterwheel][unit]"
     auto d1 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(1, 0);
 
     CHECK(d0->get_unique_id() != d1->get_unique_id());
+}
+
+// Falsified by: the EFW driver dropping the firmware clear at Disconnect (the post-disconnect nullopt), reading the
+// firmware from the SDK per hook call (the firmware_calls count), or dropping the serial reset at Disconnect (the id
+// assertions).
+TEST_CASE("ZWO EFW Filter Wheel Driver - Firmware is read once at connect and cleared at disconnect",
+          "[zwo][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    sdk.firmware = "2.3.4";
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    driver->set_connected(true);
+    CHECK(driver->get_unique_id().find("_SN_") != std::string::npos);  // serial read at connect
+    CHECK(sdk.firmware_calls == 1);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(driver->get_device_firmware() == std::optional<std::string>("2.3.4"));
+    }
+    CHECK(sdk.firmware_calls == 1);  // the hook made no SDK call
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    // The rest of the Disconnect reset still runs: the serial is dropped, so the id falls back to the unit id.
+    CHECK(driver->get_unique_id().find("_SN_") == std::string::npos);
+}
+
+// Falsified by: the EFW driver's connect letting a failed firmware read propagate (the connect then throws), or
+// reporting an empty string as a firmware.
+TEST_CASE("ZWO EFW Filter Wheel Driver - A failed or empty firmware read does not fail the connect",
+          "[zwo][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    sdk.fail_firmware = true;
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    driver->set_connected(false);
+
+    sdk.fail_firmware = false;
+    sdk.firmware.clear();
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    driver->set_connected(false);
+}
+
+// Decision 0016 rule 3: only a finished connect reports a firmware.
+// Falsified by: the EFW driver publishing firmware_ before its info read (the failed connect then reports 2.3.4),
+// or not clearing firmware_ at the start of a connect (the failed reconnect after a lost link keeps the old
+// session's 2.3.4).
+TEST_CASE("ZWO EFW Filter Wheel Driver - A connect that fails after the firmware read reports no firmware",
+          "[zwo][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    sdk.firmware = "2.3.4";
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk, clock);
+    sdk.fail_info = true;
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
+    CHECK(sdk.firmware_calls == 1);  // the firmware read answered before the info read failed
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+
+    sdk.fail_info = false;
+    driver->set_connected(true);
+    REQUIRE(driver->get_device_firmware() == std::optional<std::string>("2.3.4"));
+    sdk.remove();  // a lost link keeps the cache until the next Connect or Disconnect
+    clock.advance(std::chrono::milliseconds(150));
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+}
+
+// Decision 0016. Falsified by: get_device_firmware() in the EFW driver taking io_mutex_ or mutex_-then-I/O (the
+// hook then waits the whole 300 ms status read).
+TEST_CASE("ZWO EFW Filter Wheel Driver - Firmware answers while a status read is in flight",
+          "[zwo][filterwheel][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.position_delay = kHoldOpen;
+    std::thread reader([&] {
+        try {
+            (void)driver->get_position();
+        } catch (const std::exception&) {
+        }
+    });
+    for (int i = 0; i < 200 && sdk.position_entered.load() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE(sdk.position_entered.load() > 0);
+    CHECK(timed([&] { CHECK(driver->get_device_firmware().has_value()); }) < kGetterBudget);
+    reader.join();
+    driver->set_connected(false);
 }

@@ -57,6 +57,12 @@ public:
     int slot_index{0};
     int slot_count{7};
     int position{0};
+    // What get_firmware_version() answers; an empty string is an unreadable one. fail_firmware makes it throw.
+    std::string firmware{"1.0.0"};
+    bool fail_firmware{false};
+    std::atomic<int> firmware_calls{0};
+    // The connect's info read fails (after the firmware read).
+    bool fail_info{false};
     std::string serial{"EFW-SN-1"};
     // A second wheel on the same SDK (issue #1668 id swap); -1 = none.
     int second_id{-1};
@@ -125,7 +131,7 @@ public:
     bool get_wheel_info_by_id(int wheel_id, Info& info) override {
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels || removed || (wheel_id != id && wheel_id != second_id)) {
+        if (fail_info || no_wheels || removed || (wheel_id != id && wheel_id != second_id)) {
             return false;
         }
         info = Info{wheel_id, "EFW", slot_count};
@@ -193,7 +199,9 @@ public:
         return table_.call(wheel_id, [&] {
             std::lock_guard<std::mutex> lock(mutex_);
             check_unit(wheel_id);
-            return std::string("1.0.0");
+            ++firmware_calls;
+            if (fail_firmware) throw AlpacaException("firmware read failed", AlpacaError::DriverException);
+            return firmware;
         });
     }
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
