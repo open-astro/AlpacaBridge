@@ -61,6 +61,8 @@ public:
     std::string firmware{"1.0.0"};
     bool fail_firmware{false};
     std::atomic<int> firmware_calls{0};
+    // The connect's info read fails (after the firmware read).
+    bool fail_info{false};
     std::string serial{"EFW-SN-1"};
     // A second wheel on the same SDK (issue #1668 id swap); -1 = none.
     int second_id{-1};
@@ -129,7 +131,7 @@ public:
     bool get_wheel_info_by_id(int wheel_id, Info& info) override {
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels || removed || (wheel_id != id && wheel_id != second_id)) {
+        if (fail_info || no_wheels || removed || (wheel_id != id && wheel_id != second_id)) {
             return false;
         }
         info = Info{wheel_id, "EFW", slot_count};

@@ -947,9 +947,9 @@ TEST_CASE("ZWO EAF Focuser Driver - A latched fault refuses a move but not a Hal
     CHECK(eaf.driver->get_connected());
 }
 
-// Falsified by: get_device_firmware() in the EAF driver returning the cache without the connected check (the
-// pre-connect and post-disconnect nullopt), dropping the clear at disconnect, or calling the SDK per call (the
-// firmware_calls count), or the firmware clear swallowing the serial reset (the id assertions).
+// Falsified by: the EAF driver dropping the firmware clear at Disconnect (the post-disconnect nullopt), reading the
+// firmware from the SDK per hook call (the firmware_calls count), or dropping the serial reset at Disconnect (the id
+// assertions).
 TEST_CASE("ZWO EAF Focuser Driver - Firmware is read once at connect and cleared at disconnect",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
@@ -989,6 +989,32 @@ TEST_CASE("ZWO EAF Focuser Driver - A failed or empty firmware read does not fai
     driver->set_connected(false);
 }
 
+// Decision 0016 rule 3: only a finished connect reports a firmware.
+// Falsified by: the EAF driver publishing firmware_ before its info read (the failed connect then reports 2.3.4),
+// or not clearing firmware_ at the start of a connect (the failed reconnect after a lost link keeps the old
+// session's 2.3.4).
+TEST_CASE("ZWO EAF Focuser Driver - A connect that fails after the firmware read reports no firmware",
+          "[zwo][focuser][unit][fake-sdk]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    FakeEAFSDK sdk;
+    sdk.firmware = "2.3.4";
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
+    sdk.fail_info = true;
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
+    CHECK(sdk.firmware_calls == 1);  // the firmware read answered before the info read failed
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+
+    sdk.fail_info = false;
+    driver->set_connected(true);
+    REQUIRE(driver->get_device_firmware() == std::optional<std::string>("2.3.4"));
+    sdk.replug(9);  // a lost link keeps the cache until the next Connect or Disconnect
+    wait_past_status_ttl(clock);
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    sdk.fail_info = true;
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+}
+
 // Decision 0016. Falsified by: get_device_firmware() in the EAF driver taking io_mutex_ or mutex_-then-I/O (the
 // hook then waits the whole 300 ms status read).
 TEST_CASE("ZWO EAF Focuser Driver - Firmware answers while a status read is in flight",
@@ -1021,10 +1047,12 @@ TEST_CASE("ZWO EAF Focuser Driver - The registered driver supplies the listing's
     std::shared_ptr<alpacacore::FocuserDriver> driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
     driver->set_connected(true);
     auto& registry = alpacacore::management::DeviceRegistry::instance();
+    struct ClearRegistry {
+        ~ClearRegistry() { alpacacore::management::DeviceRegistry::instance().clear(); }
+    } clear_registry;  // the singleton is emptied even when a REQUIRE below fails
     REQUIRE(registry.register_device(driver));
     const auto listed = registry.get_device(alpacacore::DeviceType::Focuser, 0);
     REQUIRE(listed);
     CHECK(listed->get_device_firmware() == std::optional<std::string>("3.1"));
-    registry.clear();
     driver->set_connected(false);
 }

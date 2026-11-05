@@ -202,6 +202,10 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     lost_reason_.clear();
                 }
+                {
+                    std::lock_guard<std::mutex> lock(firmware_mutex_);
+                    firmware_.clear();  // a connect that fails reports no firmware
+                }
                 const auto opened = bind_rotator_locked();
                 try {
                     sdk_.with_link(open_id_, open_link_, [&] { publish_connect_state(open_id_, opened.serial); });
@@ -241,11 +245,9 @@ public:
     }
 
     // CAA firmware read once at connect; web UI only, never DriverInfo. Cheap getter: no SDK call, and only the
-    // leaf firmware_mutex_ (decision 0016). Empty or unread is no firmware.
+    // leaf firmware_mutex_ (decision 0016). Empty (unread, or cleared by Connect or Disconnect) is no firmware; no
+    // Connected check, the cache is empty while disconnected.
     std::optional<std::string> get_device_firmware() const override {
-        if (!link_.is_open()) {
-            return std::nullopt;
-        }
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (firmware_.empty()) {
             return std::nullopt;
@@ -694,16 +696,13 @@ private:
     // serial and type under mutex_ (short), the rotation limit as an atomic; a connect that throws before this publish
     // leaves the pre-connect values (decision 0016 rule 3). Caller holds io_mutex_ and not mutex_.
     void publish_connect_state(int rotator_id, const std::string& serial) {
-        // Informational: a failed read never fails the connect, the hook then reports no firmware.
+        // Informational: a failed read never fails the connect, the hook then reports no firmware. Published
+        // last, after every throw point, so only a finished connect reports one (decision 0016 rule 3).
         std::string firmware;
         try {
             firmware = sdk_.get_firmware_version(rotator_id);
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG("ZWO", "CAA firmware unavailable: " + std::string(e.what()));
-        }
-        {
-            std::lock_guard<std::mutex> lock(firmware_mutex_);
-            firmware_ = firmware;
         }
         ZWOCAARotatorInfo info;
         if (!sdk_.get_rotator_info_by_id(rotator_id, info)) {
@@ -768,6 +767,10 @@ private:
             has_target_position_ = false;
         }
         max_degree_.store(max_degree);
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_ = firmware;
+        }
     }
 
     void validate_angle(double position) const {

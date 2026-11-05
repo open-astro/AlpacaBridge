@@ -30,6 +30,7 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_task_clock.h"
 #include "fake_zwo_caa_sdk.h"
 #include "getter_stall_probe.h"
 #include "rotator_sync_offset_test_dir.h"
@@ -706,9 +707,9 @@ TEST_CASE("ZWO CAA Rotator Driver - A disconnect during queued status reads is n
     CHECK(not_connected.load() == kReaders);
 }
 
-// Falsified by: get_device_firmware() in the CAA driver returning the cache without the connected check (the
-// pre-connect and post-disconnect nullopt), dropping the clear at disconnect, or calling the SDK per call (the
-// firmware_calls count), or the firmware clear swallowing the serial reset (the id assertions).
+// Falsified by: the CAA driver dropping the firmware clear at Disconnect (the post-disconnect nullopt), reading the
+// firmware from the SDK per hook call (the firmware_calls count), or dropping the serial reset at Disconnect (the id
+// assertions).
 TEST_CASE("ZWO CAA Rotator Driver - Firmware is read once at connect and cleared at disconnect",
           "[zwo][rotator][unit][fake-sdk]") {
     FakeCAASDK sdk;
@@ -746,6 +747,31 @@ TEST_CASE("ZWO CAA Rotator Driver - A failed or empty firmware read does not fai
     CHECK(driver->get_connected());
     CHECK_FALSE(driver->get_device_firmware().has_value());
     driver->set_connected(false);
+}
+
+// Decision 0016 rule 3: only a finished connect reports a firmware.
+// Falsified by: the CAA driver publishing firmware_ before its info read (the failed connect then reports 2.3.4),
+// or not clearing firmware_ at the start of a connect (the failed reconnect after a lost link keeps the old
+// session's 2.3.4).
+TEST_CASE("ZWO CAA Rotator Driver - A connect that fails after the firmware read reports no firmware",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    FakeCAASDK sdk;
+    sdk.firmware = "2.3.4";
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk, clock);
+    sdk.fail_info = true;
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
+    CHECK(sdk.firmware_calls == 1);  // the firmware read answered before the info read failed
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+
+    sdk.fail_info = false;
+    driver->set_connected(true);
+    REQUIRE(driver->get_device_firmware() == std::optional<std::string>("2.3.4"));
+    sdk.remove();  // a lost link keeps the cache until the next Connect or Disconnect
+    clock.advance(std::chrono::milliseconds(150));
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_device_firmware().has_value());
 }
 
 // Decision 0016. Falsified by: get_device_firmware() in the CAA driver taking io_mutex_ or mutex_-then-I/O (the
