@@ -9,5 +9,6 @@
 # The gate itself, so it cannot be weakened without the same review.
 /.github/CODEOWNERS @diegopereiran @joeytroy
 /.github/workflows/decision-records.yml @diegopereiran @joeytroy
+/.github/workflows/adr-merge-queue.yml @diegopereiran @joeytroy
 /scripts/check_adr_authorization.py @diegopereiran @joeytroy
 /scripts/check_adr_scope.py @diegopereiran @joeytroy
