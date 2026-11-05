@@ -48,6 +48,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZwoMount;
+using alpacacore::test::Latch;
 using alpacacore::test::timed;
 
 alpacacore::vendor::zwo::ConnectionInfo endpoint(int port, int response_timeout_ms) {
@@ -1178,32 +1179,6 @@ TEST_CASE("ZWO async - Park or a jog during a held GOTO target write waits one e
 }
 
 namespace {
-
-// A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
-struct Latch {
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool entered = false;
-    bool open = false;
-
-    void block() {
-        std::unique_lock<std::mutex> lock(mutex);
-        entered = true;
-        cv.notify_all();
-        static_cast<void>(cv.wait_for(lock, std::chrono::seconds(2), [&] { return open; }));
-    }
-    bool wait_entered() {
-        std::unique_lock<std::mutex> lock(mutex);
-        return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
-    }
-    void release() {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            open = true;
-        }
-        cv.notify_all();
-    }
-};
 
 std::thread refuse_thread(std::function<void()>) {
     throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
