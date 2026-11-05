@@ -335,4 +335,40 @@ TEST_CASE("iOptron telescope - a cache that lapses between its freshness check a
     driver->set_connected(false);
 }
 
+// The sibling: a hold window, not a TTL, keeps the getter off the wire, and the cache behind it was invalidated
+// (SetPark drops the position cache) rather than primed. When the hold closes between the check and the body,
+// the refill has nothing to serve as it stands and must go to the mount, under the operation lock: the body runs
+// again under both locks instead of refusing the read.
+TEST_CASE(
+    "iOptron telescope - a hold window that closes between the check and the refill of an invalidated cache "
+    "refills under the operation lock",
+    "[ioptron][telescope][getter-locks]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    mount.set_alt_az(45.0, 180.0);  // SetPark reads the Alt/Az for the park position
+    alpacacore::test::FakeTaskClock inner;
+    TickingClock clock(inner);
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
+                                                              std::nullopt, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // A 100 ms RA pulse holds Declination (the axis not pulsing) at its last read for the pulse, the completion
+    // delay and the hold grace (2.6 s). Each pass drops the position cache, arms the hold, ages it to just under
+    // its end, then reads on a clock that moves 1 ms per read, so one of these ages closes the hold between the
+    // getter's check and the refill's own.
+    constexpr auto kDecHold = milliseconds(100 + 500 + 2000);
+    for (int before_ms = 5; before_ms >= 1; --before_ms) {
+        INFO("hold closes " << before_ms << " ms after the check");
+        clock.set_tick(std::chrono::nanoseconds::zero());
+        inner.advance(std::chrono::seconds(31));  // every earlier hold and the post-connect grace are over
+        driver->set_park();
+        driver->pulse_guide(2, 100);
+        inner.advance(kDecHold - milliseconds(before_ms));
+        clock.set_tick(milliseconds(1));
+        REQUIRE_NOTHROW(static_cast<void>(driver->get_declination()));
+    }
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

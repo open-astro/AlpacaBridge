@@ -2077,14 +2077,21 @@ private:
         }
     }
 
+    // Signalled by a refill helper that, under the state lock alone, finds the cache it would serve was never
+    // primed or was invalidated: serve_cached_or_refill() runs the body again under the operation lock. Not an
+    // std::exception on purpose, so no catch on the way back mistakes it for a failed exchange.
+    struct RefillNeedsOperationLock {};
+
     // Decision 0016 rule 1 (#1829): a getter served from a cache takes the state lock alone and answers when its
     // cache is fresh (the common case: every cache is primed at connect and refilled on a TTL), so it never waits
     // behind a command, the clock-sync body or another getter's refill on the wire. Only when the cache has
     // lapsed, or a fault is latched (the probe is an exchange), does it take the operation lock and run `body`
     // under both locks, where the refill reaches the mount. `fresh` and `body` run under mutex_; `fresh` true
-    // must mean `body` reaches no wire: the refill helpers return early on the same predicates, and, since the
-    // check and the refill read the clock separately, a primed cache that lapsed between the two (a 1 Hz poller
-    // lands on the TTL edge) is served as it stands under the state lock alone (serve_as_is_locked()).
+    // must mean `body` reaches no wire: the refill helpers return early on the same predicates. The check and
+    // the refill read the clock separately, so a TTL, hold window or override can lapse between the two (a 1 Hz
+    // poller lands on the TTL edge). A refill reached that way serves a primed cache as it stands, and when the
+    // cache it would serve was never primed or was invalidated it signals RefillNeedsOperationLock instead of
+    // reaching the wire: the body is then run again under both locks (serve_as_is_locked()).
     template <typename Fresh, typename Body>
     std::invoke_result_t<Body&> serve_cached_or_refill(Fresh&& fresh, Body&& body) const {
         check_connected_before_lock();
@@ -2095,7 +2102,11 @@ private:
             }
             throw_if_link_lost();
             if (!device_faulted_ && fresh()) {
-                return body();
+                try {
+                    return body();
+                } catch (const RefillNeedsOperationLock&) {
+                    // Lapsed between `fresh` and the refill's own check, on a cache that needs the exchange.
+                }
             }
         }
         StateLock lock(lock_gate_);
@@ -2107,10 +2118,20 @@ private:
     // refill helpers below return early on the same predicate.
     //
     // A refill under the state lock alone comes from serve_cached_or_refill(), whose freshness check passed a
-    // moment earlier on its own clock read; the cache lapsed in between. It is served as it stands and the next
-    // read refills it under the operation lock. A cache that was never primed still reaches Wire, which refuses
-    // the exchange as the defect it is.
-    bool serve_as_is_locked(bool cache_valid) const { return cache_valid && !lock_gate_.holds_io(); }
+    // moment earlier on its own clock read; the TTL, hold window or override lapsed in between. A primed cache
+    // is served as it stands (true) and the next read refills it under the operation lock. A cache that was
+    // never primed or was invalidated (a slew, Park, FindHome or SetPark drops it, and a hold window can close on
+    // it) needs the exchange, so the refill signals the template to run the body again under both locks. Under
+    // the operation lock the refill goes ahead (false).
+    bool serve_as_is_locked(bool cache_valid) const {
+        if (lock_gate_.holds_io()) {
+            return false;
+        }
+        if (cache_valid) {
+            return true;
+        }
+        throw RefillNeedsOperationLock{};
+    }
     bool position_cache_fresh_locked() const {
         const auto now = clock_.now();
         return position_cache_valid_ && (now < fast_cache_until_ || (now - last_position_update_) < kPositionCacheTtl);
