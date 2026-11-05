@@ -345,9 +345,14 @@ TEST_CASE("ZWO last-resort Sync fences an older GOTO and serializes its target w
     REQUIRE(rig.mount.wait_for_count(":Q", 1, kReal));
     REQUIRE(rig.clock.wait_for_waiters(2, kReal));
     rig.mount.override_reply(":SMMC", "e4", 2);
+    // The Sync's fence cancels the GOTO's back-off, but that body can still hold its clock registration while it
+    // leaves the wait, so a waiter count cannot tell it from the Sync's own park: with the Sync still on the wire
+    // (the e4 reply, then ":Q"), the step budget below ran out in microseconds and the second ":SMMC" never came
+    // (#2051). The Sync's 200 ms settle sleep is the next registration after the GOTO's; wait for that one.
+    const auto waits = rig.clock.wait_count();
     auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
     REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
-    rig.wait_for_blocked_caller();
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, kReal));
     rig.advance_until([&] { return rig.mount.count(":SMMC") == 2; }, 200ms, 1200ms);
     REQUIRE(rig.mount.wait_for_count(":SMMC", 2, kReal));
     rig.wait_for_blocked_caller();

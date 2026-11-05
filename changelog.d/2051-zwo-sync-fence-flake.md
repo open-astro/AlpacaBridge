@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **ZWO last-resort Sync case: the step budget no longer runs out before the Sync has parked** (tests, issue #2051): "ZWO last-resort Sync fences an older GOTO and serializes its target writes" waited for "a blocked caller" by waiter count, but the GOTO body the Sync fences can still hold its clock registration while it leaves its cancelled back-off, so the count was reached while the Sync was still on the wire and the 1.2 s step budget was spent in microseconds; the second `:SMMC` then never came within the real-time bound. The case now waits for the Sync's own settle sleep to register (`wait_for_wait_count`) before it steps.
