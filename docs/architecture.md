@@ -23,7 +23,7 @@ AlpacaBridge is a complete ASCOM Alpaca server for Linux, built from two main co
              v
 +---------------------------+
 |        AlpacaCore         |  <- Device driver library
-|  (drivers, wrappers,      |     (no HTTP, no sockets)
+|  (drivers, wrappers,      |     (no server)
 |   device registry)        |
 +------------+--------------+
              |
@@ -40,7 +40,7 @@ AlpacaBridge is a complete ASCOM Alpaca server for Linux, built from two main co
 AlpacaCore is a **protocol-level library** that:
 
 - Implements Alpaca device behavior and state machines
-- Contains **no HTTP, REST, sockets, or JSON parsing**
+- Contains **no server**: no listening socket, router or inbound request parsing; an outbound client inside a vendor wrapper is that vendor's wire protocol ([decision 0023](decisions/0023-outbound-clients-in-vendor-wrappers.md))
 - Exposes a clean C++ API that higher-level servers use
 - Follows the [ASCOM Alpaca API specification](https://ascom-standards.org/api/)
 

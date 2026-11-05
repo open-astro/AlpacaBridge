@@ -36,9 +36,9 @@ Instead: one protocol wrapper per vendor with its own tests and fake. When two w
 
 ### 4. JSON inside AlpacaCore
 
-What it is: using `nlohmann::json` (or any JSON type) in AlpacaCore, for config, the catalog or device state.
+What it is: using `nlohmann::json` (or any JSON type) in AlpacaCore, for config, the catalog or device state. A vendor wrapper whose wire protocol is JSON over HTTP parses its own replies inside the wrapper and hands typed values to the driver ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)).
 
-Why rejected: AlpacaCore is vendor-neutral device logic with no transport. `AGENTS.md` says "No HTTP/REST/sockets/JSON transport code" in AlpacaCore. JSON in the core would tie device logic to one wire format and make the layering gate (AlpacaHTTP to AlpacaCore to vendor) meaningless.
+Why rejected: AlpacaCore is vendor-neutral device logic with no transport. `AGENTS.md` says AlpacaCore has no server and no inbound request parsing ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)). JSON in the core would tie device logic to one wire format and make the layering gate (AlpacaHTTP to AlpacaCore to vendor) meaningless.
 
 Instead: describe configs as typed structs with field roles in the catalog descriptors and let AlpacaHTTP bridge JSON to them in one place ([decision 0004](0004-device-catalog.md), which rejected the catalog-with-JSON alternative for this reason).
 
@@ -75,7 +75,7 @@ The rules a change is checked against. Each names where it applies and what chec
 1. No universal `VendorAdapter` interface across vendors (section 1). Scope: `AlpacaCore/include/alpacacore/**`, `AlpacaCore/src/**`. Checked by: review.
 2. No universal telescope driver parameterised by protocol (section 2). Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
 3. No vendor protocol class derived from another vendor's (section 3). Scope: `AlpacaCore/include/alpacacore/vendor/**`, `AlpacaCore/src/vendors/**`. Checked by: review.
-4. No JSON type in AlpacaCore (section 4). Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review.
+4. No JSON type in an AlpacaCore interface, config, catalog descriptor or device state; a vendor wrapper's parse of its own wire replies stays inside the wrapper ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) (section 4). Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review (a JSON type in a header under `include/alpacacore/` or in a driver's state, config or catalog code).
 5. No base class per shared helper; `AsyncConnectable` is the only one (section 5). Scope: `AlpacaCore/include/alpacacore/**`. Checked by: review.
 6. No shared Dome or SafetyMonitor implementation before a named device needs it (section 6). Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
 7. No production `ByteChannel` between the serial and socket wrappers and their file descriptors (section 7). Scope: `AlpacaCore/src/vendors/**`, `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review.

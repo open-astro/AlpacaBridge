@@ -13,7 +13,7 @@ These rules tell Cursor how to work inside the **AlpacaCore** repository.
 **AlpacaCore** is a **vendor-neutral C++ Alpaca core library** that:
 
 - Implements ASCOM Alpaca device models and behavior
-- Contains **no HTTP / REST / sockets**
+- Contains **no server** (no listening socket, router or inbound request parsing; outbound vendor clients go through the `util::HttpClient` seam planned in decision 0023)
 - Avoids platform-specific hacks
 - Exposes a clean API that higher-level servers (e.g. **AlpacaHTTP** inside **AlpacaOS**) use
 - Follow the ASCOM Alpaca API specification: https://ascom-standards.org/api/
@@ -80,7 +80,7 @@ Cursor must **not** alter the license.
 AlpacaCore is **protocol-level only**:
 
 - Implements Alpaca device behavior/state
-- No HTTP, REST, sockets, or JSON parsing
+- No server: no listening socket, router or inbound request parsing (decision 0023); outbound vendor clients go through the `util::HttpClient` seam planned there
 - Higher layers translate HTTP/JSON into AlpacaCore calls
 
 ---
@@ -298,9 +298,8 @@ AlpacaCore must provide:
 
 Cursor must NOT add:
 
-- HTTP servers
-- JSON parsing
-- Socket code
+- HTTP servers, listening sockets or inbound request parsing (decision 0023)
+- JSON types in interfaces, config, the catalog or device state (decision 0013); a vendor wrapper's parse of its own wire replies stays inside the wrapper
 - GUI / CLI
 - Power management / GPIO
 - Branding or images

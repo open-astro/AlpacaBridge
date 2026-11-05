@@ -60,6 +60,20 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
 - Avoid: "disconnected" for a faulted link, or `NotConnected` for a link that has been
   silent for less than the staleness bound.
 
+## Native device vs proxied device
+
+- **Native device**: a device AlpacaBridge drives itself, over a serial port, a USB SDK
+  or GPIO, through one of its vendor drivers.
+- **Proxied device**: a device AlpacaBridge serves on behalf of an **upstream server**,
+  another Alpaca server it connects to as a client; the `remotealpaca` vendor
+  ([decision 0023](docs/decisions/0023-outbound-clients-in-vendor-wrappers.md)). The
+  proxied device has this server's own device number and `UniqueID`; the upstream's
+  device number is part of its configuration.
+- **Upstream server**: the remote Alpaca server a proxied device talks to. Never
+  "downstream": clients of AlpacaBridge are downstream of it.
+- Avoid: "forwarded device", "virtual device", "remote device" (ambiguous between the
+  proxied device and the upstream's own), and "alpaca device" for either.
+
 ## Fake evidence vs rig evidence
 
 - **Fake evidence**: a hardware-free test against a fake under `AlpacaCore/tests/`
