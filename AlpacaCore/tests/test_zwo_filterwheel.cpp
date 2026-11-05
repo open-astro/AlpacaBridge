@@ -162,7 +162,8 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Firmware answers while a status read is
         } catch (const std::exception&) {
         }
     });
-    for (int i = 0; i < 200 && sdk.position_entered.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    for (int i = 0; i < 200 && sdk.position_entered.load() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     REQUIRE(sdk.position_entered.load() > 0);
     CHECK(timed([&] { CHECK(driver->get_device_firmware().has_value()); }) < kGetterBudget);
     reader.join();
