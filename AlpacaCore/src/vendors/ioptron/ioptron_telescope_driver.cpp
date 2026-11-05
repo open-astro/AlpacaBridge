@@ -1360,6 +1360,13 @@ public:
                 // on this firmware and Dec pulse polarity flips with pier side.
                 // Slewing stays true while a trim pulse runs.
                 if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
+                    // The trim reads the position itself. Under the state lock alone (the slew hold closed
+                    // between the freshness check and the read of `now` above) the refused exchange would be
+                    // taken for a failed trim and the GOTO reported landed with its RA error: run again under
+                    // the operation lock instead.
+                    if (!lock_gate_.holds_io()) {
+                        throw RefillNeedsOperationLock{};
+                    }
                     ++slew_refine_count_;
                     try {
                         const Wire protocol = wire();
@@ -2036,8 +2043,9 @@ private:
     // already read position, Alt/Az or status from the mount. Every other call, writes included, only refuses.
     enum class LatchProbe : std::uint8_t { Refuse, Read };
 
-    // At most one probe per this interval while latched, on the task clock: a probe that times out holds mutex_ for
-    // the read timeout (5 s by default), so a client polling at 1 Hz is not blocked on every call, and a mount that
+    // At most one probe per this interval while latched, on the task clock: a probe that times out holds io_mutex_
+    // (Wire drops mutex_ for the read) for the read timeout (5 s by default), so a client polling at 1 Hz is not
+    // blocked on every call behind the operation lock, and a mount that
     // answers again is found within 5 s of polling, five probes before util::kLinkStalenessBound loses the link.
     static constexpr std::chrono::seconds kFaultProbeInterval{5};
 
@@ -2104,8 +2112,9 @@ private:
             if (!device_faulted_ && fresh()) {
                 try {
                     return body();
-                } catch (const RefillNeedsOperationLock&) {
-                    // Lapsed between `fresh` and the refill's own check, on a cache that needs the exchange.
+                } catch (const RefillNeedsOperationLock&) {  // NOLINT(bugprone-empty-catch)
+                    // Lapsed between `fresh` and the body's own check, on a read that needs the exchange: the
+                    // body runs again below, under the operation lock.
                 }
             }
         }

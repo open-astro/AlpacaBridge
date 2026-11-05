@@ -97,6 +97,18 @@ private:
     mutable std::atomic<std::uint64_t> reads_{0};
 };
 
+// Blocks until the async slew body has sent one more :MS1# than `sent_before`, or 5 s of real time pass.
+bool wait_for_goto_dispatch(alpacacore::test::FakeIoptronMount& mount, int sent_before) {
+    const auto dispatch_by = steady_clock::now() + std::chrono::seconds(5);
+    while (mount.count(":MS1#") <= sent_before) {
+        if (steady_clock::now() >= dispatch_by) {
+            return false;
+        }
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    return true;
+}
+
 }  // namespace
 
 TEST_CASE("iOptron telescope - Connected answers at once and reads false while a connect is on the wire",
@@ -367,6 +379,44 @@ TEST_CASE(
         inner.advance(kDecHold - milliseconds(before_ms));
         clock.set_tick(milliseconds(1));
         REQUIRE_NOTHROW(static_cast<void>(driver->get_declination()));
+    }
+    driver->set_connected(false);
+}
+
+// The third sibling: Slewing's body reaches the wire itself, for the HAE29C/HAE16 GOTO trim, once the slew hold has
+// closed and the status says the mount stopped. With the hold open for the check and closed for the body, the trim's
+// position read ran under the state lock alone, Wire refused it, the catch took that for a trim that failed, and
+// Slewing reported the GOTO landed with the RA error the trim exists to remove, for good.
+TEST_CASE(
+    "iOptron telescope - a slew hold that closes between the check and the body runs the GOTO trim under the "
+    "operation lock",
+    "[ioptron][telescope][getter-locks]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/12.0);  // past the 5" trim deadband
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock inner;
+    TickingClock clock(inner);
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), std::nullopt, std::nullopt,
+                                                              std::nullopt, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Each pass: a GOTO arms the 5 s slew hold at its dispatch, a status read inside the hold refills the status
+    // cache under the operation lock (the fake reports the mount stopped, 12 arcsec east of the target), then
+    // Slewing is read on a clock that moves 1 ms per read with the hold 1-5 ms from closing. Every read must
+    // report the slew still in progress: from the hold, or from the trim pulse that closes the residual.
+    for (int before_ms = 5; before_ms >= 1; --before_ms) {
+        INFO("hold closes " << before_ms << " ms after the check");
+        clock.set_tick(std::chrono::nanoseconds::zero());
+        inner.advance(std::chrono::seconds(31));  // the post-connect grace and every earlier window are over
+        const int sent_before = mount.count(":MS1#");
+        driver->slew_to_coordinates_async(12.0, 20.0);
+        REQUIRE(wait_for_goto_dispatch(mount, sent_before));
+        static_cast<void>(driver->get_at_home());  // refills the status cache: stopped
+        inner.advance(std::chrono::seconds(5) - milliseconds(before_ms));
+        clock.set_tick(milliseconds(1));
+        CHECK(driver->get_slewing());
+        clock.set_tick(std::chrono::nanoseconds::zero());
+        driver->abort_slew();
     }
     driver->set_connected(false);
 }
