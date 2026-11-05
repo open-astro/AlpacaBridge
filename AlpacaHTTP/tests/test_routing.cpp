@@ -4256,7 +4256,7 @@ int main() {
 #endif
 
     {
-        // case: updatedevice sets a telescope's optics in place (#2057)
+        // case: updatedevice sets telescope optics in place (#2057)
         // same driver instance, same uniqueId, persisted entry updated, every refusal HTTP 200 + ErrorNumber.
         const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
         // Vendor-free: a persisted entry (second Router over a one-entry file, as the #274 block does)
