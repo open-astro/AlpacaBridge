@@ -130,7 +130,7 @@ vendor-agnostic; do them in the driver from the start.
   call then cannot drop it, and every exchange runs under the state lock, which
   [decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md) items 1
   and 8 and Rule 6 rule out. The tracker is `util::LockGate`
-  (`AlpacaCore/include/alpacacore/util/lock_gate.h`), shared by the OnStep and Sky-Watcher
+  (`AlpacaCore/include/alpacacore/util/lock_gate.h`), shared by the OnStep, Sky-Watcher and iOptron
   telescopes: its `StateLock::lock()` refuses on a full table (#1729, #1730; its single
   read for a getter went with #1783, since no getter reads the device any more). A newly
   converted driver composes it rather than copying it.
