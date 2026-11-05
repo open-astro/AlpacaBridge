@@ -298,9 +298,8 @@ AlpacaCore must provide:
 
 Cursor must NOT add:
 
-- HTTP servers
-- JSON parsing
-- Socket code
+- HTTP servers, listening sockets or inbound request parsing (decision 0023)
+- JSON types in interfaces, config, the catalog or device state (decision 0013); a vendor wrapper's parse of its own wire replies stays inside the wrapper
 - GUI / CLI
 - Power management / GPIO
 - Branding or images
