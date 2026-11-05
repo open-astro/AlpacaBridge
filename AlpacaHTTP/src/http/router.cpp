@@ -5151,14 +5151,14 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
                               ". Allowed: deviceType, deviceNumber, apertureDiameter, focalLength");
             }
         }
-        if (!config.contains("deviceType") || !config["deviceType"].is_string() || !config.contains("deviceNumber") ||
-            !config["deviceNumber"].is_number_integer() || config["deviceNumber"].get<int>() < 0) {
+        // get_int rejects a number that does not fit an int instead of wrapping it (ADR 0007).
+        const int device_number = catalog_json::get_int(config, "deviceNumber", -1);
+        if (!config.contains("deviceType") || !config["deviceType"].is_string() || device_number < 0) {
             return refuse("Missing or invalid required fields: deviceType (string) and deviceNumber (integer >= 0)");
         }
         if (config["deviceType"].get<std::string>() != "telescope") {
             return refuse("Only deviceType telescope can be updated in place");
         }
-        const int device_number = config["deviceNumber"].get<int>();
         std::vector<std::pair<const char*, double>> updates;
         for (const char* key : kKeys) {
             if (!config.contains(key)) {

@@ -246,7 +246,6 @@ public:
           target_ra_hours_(0.0),
           target_dec_degrees_(0.0),
           aperture_diameter_m_(0.0),
-          aperture_area_m2_(0.0),
           focal_length_m_(0.0),
           site_latitude_cached_(0.0),
           site_longitude_cached_(0.0),
@@ -737,19 +736,13 @@ public:
     double get_aperture_diameter() const override {
         return aperture_diameter_m_;
     }
-    
-    void set_aperture_diameter(double meters) override {
-        aperture_diameter_m_ = meters;
-        if (meters > 0.0) {
-            double radius = meters / 2.0;
-            aperture_area_m2_ = std::numbers::pi * radius * radius;
-        } else {
-            aperture_area_m2_ = 0.0;
-        }
-    }
-    
+
+    void set_aperture_diameter(double meters) override { aperture_diameter_m_ = meters; }
+
     double get_aperture_area() const override {
-        return aperture_area_m2_;
+        // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
+        const double d = aperture_diameter_m_;
+        return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
     }
     
     bool get_at_home() const override {
@@ -3311,9 +3304,8 @@ private:
     // Target coordinates
     double target_ra_hours_;
     double target_dec_degrees_;
-    double aperture_diameter_m_ = 0.0;
-    double aperture_area_m2_ = 0.0;
-    double focal_length_m_ = 0.0;
+    std::atomic<double> aperture_diameter_m_ = 0.0;
+    std::atomic<double> focal_length_m_ = 0.0;
     int slew_settle_time_seconds_ = 0;
     double custom_tracking_rate_ = 1.0;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM

@@ -4361,6 +4361,10 @@ int main() {
         EXPECT(error_of(route_request(router, "POST", "/management/v1/updatedevice",
                                       R"({"deviceType":"telescope","deviceNumber":9650,"focalLength":1e999})"))
                    .value("ErrorNumber", 0) != 0);
+        // A deviceNumber that overflows int must not wrap onto 9650 (4294976946 = 2^32 + 9650).
+        EXPECT(error_of(route_request(router, "POST", "/management/v1/updatedevice",
+                                      R"({"deviceType":"telescope","deviceNumber":4294976946,"focalLength":0.9})"))
+                   .value("ErrorNumber", 0) != 0);
         EXPECT(std::fabs(get_value("focallength") - 0.6) < 1e-9);
 
         // Wrong verb: 405 with Allow.

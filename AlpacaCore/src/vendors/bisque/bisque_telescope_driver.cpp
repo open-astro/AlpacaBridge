@@ -379,16 +379,12 @@ public:
         return aperture_diameter_m_;
     }
 
-    void set_aperture_diameter(double meters) override {
-        aperture_diameter_m_ = meters;
-        if (meters > 0.0) {
-            double radius = meters / 2.0;
-            aperture_area_m2_ = std::numbers::pi * radius * radius;
-        }
-    }
+    void set_aperture_diameter(double meters) override { aperture_diameter_m_ = meters; }
 
     double get_aperture_area() const override {
-        return aperture_area_m2_;
+        // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
+        const double d = aperture_diameter_m_;
+        return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
     }
 
     bool get_at_home() const override {
@@ -1693,9 +1689,8 @@ private:
     mutable bool target_ra_set_ = false;
     mutable bool target_dec_set_ = false;
 
-    double aperture_diameter_m_ = 0.0;
-    double aperture_area_m2_ = 0.0;
-    double focal_length_m_ = 0.0;
+    std::atomic<double> aperture_diameter_m_ = 0.0;
+    std::atomic<double> focal_length_m_ = 0.0;
 
     // Snapshot-served state (decision 0010). The poll slot's body takes mutex_ only to publish.
     mutable util::StateSnapshot<PolledFrame> snapshot_{clock_, kSnapshotMaxAge};

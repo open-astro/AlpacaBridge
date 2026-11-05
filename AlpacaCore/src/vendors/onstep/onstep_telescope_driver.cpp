@@ -803,10 +803,13 @@ public:
             throw AlpacaException("Aperture diameter must be non-negative", AlpacaError::InvalidValue);
         }
         aperture_diameter_m_ = meters;
-        aperture_area_m2_ = meters > 0.0 ? (meters / 2.0) * (meters / 2.0) * std::numbers::pi : 0.0;
     }
 
-    double get_aperture_area() const override { return aperture_area_m2_; }
+    double get_aperture_area() const override {
+        // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
+        const double d = aperture_diameter_m_;
+        return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
+    }
 
     bool get_at_home() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
@@ -3377,9 +3380,8 @@ private:
     std::uint64_t target_ra_writes_ = 0;
     std::uint64_t target_dec_writes_ = 0;
 
-    double aperture_diameter_m_ = 0.0;
-    double aperture_area_m2_ = 0.0;
-    double focal_length_m_ = 0.0;
+    std::atomic<double> aperture_diameter_m_ = 0.0;
+    std::atomic<double> focal_length_m_ = 0.0;
 
     // Decision 0010 (#1783): the polled frame the getters and DeviceState serve. One publisher (the poll body,
     // plus the synchronous slew's end), any number of readers; a leaf lock under mutex_. Declared before the
