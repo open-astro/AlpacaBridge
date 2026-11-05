@@ -88,10 +88,10 @@ struct FakeApi {
 #undef FAKE_CONSTANT
 
     // Calls no case observes answer S_OK.
-#define FAKE_NOOP(name)                 \
-    template <class... Args>            \
-    static int name(Args...) {          \
-        return 0;                       \
+#define FAKE_NOOP(name)        \
+    template <class... Args>   \
+    static int name(Args...) { \
+        return 0;              \
     }
     FAKE_NOOP(StartPullModeWithCallback)
     FAKE_NOOP(Stop)
@@ -329,8 +329,7 @@ TEST_CASE("ToupcamFamilySDK - shared open ledger rolls back a failed open and ig
     SECTION("Altaircam") { check_shared_open_ledger<AltairBrand>(); }
 }
 
-TEST_CASE("ToupcamFamilySDK - SDK errors are named <prefix>_<function>",
-          "[touptek][altair][toupcam_family][unit]") {
+TEST_CASE("ToupcamFamilySDK - SDK errors are named <prefix>_<function>", "[touptek][altair][toupcam_family][unit]") {
     SECTION("Toupcam") { check_error_text_names_the_brand_function<ToupcamBrand>(); }
     SECTION("Altaircam") { check_error_text_names_the_brand_function<AltairBrand>(); }
 }

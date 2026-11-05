@@ -27,7 +27,7 @@ EXTENSIONS = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
 MINIMUM_TOKENS = 100
 # The share measured on the merge base, rounded up to the next 0.1 point; lower it,
 # never raise it.
-MAX_DUPLICATED_LINE_SHARE = 13.0  # percent
+MAX_DUPLICATED_LINE_SHARE = 6.9  # percent
 
 
 def merge_ranges(ranges):
@@ -148,8 +148,8 @@ def self_test():
         check("CPD XML: a range without endline fails loudly", False)
     except ValueError:
         check("CPD XML: a range without endline fails loudly", True)
-    check("verdict passes at the limit", verdict(13, 100, 13.0)[0])
-    check("verdict fails above the limit", not verdict(14, 100, 13.0)[0])
+    check("verdict passes at the limit", verdict(69, 1000, MAX_DUPLICATED_LINE_SHARE)[0])
+    check("verdict fails above the limit", not verdict(70, 1000, MAX_DUPLICATED_LINE_SHARE)[0])
     check("verdict fails on an empty scan", not verdict(0, 0)[0])
     check("the authored trees have lines to scan", total_lines() > 10000)
 

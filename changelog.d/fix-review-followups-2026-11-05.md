@@ -7,7 +7,7 @@
 - **WeeWX poll**, issue #2085. The feed poll runs in an operation slot on the driver's task clock (decisions 0005 and 0006).
 - **Discovery logging**, AlpacaHTTP, issue #1741. A received datagram is logged at DEBUG before it is checked, so a LAN host spraying UDP cannot fill the log.
 - **Decision records**, issue #2080. Decisions 0006, 0016 and 0017 are restated without exception clauses, and the docs-drift and serial-port checks now catch the word "exception" in a rule, a `decision NNNN` citation of a missing record, and a raw read on a copied fd.
-- **CI and scripts**, issues #1755 and #2089. New `duplication` job (PMD CPD duplicated-line ratchet, not required yet); pre-flight self-test fixes; the ConformU checker's fake-report rule matches a `Fake` folder or `Fake-*` file only; failure records 0012 to 0015 carry the standard sections.
+- **CI and scripts**, issues #1755 and #2089. New `duplication` job (PMD CPD duplicated-line ratchet, limit 6.9%, not required yet; the dependency snapshot lists the PMD pin); pre-flight self-test fixes; the ConformU checker's fake-report rule matches a `Fake` folder or `Fake-*` file only; failure records 0012 to 0015 carry the standard sections.
 
 ### Removed
 
