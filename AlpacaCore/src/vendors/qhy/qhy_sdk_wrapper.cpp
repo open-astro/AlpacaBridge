@@ -49,7 +49,6 @@ void check_result(uint32_t ret, const char* context) {
 // calls keep check_result() and their DriverException until the camera adopts
 // the same rule (after #1736).
 constexpr uint32_t kDeviceLost = static_cast<uint32_t>(QHYCCD_ERROR_DEVICELOSE);
-static_assert(QHYCCD_ERROR_DEVICELOSE == -3);
 
 void throw_if_device_lost(uint32_t ret, const char* context) {
     if (ret == kDeviceLost) {

@@ -127,7 +127,8 @@ public:
         // raw flag, so a lost wheel still runs its teardown; the connect gate reads
         // the link-aware value, so Connected=true over a lost link reconnects
         // (decision 0009 point 4, the CFW3 shape).
-        const bool live = get_connected();
+        // Qualified: the destructor reaches here, where virtual dispatch is gone anyway.
+        const bool live = QHYFilterWheelDriver::get_connected();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
