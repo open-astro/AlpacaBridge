@@ -15,15 +15,19 @@
 // poll_now(): the wire counts below are exact.
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <string>
 #include <thread>
+#include <variant>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "cgx_clock_cleanup.h"
@@ -165,6 +169,127 @@ TEST_CASE("CGX control paths read the axes and write the pair through to the fra
     CHECK(rig.reads(0x11) == dec + 1);
     rig.mount.complete_axis_guide(0x11);
     rig.clock.advance(20ms);
+    rig.mount.set_auto_complete_motions(true);
+}
+
+// Sync writes the RA label, then the Dec label, then verifies both, with mutex_ free (decision 0016) and the reference
+// still valid. A poll between the two writes publishes the new RA label beside the old Dec label. The fake lags the
+// Dec readback by one read after the write, so the poll run during the first verify sleep reads exactly that pair.
+TEST_CASE("CGX getters serve the pre-Sync pair while Sync writes the labels", "[celestron][cgx][telemetry]") {
+    namespace cgx = alpacacore::vendor::celestron;
+    TelemetryRig rig;
+    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.poll_now();
+    const double before_ra = rig.driver->get_right_ascension();
+    const double before_dec = rig.driver->get_declination();
+    const double lst = rig.driver->get_sidereal_time();
+    const auto old_dec_label = rig.mount.axis_position(0x11);
+    const auto side =
+        cgx::cgx_encoder_position_to_sky(rig.mount.axis_position(0x10), old_dec_label, lst, cgx::CgxHemisphere::North)
+            .pointing_side;
+    const auto new_dec_label =
+        cgx::cgx_sky_position_to_encoders(lst, 85.0, lst, cgx::CgxHemisphere::North, side).second;
+    rig.mount.set_label_read_offsets(0x11, {0, cgx::signed_cgx_encoder_delta(old_dec_label, new_dec_label)});
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    // Waits 1-3 are the settle before the writes; wait 4 is the first verify sleep, after both label writes.
+    for (int wait = 1; wait <= 3; ++wait) {
+        CHECK(rig.clock.wait_for_wait_count(wait, 2s));
+        rig.clock.advance(20ms);
+    }
+    CHECK(rig.clock.wait_for_wait_count(4, 2s));
+    rig.poll_now();  // new RA label, old Dec label
+    const double during_ra = rig.driver->get_right_ascension();
+    const double during_dec = rig.driver->get_declination();
+    rig.clock.advance(20ms);
+    CHECK(rig.clock.wait_for_wait_count(5, 2s));
+    rig.clock.advance(20ms);
+    CHECK_NOTHROW(sync.get());
+    CHECK(rig.mount.axis_position(0x11) == new_dec_label);  // the lagged read was the old Dec label
+    CHECK(std::abs(lst - before_ra) > 0.1);                 // a new RA label would show
+    CHECK(during_ra == Catch::Approx(before_ra).margin(1e-6));
+    CHECK(during_dec == Catch::Approx(before_dec).margin(1e-6));
+    // Sync publishes the verified pair.
+    CHECK(rig.driver->get_right_ascension() == Catch::Approx(lst).margin(1e-3));
+    CHECK(rig.driver->get_declination() == Catch::Approx(85.0).margin(1e-3));
+}
+
+TEST_CASE("CGX getters drop the pre-Sync pair when Sync fails after the label writes", "[celestron][cgx][telemetry]") {
+    TelemetryRig rig;
+    rig.mount.set_encoder_position(0x11, 0x810000);
+    rig.poll_now();
+    const double lst = rig.driver->get_sidereal_time();
+    rig.mount.set_label_read_offsets(0x11, std::vector<std::int32_t>(40, 100));  // the Dec label never reads back
+    auto sync = std::async(std::launch::async, [&] { rig.driver->sync_to_coordinates(lst, 85.0); });
+    for (int wait = 1; wait <= 40 && sync.wait_for(0s) != std::future_status::ready; ++wait) {
+        if (rig.clock.wait_for_wait_count(wait, 2s)) rig.clock.advance(20ms);
+    }
+    require_alpaca_error([&] { sync.get(); }, alpacacore::AlpacaError::DriverException);
+    rig.mount.set_label_read_offsets(0x11, {});
+    // FindHome restores the reference; the getters serve its labels, not the pair the failed Sync held.
+    rig.home();
+    CHECK(rig.driver->get_declination() > 89.99);
+}
+
+// A frame is up to a poll period old (#1940 rig, ConformU PulseGuide). While tracking, the encoders follow the sky, so
+// the served position is the one when the pair was read; with tracking off, the sky moves past still encoders.
+TEST_CASE("CGX RightAscension holds between polls while tracking", "[celestron][cgx][telemetry]") {
+    TelemetryRig rig;
+    const auto device_state_ra = [&] {
+        for (const auto& entry : rig.driver->get_device_state())
+            if (entry.name == "RightAscension") return std::get<double>(entry.value);
+        FAIL("no RightAscension in DeviceState");
+        return 0.0;
+    };
+    const auto advance = [&](std::chrono::milliseconds step) {
+        rig.clock.advance(step);
+        rig.utc += step;
+    };
+    rig.mount.set_encoder_position(0x11, 0x810000);  // off the pole, so Altitude moves with the sky
+    rig.driver->set_tracking(true);
+    rig.poll_now();
+    const double ra = rig.driver->get_right_ascension();
+    const double dec = rig.driver->get_declination();
+    const double altitude = rig.driver->get_altitude();
+    advance(200ms);
+    CHECK(rig.driver->get_right_ascension() == Catch::Approx(ra).epsilon(0).margin(1e-9));
+    CHECK(device_state_ra() == Catch::Approx(ra).epsilon(0).margin(1e-9));
+    CHECK(rig.driver->get_declination() == Catch::Approx(dec).epsilon(0).margin(1e-9));
+    // The sky turns under a held position.
+    CHECK(rig.driver->get_altitude() != Catch::Approx(altitude).epsilon(0).margin(1e-9));
+    // Tracking off: the encoders stand still and the served RA advances with sidereal time.
+    rig.driver->set_tracking(false);
+    rig.poll_now();
+    const double still = rig.driver->get_right_ascension();
+    advance(200ms);
+    CHECK(rig.driver->get_right_ascension() - still == Catch::Approx(0.2 * 1.0027379 / 3600.0).epsilon(0).margin(1e-8));
+}
+
+// The pulse moves an axis between polls. The slot publishes where it stopped before IsPulseGuiding reads false.
+TEST_CASE("CGX the first read after a pulse guide shows where it ended", "[celestron][cgx][telemetry]") {
+    namespace cgx = alpacacore::vendor::celestron;
+    TelemetryRig rig;
+    rig.driver->set_tracking(true);
+    rig.mount.set_auto_complete_motions(false);
+    rig.mount.set_hold_guide_until_completed(true);
+    const double before = rig.driver->get_declination();
+    rig.driver->pulse_guide(0, 100);
+    REQUIRE(rig.driver->get_is_pulse_guiding());
+    // The fake moves its encoder only when told: the guide's Dec motion.
+    rig.mount.set_encoder_position(0x11, (rig.mount.axis_position(0x11) + 2000) & 0x00ffffffU);
+    rig.mount.complete_axis_guide(0x11);
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (rig.driver->get_is_pulse_guiding() && std::chrono::steady_clock::now() < deadline) {
+        rig.clock.advance(20ms);
+        std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE_FALSE(rig.driver->get_is_pulse_guiding());
+    const double lst = rig.driver->get_sidereal_time();
+    const double expected =
+        cgx::cgx_encoder_position_to_sky(rig.mount.axis_position(0x10), rig.mount.axis_position(0x11), lst,
+                                         cgx::CgxHemisphere::North)
+            .declination_degrees;
+    CHECK(std::abs(expected - before) > 0.01);
+    CHECK(rig.driver->get_declination() == Catch::Approx(expected).epsilon(0).margin(1e-9));
     rig.mount.set_auto_complete_motions(true);
 }
 

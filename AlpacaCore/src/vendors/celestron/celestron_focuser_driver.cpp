@@ -158,9 +158,10 @@ public:
     }
 
     // Lock-free. A poll that has gone unanswered for util::kLinkStalenessBound
-    // latches the loss in state_ (decision 0009), and Connected reads false
-    // without a reconnect.
-    bool get_connected() const override { return connected_.load() && !state_.link_lost(); }
+    // latches the loss in state_, and a pulled cable latches it in the wrapper
+    // at once (decision 0009, link_lost()); Connected reads false without a
+    // reconnect.
+    bool get_connected() const override { return connected_.load() && !link_lost(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -182,7 +183,7 @@ public:
         // against a lost link reconnects instead of taking the idempotency
         // return. The disconnect gate takes the raw connected_, so
         // Connected=false still tears down a lost link (decision 0009).
-        const bool live = connected_.load() && !state_.link_lost();
+        const bool live = connected_.load() && !link_lost();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
@@ -232,6 +233,8 @@ public:
                     calibration_ = CalibrationState{};
                 }
                 protocol_.disconnect();
+                // A cable pulled during the first poll is a lost link, not a silent motor (decision 0009 rule 2a).
+                if (!protocol_.link_alive()) throw AlpacaException(protocol_.link_fault(), AlpacaError::NotConnected);
                 throw AlpacaException("Celestron focuser did not answer the first state poll",
                                       AlpacaError::DriverException);
             }
@@ -623,9 +626,15 @@ private:
         firmware_ = text;
     }
 
-    // The single fault text (decision 0009, point 5): the latched poll fault,
-    // kept after the link is lost so the management listing says why.
+    // The single fault text (decision 0009, point 5): the wrapper's loss
+    // reason for a pulled cable, else the latched poll fault, kept after the
+    // link is lost so the management listing says why. The wrapper keeps its
+    // reason until the next Connect; a Disconnect hides it with connected_.
     std::string get_link_fault() const override {
+        if (connected_.load() && !protocol_.link_alive()) {
+            auto lost = protocol_.link_fault();
+            if (!lost.empty()) return lost;
+        }
         auto fault = state_.fault();
         if (!fault.empty()) return fault;
         return state_.link_lost() ? "no answer to the state poll" : std::string();
@@ -642,8 +651,19 @@ private:
         return state_.served().value;
     }
 
-    // The poll's exchanges, on the poll thread with no driver lock held.
+    // The poll's exchanges, on the poll thread with no driver lock held. A
+    // pulled cable, met here or by an earlier exchange, ends the poll in this
+    // tick (decision 0009 rule 2a).
     StateFrame probe() {
+        try {
+            return sample_frame();
+        } catch (...) {
+            if (!protocol_.link_alive()) state_.lose_link();
+            throw;
+        }
+    }
+
+    StateFrame sample_frame() {
         StateFrame frame;
         resync_if_needed();
         const auto position = exchange(kGetPosition);
@@ -671,11 +691,15 @@ private:
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
-        if (state_.link_lost()) {
+        if (link_lost()) {
             throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
                                   AlpacaError::NotConnected);
         }
     }
+
+    // Lost when the poll latched it (a fault past the staleness bound, or the
+    // probe's lose_link()) or when the wrapper saw the port gone. Lock-free.
+    bool link_lost() const { return state_.link_lost() || !protocol_.link_alive(); }
 
     util::TaskClock& clock_;
     int device_number_;

@@ -65,6 +65,9 @@ bool decode_axis_completion(const AuxFrame& response, const char* operation) {
     return response.payload[0] == 0xff;
 }
 
+// A read or write errno that a tty returns only when its device is gone (decision 0009 rule 2a).
+bool transport_gone(int error) { return error == EIO || error == ENXIO || error == ENODEV; }
+
 int poll_timeout_ms(std::chrono::steady_clock::time_point deadline) {
     const auto remaining = deadline - std::chrono::steady_clock::now();
     if (remaining <= std::chrono::steady_clock::duration::zero()) {
@@ -85,6 +88,11 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    link_lost_.store(false);
+    {
+        std::lock_guard<std::mutex> loss(loss_mutex_);
+        loss_reason_.clear();
+    }
     std::error_code path_error;
     const std::filesystem::path canonical = std::filesystem::canonical(port_path, path_error);
     const std::string registry_path = path_error ? port_path : canonical.string();
@@ -159,6 +167,11 @@ void CelestronCgxProtocol::resync() {
 void CelestronCgxProtocol::disconnect() {
     std::lock_guard<std::mutex> lock(mutex_);
     disconnect_locked();
+}
+
+std::string CelestronCgxProtocol::link_fault() const {
+    std::lock_guard<std::mutex> lock(loss_mutex_);
+    return loss_reason_;
 }
 
 bool CelestronCgxProtocol::is_connected() const {
@@ -335,6 +348,20 @@ void CelestronCgxProtocol::disconnect_locked() {
     desynchronized_ = false;
 }
 
+// Decision 0009 rule 2a: the port is gone. Release it so a replugged device can be reopened, latch link_lost_ for the
+// driver (its Connected getter, its poll and its connect) and fail with NotConnected. Caller holds mutex_ inside an
+// exchange; the drivers call the wrapper with their own mutex_ free, so no driver lock is taken under this one.
+void CelestronCgxProtocol::lose_link_locked(const std::string& reason) {
+    ALPACA_LOG_ERROR("Celestron CGX", owner_ + " link lost: " + reason + " (port released; reconnect to resume)");
+    {
+        std::lock_guard<std::mutex> loss(loss_mutex_);
+        loss_reason_ = owner_ + " serial link lost (" + reason + ")";
+    }
+    link_lost_.store(true);
+    disconnect_locked();
+    throw AlpacaException(link_fault(), AlpacaError::NotConnected);
+}
+
 void CelestronCgxProtocol::wait_for_locked(short events, std::chrono::steady_clock::time_point deadline) {
     while (true) {
         if (std::chrono::steady_clock::now() >= deadline) {
@@ -349,8 +376,7 @@ void CelestronCgxProtocol::wait_for_locked(short events, std::chrono::steady_clo
                 throw_link_error("AUX transaction timed out");
             }
             if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-                disconnect_locked();
-                throw_link_error("serial device was removed or became unavailable");
+                lose_link_locked("hangup");
             }
             if ((descriptor.revents & events) != 0) {
                 return;
@@ -378,7 +404,9 @@ void CelestronCgxProtocol::write_frame_locked(const std::vector<std::uint8_t>& b
         if (count > 0) {
             written += static_cast<std::size_t>(count);
         } else if (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-            const auto error = util::errno_string(errno);
+            const int code = errno;
+            const auto error = util::errno_string(code);
+            if (transport_gone(code)) lose_link_locked("write: " + error);
             disconnect_locked();
             throw_link_error("serial write failed: " + error);
         }
@@ -417,10 +445,11 @@ std::vector<std::uint8_t> CelestronCgxProtocol::read_frame_locked(std::chrono::s
             receive_buffer_.insert(receive_buffer_.end(), incoming.begin(),
                                    incoming.begin() + static_cast<std::ptrdiff_t>(count));
         } else if (count == 0) {
-            disconnect_locked();
-            throw_link_error("serial device returned end-of-file");
+            lose_link_locked("end of file");
         } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-            const auto error = util::errno_string(errno);
+            const int code = errno;
+            const auto error = util::errno_string(code);
+            if (transport_gone(code)) lose_link_locked("read: " + error);
             disconnect_locked();
             throw_link_error("serial read failed: " + error);
         }

@@ -56,6 +56,14 @@ public:
 
     bool ok() const { return pty_.master_fd() >= 0; }
     std::string slave_path() const { return pty_.slave_path(); }
+    // A USB unplug: the worker stops (a held gate included) and both pty ends close, so the driver's poll sees a
+    // hangup and its reads end at once from here on (PtyPair::sever()). Not reversible.
+    void sever_link() {
+        stop_.store(true);
+        gate_cv_.notify_all();
+        if (worker_.joinable()) worker_.join();
+        pty_.sever();
+    }
 
     void set_limits(std::uint32_t low, std::uint32_t high) {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -25,6 +25,8 @@
 #include <cstdio>
 #include <ctime>
 #include <functional>
+#include <future>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -727,6 +729,135 @@ TEST_CASE("Celestron Focuser Driver - DeviceState TimeStamp is when the frame wa
     INFO("TimeStamp is " << behind.count() << " ms behind now");
     CHECK(behind >= std::chrono::milliseconds(60));  // the 90 ms frame age; a request-time stamp is ~0
     CHECK(behind < std::chrono::milliseconds(5000));
+}
+
+namespace {
+
+// A focuser behind a by-id style name, so a replugged motor (a new fake on a new pty) comes back under the name the
+// driver was configured with (decision 0009 rule 2a cases).
+struct FocuserLinkRig {
+    FakeTaskClock clock;
+    std::unique_ptr<FakeCelestronFocuser> fake = std::make_unique<FakeCelestronFocuser>();
+    alpacacore::test::ReplugPort port{*fake};
+    std::string node = fake->slave_path();  // the pty behind the name, which the port claim is keyed on
+    std::unique_ptr<alpacacore::FocuserDriver> driver = create_celestron_focuser(0, port.path.string(), clock);
+
+    ~FocuserLinkRig() {
+        try {
+            if (driver) driver->set_connected(false);
+        } catch (...) {  // a destructor must not throw
+        }
+    }
+
+    // A new motor on a new pty, under the configured name.
+    void replug() {
+        fake = std::make_unique<FakeCelestronFocuser>();
+        REQUIRE(fake->ok());
+        port.replug(*fake);
+        node = fake->slave_path();
+    }
+
+    // Rule 3: Connected false, operations NotConnected, DeviceState empty, the port released.
+    void check_lost() {
+        CHECK_FALSE(driver->get_connected());
+        CHECK(driver->get_device_state().empty());
+        require_alpaca_error([&] { (void)driver->get_position(); }, AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)driver->get_is_moving(); }, AlpacaError::NotConnected);
+        require_alpaca_error([&] { driver->move(10); }, AlpacaError::NotConnected);
+        require_alpaca_error([&] { driver->halt(); }, AlpacaError::NotConnected);
+        CHECK_FALSE(alpacacore::util::is_serial_port_in_use(node));
+        CHECK(driver->get_link_fault().find("Celestron focuser serial link lost (") != std::string::npos);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Celestron Focuser Driver - a cable pulled during a Move loses the link at once and Connect reopens it",
+          "[celestron][focuser][unit][fake][link-lost]") {
+    FocuserLinkRig rig;
+    REQUIRE(rig.fake->ok());
+    REQUIRE(alpacacore::test::connect_and_park(*rig.driver, rig.clock, kBound));
+    REQUIRE(alpacacore::util::is_serial_port_in_use(rig.node));
+
+    rig.fake->gate_next(0x02);  // the GOTO's reply never comes: the cable is pulled first
+    auto move = std::async(std::launch::async, [&] {
+        try {
+            rig.driver->move(5000);
+            return 0;
+        } catch (const alpacacore::AlpacaException& error) {
+            return error.error_code();
+        }
+    });
+    REQUIRE(rig.fake->wait_gate_reached(kBound));
+    rig.fake->sever_link();
+    REQUIRE(move.wait_for(1000ms) == std::future_status::ready);  // the exchange's own timeout is 1 s
+    CHECK(move.get() == AlpacaError::NotConnected);
+    rig.check_lost();
+    const auto reason = rig.driver->get_link_fault();
+    // The pty reports a pull as a hangup or, when the read wins the race, an end of file: both are the cable.
+    CHECK((reason.find("(hangup)") != std::string::npos || reason.find("(end of file)") != std::string::npos));
+
+    // No autonomous relink (rule 4): the poll ends at its next tick and time reopens nothing.
+    rig.replug();
+    rig.clock.advance(10s);
+    REQUIRE(rig.clock.wait_for_woken_settled(kBound));
+    CHECK(rig.clock.waiter_count() == 0);  // the poll body has ended
+    CHECK(rig.fake->requests().empty());
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(rig.driver->get_link_fault() == reason);  // rule 5: kept until the next Connect or Disconnect
+
+    // The client's Connect reopens the replugged port without a Disconnect first, and clears the reason.
+    rig.driver->set_connected(true);
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.driver->get_link_fault().empty());
+    CHECK(rig.driver->get_position() == 31000);
+}
+
+TEST_CASE("Celestron Focuser Driver - a cable pulled during the state poll ends the poll in that tick",
+          "[celestron][focuser][unit][fake][link-lost]") {
+    FocuserLinkRig rig;
+    REQUIRE(rig.fake->ok());
+    REQUIRE(alpacacore::test::connect_and_park(*rig.driver, rig.clock, kBound));
+
+    rig.fake->gate_next(0x01);  // the poll's position read
+    rig.clock.advance(kTick);
+    REQUIRE(rig.fake->wait_gate_reached(kBound));
+    rig.fake->sever_link();
+    REQUIRE(rig.clock.wait_for_woken_settled(kBound));
+    CHECK(rig.clock.waiter_count() == 0);  // the poll ended in the tick that met the pull, not at the 30 s bound
+    rig.check_lost();
+    const auto fault = rig.driver->get_link_fault();
+    // The pty reports a pull as a hangup or, when the read wins the race, an end of file: both are the cable.
+    CHECK((fault.find("(hangup)") != std::string::npos || fault.find("(end of file)") != std::string::npos));
+
+    // A Disconnect clears the reason (rule 5).
+    rig.driver->set_connected(false);
+    CHECK(rig.driver->get_link_fault().empty());
+}
+
+TEST_CASE("Celestron Focuser Driver - a cable pulled during the connect fails the Connect with NotConnected",
+          "[celestron][focuser][unit][fake][link-lost]") {
+    FocuserLinkRig rig;
+    REQUIRE(rig.fake->ok());
+    SECTION("the limits read") { rig.fake->gate_next(0x2C); }
+    SECTION("the firmware read, whose failure the connect does without") { rig.fake->gate_next(0xFE); }
+    auto connect = std::async(std::launch::async, [&] {
+        try {
+            rig.driver->set_connected(true);
+            return 0;
+        } catch (const alpacacore::AlpacaException& error) {
+            return error.error_code();
+        }
+    });
+    REQUIRE(rig.fake->wait_gate_reached(kBound));
+    rig.fake->sever_link();
+    REQUIRE(connect.wait_for(kBound) == std::future_status::ready);
+    CHECK(connect.get() == AlpacaError::NotConnected);
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(rig.node));
+    rig.replug();
+    rig.driver->set_connected(true);
+    CHECK(rig.driver->get_connected());
 }
 
 #endif  // _WIN32

@@ -745,22 +745,59 @@ TEST_CASE("Fake Celestron CGX mount - fractional motion wraps and rejects overfl
     CHECK(mount.axis_position(0x11) == 0U);
 }
 
-TEST_CASE("Celestron CGX AUX link - reports a removed USB device as a driver error",
-          "[celestron][cgx][protocol][integration]") {
+TEST_CASE("Celestron CGX AUX link - a removed USB device is a lost link until the next connect",
+          "[celestron][cgx][protocol][integration][link-lost]") {
+    // Decision 0009 rule 2a: a pulled cable is positive evidence, so the exchange that meets it throws NotConnected,
+    // releases the port and latches link_alive() false. A timeout is not evidence (the next case).
     alpacacore::test::FakeCelestronCgxMount mount;
     REQUIRE(mount.ok());
+    const std::string path = mount.slave_path();
     alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
-    protocol.connect_serial(mount.slave_path());
-    mount.sever_link();
+    protocol.connect_serial(path);
+    REQUIRE(protocol.link_alive());
+    REQUIRE(protocol.link_fault().empty());
+    const AuxFrame request{.source = 0x00, .destination = 0x10, .command = 0xfe, .payload = {}};
 
+    SECTION("pulled while idle: the next exchange meets it") { mount.sever_link(); }
+    SECTION("pulled while a reply is in flight") {
+        mount.fragment_next_reply();
+        auto held = std::async(std::launch::async, [&] {
+            try {
+                static_cast<void>(protocol.exchange(request, std::chrono::milliseconds(2000)));
+                return 0;  // no error
+            } catch (const alpacacore::AlpacaException& error) {
+                return error.error_code();
+            }
+        });
+        REQUIRE(mount.wait_for_reply_fragment(std::chrono::milliseconds(500)));
+        const auto started = std::chrono::steady_clock::now();
+        mount.sever_link();
+        REQUIRE(held.wait_for(std::chrono::milliseconds(1000)) == std::future_status::ready);
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1000));  // not the 2 s timeout
+        CHECK(held.get() == alpacacore::AlpacaError::NotConnected);
+    }
+
+    // Once lost, every exchange is NotConnected; the first one in the idle section meets the pull itself.
     try {
-        static_cast<void>(
-            protocol.exchange(AuxFrame{.source = 0x00, .destination = 0x10, .command = 0xfe, .payload = {}},
-                              std::chrono::milliseconds(500)));
+        static_cast<void>(protocol.exchange(request, std::chrono::milliseconds(500)));
         FAIL("Expected the removed serial device to fail the transaction");
     } catch (const alpacacore::AlpacaException& error) {
-        CHECK(error.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(error.error_code() == alpacacore::AlpacaError::NotConnected);
     }
+    CHECK_FALSE(protocol.is_connected());
+    CHECK_FALSE(protocol.link_alive());
+    CHECK(protocol.link_fault().find("Celestron CGX mount serial link lost (") != std::string::npos);
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(path));  // the claim went with the fd
+    alpacacore::test::require_alpaca_error([&] { protocol.resync(); },
+                                           alpacacore::AlpacaError::NotConnected);  // never reopens
+
+    // The next connect clears the latch and the reason, also when it fails.
+    alpacacore::test::FakeCelestronCgxMount replugged;
+    REQUIRE(replugged.ok());
+    protocol.connect_serial(replugged.slave_path());
+    CHECK(protocol.link_alive());
+    CHECK(protocol.link_fault().empty());
+    CHECK(protocol.exchange(request, std::chrono::milliseconds(500)).payload == std::vector<std::uint8_t>{7, 18});
 }
 
 TEST_CASE("Celestron CGX AUX link - requires reconnect after a timed-out reply",
@@ -778,6 +815,10 @@ TEST_CASE("Celestron CGX AUX link - requires reconnect after a timed-out reply",
     } catch (const alpacacore::AlpacaException& error) {
         CHECK(error.error_code() == alpacacore::AlpacaError::DriverException);
     }
+    // A timeout is a desync, not evidence that the port is gone (decision 0009 rule 2a): the fd stays held.
+    CHECK(protocol.link_alive());
+    CHECK(protocol.link_fault().empty());
+    CHECK(protocol.is_connected());
 
     mount.set_muted(false);
     CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(100)), alpacacore::AlpacaException);

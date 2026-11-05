@@ -56,11 +56,12 @@ constexpr std::chrono::milliseconds kStatePollPeriod{250};
 constexpr int kStatePollFaultThreshold = 3;
 constexpr std::chrono::seconds kStatePollMaxAge{1};
 
-// The raw encoder pair the poll measured. Sky values are computed when a getter reads it, from the current UTC,
-// site and mechanical hemisphere, so a frame never carries a stale sidereal time.
+// The raw encoder pair the poll or a control path measured, and the host time it was read at. Sky values are
+// computed when a getter reads it, from the UTC model, site and mechanical hemisphere (served_sky_position_locked()).
 struct CgxFrame {
     std::uint32_t ra_encoder = 0;
     std::uint32_t dec_encoder = 0;
+    std::chrono::system_clock::time_point read_at{};
 };
 
 double configured_site_coordinate(const std::optional<double>& coordinate, const char* name) {
@@ -152,12 +153,17 @@ public:
     std::string get_driver_info() const override { return "AlpacaCore Celestron CGX AUX Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 4; }
-    // Lock-free. A poll fault standing for util::kLinkStalenessBound loses the link (decision 0009), and Connected
-    // reads false without a reconnect.
-    bool get_connected() const override { return connected_.load() && !polled_.link_lost(); }
-    // The one fault text (decision 0009 point 5): the latched poll fault, kept after a loss until Connect or
-    // Disconnect.
+    // Lock-free. A poll fault standing for util::kLinkStalenessBound, or a pulled cable at once, loses the link
+    // (decision 0009, link_lost()), and Connected reads false without a reconnect.
+    bool get_connected() const override { return connected_.load() && !link_lost(); }
+    // The one fault text (decision 0009 point 5): the wrapper's loss reason for a pulled cable, else the latched poll
+    // fault, kept after a loss until Connect or Disconnect. The wrapper keeps its reason until the next Connect; a
+    // Disconnect hides it with connected_.
     std::string get_link_fault() const override {
+        if (connected_.load() && !protocol_.link_alive()) {
+            auto lost = protocol_.link_fault();
+            if (!lost.empty()) return lost;
+        }
         auto fault = polled_.fault();
         if (!fault.empty()) return fault;
         return polled_.link_lost() ? "no answer to the state poll" : std::string();
@@ -346,7 +352,9 @@ private:
     // The decision 0011 guards every coordinate read passes, in order. Caller holds mutex_.
     void require_readable_locked() const;
     // The sky position of a raw encoder pair at the current UTC, site and mechanical hemisphere. Caller holds mutex_.
-    CgxSkyPosition sky_position_locked(std::uint32_t ra_encoder, std::uint32_t dec_encoder) const;
+    // `age` shifts the sidereal time back: the sky position when a pair read `age` ago was measured.
+    CgxSkyPosition sky_position_locked(std::uint32_t ra_encoder, std::uint32_t dec_encoder,
+                                       std::chrono::system_clock::duration age = {}) const;
     // The coordinate getters: the guards, then the poll's frame (decision 0010; stale is served). Caller holds mutex_,
     // so a reference change and its frame write are seen together.
     CgxSkyPosition served_sky_position_locked() const;
@@ -360,21 +368,32 @@ private:
     // loop that called this every few milliseconds would starve the poll and, after util::kLinkStalenessBound, read
     // as a lost link mid-motion: keep the callers occasional (arrival, Sync, PulseGuide polarity, slew planning).
     void write_frame(std::uint32_t ra_encoder, std::uint32_t dec_encoder) const {
-        polled_.write([ra_encoder, dec_encoder](CgxFrame& frame) {
+        polled_.write([ra_encoder, dec_encoder, read_at = system_now_()](CgxFrame& frame) {
             frame.ra_encoder = ra_encoder;
             frame.dec_encoder = dec_encoder;
+            frame.read_at = read_at;
         });
     }
     // The poll's exchanges, on the poll thread with no driver lock held (decision 0016). A desynchronized stream is
     // flushed on the fd already held; resync never opens a port (decision 0009 rule 4) and never marks the link
-    // healthy, only the next matched reply does.
+    // healthy, only the next matched reply does. A pulled cable, met here or by a control path's exchange, latches
+    // the loss now, so the poll ends in this tick and on_lost stamps it (decision 0009 rule 2a).
     CgxFrame probe() {
-        if (!protocol_.is_healthy()) protocol_.resync();
-        CgxFrame frame;
-        frame.ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
-        frame.dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
-        return frame;
+        try {
+            if (!protocol_.is_healthy()) protocol_.resync();
+            CgxFrame frame;
+            frame.ra_encoder = protocol_.get_axis_position(CgxAxis::RightAscension);
+            frame.read_at = system_now_();  // the RA encoder's read, the one tracking moves
+            frame.dec_encoder = protocol_.get_axis_position(CgxAxis::Declination);
+            return frame;
+        } catch (...) {
+            if (!protocol_.link_alive()) polled_.lose_link();
+            throw;
+        }
     }
+    // Lost when the poll latched it (a fault past the staleness bound, or the probe's lose_link()) or when the
+    // wrapper saw the port gone, in any exchange. Lock-free.
+    bool link_lost() const { return polled_.link_lost() || !protocol_.link_alive(); }
     // The disconnect body, shared by Disconnect and a Connect over a lost link. Caller holds transition_mutex_.
     void teardown_locked();
     // A lost link (decision 0009 point 3): stamp it (the first detection wins), then release the fd and the port
@@ -405,6 +424,7 @@ private:
     void run_slew_operation(util::OperationContext& context, double ra, double dec, CgxPointingSide destination_side);
     void run_flip_slew_operation(util::OperationContext& context, double ra, double dec,
                                  CgxPointingSide destination_side);
+    void publish_guide_end_frame();
     void run_pulse_guide(util::OperationContext& context, CgxAxis axis, int velocity_percent,
                          int first_chunk_centiseconds, int remaining_centiseconds,
                          const std::shared_future<PulseGuideStart>& start_result);
@@ -458,6 +478,11 @@ private:
     CgxHemisphere mechanical_hemisphere_;
     bool needs_sync_ = false;
     bool sync_correction_active_ = false;
+    // The pre-Sync pair, held while Sync writes and verifies the labels with mutex_ free: a poll in that window can
+    // read a new RA label beside an old Dec label, so the getters serve this pair instead until Sync publishes the
+    // verified one or fails. Guarded by mutex_. Its read_at is recorded but never shifts the position: Sync turns
+    // Tracking off before the label writes, so the served age is zero while this pair is held.
+    std::optional<CgxFrame> sync_served_pair_;
     bool motion_state_unverified_ = false;
     bool slew_in_progress_ = false;
     bool restore_tracking_after_slew_ = false;
@@ -549,7 +574,7 @@ void CelestronCgxTelescopeDriver::require_connected() const {
     if (!connected_.load()) {
         throw AlpacaException("Celestron CGX USB is not connected", AlpacaError::NotConnected);
     }
-    if (polled_.link_lost()) {
+    if (link_lost()) {
         throw AlpacaException("Celestron CGX link lost; set Connected false then true to reconnect",
                               AlpacaError::NotConnected);
     }
@@ -634,20 +659,26 @@ void CelestronCgxTelescopeDriver::require_readable_locked() const {
     }
 }
 
-CgxSkyPosition CelestronCgxTelescopeDriver::sky_position_locked(std::uint32_t ra_encoder,
-                                                                std::uint32_t dec_encoder) const {
+CgxSkyPosition CelestronCgxTelescopeDriver::sky_position_locked(std::uint32_t ra_encoder, std::uint32_t dec_encoder,
+                                                                std::chrono::system_clock::duration age) const {
     const double longitude = configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude");
     const auto utc =
         std::chrono::system_clock::time_point{std::chrono::duration_cast<std::chrono::system_clock::duration>(
-            std::chrono::duration<double>(current_utc_locked()))};
+            std::chrono::duration<double>(current_utc_locked()))} -
+        age;
     return cgx_encoder_position_to_sky(ra_encoder, dec_encoder, cgx_local_sidereal_time_hours(utc, longitude),
                                        hemisphere_locked());
 }
 
 CgxSkyPosition CelestronCgxTelescopeDriver::served_sky_position_locked() const {
     require_readable_locked();
-    const auto frame = polled_.served().value;
-    return sky_position_locked(frame.ra_encoder, frame.dec_encoder);
+    auto frame = polled_.served().value;  // the fault and loss checks run even while Sync holds a pair
+    if (sync_served_pair_) frame = *sync_served_pair_;
+    // A frame is up to a poll period old. While tracking, the encoders follow the sky, so the position is the one
+    // when the pair was read: compute at that time (the UTC model applied to the host time of the read). Otherwise
+    // the encoders stand still and the sky moves past them, so the position is the pair's at the current time.
+    const auto age = tracking_ ? system_now_() - frame.read_at : std::chrono::system_clock::duration{};
+    return sky_position_locked(frame.ra_encoder, frame.dec_encoder, age);
 }
 
 CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position(std::unique_lock<std::mutex>& lock,
@@ -712,7 +743,7 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
         // A lost link counts as disconnected for a connect: Connected=true against it reconnects instead of taking
         // the idempotency return (decision 0009 rule 4). The disconnect gates take the raw connected_, so
         // Connected=false still tears a lost link down.
-        const bool live = connected_.load() && !polled_.link_lost();
+        const bool live = connected_.load() && !link_lost();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) return;
         if (connected && consume_pending_disconnect(live)) return;
         if (connected ? live : !connected_.load()) return;
@@ -845,6 +876,11 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             disconnected_checkpoint_.reset();
         }
         protocol_.disconnect();
+        // A cable pulled during an exchange whose failure the connect turns into another error (the first state
+        // poll, a legacy home-switch query) fails the Connect with NotConnected (decision 0009 rule 2a).
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("Celestron CGX connect failed: " + protocol_.link_fault(), AlpacaError::NotConnected);
+        }
         throw;
     }
 }
@@ -852,9 +888,9 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
 void CelestronCgxTelescopeDriver::teardown_locked() {
     // The poll ends before the stop and checkpoint exchanges, so it neither interleaves with them nor sees the close.
     polled_.stop_and_join();
-    // A link lost by a frame that aged past the bound may not have reached on_lost yet: release it here, so no stop
-    // or checkpoint runs on it.
-    if (polled_.link_lost()) release_lost_link();
+    // A link lost by a frame that aged past the bound, or by a pulled cable a control path met, may not have reached
+    // on_lost yet: stamp and release it here, so no stop or checkpoint runs on it.
+    if (link_lost()) release_lost_link();
 
     std::unique_lock<std::mutex> motion_start_lock(motion_start_mutex_);
     disconnecting_ = true;
@@ -1596,6 +1632,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         const std::uint32_t next_dec_rehome_label =
             offset_encoder_label(dec_rehome_label_, signed_cgx_encoder_delta(positions.second, current_dec_encoder));
         reference_write_started = true;  // Even a failed ACK may have changed the controller labels.
+        sync_served_pair_ = CgxFrame{current_ra_encoder, current_dec_encoder, system_now_()};
         {
             const MutexRelease unlocked(lock);
             protocol_.set_axis_position(CgxAxis::RightAscension, positions.first);
@@ -1627,6 +1664,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         ra_rehome_label_ = next_ra_rehome_label;
         dec_rehome_label_ = next_dec_rehome_label;
         write_frame(positions.first, positions.second);  // the verified labels, before the next poll
+        sync_served_pair_.reset();
         at_home_ = false;
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -1634,6 +1672,7 @@ void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
         sync_correction_active_ = true;
         needs_sync_ = false;
     } catch (...) {
+        sync_served_pair_.reset();  // MutexRelease took mutex_ back
         if (reference_write_started) {
             calibrated_ = false;
             needs_sync_ = true;
@@ -2188,6 +2227,19 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
     }
 }
 
+// The pulse moved an axis since the last frame. Publish the pair where it stopped before the slot ends, so the first
+// read after IsPulseGuiding goes false shows it without waiting for the next poll. One write per pulse is occasional
+// (#2035). mutex_ stays free (decision 0016); a failed read publishes nothing, and the poll reports the link.
+void CelestronCgxTelescopeDriver::publish_guide_end_frame() {
+    try {
+        const auto ra = protocol_.get_axis_position(CgxAxis::RightAscension);
+        const auto dec = protocol_.get_axis_position(CgxAxis::Declination);
+        write_frame(ra, dec);
+    } catch (const std::exception& error) {
+        ALPACA_LOG_WARN("Celestron CGX", std::string("Could not read the axes after a pulse guide: ") + error.what());
+    }
+}
+
 void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& context, CgxAxis axis, int velocity_percent,
                                                   int first_chunk_centiseconds, int remaining_centiseconds,
                                                   const std::shared_future<PulseGuideStart>& start_result) {
@@ -2221,7 +2273,10 @@ void CelestronCgxTelescopeDriver::run_pulse_guide(util::OperationContext& contex
             }
             continue;
         }
-        if (cancelled || remaining_centiseconds == 0) return;
+        if (cancelled || remaining_centiseconds == 0) {
+            publish_guide_end_frame();
+            return;
+        }
         current_chunk = std::min(255, remaining_centiseconds);
         if (!run_motion_stage(context, [this, axis, velocity_percent, current_chunk] {
                 protocol_.pulse_guide_axis(axis, velocity_percent, current_chunk);
