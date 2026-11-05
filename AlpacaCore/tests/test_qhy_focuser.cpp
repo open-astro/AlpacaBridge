@@ -27,6 +27,7 @@
 #include "concurrency_stress.h"
 #include "driver_rig.h"
 #include "fake_qhy_qfocuser.h"
+#include "stalled_outq_probe.h"
 
 namespace {
 
@@ -506,4 +507,22 @@ TEST_CASE("QHY Q-Focuser Driver - explicit disconnect after lost link clears sta
     CHECK(driver->get_device_firmware().has_value() == false);
     // And a later Connected=true is a plain connect, not a stale-link reconnect.
     require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// #2030, pinned hardware-free by #2040: the auto-detect probe treats a port that is not taking data as "not this
+// device" within its bounded drains, even though the fake behind it would answer the handshake.
+TEST_CASE("QHY Q-Focuser Driver - the probe skips a port that is not taking data", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    alpacacore::vendor::qhy::QFocuserDeviceInfo info;
+    REQUIRE(alpacacore::vendor::qhy::probe_qfocuser_port(fake.slave_path(), info));  // the fake answers
+    REQUIRE(info.firmware == 20231207);
+
+    alpacacore::test::StalledOutqGuard stalled;
+    const auto started = std::chrono::steady_clock::now();
+    alpacacore::vendor::qhy::QFocuserDeviceInfo stalled_info;
+    CHECK_FALSE(alpacacore::vendor::qhy::probe_qfocuser_port(fake.slave_path(), stalled_info));
+    // Two attempts, each one settle sleep and one 500 ms drain bound: well under the two 1.5 s reply windows
+    // a probe that ignored the drain would spend, and the fake's handshake reply never counted.
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(2500));
+    CHECK(stalled_info.firmware == 0);
 }

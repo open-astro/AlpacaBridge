@@ -245,7 +245,8 @@ std::map<std::string, std::string> parse_qfocuser_reply(std::string_view text) {
 // `info`) only if a reply with idx 1 and a "version" field comes back. The
 // probe claim (#1202) is held for exactly the probe: a port a connected
 // device holds is refused before it is opened (DEBUG log, "not found").
-static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
+// Public so a hardware-free test can run it on a pty (#2040).
+bool probe_qfocuser_port(const std::string& port_path, QFocuserDeviceInfo& info) {
 #ifndef _WIN32
     std::string error;
     util::SerialLink link =
@@ -383,7 +384,7 @@ std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
         if (c.sibling) continue;
         ALPACA_LOG_INFO(kLogTag,
                         "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") + " for Q-Focuser...");
-        workers.emplace_back([&, i] { found[i] = probe_port(candidates[i].path, infos[i]) ? 1 : 0; });
+        workers.emplace_back([&, i] { found[i] = probe_qfocuser_port(candidates[i].path, infos[i]) ? 1 : 0; });
     }
     for (auto& w : workers) w.join();
 

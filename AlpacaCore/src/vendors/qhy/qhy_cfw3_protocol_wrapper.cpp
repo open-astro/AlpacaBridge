@@ -65,6 +65,10 @@ constexpr int kMoveSliceMs = 100;
 // (a late arrival byte is ~1 ms long; this is generous, not a boot wait).
 constexpr int kReconnectSettleMs = 300;
 constexpr int kMaxSlot = 15;  // 'F'
+// Bound on the TX drain after a command (#2038, the Q-Focuser's #2030 shape): a command is a few
+// bytes, so a healthy CP2102 bridge drains in a millisecond; a bridge that never empties its queue
+// is "not this device" to the probe and a failed exchange naming the replug on the link.
+constexpr int kDrainTimeoutMs = 500;
 
 std::string printable(const std::string& raw) {
     std::string out;
@@ -174,7 +178,9 @@ static bool probe_port(const std::string& port_path, int boot_timeout_ms, Cfw3De
     auto ask = [&](const char* cmd, std::size_t max_len) -> std::string {
         tcflush(fd, TCIFLUSH);
         if (!util::tty_write_all(fd, cmd, std::char_traits<char>::length(cmd))) return {};
-        tcdrain(fd);
+        // A bridge that stops taking data never empties the TX queue (#2030 on the Q-Focuser; #2038 here): a
+        // bare tcdrain() would park the probe forever with the port held. Not draining is "not this device".
+        if (!util::tty_drain_bounded(fd, kDrainTimeoutMs)) return {};
         return read_reply(fd, 3000, max_len, link_dead);
     };
     const std::string vrs = ask("VRS", kFirmwareReplyLen);
@@ -574,7 +580,13 @@ private:
             if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
             throw AlpacaException("QHYCFW3 write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-        tcdrain(serial_fd_);
+        // Bounded (#2038, the Q-Focuser's #2030 shape): the kernel queued the command and nothing clocked it out.
+        // The node is still there, so it is not a lost link; the exchange fails and names the replug.
+        if (!util::tty_drain_bounded(serial_fd_, kDrainTimeoutMs)) {
+            throw AlpacaException("QHYCFW3 on " + config_.serial_port +
+                                      " is not taking data (USB endpoint stalled); unplug and replug it",
+                                  AlpacaError::DriverException);
+        }
     }
 #endif
 

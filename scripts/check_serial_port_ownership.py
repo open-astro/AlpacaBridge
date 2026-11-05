@@ -30,6 +30,11 @@ on the hand-rolled shapes:
                            Celestron CGX keep poll()-bounded loops behind
                            their test seams and are allowed this rule only.
                            Sockets and non-tty fds are not matched.
+  * tcdrain(            -- an unbounded drain: a USB bridge whose endpoint
+                           stops taking data never empties its queue and
+                           parks the call forever with the port held (#2030,
+                           the Q-Focuser; #2038, the CFW3 sibling). Drains
+                           go through util::tty_drain_bounded().
 
 Scanned: AlpacaCore/src and AlpacaCore/include, except the two files that
 implement the helper. Comments are stripped first, string literals are not.
@@ -92,6 +97,11 @@ RULES = [
             r"(?:(?:[\w:]+(?:\(\))?(?:\.|->))*fd\(\)|serial_fd_)\s*,"
         ),
         "raw read()/write() on a link's fd; use util::tty_read()/util::tty_write_all()",
+    ),
+    (
+        "tcdrain",
+        re.compile(r"\btcdrain\s*\("),
+        "tcdrain() has no timeout; drain with util::tty_drain_bounded() (#2030, #2038)",
     ),
 ]
 
@@ -200,6 +210,10 @@ def self_test() -> int:
         ("std read ok", "n = std::read(link_.fd(), 1);", 0),
         ("serial_read_ seam ok", "r = serial_read_(serial_fd_, &ch, 1);", 0),
         ("two on a line", "tty.c_cc[VMIN] = 0; tty.c_cc[VTIME] = 1;", 2),
+        ("tcdrain", "tcdrain(serial_fd_);", 1),
+        ("tcdrain spaced", "::tcdrain (fd);", 1),
+        ("bounded drain ok", "if (!util::tty_drain_bounded(fd, kDrainTimeoutMs)) return {};", 0),
+        ("tcdrain in comment", "// a bare tcdrain(fd) parked the connect", 0),
     ]
     failures = 0
     for label, text, expected in cases:

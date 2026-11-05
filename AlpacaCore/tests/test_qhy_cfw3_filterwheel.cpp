@@ -24,6 +24,7 @@
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_qhy_cfw3.h"
+#include "stalled_outq_probe.h"
 
 namespace {
 
@@ -576,10 +577,11 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect mid-move waits out the arr
     driver->set_connected(true);
     driver->set_position(5);
     CHECK(driver->get_position() == -1);
-    // On a pty tcdrain() returns while the goto byte is still unread in the
-    // buffer, and the held-port reconnect flushes the line (tcflush); a real
-    // UART would have sent it. Wait until the fake has taken the byte so the
-    // wheel is really mid-travel when the reconnect lands.
+    // On a pty the bounded drain sees an empty TIOCOUTQ and returns while the
+    // goto byte is still unread in the buffer, and the held-port reconnect
+    // flushes the line (tcflush); a real UART would have sent it. Wait until the
+    // fake has taken the byte so the wheel is really mid-travel when the
+    // reconnect lands.
     const auto seen_by = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (fake.count("5") == 0 && std::chrono::steady_clock::now() < seen_by) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -636,4 +638,39 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - Connect with empty serial port names p
     }
     CHECK(message.find("portPath") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
+}
+
+// #2038: a goto on a wheel that is not taking data fails inside the drain bound and Position raises the kept
+// failure naming the replug, instead of the exchange parking in tcdrain() forever with the port held.
+TEST_CASE("QHY CFW3 Filter Wheel Driver - A wheel not taking data fails the move inside the drain bound",
+          "[qhy][filterwheel][cfw3][unit]") {
+    FakeQhyCfw3 fake(7);
+    auto driver = make_driver(fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    alpacacore::test::StalledOutqGuard stalled;
+    const auto started = std::chrono::steady_clock::now();
+    driver->set_position(3);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    std::string message;
+    int code = 0;
+    bool failed = false;
+    while (!failed && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        try {
+            if (driver->get_position() != -1) FAIL("Position returned a slot after a move the wheel never took");
+        } catch (const alpacacore::AlpacaException& ex) {
+            failed = true;
+            message = ex.what();
+            code = ex.error_code();
+        }
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    REQUIRE(failed);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(message.find("not taking data") != std::string::npos);
+    CHECK(message.find("unplug and replug") != std::string::npos);
+    CHECK(elapsed < std::chrono::milliseconds(2500));  // the 500 ms drain bound, not the 3 s move timeout
+    CHECK(driver->get_connected());                    // the node is still there: not a lost link
 }
