@@ -189,7 +189,11 @@ public:
                     const auto opened = bind_focuser_locked();
                     sdk_.with_link(open_id_, open_link_, [&] { publish_connect_state(open_id_, opened.serial); });
                 } catch (...) {
-                    clear_identity();  // the scan published the enumerated identity; a failed open keeps none
+                    {
+                        // The scan published the enumerated identity; a failed open keeps none.
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        clear_identity_locked();
+                    }
                     release_open_locked();
                     throw;
                 }
@@ -207,8 +211,8 @@ public:
             lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
             max_step_.store(0);
             step_range_.store(0);
+            clear_identity_locked();
         }
-        clear_identity();
         {
             std::lock_guard<std::mutex> lock(firmware_mutex_);
             firmware_.clear();
@@ -635,11 +639,8 @@ private:
                               AlpacaError::NotConnected);
     }
 
-    // Caller holds io_mutex_. Drops this driver's open, if any. A NotConnected close (the unit is gone, for example
-    // a Connected toggle across a replug) is logged and swallowed; any other close error surfaces.
-    // A by-index driver re-resolves its unit on each connect, so it forgets the one it found.
-    void clear_identity() {
-        std::lock_guard<std::mutex> lock(mutex_);
+    // Caller holds mutex_. A by-index driver re-resolves its unit on each connect, so it forgets the one it found.
+    void clear_identity_locked() {
         if (focuser_index_.has_value()) {
             focuser_id_.reset();
             focuser_info_ = {};
@@ -648,6 +649,8 @@ private:
         }
     }
 
+    // Caller holds io_mutex_. Drops this driver's open, if any. A NotConnected close (the unit is gone, for example
+    // a Connected toggle across a replug) is logged and swallowed; any other close error surfaces.
     void release_open_locked() const {
         if (open_link_ == 0) {
             return;

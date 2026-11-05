@@ -2392,7 +2392,7 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0002-server-thread-ownership.md": 1,
     "0003-docs-drift-gates.md": 1,
     "0005-task-clock.md": 4,
-    "0006-async-operation-ownership.md": 3,
+    "0006-async-operation-ownership.md": 0,
     "0007-lan-surface-threat-model.md": 13,
     "0009-link-loss-and-relink-policy.md": 0,
     "0011-cgx-logical-reference-continuity.md": 0,
@@ -2401,7 +2401,7 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0014-utc-offset.md": 2,
     "0015-sdk-seams.md": 4,
     "0016-getters-never-wait-on-device-io.md": 0,
-    "0017-serial-port-ownership.md": 8,
+    "0017-serial-port-ownership.md": 0,
     "0019-connect-without-site.md": 1,
 }
 # The negative catalogue's rules have no natural file scope, so it alone may
