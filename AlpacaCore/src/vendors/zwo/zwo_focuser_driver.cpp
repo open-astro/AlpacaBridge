@@ -200,10 +200,6 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
-        }
-        {
-            std::lock_guard<std::mutex> lock(firmware_mutex_);
-            firmware_.clear();
             max_step_.store(0);
             step_range_.store(0);
             if (focuser_index_.has_value()) {
@@ -212,6 +208,10 @@ public:
                 focuser_info_valid_ = false;
                 serial_number_.clear();
             }
+        }
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
         }
         status_cache_.reset();
         // Waits for an exchange in flight: the handle is never closed under one.

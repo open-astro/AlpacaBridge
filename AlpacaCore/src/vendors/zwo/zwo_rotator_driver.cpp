@@ -221,10 +221,6 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
-        }
-        {
-            std::lock_guard<std::mutex> lock(firmware_mutex_);
-            firmware_.clear();
             reverse_ = false;
             if (rotator_index_.has_value()) {
                 rotator_id_.reset();
@@ -233,6 +229,10 @@ public:
                 serial_number_.clear();
                 rotator_type_.clear();
             }
+        }
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
         }
         status_cache_.reset();
         // Waits for an exchange in flight: the handle is never closed under one.

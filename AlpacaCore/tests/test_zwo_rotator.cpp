@@ -708,14 +708,15 @@ TEST_CASE("ZWO CAA Rotator Driver - A disconnect during queued status reads is n
 
 // Falsified by: get_device_firmware() in the CAA driver returning the cache without the connected check (the
 // pre-connect and post-disconnect nullopt), dropping the clear at disconnect, or calling the SDK per call (the
-// firmware_calls count).
+// firmware_calls count), or the firmware clear swallowing the serial reset (the id assertions).
 TEST_CASE("ZWO CAA Rotator Driver - Firmware is read once at connect and cleared at disconnect",
           "[zwo][rotator][unit][fake-sdk]") {
     FakeCAASDK sdk;
     sdk.firmware = "2.3.4";
-    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0, sdk);
     CHECK_FALSE(driver->get_device_firmware().has_value());
     driver->set_connected(true);
+    CHECK(driver->get_unique_id().find("_SN_") != std::string::npos);  // serial read at connect
     CHECK(sdk.firmware_calls == 1);
     for (int i = 0; i < 3; ++i) {
         CHECK(driver->get_device_firmware() == std::optional<std::string>("2.3.4"));
@@ -723,6 +724,8 @@ TEST_CASE("ZWO CAA Rotator Driver - Firmware is read once at connect and cleared
     CHECK(sdk.firmware_calls == 1);  // the hook made no SDK call
     driver->set_connected(false);
     CHECK_FALSE(driver->get_device_firmware().has_value());
+    // The rest of the Disconnect reset still runs: the serial is dropped, so the id falls back to the unit id.
+    CHECK(driver->get_unique_id().find("_SN_") == std::string::npos);
 }
 
 // Falsified by: the CAA driver's connect letting a failed firmware read propagate (the connect then throws), or
