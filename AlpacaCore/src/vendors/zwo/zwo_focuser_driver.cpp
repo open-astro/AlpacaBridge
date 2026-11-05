@@ -200,6 +200,10 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
+        }
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
             max_step_.store(0);
             step_range_.store(0);
             if (focuser_index_.has_value()) {
@@ -213,6 +217,19 @@ public:
         // Waits for an exchange in flight: the handle is never closed under one.
         std::lock_guard<std::mutex> io(io_mutex_);
         release_open_locked();
+    }
+
+    // EAF firmware read once at connect; web UI only, never DriverInfo. Cheap getter: no SDK call, and only the
+    // leaf firmware_mutex_ (decision 0016). Empty or unread is no firmware.
+    std::optional<std::string> get_device_firmware() const override {
+        if (!link_.is_open()) {
+            return std::nullopt;
+        }
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (firmware_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_;
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -338,6 +355,17 @@ private:
     // Caller holds io_mutex_ and not mutex_ (the state lock is taken for the short publish only), and runs it
     // under the open's link.
     void publish_connect_state(int focuser_id, const std::string& serial) {
+        // Informational: a failed read never fails the connect, the hook then reports no firmware.
+        std::string firmware;
+        try {
+            firmware = sdk_.get_firmware_version(focuser_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "EAF firmware unavailable: " + std::string(e.what()));
+        }
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_ = firmware;
+        }
         ZWOEAFFocuserInfo info;
         if (!sdk_.get_focuser_info_by_id(focuser_id, info)) {
             throw AlpacaException("Failed to read focuser info", AlpacaError::DriverException);
@@ -689,6 +717,9 @@ private:
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
+    // Leaf lock for firmware_ alone (the hook never waits on mutex_ or the I/O lock).
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_;
     mutable util::TtlStatusCache<Status> status_cache_;
 };
 

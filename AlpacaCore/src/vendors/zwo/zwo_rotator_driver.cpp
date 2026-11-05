@@ -221,6 +221,10 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
+        }
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
             reverse_ = false;
             if (rotator_index_.has_value()) {
                 rotator_id_.reset();
@@ -234,6 +238,19 @@ public:
         // Waits for an exchange in flight: the handle is never closed under one.
         std::lock_guard<std::mutex> io(io_mutex_);
         release_open_locked();
+    }
+
+    // CAA firmware read once at connect; web UI only, never DriverInfo. Cheap getter: no SDK call, and only the
+    // leaf firmware_mutex_ (decision 0016). Empty or unread is no firmware.
+    std::optional<std::string> get_device_firmware() const override {
+        if (!link_.is_open()) {
+            return std::nullopt;
+        }
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (firmware_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_;
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -677,6 +694,17 @@ private:
     // serial and type under mutex_ (short), the rotation limit as an atomic; a connect that throws before this publish
     // leaves the pre-connect values (decision 0016 rule 3). Caller holds io_mutex_ and not mutex_.
     void publish_connect_state(int rotator_id, const std::string& serial) {
+        // Informational: a failed read never fails the connect, the hook then reports no firmware.
+        std::string firmware;
+        try {
+            firmware = sdk_.get_firmware_version(rotator_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "CAA firmware unavailable: " + std::string(e.what()));
+        }
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_ = firmware;
+        }
         ZWOCAARotatorInfo info;
         if (!sdk_.get_rotator_info_by_id(rotator_id, info)) {
             throw AlpacaException("Failed to read rotator info", AlpacaError::DriverException);
@@ -809,6 +837,9 @@ private:
     std::mutex transition_mutex_;
     mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
+    // Leaf lock for firmware_ alone (the hook never waits on mutex_ or the I/O lock).
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_;
     mutable util::TtlStatusCache<Status> status_cache_;
 };
 

@@ -22,6 +22,7 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <variant>
@@ -703,4 +704,64 @@ TEST_CASE("ZWO CAA Rotator Driver - A disconnect during queued status reads is n
 
     CHECK(other.load() == 0);
     CHECK(not_connected.load() == kReaders);
+}
+
+// Falsified by: get_device_firmware() in the CAA driver returning the cache without the connected check (the
+// pre-connect and post-disconnect nullopt), dropping the clear at disconnect, or calling the SDK per call (the
+// firmware_calls count).
+TEST_CASE("ZWO CAA Rotator Driver - Firmware is read once at connect and cleared at disconnect",
+          "[zwo][rotator][unit][fake-sdk]") {
+    FakeCAASDK sdk;
+    sdk.firmware = "2.3.4";
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    driver->set_connected(true);
+    CHECK(sdk.firmware_calls == 1);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(driver->get_device_firmware() == std::optional<std::string>("2.3.4"));
+    }
+    CHECK(sdk.firmware_calls == 1);  // the hook made no SDK call
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+}
+
+// Falsified by: the CAA driver's connect letting a failed firmware read propagate (the connect then throws), or
+// reporting an empty string as a firmware.
+TEST_CASE("ZWO CAA Rotator Driver - A failed or empty firmware read does not fail the connect",
+          "[zwo][rotator][unit][fake-sdk]") {
+    FakeCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    sdk.fail_firmware = true;
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    driver->set_connected(false);
+
+    sdk.fail_firmware = false;
+    sdk.firmware.clear();
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    driver->set_connected(false);
+}
+
+// Decision 0016. Falsified by: get_device_firmware() in the CAA driver taking io_mutex_ or mutex_-then-I/O (the
+// hook then waits the whole 300 ms status read).
+TEST_CASE("ZWO CAA Rotator Driver - Firmware answers while a status read is in flight",
+          "[zwo][rotator][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.read_delay = kHoldOpen;
+    std::thread reader([&] {
+        try {
+            (void)driver->get_is_moving();
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(sdk.read_entered));
+    CHECK(timed([&] { CHECK(driver->get_device_firmware().has_value()); }) < kGetterBudget);
+    reader.join();
+    driver->set_connected(false);
 }
