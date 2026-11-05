@@ -496,8 +496,8 @@ public:
 
     alpacacore::AlignmentMode get_alignment_mode() const override { return alpacacore::AlignmentMode::GermanPolar; }
     double get_altitude() const override { return 0.0; }
-    double get_aperture_diameter() const override { return 0.0; }
-    void set_aperture_diameter(double) override {}
+    double get_aperture_diameter() const override { return aperture_; }
+    void set_aperture_diameter(double meters) override { aperture_ = meters; }
     double get_aperture_area() const override { return 0.0; }
     bool get_at_home() const override { return false; }
     bool get_at_park() const override { return false; }
@@ -524,8 +524,8 @@ public:
     void set_declination_rate(double) override {}
     bool get_tracking() const override { return false; }
     void set_tracking(bool) override {}
-    double get_focal_length() const override { return 0.0; }
-    void set_focal_length(double) override {}
+    double get_focal_length() const override { return focal_; }
+    void set_focal_length(double meters) override { focal_ = meters; }
     alpacacore::GuideRate get_guide_rate() const override { return guide_rate; }
     void set_guide_rate(const alpacacore::GuideRate& rate) override { guide_rate = rate; }
     alpacacore::GuideRate guide_rate{};
@@ -588,6 +588,8 @@ public:
     std::function<void()> on_utc_write;
 
 private:
+    double aperture_ = 0.0;
+    double focal_ = 0.0;
     int number_;
     bool connected_ = false;
     std::chrono::system_clock::time_point utc_{};
@@ -4253,6 +4255,138 @@ int main() {
     }
 #endif
 
+    {
+        // case: updatedevice sets telescope optics in place (#2057)
+        // same driver instance, same uniqueId, persisted entry updated, every refusal HTTP 200 + ErrorNumber.
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        // Vendor-free: a persisted entry (second Router over a one-entry file, as the #274 block does)
+        // plus a stub registered under the same number.
+        std::string original;
+        if (std::filesystem::exists(file)) {
+            std::ifstream in(file);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        std::filesystem::create_directories(file.parent_path());
+        {
+            std::ofstream out(file, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "stubvendor"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9650},
+                                           {"siteLatitude", -33.856784},
+                                           {"siteLongitude", 151.215297},
+                                           {"learnSiteFromClient", false}}})
+                       .dump();
+        }
+        alpacahttp::Router router;
+        auto stub = std::make_shared<TelescopeClockStubDriver>(9650);
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(stub));
+        const auto driver_before =
+            alpacacore::management::DeviceRegistry::instance().get_device(alpacacore::DeviceType::Telescope, 9650);
+        const auto post = [&](const nlohmann::json& body, const std::string& method = "POST") {
+            return route_request(router, method, "/management/v1/updatedevice", body.dump());
+        };
+        const auto error_of = [&](const alpacahttp::Response& r) {
+            const auto json = nlohmann::json::parse(r.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && r.status_code() == 200);
+            return json.is_discarded() ? nlohmann::json() : json;
+        };
+        const auto get_value = [&](const std::string& member) {
+            const auto json = nlohmann::json::parse(
+                route_request(router, "GET", "/api/v1/telescope/9650/" + member + "?ClientID=1").body(), nullptr,
+                false);
+            return json.is_discarded() ? -1e9 : json.value("Value", -1e9);
+        };
+        const auto file_entry = [&]() {
+            std::ifstream in(file);
+            const auto parsed = nlohmann::json::parse(in, nullptr, false);
+            if (parsed.is_array()) {
+                for (const auto& entry : parsed) {
+                    if (entry.value("deviceNumber", -1) == 9650) {
+                        return entry;
+                    }
+                }
+            }
+            return nlohmann::json();
+        };
+        const std::string uid_before = stub->get_unique_id();
+        const std::string stored_uid_before = file_entry().value("uniqueId", "");
+        const nlohmann::json id = {{"deviceType", "telescope"}, {"deviceNumber", 9650}};
+
+        auto ok = id;
+        ok["apertureDiameter"] = 0.1;
+        ok["focalLength"] = 0.5;
+        EXPECT(error_of(post(ok)).value("ErrorNumber", -1) == 0);
+        EXPECT(std::fabs(get_value("aperturediameter") - 0.1) < 1e-9);
+        EXPECT(std::fabs(get_value("focallength") - 0.5) < 1e-9);
+        EXPECT(std::fabs(file_entry().value("apertureDiameter", 0.0) - 0.1) < 1e-9);
+        EXPECT(std::fabs(file_entry().value("focalLength", 0.0) - 0.5) < 1e-9);
+        EXPECT(alpacacore::management::DeviceRegistry::instance().get_device(alpacacore::DeviceType::Telescope, 9650) ==
+               driver_before);
+        EXPECT(!uid_before.empty() && stub->get_unique_id() == uid_before &&
+               file_entry().value("uniqueId", "") == stored_uid_before);
+        // learnSiteFromClient=false does not stop the optics being stored.
+        // PUT works too, and one key alone is enough.
+        auto only_focal = id;
+        only_focal["focalLength"] = 0.6;
+        EXPECT(error_of(post(only_focal, "PUT")).value("ErrorNumber", -1) == 0);
+        EXPECT(std::fabs(file_entry().value("focalLength", 0.0) - 0.6) < 1e-9);
+        EXPECT(std::fabs(file_entry().value("apertureDiameter", 0.0) - 0.1) < 1e-9);
+
+        // Unchanged value: no file write.
+        std::filesystem::remove(file);
+        EXPECT(error_of(post(only_focal)).value("ErrorNumber", -1) == 0);
+        EXPECT(!std::filesystem::exists(file));
+
+        const auto refused = [&](nlohmann::json body, const std::string& text) {
+            const auto json = error_of(post(body));
+            EXPECT(json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find(text) != std::string::npos);
+        };
+        refused(id, "Nothing to update");
+        auto unknown = ok;
+        unknown["siteLatitude"] = 10.0;
+        refused(unknown, "Allowed: deviceType, deviceNumber, apertureDiameter, focalLength");
+        auto not_scope = ok;
+        not_scope["deviceType"] = "focuser";
+        refused(not_scope, "telescope");
+        auto missing_number = ok;
+        missing_number["deviceNumber"] = 9651;
+        refused(missing_number, "Device not found");
+        auto negative = id;
+        negative["focalLength"] = -1.0;
+        refused(negative, "finite and >= 0");
+        auto wrong_type = id;
+        wrong_type["apertureDiameter"] = "0.1";
+        refused(wrong_type, "must be a number");
+        EXPECT(error_of(route_request(router, "POST", "/management/v1/updatedevice",
+                                      R"({"deviceType":"telescope","deviceNumber":9650,"focalLength":1e999})"))
+                   .value("ErrorNumber", 0) != 0);
+        // A deviceNumber that overflows int must not wrap onto 9650 (4294976946 = 2^32 + 9650).
+        EXPECT(error_of(route_request(router, "POST", "/management/v1/updatedevice",
+                                      R"({"deviceType":"telescope","deviceNumber":4294976946,"focalLength":0.9})"))
+                   .value("ErrorNumber", 0) != 0);
+        EXPECT(std::fabs(get_value("focallength") - 0.6) < 1e-9);
+
+        // Wrong verb: 405 with Allow.
+        const auto get = route_request(router, "GET", "/management/v1/updatedevice");
+        EXPECT(get.status_code() == 405 && get.get_header("Allow") == "POST, PUT");
+
+        // Cross-origin: refused, nothing changed.
+        {
+            const std::string body = ok.dump();
+            std::ostringstream raw;
+            raw << "POST /management/v1/updatedevice HTTP/1.1\r\nHost: localhost\r\nOrigin: http://evil.example\r\n"
+                << "Content-Type: application/json\r\nContent-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            EXPECT(router.route(request, 1).status_code() == 403);
+            EXPECT(std::fabs(get_value("focallength") - 0.6) < 1e-9);
+        }
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Telescope, 9650);
+        std::ofstream restore(file, std::ios::trunc);
+        restore << (original.empty() ? std::string("[]") : original);
+    }
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
     {
         // skywatcher / telescope (direct motor controller) — serial fields,

@@ -1458,6 +1458,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "removedevice";
         return match;
     }
+    if (path == "/management/v1/updatedevice" || path == "/management/updatedevice") {
+        match.is_management = true;
+        match.management_endpoint = "updatedevice";
+        return match;
+    }
     if (path == "/management/v1/loglevel" || path == "/management/loglevel") {
         match.is_management = true;
         match.management_endpoint = "loglevel";
@@ -1581,6 +1586,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_configure_device(request, server_tx_id);
     } else if (match.management_endpoint == "removedevice") {
         return handle_remove_device(request, server_tx_id);
+    } else if (match.management_endpoint == "updatedevice") {
+        return handle_update_device(request, server_tx_id);
     } else if (match.management_endpoint == "loglevel") {
         return handle_log_level(request, server_tx_id);
     } else if (match.management_endpoint == "logs") {
@@ -5102,6 +5109,123 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::handle_update_device(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+    // open-astro#2057: rewrites persisted device config, so it takes the same guard as configuredevice.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device update")) {
+        return *rejected;
+    }
+    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
+        response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                              "Method not allowed. Use POST or PUT."));
+        response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
+        return response;
+    }
+
+    const auto refuse = [&](const std::string& message) {
+        response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE, message));
+        return response;
+    };
+    try {
+        load_persisted_devices();
+        const auto config = nlohmann::json::parse(request.body(), nullptr, false);
+        if (!config.is_object()) {
+            return refuse("Invalid JSON body: expected an object");
+        }
+        static const char* const kKeys[] = {"apertureDiameter", "focalLength"};
+        for (const auto& item : config.items()) {
+            const auto& k = item.key();
+            if (k != "deviceType" && k != "deviceNumber" && k != kKeys[0] && k != kKeys[1]) {
+                return refuse("Unknown field: " + util::escape_for_log(k, 64) +
+                              ". Allowed: deviceType, deviceNumber, apertureDiameter, focalLength");
+            }
+        }
+        // get_int rejects a number that does not fit an int instead of wrapping it (ADR 0007).
+        const int device_number = catalog_json::get_int(config, "deviceNumber", -1);
+        if (!config.contains("deviceType") || !config["deviceType"].is_string() || device_number < 0) {
+            return refuse("Missing or invalid required fields: deviceType (string) and deviceNumber (integer >= 0)");
+        }
+        if (config["deviceType"].get<std::string>() != "telescope") {
+            return refuse("Only deviceType telescope can be updated in place");
+        }
+        std::vector<std::pair<const char*, double>> updates;
+        for (const char* key : kKeys) {
+            if (!config.contains(key)) {
+                continue;
+            }
+            const auto& v = config[key];
+            if (!v.is_number()) {
+                return refuse(std::string(key) + " must be a number (metres)");
+            }
+            const double d = v.get<double>();
+            if (!std::isfinite(d) || d < 0.0) {
+                return refuse(std::string(key) + " must be finite and >= 0 (metres)");
+            }
+            updates.emplace_back(key, d);
+        }
+        if (updates.empty()) {
+            return refuse("Nothing to update: send apertureDiameter and/or focalLength (metres)");
+        }
+
+        auto device = alpacacore::management::DeviceRegistry::instance().get_device(alpacacore::DeviceType::Telescope,
+                                                                                    device_number);
+        auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(device.get());
+        if (telescope == nullptr) {
+            return refuse("Device not found: telescope #" + std::to_string(device_number));
+        }
+        for (const auto& [key, value] : updates) {
+            if (std::string_view(key) == "apertureDiameter") {
+                telescope->set_aperture_diameter(value);
+            } else {
+                telescope->set_focal_length(value);
+            }
+        }
+        // Not gated by learnSiteFromClient: that opt-out protects a surveyed site, not optics.
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            for (auto& entry : persisted_devices_) {
+                const auto pkey = persisted_key(entry);
+                if (!pkey || pkey->device_type != "telescope" || pkey->device_number != device_number) {
+                    continue;
+                }
+                for (const auto& [key, value] : updates) {
+                    const auto current = entry.find(key);
+                    if (current == entry.end() || !current->is_number() || current->get<double>() != value) {
+                        entry[key] = value;
+                        changed = true;
+                    }
+                }
+                break;
+            }
+        }
+        if (changed && !save_persisted_devices()) {
+            util::log_warning("Telescope " + std::to_string(device_number) +
+                              " optics are in use for this session but could NOT be written to "
+                              "config/registered_devices.json (see the error above)");
+        }
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = std::string("Device updated successfully");
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
+            log_alpaca_exception("Error updating device", *alpaca);
+        } else {
+            util::log_error("Error updating device: " + util::escape_for_log(e.what(), 4096));
+        }
+        response.set_body(make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what()));
         return response;
     }
 }

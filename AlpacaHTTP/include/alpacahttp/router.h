@@ -325,6 +325,8 @@ private:
     Response handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id);
     Response handle_attached_cameras(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
+    // open-astro#2057: in-place telescope optics update (apertureDiameter, focalLength), no re-registration.
+    Response handle_update_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
     Response handle_restart(const Request& request, std::uint32_t server_tx_id);
     Response handle_sync_time(const Request& request, std::uint32_t server_tx_id);
