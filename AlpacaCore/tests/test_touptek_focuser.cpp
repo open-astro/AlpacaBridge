@@ -171,8 +171,9 @@ TEST_CASE("ToupTek AAF Focuser Driver - disconnect with a move in flight closes 
 }
 
 // Falsified by: touptek_focuser_driver.cpp connected_max_step() MUTATION: replaced the NotConnected throw with
-// return max_step_current_.load(), move() then reports InvalidValue for the zero limit instead of NotConnected. The
-// race itself is covered by the [stress] case "ToupTek AAF focuser - concurrent connect/disconnect/operate stress".
+// return max_step_current_.load(), MaxStep and MaxIncrement then answer the stale limit instead of NotConnected
+// (move() clamps to it and still meets ensure_connected() under the I/O lock). The race itself is covered by the
+// [stress] case "ToupTek AAF focuser - concurrent connect/disconnect/operate stress".
 TEST_CASE("ToupTek AAF Focuser Driver - a disconnected move or limit read is NotConnected, never out of range",
           "[touptek][focuser][unit]") {
     alpacacore::test::FakeToupTekSDK fake;
@@ -268,23 +269,24 @@ TEST_CASE("ToupTek AAF Focuser Driver - Value range validation",
           "[touptek][focuser][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_index(0, 0);
 
-    // Move() validates the connection first. The contract is: when not
-    // connected, NotConnected is reported; when connected, out-of-range
-    // positions yield InvalidValue. The disconnected path runs on the real SDK
-    // here; the connected range check runs below over FakeToupTekSDK.
+    // Move() validates the connection first: when not connected, NotConnected
+    // is reported whatever the position. The disconnected path runs on the real
+    // SDK here; the connected clamp runs below over FakeToupTekSDK.
     require_alpaca_error([&]() { driver->move(-1); },
                          alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->move(100000000); },
                          alpacacore::AlpacaError::NotConnected);
 
-    // Connected over the fake: out-of-range positions are InvalidValue and no
-    // move reaches the device.
+    // Connected over the fake: a position outside 0..MaxStep goes to that limit
+    // (ConformU moves below 0 and above MaxStep and expects the focuser there; issue #2028).
     alpacacore::test::FakeToupTekSDK fake;
     auto connected = make_connected(fake);
-    require_alpaca_error([&]() { connected->move(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { connected->move(connected->get_max_step() + 1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    CHECK(fake.call_count("aaf_set") == 0);
+    const int max_step = connected->get_max_step();
+    connected->move(-1);
+    CHECK(connected->get_position() == 0);  // the limit, not the request
+    connected->move(max_step + 1);
+    CHECK(connected->get_position() == max_step);
+    CHECK(fake.call_count("aaf_set") == 2);
 
     // Set temp comp is unsupported, but the connection check answers first
     // while disconnected (open-astro#309). The NotImplemented answer on a

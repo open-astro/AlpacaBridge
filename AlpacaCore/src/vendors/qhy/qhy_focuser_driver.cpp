@@ -15,6 +15,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
@@ -22,6 +23,7 @@
 #include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -40,14 +42,23 @@ constexpr double kHoldVoltageThreshold = 11.5;
 // window; a stalled or limit-clamped move therefore reads as stopped after
 // one grace period instead of forever.
 constexpr auto kMotionGrace = std::chrono::milliseconds(1500);
-// State poll (open-astro#1310, decision 0010), start to start. One poll is a
-// position and a telemetry exchange (about 35 ms each at 9600 baud), so the
-// period leaves the wire mostly free for Move and Halt. The freshness bound is
-// two periods; the cadence, the fault latch and the link-loss rule live in
-// util::PolledState. Every getter reads memory, so a burst of reads costs no
-// exchange at all.
+// State poll (open-astro#1310, decision 0010), start to start. One poll is one
+// position exchange (about 35 ms at 9600 baud); telemetry rides on its own
+// cadence below (#2031). The period leaves the wire mostly free for Move and
+// Halt. The freshness bound is two periods; the cadence, the fault latch and the
+// link-loss rule live in util::PolledState. Every getter reads memory, so a
+// burst of reads costs no exchange at all.
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
 constexpr int kFaultThreshold = 3;
+// Telemetry (cmd_id 4) is best effort, on its own cadence (#2031): the firmware answers position
+// through a move but gives no telemetry reply for about 10 s after every move command, and a poll
+// that needed both latched the fault during every long move. The poll asks for telemetry once per
+// kTelemetryPeriod while no move is pending, with a short deadline, and after a miss waits
+// kTelemetryBackoff before asking again. The frame keeps the last reading with its own
+// measurement time; Temperature refuses only a reading older than the staleness bound.
+constexpr auto kTelemetryPeriod = std::chrono::seconds(1);
+constexpr auto kTelemetryBackoff = std::chrono::seconds(5);
+constexpr int kTelemetryTimeoutMs = 500;
 }  // namespace
 
 class QhyFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
@@ -279,8 +290,37 @@ public:
     }
 
     double get_temperature() const override {
-        const QFocuserTelemetry t = served_frame().telemetry;
-        return settings_.temperature_source == "chip" ? t.chip_temperature_c : t.external_temperature_c;
+        const StateFrame frame = served_frame();
+        const bool external = settings_.temperature_source != "chip";
+        if (frame.telemetry_valid && external && !frame.telemetry.external_probe_present) {
+            // The firmware reports about -111 C with nothing in the probe socket (#2032). Checked before the
+            // age of the reading, so a client that asks once whether the property is implemented gets one answer.
+            throw AlpacaException(
+                "No external temperature probe is plugged into the Q-Focuser; plug one in, or set temperatureSource "
+                "to chip to report the controller board's sensor",
+                AlpacaError::PropertyNotImplemented);
+        }
+        // Decision 0010 rule 8: a value the device has not supplied is a DriverException, never a guess.
+        if (!frame.telemetry_valid) {
+            // The first request after the connect missed (a connect within about 10 s of a move); the poll
+            // asks again after its hold-off.
+            throw AlpacaException(
+                "The Q-Focuser has not answered a telemetry request since the connect; it answers none for about "
+                "10 s after a move, try again shortly",
+                AlpacaError::DriverException);
+        }
+        // Stale: the firmware has had the bound to answer and did not. A move is exempt (the poll does not ask
+        // during one, and a full-range move takes about 40 s), and the bound counts from the end of motion
+        // when a move came between, so a long move is not reported as a silent unit the moment it ends.
+        if (!frame.moving && clock_.now() - frame.telemetry_idle_since >= util::kLinkStalenessBound) {
+            throw AlpacaException(
+                "The Q-Focuser has not answered a telemetry request for " +
+                    std::to_string(
+                        std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
+                    " s",
+                AlpacaError::DriverException);
+        }
+        return external ? frame.telemetry.external_temperature_c : frame.telemetry.chip_temperature_c;
     }
 
     void halt() override {
@@ -292,19 +332,24 @@ public:
         // Halt is the safety stop: never refused for a link fault.
         std::lock_guard<std::mutex> lock(status_mutex_);
         protocol_.halt();
+        const auto now = clock_.now();
         // Write-through: IsMoving reads false right after Halt, not after the next poll.
-        // No target => not moving, whatever position the motor stopped at.
-        state_.write([](StateFrame& frame) {
+        // No target => not moving, whatever position the motor stopped at. The Halt ends the motion
+        // the way an arrival does, so Temperature's bound counts from here (the poll's own
+        // moving-to-stopped stamp never fires: it reads this frame's moving as already false).
+        state_.write([now](StateFrame& frame) {
             frame.target.reset();
+            if (frame.moving) frame.telemetry_idle_since = now;
             frame.moving = false;
         });
     }
 
     void move(int position) override {
         ensure_connected();
-        if (position < 0 || position > settings_.max_step) {
-            throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
-        }
+        // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
+        // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, issue #2028). The clamp is
+        // pure arithmetic, so a faulted link is still refused below with the fault text.
+        position = std::clamp(position, 0, std::max(settings_.max_step, 0));
         (void)served_frame();  // refused while the link is faulted or lost
         // Hold status_mutex_ across move_to() so two concurrent moves cannot
         // reach the device in one order while the frame records the other (see
@@ -323,7 +368,8 @@ public:
     }
 
 private:
-    // What one poll measured. `telemetry` is refreshed with every poll.
+    // What one poll measured. `telemetry` is the last reading the firmware
+    // gave, carried from frame to frame with its own measurement time (#2031).
     // `target` and `last_change` are motion state: they live in the frame so a
     // frame that a move()/halt() write overtook is dropped whole, with its
     // position and these, by PolledState.
@@ -333,6 +379,11 @@ private:
         std::optional<int> target;
         util::TaskClock::clock::time_point last_change{};
         QFocuserTelemetry telemetry;
+        bool telemetry_valid = false;
+        util::TaskClock::clock::time_point telemetry_measured_at{};
+        // The later of the reading and the end of the last motion: Temperature's staleness counts from here,
+        // because the firmware answers no telemetry during a move and the poll does not ask for it then.
+        util::TaskClock::clock::time_point telemetry_idle_since{};
     };
 
     // The single fault text (decision 0009, point 5): the latched poll fault,
@@ -363,8 +414,8 @@ private:
             throw AlpacaException("Q-Focuser transport is down", AlpacaError::NotConnected);
         }
         StateFrame frame;
+        // The position exchange is the poll: its failure is what the fault latch counts.
         const std::int32_t pos = protocol_.get_position();
-        frame.telemetry = protocol_.get_telemetry();
         // The motion decision reads the target and last change from the held
         // frame and writes the arrival into the new one. A frame a move()/halt()
         // write overtook is dropped whole by PolledState, so a target set
@@ -376,6 +427,10 @@ private:
         if (previous.has_value()) {
             frame.target = previous->value.target;
             frame.last_change = changed ? now : previous->value.last_change;
+            frame.telemetry = previous->value.telemetry;
+            frame.telemetry_valid = previous->value.telemetry_valid;
+            frame.telemetry_measured_at = previous->value.telemetry_measured_at;
+            frame.telemetry_idle_since = previous->value.telemetry_idle_since;
         } else {
             frame.last_change = now;
         }
@@ -383,12 +438,35 @@ private:
         if (frame.target.has_value() && pos == *frame.target) {
             frame.target.reset();  // arrived
         }
+        if (previous.has_value() && previous->value.moving && !frame.moving) {
+            frame.telemetry_idle_since = now;  // motion ended: the firmware can answer telemetry again from here
+        }
+        // Telemetry, best effort (#2031): asked once per period while the motor is not moving (IsMoving,
+        // not the target: a stalled or clamped move keeps its target and reads as stopped after the grace)
+        // and no miss is being waited out; otherwise the last reading rides along. A miss is not a failed poll.
+        const bool due = !frame.telemetry_valid || now - frame.telemetry_measured_at >= kTelemetryPeriod;
+        if (due && !frame.moving && now >= telemetry_hold_off_until_) {
+            try {
+                frame.telemetry = protocol_.get_telemetry(kTelemetryTimeoutMs);
+                frame.telemetry_valid = true;
+                frame.telemetry_measured_at = now;
+                frame.telemetry_idle_since = now;
+            } catch (const AlpacaException& e) {
+                if (e.error_code() == AlpacaError::NotConnected) throw;  // the link is gone: a failed poll
+                telemetry_hold_off_until_ = now + kTelemetryBackoff;
+                ALPACA_LOG_DEBUG(kLogTag,
+                                 "Q-Focuser telemetry not answered; the position poll goes on and the "
+                                 "last reading is kept: " +
+                                     std::string(e.what()));
+            }
+        }
         return frame;
     }
 
-    // At connect and disconnect: drop the frame, the fault and the target.
+    // At connect and disconnect: drop the frame, the fault and the target. The poll is stopped here.
     void reset_state() {
         state_.reset();  // the target and last change go with the frame
+        telemetry_hold_off_until_ = {};
     }
 
     // Push the user's settings to the firmware right after the handshake.
@@ -439,6 +517,9 @@ private:
     // never taken by a getter or the poll.
     std::mutex status_mutex_;
     util::OperationGeneration state_poll_generation_;
+    // When the poll may ask for telemetry again after a miss (#2031). Touched by the poll thread and,
+    // with the poll stopped, by reset_state(); never read by a getter.
+    util::TaskClock::clock::time_point telemetry_hold_off_until_{};
     // Position, motion and telemetry served to the getters (open-astro#1310).
     // Declared after clock_ and protocol_: it is destroyed first and joins its
     // poll body while both are still alive.

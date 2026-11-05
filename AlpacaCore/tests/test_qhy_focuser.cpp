@@ -27,6 +27,7 @@
 #include "concurrency_stress.h"
 #include "driver_rig.h"
 #include "fake_qhy_qfocuser.h"
+#include "stalled_outq_probe.h"
 
 namespace {
 
@@ -157,7 +158,8 @@ TEST_CASE("QHY Q-Focuser Driver - Reply parser", "[qhy][focuser][unit]") {
     CHECK(parse_qfocuser_reply("{}").empty());
 }
 
-TEST_CASE("QHY Q-Focuser Driver - Value range validation", "[qhy][focuser][unit]") {
+// ConformU moves below 0 and above MaxStep and expects the focuser at that limit (issue #2028).
+TEST_CASE("QHY Q-Focuser Driver - A move outside 0..MaxStep goes to that limit", "[qhy][focuser][unit]") {
     alpacacore::test::FakeQhyQFocuser fake;
     alpacacore::vendor::qhy::QFocuserSettings settings;
     settings.max_step = 5000;
@@ -165,11 +167,11 @@ TEST_CASE("QHY Q-Focuser Driver - Value range validation", "[qhy][focuser][unit]
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     CHECK(driver->get_max_step() == 5000);
-    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { driver->move(5001); }, alpacacore::AlpacaError::InvalidValue);
-    CHECK(fake.count("\"cmd_id\":6") == 0);  // rejected before reaching the wire
-    CHECK_NOTHROW(driver->move(5000));
+    driver->move(-1);
+    CHECK(fake.count("\"cmd_id\":6,\"tar\":0}") == 1);  // the limit, not the request
+    driver->move(5001);
     CHECK(fake.count("\"cmd_id\":6,\"tar\":5000}") == 1);
+    CHECK(fake.count("\"cmd_id\":6") == 2);
 
     driver->set_connected(false);
 }
@@ -282,6 +284,53 @@ TEST_CASE("QHY Q-Focuser Driver - Hold settings skipped on USB power", "[qhy][fo
     CHECK(driver->get_temperature() == Catch::Approx(18.727));
 
     driver->set_connected(false);
+}
+
+// #2032: with nothing in the probe socket the firmware reports about -111 C, which is a sentinel, not a reading.
+TEST_CASE(
+    "QHY Q-Focuser Driver - No external probe: Temperature is PropertyNotImplemented and the board sensor still "
+    "answers",
+    "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    fake.set_external_probe(false);
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), {});
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    require_alpaca_error([&]() { driver->get_temperature(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    // DeviceState omits what its getter refuses; the rest is still there.
+    bool has_position = false, has_temperature = false;
+    for (const auto& entry : driver->get_device_state()) {
+        if (entry.name == "Position") has_position = true;
+        if (entry.name == "Temperature") has_temperature = true;
+    }
+    CHECK(has_position);
+    CHECK_FALSE(has_temperature);
+    driver->set_connected(false);
+
+    alpacacore::vendor::qhy::QFocuserSettings settings;
+    settings.temperature_source = "chip";
+    auto chip = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), settings);
+    REQUIRE(alpacacore::test::settle_connected(*chip, true, std::chrono::seconds(10)));
+    CHECK(chip->get_temperature() == Catch::Approx(18.727));
+    chip->set_connected(false);
+}
+
+// The refusal a client reads carries the last attempt's reason (a stalled unit says "not taking data ...; unplug and
+// replug it" on the rig, which a pty cannot reproduce; a reply without "version" is the hardware-free shape).
+TEST_CASE("QHY Q-Focuser Driver - A refused handshake names the last attempt's reason", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    fake.set_handshake_without_version(true);
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+    std::string message;
+    try {
+        driver->set_connected(true);
+        FAIL("the connect was not refused");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        message = e.what();
+    }
+    CHECK(message.find("handshake failed after 3 attempts on " + fake.slave_path() +
+                       ": the reply carried no version") != std::string::npos);
+    CHECK(driver->get_connected() == false);
 }
 
 TEST_CASE("QHY Q-Focuser Driver - Absent port fails connect with NotConnected", "[qhy][focuser][unit]") {
@@ -458,4 +507,22 @@ TEST_CASE("QHY Q-Focuser Driver - explicit disconnect after lost link clears sta
     CHECK(driver->get_device_firmware().has_value() == false);
     // And a later Connected=true is a plain connect, not a stale-link reconnect.
     require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// #2030, pinned hardware-free by #2040: the auto-detect probe treats a port that is not taking data as "not this
+// device" within its bounded drains, even though the fake behind it would answer the handshake.
+TEST_CASE("QHY Q-Focuser Driver - the probe skips a port that is not taking data", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    alpacacore::vendor::qhy::QFocuserDeviceInfo info;
+    REQUIRE(alpacacore::vendor::qhy::probe_qfocuser_port(fake.slave_path(), info));  // the fake answers
+    REQUIRE(info.firmware == 20231207);
+
+    alpacacore::test::StalledOutqGuard stalled;
+    const auto started = std::chrono::steady_clock::now();
+    alpacacore::vendor::qhy::QFocuserDeviceInfo stalled_info;
+    CHECK_FALSE(alpacacore::vendor::qhy::probe_qfocuser_port(fake.slave_path(), stalled_info));
+    // Two attempts, each one settle sleep and one 500 ms drain bound: well under the two 1.5 s reply windows
+    // a probe that ignored the drain would spend, and the fake's handshake reply never counted.
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(2500));
+    CHECK(stalled_info.firmware == 0);
 }

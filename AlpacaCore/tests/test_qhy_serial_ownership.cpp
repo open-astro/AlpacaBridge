@@ -215,12 +215,9 @@ TEST_CASE("QHY Q-Focuser catalog - the configured maxStep reaches the connected 
     REQUIRE(driver->get_connected());
     CHECK(focuser.get_max_step() == 30000);
     CHECK(focuser.get_max_increment() == 30000);
-    try {
-        focuser.move(30001);
-        FAIL("Move beyond the configured maxStep must be refused");
-    } catch (const alpacacore::AlpacaException& e) {
-        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidValue);
-    }
+    // A Move beyond the configured maxStep goes to that limit (the focuser clamp, issue #2028).
+    focuser.move(30001);
+    CHECK(fake.count("\"cmd_id\":6,\"tar\":30000}") == 1);
     driver->set_connected(false);
 }
 

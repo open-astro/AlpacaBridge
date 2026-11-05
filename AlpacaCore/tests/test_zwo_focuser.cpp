@@ -189,8 +189,9 @@ TEST_CASE("ZWO EAF Focuser Driver - Static members are read at connect and reset
     CHECK(driver->get_max_increment() == 1000);
     CHECK(sdk.max_step_calls == 2);
 
-    driver->move(100);  // range check uses the cached MaxStep
-    require_alpaca_error([&]() { driver->move(30001); }, alpacacore::AlpacaError::InvalidValue);
+    driver->move(100);
+    driver->move(30001);  // clamped to the cached MaxStep (issue #2028)
+    CHECK(sdk.position == 30000);
 }
 
 // Falsified by: zwo_focuser_driver.cpp move() dropping its
@@ -296,7 +297,8 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step that differs is writte
     CHECK(sdk.last_set_max_step == 40000);
     CHECK(driver->get_max_step() == 40000);
     driver->move(40000);
-    require_alpaca_error([&]() { driver->move(40001); }, alpacacore::AlpacaError::InvalidValue);
+    driver->move(40001);  // clamped to the configured MaxStep (issue #2028)
+    CHECK(sdk.position == 40000);
 
     // A reconnect finds the unit already holding the value: no second write.
     driver->set_connected(false);
@@ -349,6 +351,8 @@ TEST_CASE("ZWO EAF Focuser Driver - A stored max step of 0 with none configured 
     CHECK(driver->get_max_step() == 0);
     CHECK(sdk.set_max_step_calls == 0);
     require_alpaca_error([&] { driver->move(0 + 1); }, alpacacore::AlpacaError::InvalidValue);
+    // A Move to 0 is refused as well (#2028): the guard is the stored limit, not the position.
+    require_alpaca_error([&] { driver->move(0); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 // Falsified by: zwo_focuser_driver.cpp set_connected() skipping

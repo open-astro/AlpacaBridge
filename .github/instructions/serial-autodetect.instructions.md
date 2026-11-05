@@ -73,10 +73,18 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   (`drain_network_stale`), and the iOptron and ZWO mount TCP probes (`probe_ioptron_network`, `probe_network_mount`).
   The Sky-Watcher connected path and the Celestron CGX loops (decision 0017 rule 9) and the stream readers (Wanderer,
   Gemini PDH) keep their own shape.
+- **A drain goes through `util::tty_drain_bounded(fd, timeout_ms)`** (`serial_link.h`), never a bare
+  `tcdrain()` (#2030, #2038). `tcdrain()` has no timeout: a USB bridge whose endpoint has stopped taking data
+  (a Q-Focuser enumerated without its 12 V supply) never empties its transmit queue, and the call parked the
+  connect forever with the port held, so only a replug cleared it. The helper polls `TIOCOUTQ` to a deadline
+  and flushes what is left; a probe treats a stall as "not this device", a connected exchange throws
+  `DriverException` naming the replug (the Q-Focuser and the QHY CFW3 wrappers), and the iOptron mount's
+  disconnect drain is the same helper at 250 ms. A pty always drains, so a hardware-free test of the stall
+  installs a queue-depth probe with `util::tty_outq_probe_for_testing()` (#2040) for the length of an `alpacacore::test::StalledOutqGuard` (`AlpacaCore/tests/stalled_outq_probe.h`, the one copy every test file includes).
 - `scripts/check_serial_port_ownership.py` (the `static-checks` CI job and pre-flight gate 2e2)
   fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment, a
-  pre-#1202 `mark_serial_port_*` call or a raw `read()`/`write()` on a link's fd (`x.fd()`, `x->fd()`,
-  `serial_fd_`) anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the two helper headers.
+  pre-#1202 `mark_serial_port_*` call, a bare `tcdrain()` or a raw `read()`/`write()` on a link's fd (`x.fd()`,
+  `x->fd()`, `serial_fd_`) anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the two helper headers.
   Only the Sky-Watcher and Celestron CGX wrappers may use raw `read`/`write` (their `poll()`-bounded loops
   behind test seams); the allowance is per rule, so the other rules still apply to them. `TIOCEXCL` is
   best effort: a refusal logs a warning and the open goes on, unless the link opts in to

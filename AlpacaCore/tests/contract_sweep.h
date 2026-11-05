@@ -174,9 +174,6 @@ struct ContractEntry {
     DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
     int switch_writable_id = -1;
     const char* switch_caps_source = "";
-    // Focuser only: the driver checks a static position range, so move(-1) is an InvalidValue probe
-    // (with_static_focuser_range clears no_invalid_probe_reason).
-    bool focuser_static_range = false;
 };
 
 // Platform 7 interface versions per device type.
@@ -201,7 +198,7 @@ inline int platform7_interface_version(DeviceType t) {
 inline const char* invalid_probe_reason_for(DeviceType t) {
     switch (t) {
         case DeviceType::Camera:
-        case DeviceType::Focuser:  // with_static_focuser_range clears it for a driver that validates a range
+        case DeviceType::Focuser:  // every focuser clamps a Move to 0..MaxStep (with_clamping_focuser says so)
             return "no argument with a static out-of-range value that is validated before the connection check "
                    "(assumption)";
         default:
@@ -231,13 +228,8 @@ inline ContractEntry with_command_passthrough(ContractEntry e) {
     return e;
 }
 
-inline ContractEntry with_static_focuser_range(ContractEntry e) {
-    e.focuser_static_range = true;
-    e.no_invalid_probe_reason = "";
-    return e;
-}
-
-// A focuser that clamps an out-of-range move() instead of throwing has no InvalidValue probe; `why` cites it.
+// A focuser clamps an out-of-range move() instead of throwing (ascom-contract.instructions.md, #2028), so it has no
+// InvalidValue probe; `why` cites the driver's clamp.
 inline ContractEntry with_clamping_focuser(ContractEntry e, const char* why) {
     e.no_invalid_probe_reason = why;
     return e;
@@ -295,10 +287,13 @@ inline ContractEntry contract_entry_zwo_filterwheel() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_zwo_focuser() {
-    return make_entry(
-        "zwo_focuser", "zwo", "focuser", DeviceType::Focuser,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_eaf_focuser_by_index(n, 0); },
-        kSrcAgents);
+    return with_clamping_focuser(
+        make_entry(
+            "zwo_focuser", "zwo", "focuser", DeviceType::Focuser,
+            [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_eaf_focuser_by_index(n, 0); },
+            kSrcAgents),
+        "zwo_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range (ConformU requires clamping, "
+        "#2028)");
 }
 inline ContractEntry contract_entry_zwo_rotator() {
     return make_entry(
@@ -370,12 +365,14 @@ inline ContractEntry contract_entry_qhy_filterwheel_cfw3() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_qhy_focuser() {
-    return make_entry(
-        "qhy_focuser", "qhy", "focuser", DeviceType::Focuser,
-        [](int n) -> std::unique_ptr<AlpacaDriver> {
-            return vendor::qhy::create_qhy_focuser(n, "/dev/qhy-qfocuser-absent");
-        },
-        kSrcAgents);
+    return with_clamping_focuser(make_entry(
+                                     "qhy_focuser", "qhy", "focuser", DeviceType::Focuser,
+                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                         return vendor::qhy::create_qhy_focuser(n, "/dev/qhy-qfocuser-absent");
+                                     },
+                                     kSrcAgents),
+                                 "qhy_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
+                                 "(ConformU requires clamping, #2028)");
 }
 #endif
 
@@ -392,11 +389,14 @@ inline ContractEntry contract_entry_ioptron_telescope() {
         kSrcAgentsAxis));
 }
 inline ContractEntry contract_entry_ioptron_focuser() {
-    // iEAF move() validates 0..IEAF_MAX_STEP before the connection check.
-    return with_static_focuser_range(make_entry(
-        "ioptron_focuser", "ioptron", "focuser", DeviceType::Focuser,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_ieaf_focuser(n, "/dev/ttyUSB0"); },
-        kSrcAgents));
+    return with_clamping_focuser(make_entry(
+                                     "ioptron_focuser", "ioptron", "focuser", DeviceType::Focuser,
+                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                         return vendor::ioptron::create_ieaf_focuser(n, "/dev/ttyUSB0");
+                                     },
+                                     kSrcAgents),
+                                 "ioptron_ieaf_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the "
+                                 "range (ConformU requires clamping, #2028)");
 }
 inline ContractEntry contract_entry_ioptron_filterwheel() {
     return make_entry(
@@ -405,12 +405,16 @@ inline ContractEntry contract_entry_ioptron_filterwheel() {
         kSrcAgents);
 }
 // The iFR focuser-rotator has its own catalog vendor ("ifr"), built under the iOptron flag (GUARD_OVERRIDE in the
-// gate). Its focuser move() validates 0..MaxStep before the connection check.
+// gate).
 inline ContractEntry contract_entry_ifr_focuser() {
-    return with_static_focuser_range(make_entry(
-        "ifr_focuser", "ifr", "focuser", DeviceType::Focuser,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_ifr_focuser(n, "/dev/ttyUSB0"); },
-        kSrcAgents));
+    return with_clamping_focuser(make_entry(
+                                     "ifr_focuser", "ifr", "focuser", DeviceType::Focuser,
+                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                         return vendor::ioptron::create_ifr_focuser(n, "/dev/ttyUSB0");
+                                     },
+                                     kSrcAgents),
+                                 "ioptron_ifr_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the "
+                                 "range (ConformU requires clamping, #2028)");
 }
 inline ContractEntry contract_entry_ifr_rotator() {
     return make_entry(
@@ -684,10 +688,14 @@ inline ContractEntry contract_entry_touptek_filterwheel() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_touptek_focuser() {
-    return make_entry(
-        "touptek_focuser", "touptek", "focuser", DeviceType::Focuser,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::touptek::create_touptek_focuser_by_index(n, 0); },
-        kSrcAgents);
+    return with_clamping_focuser(make_entry(
+                                     "touptek_focuser", "touptek", "focuser", DeviceType::Focuser,
+                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                         return vendor::touptek::create_touptek_focuser_by_index(n, 0);
+                                     },
+                                     kSrcAgents),
+                                 "touptek_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
+                                 "(ConformU requires clamping, #2028)");
 }
 #endif
 

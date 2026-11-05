@@ -63,7 +63,7 @@ Shared test helpers live in `AlpacaCore/tests/driver_rig.h` (namespace `alpacaco
    - Switches: `get_max_switch`, invalid switch ID handling.
    - Rotators: `get_can_reverse`, device state telemetry.
 
-6. **Value range validation** — invalid inputs must throw `AlpacaException` with `error_code() == AlpacaError::InvalidValue`, not silently normalize or throw a generic error (ConformU specifically tests boundary values).
+6. **Value range validation** — invalid inputs must throw `AlpacaException` with `error_code() == AlpacaError::InvalidValue`, not silently normalize or throw a generic error (ConformU specifically tests boundary values). The one exception is a Focuser `Move` outside `0..MaxStep`, which ConformU expects to stop at that limit, so the driver clamps and the test asserts the limit on the wire ([ASCOM contract](ascom-contract.instructions.md#ascom-exception-vocabulary-pick-the-right-one--conformu-checks-it), #2028).
 
 7. **State machine contracts** — device state follows ASCOM rules without needing hardware (e.g. `CameraState == Idle` before any exposure, `Slewing == false` when not connected, `IsPulseGuiding == false` when idle). These have caught real bugs: iOptron's settle loop prematurely declared slews complete, SynScan's `IsPulseGuiding` always returned false, SVBONY's `CameraState` got stuck after SDK hangs.
 
