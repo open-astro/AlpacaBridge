@@ -20,3 +20,4 @@
 - **Update check over https only**, AlpacaHTTP, issue #1741. The Packages index and release notes are fetched over https, redirects included.
 - **Driver follow-ups**, issue #2085. A failed ZWO EAF open no longer leaves the enumerated name in `Name`; a refused QHY CFW3 move keeps the earlier failed-move text; the Gemini flat panel cannot lose the wakeup of a replaced calibrator body; the ZWO mount's UTCDate write and connect-time time sync no longer interleave.
 - **Router and server**, issue #2086. A throw during a restart no longer leaves the server reporting running or refusing later restarts, and the shutdown and restart callbacks are set and read under a lock.
+- **Sky-Watcher final-leg start grace**, issue #437. A stopped status read right after the final leg's start no longer ends the goto (`test_skywatcher_backlash.cpp`, "a stopped read right after the final leg's start does not end the goto").

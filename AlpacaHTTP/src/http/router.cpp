@@ -5836,6 +5836,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // reply, not only on the cross-origin 403 (#509), with the same
     // precedence: a non-zero query-string ID wins.
     // Parsed once: the ID here and Epoch/Value below read the same body.
+    // parse_json() catches the JSON errors itself and returns nullopt; it never throws.
     const auto body_json = request.body().empty() ? decltype(parse_json(request.body())){} : parse_json(request.body());
     if (client_tx_id == 0 && body_json) {
         client_tx_id = extract_client_transaction_id(*body_json);

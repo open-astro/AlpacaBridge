@@ -403,6 +403,14 @@ public:
         (after_next_start ? ax(axis).failed_status_replies_on_start : ax(axis).failed_status_replies) = n;
     }
 
+    /// open-astro#437: answer the first ":f" after the axis' next ":J" as
+    /// STOPPED although the axis runs: a board that has not latched the start
+    /// yet. The slew wait must not take it for the end of the leg.
+    void report_stopped_after_next_start(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).stopped_reply_on_start = true;
+    }
+
     /// How many of those failed replies are still to be served.
     int status_failures_pending(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -524,6 +532,8 @@ protected:
         int commands_while_coasting = 0;         // motion frames received while coasting
         int failed_status_replies = 0;           // ":f" inquiries to answer "!0" (test knob)
         int failed_status_replies_on_start = 0;  // moved into failed_status_replies at the next ":J"
+        bool stopped_reply_on_start = false;     // arms stopped_reply at the next ":J"
+        bool stopped_reply = false;              // the next ":f" reads stopped
         double goto_cps = 0.0;                   // a slow GOTO's ":I" rate; 0 = kGotoDegPerSec
         int drop_step_period_writes = 0;         // ":I" writes to ack-but-ignore (test knob)
         int wrong_restart_latches = 0;           // ":J" restarts to latch at the wrong rate (test knob)
@@ -714,7 +724,9 @@ public:
                 }
                 static const char* hex = "0123456789ABCDEF";
                 uint32_t n0 = (a.speed_mode ? 1u : 0u) | (a.dir == '1' ? 2u : 0u) | (a.fast ? 4u : 0u);
-                uint32_t n1 = !a.hide_running && (a.running || a.hold_running) ? 1u : 0u;
+                const bool force_stopped = a.stopped_reply;
+                a.stopped_reply = false;
+                uint32_t n1 = !force_stopped && !a.hide_running && (a.running || a.hold_running) ? 1u : 0u;
                 uint32_t n2 = a.init_done ? 1u : 0u;
                 std::string out = "=";
                 out += hex[n0];
@@ -773,6 +785,8 @@ public:
                 ++a.start_count;
                 a.failed_status_replies += a.failed_status_replies_on_start;
                 a.failed_status_replies_on_start = 0;
+                a.stopped_reply = a.stopped_reply_on_start;
+                a.stopped_reply_on_start = false;
                 was_running_on_start = a.running;
                 if (!was_running_on_start) {
                     // Only a genuinely fresh start (from stopped) has no

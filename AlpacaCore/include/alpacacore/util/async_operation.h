@@ -18,6 +18,7 @@
 #include <alpacacore/util/task_clock.h>
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -234,6 +235,8 @@ public:
             if (current_->returned) {
                 current_->thread.join();
             } else {
+                // reserve(kMaxStaleBodies + 1) in the constructor: a push must not reallocate.
+                assert(stale_.size() < stale_.capacity());
                 stale_.push_back(std::move(current_));
             }
             current_.reset();

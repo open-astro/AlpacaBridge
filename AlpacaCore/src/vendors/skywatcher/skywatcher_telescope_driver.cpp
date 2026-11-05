@@ -5794,6 +5794,8 @@ private:
                 if (send_final_approach_locked(lock)) {
                     // open-astro#437: land the final leg the same way, with its own
                     // start grace: a stopped read right after its ":J" is not the end.
+                    // The 180 s Slew timeout restarts with it, so a goto that owes a
+                    // final leg may wait up to about 360 s in all.
                     saw_slewing = false;
                     start = clock_.now();
                     continue;
