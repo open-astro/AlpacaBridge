@@ -3,4 +3,4 @@
 - **QHY Q-Focuser: Position and IsMoving no longer lag one poll on the one-reply-behind firmware** (AlpacaCore, issue #2042): when a command's idx repeats the previous reply's (back-to-back position polls), the wrapper reads on for the kicked fresh reply for up to 50 ms and returns it instead of the stale one, so an arrival shows on its own tick.
 
 ### Added (tests)
-- **Q-Focuser connect-in-silence and one-behind poll cases** (issue #2041, issue #2042): four `[snapshot]` cases on the pty fake and the fake clock.
+- **Q-Focuser connect-in-silence and one-behind poll cases** (issue #2041, issue #2042): five `[snapshot]` cases on the pty fake and the fake clock, the hold write that times out at connect included.
