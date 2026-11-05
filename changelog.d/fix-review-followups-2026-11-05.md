@@ -11,7 +11,7 @@
 
 ### Removed
 
-- **`ALPACAHTTP_ENABLE_DISCOVERY`**, issue #1741: the option could not link when off; discovery is switched at runtime by `discovery.enabled`. The unbuilt QHY `libqhyccd.a`, `testapp/` and `doc/` are no longer tracked.
+- **`ALPACAHTTP_ENABLE_DISCOVERY`**, issue #1741: the option could not link when off; discovery is switched at runtime by `discovery.enabled`.
 
 ### Fixed
 
