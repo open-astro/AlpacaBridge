@@ -423,6 +423,85 @@ TEST_CASE("QHY Filter Wheel Driver - A wheel settling on a non-target slot repor
     driver->set_connected(false);
 }
 
+// Falsified by: qhy_filterwheel_driver.cpp get_position() dropping the deadline check, so a pulled cable reads -1
+// forever, or not keeping move_failure_, so the error shows once and Position goes back to -1.
+TEST_CASE("QHY Filter Wheel Driver - A move still reading -1 at its deadline fails and keeps the error",
+          "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, clock);
+    driver->set_connected(true);
+
+    driver->set_position(3);
+    fake.cfw_position_script = {-1};
+    clock.advance(std::chrono::seconds(14));
+    CHECK(driver->get_position() == -1);
+    clock.advance(std::chrono::seconds(1));
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::DriverException);
+    // Kept with no further SDK read, and Connected stays true (decision 0009).
+    const int reads = fake.call_count("get_cfw_position");
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::DriverException);
+    CHECK(fake.call_count("get_cfw_position") == reads);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp set_position() not clearing move_failure_, so a good move still raises.
+TEST_CASE("QHY Filter Wheel Driver - The next move clears a failed move", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, clock);
+    driver->set_connected(true);
+    driver->set_position(3);
+    fake.cfw_position_script = {-1};
+    clock.advance(std::chrono::seconds(15));
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::DriverException);
+
+    driver->set_position(2);
+    fake.cfw_position_script = {2};
+    CHECK(driver->get_position() == 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp teardown() not clearing move_failure_, so a reconnect still raises.
+TEST_CASE("QHY Filter Wheel Driver - A reconnect clears a failed move", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, clock);
+    driver->set_connected(true);
+    driver->set_position(3);
+    fake.cfw_position_script = {-1};
+    clock.advance(std::chrono::seconds(15));
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::DriverException);
+
+    driver->set_connected(false);
+    fake.cfw_position_script = {3};
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 3);
+    driver->set_connected(false);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp set_position() timing the deadline from a constant, so a wheel with many
+// slots fails at the floor.
+TEST_CASE("QHY Filter Wheel Driver - A wheel with many slots gets a longer deadline", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    fake.params[alpacacore::vendor::qhy::control::CFWSLOTSNUM] = 9.0;
+    LockedQHYSDK sdk(fake);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, clock);
+    driver->set_connected(true);
+    driver->set_position(3);
+    fake.cfw_position_script = {-1};
+    clock.advance(std::chrono::seconds(17));
+    CHECK(driver->get_position() == -1);
+    clock.advance(std::chrono::seconds(1));
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::DriverException);
+    driver->set_connected(false);
+}
+
 // ── Getters never wait on device I/O (decision 0016, issue #1395) ───────────
 
 namespace {
@@ -718,13 +797,14 @@ TEST_CASE("QHY Filter Wheel Driver - Failed reads and generic SDK errors keep th
     driver->set_connected(true);
 
     // -1 is the moving answer whether the wheel moves or the read failed: no
-    // count of them loses the link, however long it lasts (no latch, no bound).
+    // count of them loses the link, even past the move's deadline (no latch).
     driver->set_position(3);
     fake.cfw_position_script = {-1};
     for (int i = 0; i < 100; ++i) {
-        clock.advance(alpacacore::util::kLinkStalenessBound);
         CHECK(driver->get_position() == -1);
     }
+    clock.advance(std::chrono::hours(1));
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected());
 
     fake.throw_from.insert("move_cfw");

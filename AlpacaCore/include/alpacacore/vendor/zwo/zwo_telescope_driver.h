@@ -38,6 +38,10 @@ void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::
 /// before it is sent (call before the first slew).
 void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
 
+/// Test-only: called with the initiator's name ("Park", "FindHome", "MoveAxis", "AbortSlew", "Unpark") after its GOTO
+/// fence and before its first wire command (call before connecting).
+void set_initiator_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
+
 std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,
                                                       util::TaskClock& clock = util::default_task_clock());
 

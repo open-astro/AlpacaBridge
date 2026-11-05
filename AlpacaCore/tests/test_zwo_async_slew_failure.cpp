@@ -1247,6 +1247,160 @@ TEST_CASE("ZWO async - a fence waits for the GOTO call the send gate has counted
     driver->set_connected(false);
 }
 
+// open-astro#2073: Park, FindHome, MoveAxis and AbortSlew fence the GOTO, then send their own command. A SlewAsync in
+// that gap must wait for the command: it claims either before the fence (and is fenced) or after the command is on
+// the wire, so it never returns while the initiator is held. The initiator seam holds the initiator between its fence
+// and its command; a SlewAsync that returns within 200 ms real time meanwhile claimed in the gap (a bounded negative
+// check, as sent_while_held above). The ":MS" seam waits for the initiator's command, so on the old code that GOTO
+// went out after a command whose call it had already returned before.
+// Falsified by: zwo_telescope_driver.cpp park() (and find_home(), move_axis(), abort_slew()): removing the
+// initiator_mutex_ lock taken before fence_goto(), so the SlewAsync claims and returns while the initiator is held.
+TEST_CASE("ZWO async - a SlewAsync during a fencing initiator's fence-to-command gap waits for the command (#2073)",
+          "[zwo][telescope][async][operation-slot]") {
+    const auto initiator_and_command = GENERATE(
+        std::pair<std::string, std::string>{"Park", ":hP"}, std::pair<std::string, std::string>{"FindHome", ":hC"},
+        std::pair<std::string, std::string>{"MoveAxis", ":Me"}, std::pair<std::string, std::string>{"AbortSlew", ":Q"});
+    const std::string& label = initiator_and_command.first;
+    const std::string& command = initiator_and_command.second;
+    CAPTURE(label);
+    Latch latch;
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    // ":Q" exactly: a prefix would also count ":Qe" / ":Qw".
+    const auto sent = [&] { return label == "AbortSlew" ? count_exact(mount, ":Q") : mount.count(command); };
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == label) latch.block();
+    });
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == ":MS") static_cast<void>(wait_until([&] { return sent() > 0; }, 2000));
+    });
+    rig.connect();
+
+    auto initiator = std::async(std::launch::async, [&] {
+        if (label == "Park") driver->park();
+        if (label == "FindHome") driver->find_home();
+        if (label == "MoveAxis") driver->move_axis(0, 1.0);
+        if (label == "AbortSlew") driver->abort_slew();
+    });
+    REQUIRE(latch.wait_entered());
+    auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates_async(5.5, 20.0); });
+    const bool slew_returned_while_held = slew.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+    latch.release();  // before any REQUIRE can unwind, so the futures' destructors never wait on the latch
+    initiator.wait();
+    slew.wait();
+    REQUIRE_NOTHROW(initiator.get());
+    REQUIRE_NOTHROW(slew.get());
+    CHECK_FALSE(slew_returned_while_held);
+    CHECK(sent() == 1);
+    driver->set_connected(false);
+}
+
+// open-astro#2073: an AbortSlew that arrives while a Park holds the initiator lock waits for Park's status read and
+// ":hP", then returns within the budget; its ":Q" follows ":hP", so the mount stops instead of parking after the abort.
+// Falsified by: zwo_telescope_driver.cpp abort_slew(): removing the initiator_mutex_ lock taken before fence_goto(),
+// so ":Q" goes out while Park is held and the mount parks after the abort returned.
+TEST_CASE("ZWO async - AbortSlew during a Park waits for ':hP', stops after it and returns in budget (#2073)",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == "Park") latch.block();
+    });
+    rig.connect();
+
+    auto park = std::async(std::launch::async, [&] { driver->park(); });
+    REQUIRE(latch.wait_entered());
+    auto abort = std::async(std::launch::async, [&] { driver->abort_slew(); });
+    const bool abort_returned_while_held = abort.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+    latch.release();  // before any REQUIRE can unwind, so the futures' destructors never wait on the latch
+    const bool abort_in_budget = abort.wait_for(kInitiatorBudget) == std::future_status::ready;
+    park.wait();
+    abort.wait();
+    REQUIRE_NOTHROW(park.get());
+    REQUIRE_NOTHROW(abort.get());
+    CHECK_FALSE(abort_returned_while_held);
+    CHECK(abort_in_budget);
+
+    const auto all = mount.commands();
+    const auto park_at = std::find(all.begin(), all.end(), std::string(":hP"));
+    const auto stop_at = std::find(all.begin(), all.end(), std::string(":Q"));
+    REQUIRE(park_at != all.end());
+    REQUIRE(stop_at != all.end());
+    CHECK(park_at < stop_at);
+    driver->set_connected(false);
+}
+
+// open-astro#2073: Connected=false never takes the initiator lock, so it returns while a Park holds it between its
+// fence and ":hP"; the Park then completes or fails, and no GOTO is sent.
+// Falsified by: zwo_telescope_driver.cpp set_connected(): taking initiator_mutex_ before the teardown, so the
+// disconnect waits for the held Park.
+TEST_CASE("ZWO async - Connected=false returns while a Park holds the initiator lock (#2073)",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == "Park") latch.block();
+    });
+    rig.connect();
+
+    auto park = std::async(std::launch::async, [&] {
+        try {
+            driver->park();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // The link closed under it: NotConnected or a failed send, both fine here.
+        }
+    });
+    REQUIRE(latch.wait_entered());
+    auto disconnect = std::async(std::launch::async, [&] { driver->set_connected(false); });
+    const bool disconnected_while_held = disconnect.wait_for(kInitiatorBudget) == std::future_status::ready;
+    latch.release();  // before any REQUIRE can unwind, so the futures' destructors never wait on the latch
+    park.wait();
+    disconnect.wait();
+    CHECK(disconnected_while_held);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(mount.count(":MS") == 0);
+}
+
+// open-astro#2073, already safe (a regression guard): Unpark fences too, but a SlewAsync in its fence-to-command gap
+// is refused as parked, because the mount is still parked until Unpark's own post-command block.
+// Falsified by: zwo_telescope_driver.cpp ensure_not_parked(): returning before the parked checks, so the SlewAsync
+// claims while Unpark is held and its ":MS" is sent.
+TEST_CASE("ZWO async - a SlewAsync during Unpark's fence-to-command gap is refused as parked (#2073)",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == "Unpark") latch.block();
+    });
+    mount.set_park_state(2);
+    rig.connect();
+    rig.tick();
+    REQUIRE(driver->get_at_park());
+
+    auto unpark = std::async(std::launch::async, [&] { driver->unpark(); });
+    REQUIRE(latch.wait_entered());
+    auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates_async(5.5, 20.0); });
+    slew.wait();
+    latch.release();  // before any REQUIRE can unwind, so the futures' destructors never wait on the latch
+    unpark.wait();
+    REQUIRE_NOTHROW(unpark.get());
+    try {
+        slew.get();
+        FAIL("a SlewAsync while parked must be refused");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
+    }
+    CHECK_FALSE(goto_sent_within_setup_window(mount));
+    driver->set_connected(false);
+}
+
 // decision 0006 "Thread refusal": a second GOTO whose body the slot cannot start supersedes the first (held on ":Sr")
 // and publishes the stopped state itself: Slewing false, and the poll it paused reads status again.
 // Falsified by: zwo_telescope_driver.cpp slew_to_target_async(): removing the poll_pause_ release in the refused-start

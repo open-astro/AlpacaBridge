@@ -18,7 +18,9 @@
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <exception>
 #include <mutex>
 #include <optional>
@@ -34,6 +36,12 @@ namespace alpacacore::vendor::qhy {
 constexpr std::chrono::milliseconds kSettleTime{2000};
 // Minimum identical reads inside that window, so one slow poll cannot settle.
 constexpr int kSettleMinReads = 3;
+// How long a pending move may keep reading -1 before it fails (issue #2052): a
+// pulled cable can answer -1 on every status read. The bound is the larger of the
+// floor and the slot count times the per-slot time, about twice the rig's measured
+// move (roughly 1 s per slot on the 8-slot miniCam8M wheel).
+constexpr std::chrono::seconds kMoveDeadlineFloor{15};
+constexpr std::chrono::seconds kMoveTimePerSlot{2};
 
 class QHYFilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
@@ -243,6 +251,19 @@ public:
                 rest_candidate_.reset();
                 return pos;
             }
+            // A digit is a wheel in transit or coming to rest, which the rule above
+            // ends. Only -1 can repeat forever: it is also what a failed status read
+            // answers, so a move still reading it at its deadline has failed. The
+            // error stays until the next move, a reconnect or a Disconnect (the
+            // failed-async rule); Connected stays true (decision 0009, no latch).
+            if (pos < 0 && now >= move_deadline_) {
+                move_failure_ = "Filter wheel move to slot " + std::to_string(pending_target_.value()) +
+                                " did not finish: the wheel stopped reporting a position (check its USB cable)";
+                ALPACA_LOG_WARN("QHY", move_failure_);
+                pending_target_.reset();
+                rest_candidate_.reset();
+                throw AlpacaException(move_failure_, AlpacaError::DriverException);
+            }
             return -1;
         }
         if (pos >= 0) {
@@ -285,6 +306,7 @@ public:
             cached_position_.reset();
             pending_target_ = position;
             rest_candidate_.reset();
+            move_failure_.clear();
         }
         try {
             on_link(word, [&] { sdk_.move_cfw(id, position); });
@@ -295,6 +317,11 @@ public:
             pending_target_.reset();
             throw;
         }
+        // Timed from the order's acceptance: move_cfw can wait behind a frame
+        // download on the shared handle, and no read can run until this I/O lock
+        // is released.
+        std::lock_guard<std::mutex> lock(mutex_);
+        move_deadline_ = clock_.now() + std::max(kMoveDeadlineFloor, kMoveTimePerSlot * slot_count_);
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -340,6 +367,9 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!get_connected() || !camera_id_.has_value()) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
+        }
+        if (!move_failure_.empty()) {
+            throw AlpacaException(move_failure_, AlpacaError::DriverException);
         }
         if (cached_position_.has_value() && !pending_target_.has_value()) {
             return cached_position_;
@@ -414,6 +444,7 @@ private:
             cached_position_.reset();
             pending_target_.reset();
             rest_candidate_.reset();
+            move_failure_.clear();
             link_fault_.clear();
             connected_.store(false);
         }
@@ -654,12 +685,17 @@ private:
     mutable std::optional<int> cached_position_;
     // Set by set_position() to the commanded slot while a move is in flight;
     // cleared once a live read confirms arrival, when the wheel rests on a
-    // non-target slot (rest rule), or when move_cfw throws. See get_position().
+    // non-target slot (rest rule), when the move fails at its deadline, or when
+    // move_cfw throws. See get_position().
     mutable std::optional<int> pending_target_;
     // Rest detection for a move that ends on a non-target slot (guarded by mutex_).
     mutable std::optional<int> rest_candidate_;
     mutable util::TaskClock::clock::time_point rest_since_{};
     mutable int rest_reads_ = 0;
+    // When a pending move still reading -1 fails, and the error Position raises
+    // from then until the next move or teardown (guarded by mutex_, issue #2052).
+    util::TaskClock::clock::time_point move_deadline_{};
+    mutable std::string move_failure_;
     std::atomic<bool> connected_;
     // Connected's link half (decision 0009, issue #1985): opened last in a
     // connect, closed by a loss or a transition. mutable: a const Position read
