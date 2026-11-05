@@ -281,6 +281,12 @@ read_lines() {
 
 # --- self-test (issue #1453) -----------------------------------------------
 
+# bash4_lines <file>: prints "line:text" for each bash 4 construct in <file> (the
+# bracketed letters keep the pattern from matching its own line).
+bash4_lines() {
+  grep -nE 'map[f]ile|read[a]rray|(declare|local) +-[a-zA-Z]*[An]\b|\$\{[A-Za-z_]+(,,?|\^\^?)\}|\$\{[A-Za-z_]+\[-[0-9]+\]\}|\|[&]|[&]>>|\bco[p]roc\b' "$1"
+}
+
 # unguarded_gate_lines <file>: prints "line:text" for each gate command (a
 # run_all_tests.sh, cmake -S or cmake --build call) that is not inside a top-level
 # if-chain whose if/elif tests full_only, RUN_TSAN or RUN_SCAN_BUILD. Comment
@@ -333,7 +339,18 @@ self_test() {
   # Check 4: no bash 4 construct anywhere in the script (the bracketed letters keep
   # this pattern from matching its own line).
   local hits
-  if hits="$(grep -nE 'map[f]ile|read[a]rray|(declare|local) +-[a-zA-Z]*[An]\b|\$\{[A-Za-z_]+(,,?|\^\^?)\}|\$\{[A-Za-z_]+\[-[0-9]+\]\}|\|[&]|[&]>>|\bco[p]roc\b' "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
+  # Each construct the pattern must catch, one per line (#2089); none may slip through.
+  # Every fixture string is split with '' so this line does not match the pattern itself.
+  hits="$(printf '%s\n' 'map''file -t a' 'read''array a' 'declare'' -A m' 'declare'' -n r=x' 'local'' -n r=x' \
+    'echo $''{x,,}' 'echo $''{x^^}' 'echo $''{x^}' 'echo $''{x,}' 'echo $''{a[-1]}' 'cmd |''& tee' 'cmd &''>> log' \
+    'co''proc cat' \
+    | bash4_lines /dev/stdin | wc -l | tr -d ' ')"
+  if [ "${hits}" = "13" ]; then
+    st_ok "the bash 4 pattern catches each construct in its fixture"
+  else
+    st_fail "the bash 4 pattern caught ${hits} of 13 fixture constructs"
+  fi
+  if hits="$(bash4_lines "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
     st_fail "bash 4 construct in scripts/ci_preflight.sh:"
     echo "${hits}" >&2
   else

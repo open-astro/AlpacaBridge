@@ -53,8 +53,10 @@ def duplicated_lines(cpd_xml):
         for f in dup:
             if f.tag.rsplit("}", 1)[-1] != "file":
                 continue
+            if f.get("line") is None or f.get("endline") is None:
+                raise ValueError("CPD <file> without line/endline (needs PMD 7): %s" % f.get("path"))
             first = int(f.get("line"))
-            last = int(f.get("endline", f.get("line")))
+            last = int(f.get("endline"))
             per_file.setdefault(f.get("path"), []).append((first, last))
     return {path: sum(last - first + 1 for first, last in merge_ranges(r)) for path, r in per_file.items()}
 
@@ -141,6 +143,11 @@ def self_test():
         check("CPD XML: an inverted range fails loudly", False)
     except ValueError:
         check("CPD XML: an inverted range fails loudly", True)
+    try:
+        duplicated_lines(xml.replace(' endline="14"', ''))
+        check("CPD XML: a range without endline fails loudly", False)
+    except ValueError:
+        check("CPD XML: a range without endline fails loudly", True)
     check("verdict passes at the limit", verdict(13, 100, 13.0)[0])
     check("verdict fails above the limit", not verdict(14, 100, 13.0)[0])
     check("verdict fails on an empty scan", not verdict(0, 0)[0])

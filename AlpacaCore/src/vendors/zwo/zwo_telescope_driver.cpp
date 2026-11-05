@@ -524,7 +524,9 @@ public:
                 site_elevation_m_ = pending_site_elevation_.value();
             }
         };
-        auto sync_mount_time_if_configured = [&]() {
+        // `client_writes_seen`: utc_client_writes_ when the link went up. A client UTCDate write that landed since
+        // is newer than the host clock and wins: the sync skips the time write (the site still goes out).
+        auto sync_mount_time_if_configured = [&](std::uint64_t client_writes_seen) {
             if (!sync_time_on_connect_) {
                 return;
             }
@@ -551,6 +553,12 @@ public:
             const int offset_minutes = 0;
             TimeInfo info = from_utc_time_point(now, offset_minutes);
             std::lock_guard<std::mutex> time_write(time_write_mutex_);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (utc_client_writes_ != client_writes_seen) {
+                    return;
+                }
+            }
             protocol.set_time_info(info);
             std::lock_guard<std::mutex> lock(mutex_);
             utc_offset_.set(now, clock_.now());
@@ -572,10 +580,11 @@ public:
             stop_poll_thread();
             poll_stop_.store(false);
             reset_session_state_for_connect(/*keep_telemetry_caches=*/true);
+            const std::uint64_t client_writes_seen = utc_client_writes_copy();
             apply_or_load_site_info();
             apply_pending_elevation();
             try {
-                sync_mount_time_if_configured();
+                sync_mount_time_if_configured(client_writes_seen);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
@@ -622,6 +631,7 @@ public:
                     mount_info_ = mount_info;
                 }
                 protocol.finish_identity_check();
+                const std::uint64_t client_writes_seen = utc_client_writes_copy();
                 connected_.store(true);
 
                 apply_or_load_site_info();
@@ -671,7 +681,7 @@ public:
                 }
 
                 try {
-                    sync_mount_time_if_configured();
+                    sync_mount_time_if_configured(client_writes_seen);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO",
                                     "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
@@ -1505,6 +1515,8 @@ public:
         std::lock_guard<std::mutex> time_write(time_write_mutex_);
         if (connected_.load()) {
             protocol_.set_time_info(info);
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++utc_client_writes_;  // newer than the connect's host-time sync, which then skips
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -3003,6 +3015,12 @@ private:
     // connect's time sync. No getter takes it. Order: transition_mutex_, then this,
     // then the protocol wrapper's mutex, then mutex_.
     std::mutex time_write_mutex_;
+    std::uint64_t utc_client_writes_ = 0;  // client UTCDate writes that reached the wire; guarded by mutex_
+
+    std::uint64_t utc_client_writes_copy() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return utc_client_writes_;
+    }
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     std::string mount_info_;
