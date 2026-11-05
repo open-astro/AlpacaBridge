@@ -11,7 +11,7 @@ AGENTS.md kept AlpacaCore free of "HTTP/REST/sockets/JSON transport code" so tha
 - **AlpacaCore runs no server.** It listens on no socket, owns no router, serves no page and parses no inbound request. That is the whole of the old guardrail, stated as what it protects.
 - **An outbound client inside a vendor wrapper is that vendor's wire protocol**, the same as a serial port or a USB SDK. It lives in `src/vendors/<vendor>/` and `include/alpacacore/vendor/<vendor>/`, is reached through a seam under [decision 0015](0015-sdk-seams.md), and is subject to [decision 0007](0007-lan-surface-threat-model.md) as an outbound surface: bounded response body, `http` and `https` only on the request and every redirect, a per-call timeout.
 - **One HTTP client seam.** `util::HttpClient` is the one interface an AlpacaCore vendor uses for HTTP: a real libcurl implementation, a scripted fake and a locked decorator, per 0015. WeeWX moves onto it; the `remotealpaca` client is built on it. No vendor calls libcurl directly.
-- **A proxied device never points at this server.** An upstream whose host and port resolve to one of this server's own listening addresses is refused when configured and again at Connect if the resolution changed. The error names the loop.
+- **A proxied device never points at this server.** An upstream whose host and port resolve to one of this server's own listening addresses is refused when configured and again at Connect if the resolution changed. The error names the loop. AlpacaCore has no view of the server's bind addresses, so AlpacaHTTP passes them to the vendor factory when it builds a proxied device.
 - **Proxied devices obey the other records as native devices do.** Their getters are served from a polled snapshot of the upstream ([decision 0010](0010-snapshot-served-state.md)) so they never wait on the upstream ([decision 0016](0016-getters-never-wait-on-device-io.md)); their link follows [decision 0009](0009-link-loss-and-relink-policy.md) with `util::PolledLinkHealth`, a refused connection being a loss at once; commands run in a `util::AsyncOperation`. Upstream `ErrorNumber` and `ErrorMessage` pass through unchanged, prefixed with the upstream host; a transport failure maps to `NotConnected` when the link is lost and `DriverException` otherwise. The management `UniqueID` is this server's own, never the upstream's; `DeviceState` is the upstream's with this server's link-health fields added.
 - **Slices for #1753.** The `util::HttpClient` seam and the WeeWX migration (closes 0007 NS-10); the remote client library with a loopback fake server; `remotealpaca` ObservingConditions behind `ALPACACORE_ENABLE_REMOTEALPACA`; SafetyMonitor, where a lost link never reads safe; then one PR per device type. Upstream discovery over UDP is a later slice, not part of these.
 
@@ -19,7 +19,7 @@ AGENTS.md kept AlpacaCore free of "HTTP/REST/sockets/JSON transport code" so tha
 
 The rules a change is checked against.
 
-1. AlpacaCore has no server: no listening socket, no router, no inbound request parsing. Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: `scripts/check_layering.py`, review (a `listen`, `bind` or `accept` call, or an HTTP request parser, under AlpacaCore).
+1. AlpacaCore has no server: no listening socket, no router, no inbound request parsing. Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review (a `listen`, `bind` or `accept` call, or an HTTP request parser, under AlpacaCore; `scripts/check_layering.py` checks includes and CMake only and does not cover this).
 2. An AlpacaCore vendor reaches HTTP only through `util::HttpClient`; no vendor file names libcurl directly once the seam has landed. Scope: `AlpacaCore/src/vendors/**`. Checked by: review (`git grep -l curl_easy AlpacaCore/src/vendors` names a vendor file).
 3. An outbound client bounds its response body, allows only `http` and `https` on the request and every redirect, and times out every call. Scope: `AlpacaCore/src/vendors/weewx/*.cpp`, `AlpacaCore/src/core/util/*.cpp`. Checked by: review (an unbounded write callback, a missing protocol allow-list, a call with no timeout), and the seam's unit tests once it lands.
 4. A proxied device refuses an upstream that resolves to this server's own listening address, at configure time and at Connect. Scope: `AlpacaCore/src/vendors/**`. Checked by: review (a `remotealpaca` factory or connect path with no self-address check), and the vendor's unit tests once it lands.
@@ -37,7 +37,7 @@ The rules a change is checked against.
 - WeeWX stops being a tension with the architecture rule and becomes the precedent; its NS-10 hardening lands with the seam migration.
 - The `remotealpaca` vendor can start, one slice at a time, with its contract fixed here rather than in each PR.
 - Every future vendor whose wire is HTTP (a weather API, a power box with a REST interface) follows the same seam and the same 0007 bounds.
-- The layering gate keeps its meaning: it rejects servers in AlpacaCore, not clients.
+- The call flow `AlpacaHTTP -> AlpacaCore driver -> vendor` keeps its meaning: AlpacaCore holds no server. The layering gate (`scripts/check_layering.py`) is unchanged; the no-server rule is review-checked.
 
 ## How to reverse
 
