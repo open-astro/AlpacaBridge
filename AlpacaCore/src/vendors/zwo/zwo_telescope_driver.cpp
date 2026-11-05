@@ -1225,8 +1225,12 @@ public:
         ensure_not_parked("MoveAxis");
 
         // open-astro#720: a pending GOTO setup must not send ":MS" after the
-        // stop or the jog below. One fence covers both branches.
+        // stop or the jog below. One fence covers both branches. open-astro#2073:
+        // initiator_mutex_ keeps a SlewAsync from claiming between the fence and
+        // the command; it is released before the tracking restore.
+        std::unique_lock<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
+        if (initiator_hook_) initiator_hook_("MoveAxis");
 
         auto& protocol = protocol_;
 
@@ -1274,6 +1278,7 @@ public:
                 }
                 write_frame_locked();
             }
+            initiator_lock.unlock();
 
             if (restore_tracking.has_value()) {
                 // Tracking can be dropped by stop/abort commands after manual motion; restore prior state.
@@ -1519,9 +1524,12 @@ public:
     void find_home() override {
         check_connected();
         ensure_not_parked("FindHome");
-        // open-astro#720: a pending GOTO setup must not send ":MS" after ":hC".
+        // open-astro#720: a pending GOTO setup must not send ":MS" after ":hC". open-astro#2073: nor may a SlewAsync
+        // claim between the fence and ":hC" (initiator_mutex_, held to the end).
+        std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
         reset_position_offsets();
+        if (initiator_hook_) initiator_hook_("FindHome");
         protocol_.go_home();
         std::lock_guard<std::mutex> lock(mutex_);
         parked_cached_ = false;
@@ -1542,9 +1550,13 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (park_failed_) clear_last_slew_error_locked();
         }
-        // open-astro#720: a pending GOTO setup must not send ":MS" after ":hP".
+        // open-astro#720: a pending GOTO setup must not send ":MS" after ":hP". open-astro#2073: nor may a SlewAsync
+        // claim between the fence and ":hP" (initiator_mutex_, held to the end: one ":GU" exchange and the no-reply
+        // ":hP", wire time an AbortSlew would wait for on the I/O lock anyway).
+        std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
         reset_position_offsets();
+        if (initiator_hook_) initiator_hook_("Park");
         if (get_at_park()) {
             return;
         }
@@ -1583,8 +1595,11 @@ public:
         // (revoke its claim, wait for its call in flight), so it neither sends
         // ":MS" after this abort nor records its rejection as a slew failure. A
         // ":MS" already on the wire when the fence lands goes out before the
-        // ":Q" below, which stops it.
+        // ":Q" below, which stops it. open-astro#2073: initiator_mutex_ (held to the end) keeps a SlewAsync from
+        // claiming between the fence and ":Q".
+        std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
+        if (initiator_hook_) initiator_hook_("AbortSlew");
         protocol_.abort_motion();
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[0] = false;
@@ -2133,6 +2148,7 @@ public:
         check_connected();
         fence_goto();
         reset_position_offsets();
+        if (initiator_hook_) initiator_hook_("Unpark");
         auto& protocol = protocol_;
         // Guard the poll thread's park-state warm against re-parking us: some
         // firmware keeps reporting :Gps=Completed briefly after :Spu, and the
@@ -2966,6 +2982,9 @@ public:
     void set_goto_send_hook_for_testing(std::function<void(std::string_view)> hook) {
         goto_send_hook_ = std::move(hook);
     }
+    void set_initiator_hook_for_testing(std::function<void(std::string_view)> hook) {
+        initiator_hook_ = std::move(hook);
+    }
 
 private:
     const int device_number_;
@@ -3091,10 +3110,13 @@ private:
     std::uint64_t goto_claim_ = 0;
     unsigned goto_sends_in_flight_ = 0;
     mutable std::condition_variable goto_send_cv_;
-    // Orders slew initiators: held across the claim and goto_slot_.start(). Lock order: first, then mutex_ for the
-    // claim block and the refused-start publish only. Never taken by a body, a fence, a getter or set_connected().
+    // Orders initiators (open-astro#2073): SlewAsync holds it across the claim and goto_slot_.start(); Park, FindHome,
+    // MoveAxis and AbortSlew from before fence_goto() until their own command is sent, so no GOTO claims in between.
+    // Lock order: first, then mutex_, pulse_mutex_ and the protocol mutex. Not a state lock: no getter takes it, so it
+    // may be held across wire I/O. Never taken by a body, fence_goto(), a getter or set_connected().
     std::mutex initiator_mutex_;
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
+    std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting
     util::OperationGeneration goto_generation_;
     util::OperationGeneration pulse_generation_;
     util::OperationGeneration teardown_generation_;
@@ -3125,6 +3147,12 @@ void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::
 void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook) {
     if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
         zwo->set_goto_send_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_initiator_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook) {
+    if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
+        zwo->set_initiator_hook_for_testing(std::move(hook));
     }
 }
 
