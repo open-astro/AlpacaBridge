@@ -312,7 +312,6 @@ Never crash the server on device errors.
 
 ```
 ALPACAHTTP_BUILD_TESTS
-ALPACAHTTP_ENABLE_DISCOVERY
 ```
 
 Cursor must guard optional components behind these flags.

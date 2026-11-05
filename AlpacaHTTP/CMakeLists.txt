@@ -97,7 +97,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(ALPACAHTTP_BUILD_TESTS "Build test suite" ON)
-option(ALPACAHTTP_ENABLE_DISCOVERY "Enable Alpaca Discovery" ON)
 
 # Find dependencies
 find_package(nlohmann_json 3.2.0 QUIET)
@@ -269,12 +268,8 @@ set(ALPACAHTTP_SOURCES
     src/util/host_timezone.cpp
     src/util/wifi_manager.cpp
     src/util/software_update.cpp
+    src/discovery/discovery.cpp
 )
-
-if(ALPACAHTTP_ENABLE_DISCOVERY)
-    list(APPEND ALPACAHTTP_SOURCES src/discovery/discovery.cpp)
-    add_definitions(-DALPACAHTTP_ENABLE_DISCOVERY)
-endif()
 
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacahttp-clean-all
@@ -480,11 +475,9 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_json alpacahttp)
     add_test(NAME test_json COMMAND test_json)
     
-    if(ALPACAHTTP_ENABLE_DISCOVERY)
-        add_executable(test_discovery tests/test_discovery.cpp)
-        target_link_libraries(test_discovery alpacahttp)
-        add_test(NAME test_discovery COMMAND test_discovery)
-    endif()
+    add_executable(test_discovery tests/test_discovery.cpp)
+    target_link_libraries(test_discovery alpacahttp)
+    add_test(NAME test_discovery COMMAND test_discovery)
     
     add_executable(test_config tests/test_config.cpp)
     target_link_libraries(test_config alpacahttp)

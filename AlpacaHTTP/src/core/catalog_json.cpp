@@ -12,6 +12,8 @@
 
 #include "catalog_json.h"
 
+#include "../http/device_call.h"  // to_lower_copy
+
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/util/error_handling.h>
 
@@ -237,12 +239,6 @@ nlohmann::json field_to_json(const FieldRef& f) {
     return j;
 }
 
-std::string to_lower(std::string_view s) {
-    std::string out(s);
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
-    return out;
-}
-
 }  // namespace
 
 alpacacore::catalog::DeviceConfig config_from_json(const nlohmann::json& json,
@@ -322,15 +318,15 @@ nlohmann::json describe_json(const alpacacore::catalog::DeviceCatalog& catalog) 
     auto views = catalog.describe();
     std::sort(views.begin(), views.end(), [](const auto& a, const auto& b) {
         if (a.key.vendor != b.key.vendor) return a.key.vendor < b.key.vendor;
-        return to_lower(alpacacore::device_type_to_string(a.key.type)) <
-               to_lower(alpacacore::device_type_to_string(b.key.type));
+        return to_lower_copy(std::string(alpacacore::device_type_to_string(a.key.type))) <
+               to_lower_copy(std::string(alpacacore::device_type_to_string(b.key.type)));
     });
 
     nlohmann::json out = nlohmann::json::array();
     for (const auto& view : views) {
         nlohmann::json descriptor;
         descriptor["vendor"] = view.key.vendor;
-        descriptor["deviceType"] = to_lower(alpacacore::device_type_to_string(view.key.type));
+        descriptor["deviceType"] = to_lower_copy(std::string(alpacacore::device_type_to_string(view.key.type)));
         descriptor["displayName"] = std::string(view.display_name);
         if (!view.vendor_label.empty()) descriptor["vendorLabel"] = std::string(view.vendor_label);
         descriptor["available"] = view.available;

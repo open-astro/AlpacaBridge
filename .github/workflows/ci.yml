@@ -1151,6 +1151,12 @@ jobs:
           python3 scripts/check_adr_authorization.py --self-test
           python3 scripts/check_adr_scope.py --self-test
 
+      - name: Docs drift - Run the scripts/tests unit tests
+        if: ${{ !cancelled() }}
+        # scripts/tests/ holds unittest cases (the QHY USB recovery probe's)
+        # that nothing else runs (#1741).
+        run: python3 -I -m unittest discover -s scripts/tests
+
       - name: Docs drift - Check docs/config for self-inconsistency
         if: ${{ !cancelled() }}
         # Catches drift between the repo's own docs and its actual config

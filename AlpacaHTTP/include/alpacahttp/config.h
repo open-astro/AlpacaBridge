@@ -123,7 +123,6 @@ public:
     void set_server_name(const std::string& name) { server_name_ = name; }
     void set_manufacturer(const std::string& mfg) { manufacturer_ = mfg; }
     void set_location(const std::string& loc) { location_ = loc; }
-    void set_profile_name(const std::string& name) { profile_name_ = name; }
     void set_sync_system_clock_from_clients(bool enabled) { sync_system_clock_from_clients_ = enabled; }
     void set_thread_pool_size(std::size_t size) {
         if (size < 1) size = 1;
@@ -160,9 +159,6 @@ public:
         motion_watchdog_seconds_ = seconds;
     }
     void set_update_packages_url(const std::string& url) { update_packages_url_ = url; }
-    void set_update_release_notes_url(const std::string& url) { update_release_notes_url_ = url; }
-    void set_update_release_url(const std::string& url) { update_release_url_ = url; }
-    void set_log_directory(const std::string& dir) { log_directory_ = dir; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
 

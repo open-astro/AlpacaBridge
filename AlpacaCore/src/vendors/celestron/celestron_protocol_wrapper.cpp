@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/nexstar_frame.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
@@ -258,35 +259,9 @@ int parse_mode_byte(const std::string& response) {
     return static_cast<int>(ch);
 }
 
-std::string build_hex(uint32_t value, std::size_t width) {
-    std::ostringstream oss;
-    oss << std::uppercase << std::setw(static_cast<int>(width)) << std::setfill('0') << std::hex << value;
-    return oss.str();
-}
-
-std::string trailing_hex(const std::string& value) {
-    std::size_t end = value.size();
-    while (end > 0 && !std::isxdigit(static_cast<unsigned char>(value[end - 1]))) {
-        --end;
-    }
-    std::size_t start = end;
-    while (start > 0 && std::isxdigit(static_cast<unsigned char>(value[start - 1]))) {
-        --start;
-    }
-    return value.substr(start, end - start);
-}
-
-std::string leading_hex(const std::string& value) {
-    std::size_t start = 0;
-    while (start < value.size() && !std::isxdigit(static_cast<unsigned char>(value[start]))) {
-        ++start;
-    }
-    std::size_t end = start;
-    while (end < value.size() && std::isxdigit(static_cast<unsigned char>(value[end]))) {
-        ++end;
-    }
-    return value.substr(start, end - start);
-}
+using util::build_hex;
+using util::leading_hex;
+using util::trailing_hex;
 
 std::optional<std::pair<uint32_t, uint32_t>> parse_axis_pair_response(const std::string& response,
                                                                        bool precise) {

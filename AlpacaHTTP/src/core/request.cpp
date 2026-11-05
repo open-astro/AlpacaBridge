@@ -13,6 +13,8 @@
 #include <alpacahttp/request.h>
 #include <alpacahttp/util/url_decode.h>
 
+#include "../http/device_call.h"  // to_lower_copy
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -21,12 +23,6 @@
 namespace alpacahttp {
 
 namespace {
-
-std::string to_lower_copy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
 
 } // namespace
 

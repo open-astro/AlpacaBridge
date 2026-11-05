@@ -4629,6 +4629,9 @@ Response Router::handle_static_file(const Request& request) {
             path_str[root_str.size()] != std::filesystem::path::preferred_separator) {
             continue;
         }
+        if (!std::filesystem::is_regular_file(canonical_path, ec)) {
+            continue;  // a directory or a missing file is not served (#1741)
+        }
         file.open(canonical_path, std::ios::binary);
         if (file.is_open()) {
             full_path = path_str;
@@ -4657,15 +4660,22 @@ Response Router::handle_static_file(const Request& request) {
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
     
-    // Set appropriate content type
-    if (file_path.find(".html") != std::string::npos) {
+    // Content type from the file's extension, not a substring of the path (#1741).
+    const std::string extension = std::filesystem::path(full_path).extension().string();
+    if (extension == ".html") {
         response.set_content_type("text/html");
-    } else if (file_path.find(".css") != std::string::npos) {
+    } else if (extension == ".css") {
         response.set_content_type("text/css");
-    } else if (file_path.find(".js") != std::string::npos) {
+    } else if (extension == ".js") {
         response.set_content_type("application/javascript");
-    } else if (file_path.find(".json") != std::string::npos) {
+    } else if (extension == ".json") {
         response.set_content_type("application/json");
+    } else if (extension == ".ico") {
+        response.set_content_type("image/x-icon");
+    } else if (extension == ".svg") {
+        response.set_content_type("image/svg+xml");
+    } else if (extension == ".png") {
+        response.set_content_type("image/png");
     } else {
         response.set_content_type("text/plain");
     }

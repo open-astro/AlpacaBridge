@@ -6570,6 +6570,17 @@ int main() {
         }
     }
 
+    // Static files (#1741): the content type comes from the file's extension, and
+    // a directory under web/ is 404, not an empty 200.
+    {
+        const auto index = route_request(router, "GET", "/web/index.html");
+        EXPECT(index.status_code() == 200);  // the web root resolves from the test's cwd
+        EXPECT(index.get_header("Content-Type") == "text/html");
+        EXPECT(route_request(router, "GET", "/web/app.js").get_header("Content-Type") == "application/javascript");
+        EXPECT(route_request(router, "GET", "/web/favicon.ico").get_header("Content-Type") == "image/x-icon");
+        EXPECT(route_request(router, "GET", "/web/assets").status_code() == 404);
+    }
+
     // Security: Content-Length must be bounded and validated (audit finding
     // M1). An absurd or malformed value must fail parsing rather than drive a
     // multi-gigabyte body_.resize().
