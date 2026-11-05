@@ -771,6 +771,19 @@ TEST_CASE("ZWO EAF Focuser Driver - A removed unit seen by an optional read is a
     CHECK(sdk.open_calls == sdk.close_calls);
 }
 
+// Issue #2085: a failed open publishes no identity, so Name falls back like a disconnected driver.
+// Falsified by: zwo_focuser_driver.cpp set_connected(true)'s failure path calling only release_open_locked()
+// (Name keeps the enumerated "EAF").
+TEST_CASE("ZWO EAF Focuser Driver - Name keeps no enumerated identity after a failed open",
+          "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    sdk.step_range_removed = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0, sdk);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_name() == "ZWO EAF");
+}
+
 // Issue #1500, decision 4: the loss is logged once, with the serial and the last-known values. The serial is device
 // text, so a control character in it never reaches the log raw (CWE-117).
 // Falsified by: a WARN per failed read instead of one at the loss, or the serial logged unescaped.

@@ -35,6 +35,8 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_task_clock.h"
+#include "fake_weewx_fetcher.h"
 
 namespace {
 
@@ -660,4 +662,29 @@ TEST_CASE("WeeWX ObservingConditions Driver - empty fetcher is refused at constr
               (void)alpacacore::vendor::weewx::create_weewx_observingconditions(
                   0, config, alpacacore::vendor::weewx::WeeWxFetcher{});
           }) == alpacacore::AlpacaError::InvalidValue);
+}
+
+// Decision 0006 rule 1 (#2085): the poll runs in an operation slot on the driver's TaskClock, and a
+// disconnect while it waits ends it at once.
+// Falsified by: weewx_observingconditions_driver.cpp poll_loop() waiting on a wall-clock condition variable
+// (advancing the fake clock makes no poll).
+TEST_CASE("WeeWX ObservingConditions Driver - the poll waits on the task clock and a disconnect ends it",
+          "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+    config.poll_interval = std::chrono::seconds(60);
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fake.fetcher(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the poll is waiting out its interval
+    const int before = fake.calls();
+    clock.advance(config.poll_interval);
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));  // the woken poll fetched and waits again
+    CHECK(fake.calls() == before + 1);  // one interval on the fake clock, one poll
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(1));
+    CHECK_FALSE(driver->get_connected());
 }

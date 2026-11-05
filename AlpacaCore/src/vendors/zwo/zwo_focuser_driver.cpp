@@ -185,10 +185,11 @@ public:
                     std::lock_guard<std::mutex> lock(firmware_mutex_);
                     firmware_.clear();  // a connect that fails reports no firmware
                 }
-                const auto opened = bind_focuser_locked();
                 try {
+                    const auto opened = bind_focuser_locked();
                     sdk_.with_link(open_id_, open_link_, [&] { publish_connect_state(open_id_, opened.serial); });
                 } catch (...) {
+                    clear_identity();  // the scan published the enumerated identity; a failed open keeps none
                     release_open_locked();
                     throw;
                 }
@@ -206,13 +207,8 @@ public:
             lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
             max_step_.store(0);
             step_range_.store(0);
-            if (focuser_index_.has_value()) {
-                focuser_id_.reset();
-                focuser_info_ = {};
-                focuser_info_valid_ = false;
-                serial_number_.clear();
-            }
         }
+        clear_identity();
         {
             std::lock_guard<std::mutex> lock(firmware_mutex_);
             firmware_.clear();
@@ -641,6 +637,17 @@ private:
 
     // Caller holds io_mutex_. Drops this driver's open, if any. A NotConnected close (the unit is gone, for example
     // a Connected toggle across a replug) is logged and swallowed; any other close error surfaces.
+    // A by-index driver re-resolves its unit on each connect, so it forgets the one it found.
+    void clear_identity() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (focuser_index_.has_value()) {
+            focuser_id_.reset();
+            focuser_info_ = {};
+            focuser_info_valid_ = false;
+            serial_number_.clear();
+        }
+    }
+
     void release_open_locked() const {
         if (open_link_ == 0) {
             return;

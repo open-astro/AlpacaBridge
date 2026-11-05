@@ -241,6 +241,7 @@ public:
         // holding mutex_ (the body's publish path needs mutex_).
         std::lock_guard<std::mutex> initiator_lock(move_start_mutex_);
         std::optional<int> previous_position;
+        std::optional<std::string> previous_failure;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // Re-assert under the locks: teardown_locked() stores connected_
@@ -270,6 +271,7 @@ public:
                 return;
             }
             previous_position = position_cache_;
+            previous_failure = move_failure_;
             position_cache_.reset();
             move_failure_.reset();
             pending_target_ = position;
@@ -284,6 +286,7 @@ public:
             // No body runs: undo the claim so Position does not read -1 forever.
             std::lock_guard<std::mutex> lock(mutex_);
             position_cache_ = previous_position;
+            move_failure_ = previous_failure;  // Position keeps raising the earlier failed move (#2085)
             pending_target_.reset();
             throw;
         }

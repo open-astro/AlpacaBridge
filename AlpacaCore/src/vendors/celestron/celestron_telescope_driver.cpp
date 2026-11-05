@@ -2682,6 +2682,9 @@ private:
                 }
             }
             if (slow_ok) {
+                // Not counted toward link health: it runs only after the alt-az read (and
+                // the pier read) above answered on this tick, so a dead link has already
+                // failed one of those. Count it if the slow fields are reordered so it runs first.
                 try {
                     sample.tracking_mode = protocol.get_tracking_mode();
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
@@ -3020,7 +3023,7 @@ private:
             std::optional<LocationInfo> site;
             try {
                 site = CelestronProtocolWrapper::instance().get_location();
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSiteInfoRetryDelay
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSitePollRetryDelay
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_ || link_lost() || stopped()) {

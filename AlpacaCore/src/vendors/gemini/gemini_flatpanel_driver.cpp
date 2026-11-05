@@ -1182,7 +1182,11 @@ private:
             }
             return;
         }
-        calibrator_idle_cv_.notify_all();  // a replaced body waiting for the port returns
+        // A replaced body waiting for the port returns. start() set its superseded
+        // flag under the slot's own mutex, so take and drop calibrator_idle_mutex_
+        // first: a body between its predicate check and its wait cannot miss this.
+        { std::lock_guard<std::mutex> idle_lock(calibrator_idle_mutex_); }
+        calibrator_idle_cv_.notify_all();
     }
 
     struct CalibratorCommand {

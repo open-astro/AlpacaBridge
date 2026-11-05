@@ -12,6 +12,7 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
@@ -23,7 +24,6 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdlib>
 #include <limits>
 #include <mutex>
@@ -308,13 +308,14 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config, WeeWxFetcher fetcher)
+    WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config, WeeWxFetcher fetcher,
+                                   util::TaskClock& clock)
         : AsyncConnectable(kDriverComponent),
           device_number_(device_number),
           config_(std::move(config)),
           fetcher_(std::move(fetcher)),
           connected_(false),
-          poll_running_(false) {
+          poll_op_("WeeWX poll", poll_generation_, clock) {
         if (config_.url.empty()) {
             throw AlpacaException("WeeWX URL is required", AlpacaError::InvalidValue);
         }
@@ -623,31 +624,19 @@ private:
         return parse_snapshot(payload);
     }
 
+    // Decision 0006 rule 1: the poll is a slot body. set_connected() runs under
+    // transition_mutex_, so a start never races a stop.
     void start_polling() {
-        std::lock_guard<std::mutex> lock(poll_mutex_);
-        if (poll_running_.load()) {
+        if (poll_op_.running()) {
             return;
         }
-        poll_running_.store(true);
-        poll_thread_ = std::thread([this]() { poll_loop(); });
+        poll_op_.start([this](util::OperationContext& ctx) { poll_loop(ctx); });
     }
 
-    void stop_polling() {
-        {
-            std::lock_guard<std::mutex> lock(poll_mutex_);
-            if (!poll_running_.load()) {
-                return;
-            }
-            poll_running_.store(false);
-        }
-        poll_cv_.notify_all();
-        if (poll_thread_.joinable()) {
-            poll_thread_.join();
-        }
-    }
+    void stop_polling() { poll_op_.cancel_all_and_join(); }
 
-    void poll_loop() {
-        while (poll_running_.load()) {
+    void poll_loop(util::OperationContext& ctx) {
+        do {
             try {
                 SensorSnapshot snapshot = fetch_snapshot();
                 std::lock_guard<std::mutex> lock(data_mutex_);
@@ -663,10 +652,7 @@ private:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kDriverComponent, "Polling failed: " + std::string(e.what()));
             }
-
-            std::unique_lock<std::mutex> lock(poll_mutex_);
-            poll_cv_.wait_for(lock, config_.poll_interval, [this]() { return !poll_running_.load(); });
-        }
+        } while (ctx.wait_for(config_.poll_interval));
     }
 
     int device_number_;
@@ -688,12 +674,11 @@ private:
         {"skyquality", "Sky quality (WeeWX sqm)"},
         {"skytemperature", "Sky sensor temperature (WeeWX sqmTemp)"}};
 
-    std::mutex poll_mutex_;
     // Guards set_connected() against a concurrent set_connected() only (#528).
     std::mutex transition_mutex_;
-    std::condition_variable poll_cv_;
-    std::atomic<bool> poll_running_;
-    std::thread poll_thread_;
+    // Last, so the slot is destroyed (and its body joined) before anything the body touches.
+    util::OperationGeneration poll_generation_;
+    util::AsyncOperation poll_op_;
 };
 
 } // namespace
@@ -716,7 +701,14 @@ std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
                                                                             const WeeWxHttpConfig& config,
                                                                             WeeWxFetcher fetcher) {
-    return std::make_unique<WeeWxObservingConditionsDriver>(device_number, config, std::move(fetcher));
+    return create_weewx_observingconditions(device_number, config, std::move(fetcher), util::default_task_clock());
+}
+
+std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
+                                                                            const WeeWxHttpConfig& config,
+                                                                            WeeWxFetcher fetcher,
+                                                                            util::TaskClock& clock) {
+    return std::make_unique<WeeWxObservingConditionsDriver>(device_number, config, std::move(fetcher), clock);
 }
 
 } // namespace alpacacore::vendor::weewx

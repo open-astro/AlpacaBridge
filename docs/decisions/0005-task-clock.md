@@ -79,6 +79,7 @@ Symbol: `TaskClock`
 | ZWO dew heater switch | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted | #1667 | heater read cache age and its fault stamp (the decision 0009 staleness bound) |
 | ZWO EFW filter wheel | `AlpacaCore/src/vendors/zwo/zwo_filterwheel_driver.cpp` | adopted | #1668 | Position cache age and its fault stamp (the decision 0009 staleness bound) |
 | ZWO CAA rotator | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted | #1668 | status cache age and its fault stamp (the decision 0009 staleness bound) |
+| WeeWX observing conditions | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted | #2085 | feed poll interval wait |
 
 ## Links
 
