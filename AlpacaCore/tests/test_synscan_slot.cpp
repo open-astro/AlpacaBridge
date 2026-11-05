@@ -35,12 +35,14 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using alpacacore::test::require_alpaca_error;
 
 struct FakeSynScanState {
     alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
@@ -165,7 +167,7 @@ void refused_slot_start_stops_mount(const std::function<void(alpacacore::Telesco
     const int cancels_before = rig.st->command_count('M');
 
     refuse_slot_threads(*rig.driver);
-    CHECK_THROWS_AS(second(*rig.driver), alpacacore::AlpacaException);
+    require_alpaca_error([&] { second(*rig.driver); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(rig.st->command_count('M') == cancels_before + 1);  // the GOTO was cancelled
     CHECK_FALSE(rig.driver->get_slewing());
@@ -183,7 +185,7 @@ void refused_start_keeps_move_axis(const std::function<void(alpacacore::Telescop
     const int passthrough_before = rig.st->command_count('P');
 
     refuse_slot_threads(*rig.driver);
-    CHECK_THROWS_AS(second(*rig.driver), alpacacore::AlpacaException);
+    require_alpaca_error([&] { second(*rig.driver); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(rig.st->command_count('M') == cancels_before);  // nothing in the slot: nothing to cancel
     CHECK(rig.st->command_count('P') == passthrough_before);
@@ -207,8 +209,9 @@ TEST_CASE("SynScan slot - a refused goto start on an idle mount cancels nothing"
     const int cancels_before = rig.st->command_count('M');
 
     refuse_slot_threads(*rig.driver);
-    CHECK_THROWS_AS(rig.driver->slew_to_coordinates_async(5.5, 20.0), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(rig.driver->park(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
+                         alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { rig.driver->park(); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(rig.st->command_count('M') == cancels_before);  // nothing was in flight: nothing to stop
     CHECK(rig.st->goto_count.load() == 0);
@@ -234,7 +237,7 @@ TEST_CASE("SynScan slot - a refused pulse timer start stops the axis and clears 
     alpacacore::vendor::synscan::set_pulse_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
-    CHECK_THROWS_AS(rig.driver->pulse_guide(0, 2000), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver->pulse_guide(0, 2000); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(rig.st->command_count('P') >= passthrough_before + 2);  // the rate command, then the stop
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());

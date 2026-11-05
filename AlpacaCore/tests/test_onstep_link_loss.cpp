@@ -1208,7 +1208,7 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
     REQUIRE(driver->get_connected());
     clock.advance(std::chrono::seconds(2));  // the fault has now stood past the bound
     // A getter takes no operation lock, so it only throws the fault; the poll's next tick finds the bound.
-    CHECK_THROWS_AS((void)driver->get_right_ascension(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(tick(*driver));
     require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_connected());
@@ -1450,7 +1450,7 @@ TEST_CASE("OnStep link loss - a link lost during the connect's first reads keeps
     PortLink link(first.slave_path());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), clock);
     first.sever_on(":GRa#");
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     REQUIRE_FALSE(driver->get_connected());
 
     alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(1500));

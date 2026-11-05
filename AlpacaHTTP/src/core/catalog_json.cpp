@@ -12,8 +12,6 @@
 
 #include "catalog_json.h"
 
-#include "../http/device_call.h"  // to_lower_copy
-
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/util/error_handling.h>
 
@@ -27,6 +25,8 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+#include "../http/device_call.h"  // to_lower_copy
 
 namespace alpacahttp::catalog_json {
 

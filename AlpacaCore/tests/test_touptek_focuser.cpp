@@ -237,10 +237,6 @@ TEST_CASE("ToupTek AAF Focuser Driver - Unsupported actions", "[touptek][focuser
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 
     require_alpaca_error([&]() { driver->action("noop", ""); },
                          alpacacore::AlpacaError::ActionNotImplemented);

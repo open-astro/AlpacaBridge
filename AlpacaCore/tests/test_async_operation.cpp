@@ -37,8 +37,8 @@
 #include <functional>
 #include <future>
 #include <memory>
-#include <new>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>

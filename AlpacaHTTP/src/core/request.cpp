@@ -13,12 +13,12 @@
 #include <alpacahttp/request.h>
 #include <alpacahttp/util/url_decode.h>
 
-#include "../http/device_call.h"  // to_lower_copy
-
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <sstream>
+
+#include "../http/device_call.h"  // to_lower_copy
 
 namespace alpacahttp {
 

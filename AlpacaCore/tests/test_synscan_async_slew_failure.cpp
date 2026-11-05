@@ -406,7 +406,7 @@ TEST_CASE("SynScan AbortSlew - a stop failure still reaps the cancelled slew tas
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE(server.drop_connections());
-    CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
 
     REQUIRE_NOTHROW(driver->set_connected(false));
     REQUIRE_NOTHROW(driver->set_connected(true));
@@ -429,7 +429,7 @@ TEST_CASE("SynScan AbortSlew - a failed tracking restore still clears Slewing (#
     REQUIRE(driver->get_slewing());
 
     st->reject_tracking.store(true);
-    CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
     st->reject_tracking.store(false);
     CHECK(driver->get_slewing() == false);
     driver->set_connected(false);
@@ -882,8 +882,8 @@ TEST_CASE("SynScan tracking - mode follows mount geometry, the same in either he
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    CHECK_THROWS_AS(driver->get_alignment_mode(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(st->command_count('T') == 0);
     driver->set_connected(false);
 }

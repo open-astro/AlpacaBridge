@@ -15,7 +15,8 @@
 // uses FakePlayerOneSDK and always reaches its connected path; the filter wheel
 // has a fail-fast case over the production SDK (hardware absent) and a connected
 // case over FakePlayerOnePWSDK behind LockedPlayerOnePWSDK (issue #1256); the
-// switch uses the production SDK and fails fast when hardware is absent.
+// switch has fail-fast cases over the production SDK and connected cases over
+// FakePlayerOneSDK.
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -23,6 +24,8 @@
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
 #include <alpacacore/vendor/playerone/playerone_switch_driver.h>
+
+#include <atomic>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -199,4 +202,51 @@ TEST_CASE("Player One switch - concurrent connect/disconnect/operate stress", "[
 TEST_CASE("Player One switch - destruction races an in-flight connect", "[playerone][switch][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::playerone::create_playerone_switch(0, 0); });
+}
+
+// Thermal switch storm over FakePlayerOneSDK (open-astro#2088): the registrations above fail fast at enumeration on
+// the production SDK, so the connect path, the status cache refill the getters share and the heater/fan writes never
+// ran under TSan. The fake's default camera reports a heater and a fan, so every connect reaches the end of the path.
+// The fake is declared before the driver, which holds a reference to it.
+TEST_CASE("Player One switch over a fake SDK - concurrent connect/disconnect/operate stress",
+          "[playerone][switch][stress]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_thermal_controls(true, true);
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, "", sdk);
+
+    alpacacore::test::StressCallGuard guard;
+    std::atomic<bool> saw_connected{false};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard, &saw_connected](AlpacaDriver& d) {
+        auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
+        if (sw.get_connected()) {
+            saw_connected.store(true);
+        }
+        guard([&] { static_cast<void>(sw.get_max_switch()); });
+        guard([&] { static_cast<void>(sw.get_can_write(0)); });
+        guard([&] { static_cast<void>(sw.get_switch(0)); });
+        guard([&] { static_cast<void>(sw.get_switch_value(1)); });
+        guard([&] { sw.set_switch_value(0, 1.0); });
+        guard([&] { sw.set_switch(1, true); });
+        guard([&] { static_cast<void>(sw.get_switch_name(0)); });
+        guard([&] { static_cast<void>(sw.get_switch_description(1)); });
+        guard([&] { static_cast<void>(sw.get_device_state()); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(saw_connected.load());
+    // No heater or fan call reached a closed camera, and every open (listing and switch) was closed.
+    CHECK_FALSE(sdk.operation_after_close());
+    CHECK(sdk.open_refs(17) == 0);
+}
+
+TEST_CASE("Player One switch over a fake SDK - destruction races an in-flight connect", "[playerone][switch][stress]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_thermal_controls(true, true);
+    alpacacore::test::run_destruction_during_connect_stress(
+        [&sdk]() { return alpacacore::vendor::playerone::create_playerone_switch(0, 0, "", sdk); });
+    CHECK(sdk.open_refs(17) == 0);
 }

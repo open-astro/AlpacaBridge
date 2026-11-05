@@ -142,7 +142,7 @@ TEST_CASE("Bisque UTCDate - unavailable mode clears time across polls and reconn
     CHECK(rig.driver->get_utc_date() == std::chrono::system_clock::time_point(milliseconds(978307200456)));
     rig.driver->set_connected(false);
     rig.mount.reject_connection = true;
-    CHECK_THROWS_AS(rig.driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
     rig.mount.reject_connection = false;
     rig.mount.use_computer_clock = false;

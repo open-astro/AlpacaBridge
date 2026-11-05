@@ -364,7 +364,7 @@ TEST_CASE("GPhoto camera fake - connect-path throw closes the handle and leaves 
     FakeRawDecoder decoder;
 
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
-    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
     // The connect-path open must be balanced by a close on the failure path.
     CHECK(fake.open_count == fake.close_count);

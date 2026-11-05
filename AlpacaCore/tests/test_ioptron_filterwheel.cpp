@@ -286,14 +286,14 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a reconnect clears the Position li
     ConnectedIefw wheel;
     wheel.fake.set_wheel_slot(3);
     wheel.fake.fail_wheel_position(true);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)wheel.driver->get_position(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)wheel.driver->get_position(); }, alpacacore::AlpacaError::DriverException);
     wheel.fake.fail_wheel_position(false);
 
     wheel.driver->set_connected(false);
     wheel.driver->set_connected(true);
     wheel.fake.fail_wheel_position(true);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)wheel.driver->get_position(); }, alpacacore::AlpacaError::DriverException);
     try {
         wheel.driver->get_position();
         FAIL("a failed read must throw");
@@ -465,7 +465,7 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a refused move invalidates the cac
     REQUIRE(wheel.driver->get_position() == 3);
 
     wheel.fake.unplug();  // the :WM write fails
-    CHECK_THROWS_AS(wheel.driver->set_position(4), alpacacore::AlpacaException);
+    require_alpaca_error([&] { wheel.driver->set_position(4); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { (void)wheel.driver->get_position(); },
                          static_cast<int>(alpacacore::AlpacaError::NotConnected));  // not the cached frame
 }

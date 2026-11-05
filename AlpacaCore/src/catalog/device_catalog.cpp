@@ -159,8 +159,13 @@ std::vector<DescriptorView> DeviceCatalog::describe() const {
 std::optional<DescriptorView> DeviceCatalog::describe(const DeviceKey& key) const {
     const Schema* s = find_schema(key);
     if (s == nullptr) return std::nullopt;
-    return DescriptorView{s->key,    s->display_name,          s->build_option, find_factory(s->key) != nullptr,
-                          s->fields, s->vendor_label, s->forget_dropped_selectors};
+    return DescriptorView{s->key,
+                          s->display_name,
+                          s->build_option,
+                          find_factory(s->key) != nullptr,
+                          s->fields,
+                          s->vendor_label,
+                          s->forget_dropped_selectors};
 }
 
 std::vector<DeviceKey> DeviceCatalog::factory_keys() const {

@@ -846,9 +846,10 @@ public:
                 return "=";
             }
             case 'D':
-                return "=" + u24(profile_.sidereal_period != 0
-                                     ? profile_.sidereal_period
-                                     : static_cast<uint32_t>(std::llround(kTimerFreq * 360.0 / a.cpr / kSiderealDegPerSec)));
+                return "=" +
+                       u24(profile_.sidereal_period != 0
+                               ? profile_.sidereal_period
+                               : static_cast<uint32_t>(std::llround(kTimerFreq * 360.0 / a.cpr / kSiderealDegPerSec)));
             case 'h':
                 return "=" + u24(static_cast<uint32_t>(a.goto_target));
             case 'O':

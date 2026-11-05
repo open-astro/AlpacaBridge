@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
 
@@ -41,9 +42,11 @@ class PlayerOneSDK;  // camera SDK seam (playerone_sdk_wrapper.h)
 std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index,
                                                       const std::string& camera_serial = {});
 
-// Injectable SDK overload for hardware-free tests. `sdk` must outlive the driver.
+// Injectable SDK overload for hardware-free tests. `sdk` and `clock` must outlive the driver. `clock` is the
+// TaskClock the status cache's age and its fault stamp run on (decision 0005).
 std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index,
-                                                      const std::string& camera_serial, PlayerOneSDK& sdk);
+                                                      const std::string& camera_serial, PlayerOneSDK& sdk,
+                                                      util::TaskClock& clock = util::default_task_clock());
 
 /**
  * @brief Every attached Player One camera for a thermal switch's camera picker:
@@ -76,7 +79,9 @@ protected:
     ~PlayerOneThermalSdk() = default;
 };
 
-/// Test overload: the driver keeps a reference, `sdk` must outlive it.
-std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index, PlayerOneThermalSdk& sdk);
+/// Test overload: the driver keeps references, `sdk` and `clock` must outlive it. `clock` is the TaskClock the status
+/// cache's age and its fault stamp run on (decision 0005).
+std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index, PlayerOneThermalSdk& sdk,
+                                                      util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::playerone

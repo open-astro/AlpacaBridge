@@ -122,10 +122,10 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported actions", "[skywatcher][tel
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->command_bool("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][telescope][unit]") {

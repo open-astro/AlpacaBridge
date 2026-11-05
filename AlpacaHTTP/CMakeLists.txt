@@ -576,5 +576,13 @@ test "$rc" = "$want" && printf '%s' "$err" | grep -q -- "$text"]=])
     add_test(NAME server_cli_missing_config
         COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 1 "cannot read config file"
             ${CMAKE_CURRENT_BINARY_DIR}/no_such_config.yaml)
+    # Issue #2088: a stop nobody asked for (here the first bind failing) exits 1 for systemd.
+    find_program(ALPACAHTTP_PYTHON3 python3)
+    if(ALPACAHTTP_PYTHON3)
+        add_test(NAME server_exit_status_unrequested_stop
+            COMMAND ${ALPACAHTTP_PYTHON3} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/server_exit_status.py
+                $<TARGET_FILE:alpacahttp_server>)
+        set_tests_properties(server_exit_status_unrequested_stop PROPERTIES TIMEOUT 30)
+    endif()
     set_tests_properties(server_cli_unknown_option server_cli_extra_argument server_cli_missing_config PROPERTIES TIMEOUT 20)
 endif()

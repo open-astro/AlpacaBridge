@@ -250,10 +250,14 @@ TEST_CASE("WeeWX ObservingConditions Driver - Unsupported actions", "[weewx]") {
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("foo", "bar"), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("foo", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("foo", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("foo", false), alpacacore::AlpacaException);
+    alpacacore::test::require_alpaca_error([&]() { driver->action("foo", "bar"); },
+                                           alpacacore::AlpacaError::ActionNotImplemented);
+    alpacacore::test::require_alpaca_error([&]() { driver->command_blind("foo", false); },
+                                           alpacacore::AlpacaError::MethodNotImplemented);
+    alpacacore::test::require_alpaca_error([&]() { driver->command_bool("foo", false); },
+                                           alpacacore::AlpacaError::MethodNotImplemented);
+    alpacacore::test::require_alpaca_error([&]() { driver->command_string("foo", false); },
+                                           alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("WeeWX ObservingConditions Driver - ASCOM Error Codes", "[weewx]") {
@@ -668,8 +672,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - empty fetcher is refused at constr
 // disconnect while it waits ends it at once.
 // Falsified by: weewx_observingconditions_driver.cpp poll_loop() waiting on a wall-clock condition variable
 // (advancing the fake clock makes no poll).
-TEST_CASE("WeeWX ObservingConditions Driver - the poll waits on the task clock and a disconnect ends it",
-          "[weewx]") {
+TEST_CASE("WeeWX ObservingConditions Driver - the poll waits on the task clock and a disconnect ends it", "[weewx]") {
     alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
     alpacacore::test::FakeWeeWxFetcher fake;
     alpacacore::vendor::weewx::WeeWxHttpConfig config;
@@ -681,7 +684,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - the poll waits on the task clock a
     const int before = fake.calls();
     clock.advance(config.poll_interval);
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));  // the woken poll fetched and waits again
-    CHECK(fake.calls() == before + 1);  // one interval on the fake clock, one poll
+    CHECK(fake.calls() == before + 1);                               // one interval on the fake clock, one poll
 
     const auto t0 = std::chrono::steady_clock::now();
     driver->set_connected(false);

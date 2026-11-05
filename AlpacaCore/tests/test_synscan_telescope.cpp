@@ -192,24 +192,24 @@ TEST_CASE("SynScan Telescope Driver - Disconnected Behavior", "[synscan][telesco
     REQUIRE_FALSE(driver->get_connected());
 
     // Position queries require connection
-    CHECK_THROWS_AS(driver->get_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_declination(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_altitude(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_azimuth(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
 
     // Tracking requires connection
-    CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
     // Slew and park require connection (or target not set, both throw AlpacaException)
-    CHECK_THROWS_AS(driver->slew_to_target_async(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
 
     // Action and command methods
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->command_bool("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 #ifndef _WIN32  // needs the fake mount server
@@ -1029,13 +1029,13 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
         driver->move_axis(0, 1.0);
         REQUIRE(driver->get_slewing());
         fail_t->store(true);
-        CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+        require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
     }
     SECTION("MoveAxis stop") {
         driver->move_axis(0, 1.0);
         REQUIRE(driver->get_slewing());
         fail_t->store(true);
-        CHECK_THROWS_AS(driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+        require_alpaca_error([&] { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::DriverException);
     }
     SECTION("PulseGuide end") {
         driver->pulse_guide(2, 300);  // East, RA

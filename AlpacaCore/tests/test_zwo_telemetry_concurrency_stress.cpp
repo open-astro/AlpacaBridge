@@ -204,7 +204,7 @@ TEST_CASE("ZWO a failed sibling connect and destruction cannot close a healthy l
     vendor::zwo::ConnectionInfo info;
     info.port_path = "/dev/does-not-exist-issue-1524";
     auto failed = vendor::zwo::create_zwo_telescope(7, info);
-    CHECK_THROWS_AS(failed->set_connected(true), AlpacaException);
+    test::require_alpaca_error([&] { failed->set_connected(true); }, AlpacaError::NotConnected);
     failed.reset();
     CHECK(live.driver->command_string(":GVP", false) == "AM5N");
     live.tick();
@@ -1167,7 +1167,7 @@ TEST_CASE("ZWO UTC anchor clears on disconnect fresh connect and failed initiali
     CHECK(vendor::zwo::utc_anchor_for_testing(*rig.driver) == old);
     rig.fail(":GVP", fail_identity);
     if (fail_identity) {
-        CHECK_THROWS_AS(rig.driver->set_connected(true), AlpacaException);
+        test::require_alpaca_error([&] { rig.driver->set_connected(true); }, AlpacaError::DriverException);
         CHECK_FALSE(rig.driver->get_connected());
         unavailable();
         CHECK_FALSE(vendor::zwo::utc_anchor_for_testing(*rig.driver));
@@ -1201,7 +1201,7 @@ TEST_CASE("ZWO a failed transport open clears an offline UTC anchor", "[zwo][tel
     info.port_path = "/dev/does-not-exist-issue-1522";
     auto driver = vendor::zwo::create_zwo_telescope(0, info, clock);
     driver->set_utc_date(std::chrono::sys_days{std::chrono::year{2001} / 1 / 2});
-    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    test::require_alpaca_error([&] { driver->set_connected(true); }, AlpacaError::NotConnected);
     error([&] { driver->get_utc_date(); }, AlpacaError::NotConnected);
     CHECK_FALSE(vendor::zwo::utc_anchor_for_testing(*driver));
 }

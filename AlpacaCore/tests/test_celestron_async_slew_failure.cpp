@@ -48,6 +48,7 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using alpacacore::test::require_alpaca_error;
 
 // The fake mount reports pier W at longitude 0, and the driver takes a forced
 // meridian flip (two passthrough GOTOs, never the plain one) whenever the target's
@@ -795,7 +796,7 @@ TEST_CASE("Celestron AbortSlew - a stop failure still reaps the cancelled slew t
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE(server.drop_connections());
-    CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
 
     REQUIRE_NOTHROW(driver->set_connected(false));
     REQUIRE_NOTHROW(driver->set_connected(true));
@@ -834,7 +835,7 @@ void refused_slot_start_stops_mount(const std::function<void(alpacacore::Telesco
     const int cancels_before = st->command_count('M');
 
     refuse_slot_threads(*driver);
-    CHECK_THROWS_AS(second(*driver), alpacacore::AlpacaException);
+    require_alpaca_error([&] { second(*driver); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(st->command_count('M') == cancels_before + 1);  // the GOTO was cancelled
     CHECK(read_slewing(*driver) == SlewingRead::False);
@@ -862,7 +863,7 @@ void refused_start_keeps_move_axis(const std::function<void(alpacacore::Telescop
     const int passthrough_before = st->command_count('P');
 
     refuse_slot_threads(*driver);
-    CHECK_THROWS_AS(second(*driver), alpacacore::AlpacaException);
+    require_alpaca_error([&] { second(*driver); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(st->command_count('M') == cancels_before);  // nothing in the slot: nothing to cancel
     CHECK(st->command_count('P') == passthrough_before);
@@ -900,7 +901,7 @@ TEST_CASE("Celestron slot - a refused park start keeps AtHome after FindHome", "
     REQUIRE(driver->get_at_home());
 
     refuse_slot_threads(*driver);
-    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(driver->get_at_home());
     CHECK_FALSE(driver->get_at_park());
@@ -931,8 +932,9 @@ TEST_CASE("Celestron slot - a refused goto start on an idle mount cancels nothin
     const int cancels_before = st->command_count('M');
 
     refuse_slot_threads(*driver);
-    CHECK_THROWS_AS(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0); },
+                         alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::DriverException);
 
     CHECK(st->command_count('M') == cancels_before);  // nothing was in flight: nothing to stop
     CHECK(st->goto_count.load() == 0);
@@ -1340,8 +1342,8 @@ TEST_CASE("Celestron tracking - mode follows mount geometry and site hemisphere"
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    CHECK_THROWS_AS(driver->get_alignment_mode(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
 }
 

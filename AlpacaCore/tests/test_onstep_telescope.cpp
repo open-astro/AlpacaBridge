@@ -119,10 +119,10 @@ TEST_CASE("OnStep Telescope Driver - Unsupported actions", "[onstep][telescope][
 
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->command_bool("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep Telescope Driver - Device-specific behavior", "[onstep][telescope][unit]") {
@@ -1371,7 +1371,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis stop that cannot be sent still e
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
     REQUIRE(fake.server.drop_connections());
-    CHECK_THROWS_AS(driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::DriverException);
     fake.advance(std::chrono::seconds(14));  // two intervals: no tick may run
     CHECK(resend_warns.count() == 0);
     driver->set_connected(false);
@@ -1393,7 +1393,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent ends its axi
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
     REQUIRE(fake.server.drop_connections());
-    CHECK_THROWS_AS(driver->move_axis(0, -1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->move_axis(0, -1.0); }, alpacacore::AlpacaError::DriverException);
     fake.advance(std::chrono::seconds(14));  // two intervals: no tick may run
     CHECK(resend_warns.count() == 0);
     driver->set_connected(false);
@@ -1415,7 +1415,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent leaves the o
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
     REQUIRE(fake.server.drop_connections());
-    CHECK_THROWS_AS(driver->move_axis(1, 1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->move_axis(1, 1.0); }, alpacacore::AlpacaError::DriverException);
     fake.resend_tick();  // axis 0 is due again
     CHECK(skipped.count() >= 1);
     driver->set_connected(false);
@@ -2230,7 +2230,8 @@ TEST_CASE("OnStep Telescope Driver - a GOTO stopped by Park is not resumed as a 
         mount->refuse_code = 12;  // CE_NO_PARK_POSITION_SET, once the GOTO is stopped
         mount->tracking = false;  // the stopped GOTO left tracking off
     }
-    CHECK_THROWS_AS(on_clock(*mount, *driver, [&] { driver->park(); }), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { on_clock(*mount, *driver, [&] { driver->park(); }); },
+                         alpacacore::AlpacaError::InvalidOperation);
     CHECK(mount->first(":Q#") < mount->first(":hP#"));
     REQUIRE_NOTHROW(driver->abort_slew());  // drops the kept refusal
     CHECK_FALSE(driver->get_slewing());     // inside the 2 s slew grace: the stop cleared it
@@ -2426,8 +2427,10 @@ TEST_CASE("OnStep Telescope Driver - a no-op Park or FindHome drops an earlier b
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     start_move(*driver, *mount, 0, 1.0);  // so the park runs in the body
     mount->refuse_code = 21;              // the body's try is refused: hardware fault
-    CHECK_THROWS_AS(on_clock(*mount, *driver, [&] { driver->park(); }), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);  // the kept refusal
+    require_alpaca_error([&]() { on_clock(*mount, *driver, [&] { driver->park(); }); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { (void)driver->get_slewing(); },
+                         alpacacore::AlpacaError::InvalidOperation);  // the kept refusal
 
     SECTION("the mount was parked meanwhile, then Park") {
         {
@@ -2906,8 +2909,8 @@ TEST_CASE("OnStep Telescope Driver - a FindHome refusal met in the background is
     start_move(*driver, *mount, 1, 1.0);
     const auto waits_before = mount->clock.wait_count();
     REQUIRE_NOTHROW(driver->find_home());
-    CHECK_THROWS_AS(settle(*mount, *driver, waits_before), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_at_home(), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { settle(*mount, *driver, waits_before); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { (void)driver->get_at_home(); }, alpacacore::AlpacaError::InvalidOperation);
     CHECK_NOTHROW(driver->get_at_park());
     driver->set_connected(false);
 }

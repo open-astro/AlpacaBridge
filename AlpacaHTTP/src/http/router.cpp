@@ -4659,7 +4659,7 @@ Response Router::handle_static_file(const Request& request) {
     // Read file content
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
-    
+
     // Content type from the file's extension, not a substring of the path (#1741).
     const std::string extension = std::filesystem::path(full_path).extension().string();
     if (extension == ".html") {
@@ -4679,7 +4679,7 @@ Response Router::handle_static_file(const Request& request) {
     } else {
         response.set_content_type("text/plain");
     }
-    
+
     response.set_body(content);
     return response;
 }
@@ -5609,7 +5609,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         response.set_header("Allow", "POST, PUT");
         return response;
     }
-    
+
     std::function<void()> shutdown_callback;
     {
         std::lock_guard<std::mutex> lock(callback_mutex_);
