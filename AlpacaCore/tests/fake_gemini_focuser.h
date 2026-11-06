@@ -126,6 +126,9 @@ public:
     void set_garbage_state_replies(bool on) { garbage_state_.store(on); }
     /// ":06#" answers garbage while the other state queries stay good (a
     /// focuser without a temperature probe).
+    /// Persistent: Position, IsMoving and temperature requests get no reply at all (the handshake and firmware
+    /// query still answer), unlike the one-shot hold_reply_to().
+    void set_silent_state_replies(bool on) { silent_state_.store(on); }
     void set_garbage_temperature(bool on) { garbage_temperature_.store(on); }
     /// ":24#" answers a frame the temperature compensation parser rejects ("Qx#"), the other queries stay good.
     void set_garbage_temp_comp(bool on) { garbage_temp_comp_.store(on); }
@@ -212,6 +215,8 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
             }
             reply = "F" + std::to_string(kFirmware) + "#";
+        } else if (silent_state_.load() && (cmd == ":00#" || cmd == ":01#" || cmd == ":06#")) {
+            return;
         } else if (garbage_state_.load() && (cmd == ":00#" || cmd == ":01#" || cmd == ":06#")) {
             reply = "Px#";
         } else if (garbage_temperature_.load() && cmd == ":06#") {
@@ -291,6 +296,7 @@ private:
     std::string hold_cmd_;  // hold_reply_to(), guarded by mutex_
     int hold_cmd_ms_ = 0;
 
+    std::atomic<bool> silent_state_{false};
     std::atomic<bool> garbage_state_{false};
     std::atomic<bool> garbage_temperature_{false};
     std::atomic<bool> garbage_temp_comp_{false};
