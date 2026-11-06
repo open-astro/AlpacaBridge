@@ -30,6 +30,13 @@
 # that tag against the branch's checkout and stops before anything is
 # published. /bump-release does this before the first beta tag of a stable
 # branch.
+#
+# Apt handoff: once the .deb is attached, the apt job dispatches the Release
+# workflow of open-astro/apt-openastro-net for this tag, which re-hosts the
+# assets a minute or two later. It runs as the open-astro-apt-release GitHub
+# App, whose only repository permission on that repository is Actions: write.
+# The job is skipped while the repository variable APT_RELEASE_APP_CLIENT_ID is
+# unset. A poll in that repository is the fallback for a missed dispatch.
 
 name: Release
 
@@ -310,8 +317,46 @@ jobs:
             "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb" \
             "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb.sha256"
 
+  apt:
+    # Starts the apt publish for this tag. The tag goes in as a pinned input, so
+    # apt re-hosts the assets of this tag and never the newest release it finds.
+    # The token is minted for the apt repository and Actions: write only. The
+    # job's own GITHUB_TOKEN holds nothing: the App token does the work.
+    name: Dispatch the apt release
+    if: github.event_name == 'push' && vars.APT_RELEASE_APP_CLIENT_ID != ''
+    needs: [release, deb]
+    permissions: {}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      PRERELEASE: ${{ needs.release.outputs.prerelease }}
+    steps:
+      - name: Mint the App token
+        id: app_token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ vars.APT_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.APT_RELEASE_APP_PRIVATE_KEY }}
+          owner: open-astro
+          repositories: apt-openastro-net
+          permission-actions: write
+
+      - name: Dispatch the apt Release workflow
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "${PRERELEASE}" = "true" ]; then
+            inputs=(-f targets=alpacabridge-beta -f "alpacabridge_beta_tag=${RELEASE_TAG}")
+          else
+            inputs=(-f targets=alpacabridge -f "alpacabridge_ref=${RELEASE_TAG}")
+          fi
+          gh workflow run release.yml --repo open-astro/apt-openastro-net --ref main "${inputs[@]}"
+          echo "Dispatched the apt release for ${RELEASE_TAG}."
+
   prune:
-    # Last job: once the .deb is attached, delete the GitHub Releases this tag
+    # Once the .deb is attached, delete the GitHub Releases this tag
     # supersedes (older betas of the same X.Y.Z; every beta of X.Y.Z after the
     # stable). Tags stay; older betas are tags only, with no Release or .deb. A
     # pruned release can be recreated, .deb attached, by re-running that tag's

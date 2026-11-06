@@ -1,0 +1,2 @@
+### Added (CI)
+- **Publish to apt right after the tag** (CI): a new `apt` job in `.github/workflows/release.yml` dispatches the Release workflow of `open-astro/apt-openastro-net` once the `.deb` is attached, with the tag pinned, so a release or beta reaches apt in a minute or two instead of waiting for the poll. It runs as the `open-astro-apt-release` GitHub App, limited to Actions: write on that repository, and is skipped while the repository variable `APT_RELEASE_APP_CLIENT_ID` is unset. See docs/beta-channel.md.
