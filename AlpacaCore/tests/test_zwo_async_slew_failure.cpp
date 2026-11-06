@@ -1073,6 +1073,24 @@ TEST_CASE("ZWO async - redundant Connected=true preserves a stored slew failure"
     driver->set_connected(false);
 }
 
+// PIN (#2093): a PulseGuide moves the Sync ownership epoch but is not a motion recovery: a stored GOTO failure stays.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide() calling clear_last_slew_error_locked() (under mutex_) instead of
+// bump_motion_epoch(), which clears the stored failure.
+TEST_CASE("ZWO async - a PulseGuide keeps a stored slew failure (#2093)", "[zwo][telescope][async][slewfailure]") {
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
+
+    mount.override_reply(":Sr", "0");
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 5000));
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 250));
+    REQUIRE(mount.wait_for_count(":Mg", 1, std::chrono::seconds(5)));  // the pulse was accepted and sent
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);
+    driver->set_connected(false);
+}
+
 // Operation slot, GOTO family: a new GOTO replaces the previous body without waiting for it. The previous body sits
 // in a mount transaction that has not been answered; the HTTP thread must not wait for that answer.
 // Falsified by: zwo_telescope_driver.cpp slew_to_target_async() calling goto_slot_.cancel_all_and_join() before
@@ -1398,6 +1416,54 @@ TEST_CASE("ZWO async - a SlewAsync during Unpark's fence-to-command gap is refus
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
     }
     CHECK_FALSE(goto_sent_within_setup_window(mount));
+    driver->set_connected(false);
+}
+
+// open-astro#2096: a PulseGuide that decided to start the pulse drain and has not started it yet (A, held on the seam)
+// must not start a drain over a newer one. A reset (AbortSlew) and a second PulseGuide (B, 6000 ms) land in that gap:
+// B's drain sends its first step, and A's late start would supersede it, so B's second step would never be sent.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide(): removing the pulse_start_mutex_ lock held across the drain
+// decision and pulse_slot_.start() (B's second step is lost); or reset_position_offsets(): removing its
+// pulse_start_mutex_ lock (the reset returns while A is held).
+TEST_CASE("ZWO async - a stale pulse drain start never cuts a newer accepted pulse (#2096)",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    std::atomic<bool> armed{true};
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == "PulseGuide" && armed.exchange(false)) latch.block();  // the first PulseGuide only
+    });
+    rig.connect();
+
+    auto a = std::async(std::launch::async, [&] { driver->pulse_guide(0, 500); });
+    REQUIRE(latch.wait_entered());  // A decided to start the drain and has not started it
+    auto reset = std::async(std::launch::async, [&] { driver->abort_slew(); });
+    // An AbortSlew takes about 240 ms here (its ":Q"); kInitiatorBudget stays under the latch's 2 s self-release.
+    const bool reset_while_held = reset.wait_for(kInitiatorBudget) == std::future_status::ready;
+    if (!reset_while_held) latch.release();  // the reset waits for A's start: let A start, then the reset runs
+    reset.wait();
+    auto b = std::async(std::launch::async, [&] { driver->pulse_guide(1, 6000); });  // B: two 3000 ms steps
+    const bool b_first_step = mount.wait_for_count(":Mgs", 1, std::chrono::milliseconds(1500));
+    b.wait();
+    latch.release();  // A's start, if it was still held
+    a.wait();
+    REQUIRE_NOTHROW(reset.get());
+    REQUIRE_NOTHROW(b.get());
+    REQUIRE_NOTHROW(a.get());
+    // The poll loop and B's drain in its step wait; a superseded drain no longer waits.
+    const bool b_drain_waits = b_first_step && rig.clock.wait_for_waiters(2, std::chrono::seconds(2));
+    if (b_drain_waits) rig.tick(std::chrono::milliseconds(3000));  // B's first step ends
+
+    CHECK_FALSE(reset_while_held);
+    CHECK(b_first_step);
+    CHECK(b_drain_waits);
+    CHECK(mount.wait_for_count(":Mgs", 2, std::chrono::seconds(2)));  // B's second step reached the mount
+    const auto all = mount.commands();
+    const auto stop_at = std::find(all.begin(), all.end(), std::string(":Q"));
+    REQUIRE(stop_at != all.end());
+    CHECK(std::find_if(stop_at, all.end(), [](const std::string& c) { return c.rfind(":Mgn", 0) == 0; }) == all.end());
     driver->set_connected(false);
 }
 

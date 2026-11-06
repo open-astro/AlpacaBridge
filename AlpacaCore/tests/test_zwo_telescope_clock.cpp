@@ -28,6 +28,7 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
@@ -455,6 +456,41 @@ TEST_CASE("ZWO an older Sync sends no last-resort :CM once a newer GOTO is accep
     require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
 }
 
+// #2093: a PulseGuide accepted while an older Sync waits out an "e4" reply is a newer motion command, as a GOTO is:
+// the Sync sends nothing after the pulse's ":Mg" (no ":Q" that would stop the pulse, no retried sync).
+// Falsified by: zwo_telescope_driver.cpp pulse_guide() without its bump_motion_epoch() call.
+TEST_CASE("ZWO an older Sync never stops a newer PulseGuide (#2093)", "[zwo][telescope][unit][clock][sync-fence]") {
+    const bool last_resort = GENERATE(false, true);  // the pulse lands in the 200 ms settle, or the 300 ms one
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its first ":Q" and waits out the 200 ms settle
+    if (last_resort) {
+        rig.advance(200ms);
+        REQUIRE(rig.mount.wait_for_count(":SMMC", 2, kReal));
+        rig.wait_for_blocked_caller();  // Sync sent its last-resort ":Q" and waits out the 300 ms settle
+    }
+    rig.driver->pulse_guide(0, 1000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    const auto before = rig.mount.commands();
+    const auto pulse_at = static_cast<std::size_t>(
+        std::find_if(before.begin(), before.end(), [](const std::string& c) { return c.rfind(":Mg", 0) == 0; }) -
+        before.begin());
+    rig.advance_until([&] { return ready(sync); }, 100ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    const auto sent = rig.mount.commands();
+    for (std::size_t i = pulse_at + 1; i < sent.size(); ++i) {
+        INFO("after the pulse: " << sent[i]);
+        CHECK(sent[i] != ":Q");
+        CHECK(sent[i].rfind(":SMMC", 0) != 0);
+        CHECK(sent[i] != ":CM");
+        CHECK(sent[i] != ":Sr06:00:00");
+    }
+    require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
 TEST_CASE("ZWO SyncToCoordinates sends its own pair, not a target set earlier",
           "[zwo][telescope][unit][clock][sync-fence]") {
     Rig rig;
@@ -849,6 +885,32 @@ TEST_CASE("ZWO telescope clock - a pulse after a reconnect reaches the mount",
     const int pulses = rig.mount.count(":Mg");
     rig.driver->pulse_guide(2, 500);
     CHECK(rig.mount.wait_for_count(":Mg", pulses + 1, kReal));
+}
+
+// #2095: a redundant Connected=true drops the queued pulses but leaves the running drain in charge, so the next
+// PulseGuide queues behind the step in flight instead of sending its ":Mg" over it.
+// Falsified by: zwo_telescope_driver.cpp reset_session_state_for_connect() clearing pulse_drain_active_ on the
+// redundant path too, so the next pulse starts a new drain that supersedes the running one.
+TEST_CASE("ZWO telescope clock - a redundant connect never overlaps the running pulse (#2095)",
+          "[zwo][telescope][unit][clock][operation-slot]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 6000);  // A: two 3000 ms steps
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    rig.wait_for_blocked_caller();    // the drain waits out A's first step
+    rig.driver->pulse_guide(2, 500);  // C: queued behind A
+    auto& redundant = rig.call([&] { rig.driver->set_connected(true); });
+    for (int i = 0; i < 200 && redundant.wait_for(10ms) != std::future_status::ready; ++i) rig.advance(10ms);
+    REQUIRE(redundant.wait_for(0ms) == std::future_status::ready);
+    redundant.get();
+    rig.driver->pulse_guide(1, 1000);                        // B
+    CHECK_FALSE(rig.mount.wait_for_count(":Mg", 2, 200ms));  // B waits for A's step
+    rig.advance_until([&] { return rig.mount.count(":Mg") >= 3; }, 100ms, 10s);
+    std::vector<std::string> pulses;
+    for (const auto& command : rig.mount.commands()) {
+        if (command.rfind(":Mg", 0) == 0) pulses.push_back(command);
+    }
+    CHECK(pulses == std::vector<std::string>{":Mgn3000", ":Mgn3000", ":Mgs1000"});  // C was dropped, B came last
 }
 
 #endif  // !_WIN32

@@ -425,10 +425,12 @@ public:
                 tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             poll_pause_.store(false);
-            // A drain still running keeps its current task; the next pulse starts a new drain.
+            // A redundant connect drops the queued pulses but keeps a running drain in charge (pulse_drain_active_
+            // stays set), so the next pulse queues behind its step instead of overlapping it (#2095). A real connect
+            // has joined the drain (stop_pulse_drain()) and clears the flag.
             pulse_queue_.clear();
             pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-            pulse_drain_active_ = false;
+            if (!keep_telemetry_caches) pulse_drain_active_ = false;
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
@@ -1651,6 +1653,7 @@ public:
         if (effective_duration <= 0) {
             return;
         }
+        bump_motion_epoch();  // open-astro#2093: before the task can reach the drain and its ":Mg"
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1690,6 +1693,9 @@ public:
         task.expected_ra_hours = expected_hours;
         task.expected_dec_degrees = expected_dec;
 
+        // open-astro#2096: the drain decision and its start are one step against a reset and another PulseGuide, so a
+        // late start never supersedes a newer drain that already took a task.
+        std::lock_guard<std::mutex> start_lock(pulse_start_mutex_);
         bool start_drain = false;
         {
             // Match the connect reset's pulse -> state order (#714); state remains the leaf.
@@ -1709,6 +1715,7 @@ public:
             pulse_drain_active_ = true;
         }
         if (!start_drain) return;
+        if (initiator_hook_) initiator_hook_("PulseGuide");
         try {
             pulse_slot_.start([this](util::OperationContext& ctx) { drain_pulses(ctx); });
         } catch (...) {
@@ -2027,11 +2034,11 @@ public:
 
         auto& protocol = protocol_;
 
-        // Every newer initiator (GOTO, MoveAxis, FindHome, Park, Unpark, AbortSlew) bumps slew_error_epoch_. Once it
-        // has moved, a newer command owns the motion and this older Sync must not stop it, unless that command is a
-        // GOTO the mount has not accepted yet: its retry restores its own target. Only GOTO acceptance is fenced
-        // exactly; MoveAxis, FindHome, Park and Unpark bump the epoch after their wire command, so a check that
-        // lands in that window can still stop them.
+        // Every newer initiator (GOTO, PulseGuide, MoveAxis, FindHome, Park, Unpark, AbortSlew) bumps
+        // slew_error_epoch_. Once it has moved, a newer command owns the motion and this older Sync must not stop it,
+        // unless that command is a GOTO the mount has not accepted yet: its retry restores its own target. GOTO
+        // acceptance and PulseGuide (#2093, before its ":Mg") are fenced exactly; MoveAxis, FindHome, Park and Unpark
+        // bump the epoch after their wire command, so a check that lands in that window can still stop them.
         uint64_t sync_epoch = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2400,6 +2407,8 @@ private:
     void reset_position_offsets() {
         // One section: a pulse queued after it starts a drain this cancel cannot reach, and the cancelled drain's
         // reconciliation, which re-checks its stop reason under mutex_, cannot write offsets after they are zeroed.
+        // pulse_start_mutex_ first: never between a PulseGuide's drain decision and its start (#2096).
+        std::lock_guard<std::mutex> start_lock(pulse_start_mutex_);
         std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         pulse_queue_.clear();
@@ -2923,6 +2932,16 @@ private:
         pulse_drain_active_ = false;
     }
 
+    // open-astro#2093: PulseGuide moves the epoch before its task is queued, under target_write_mutex_, so an older
+    // Sync's ownership check and its stop fall wholly before the pulse's ":Mg" or see the new epoch and send nothing. A
+    // pure bump: a stored slew failure stays. Call with no lock held. (main's #1925 helper, used here by PulseGuide
+    // only.)
+    void bump_motion_epoch() {
+        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++slew_error_epoch_;
+    }
+
     // open-astro#575: every clear of the stored slew failure (new initiator,
     // AbortSlew, reconnect) starts a new epoch; see slew_error_epoch_.
     void clear_last_slew_error_locked() {
@@ -3021,8 +3040,8 @@ private:
     mutable std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
-    // Serializes target writes through CM/MS, never held across a join or a driver wait; getters never take it.
-    // Order: before the protocol wrapper's mutex and mutex_.
+    // Serializes target writes through CM/MS and the PulseGuide epoch bump (bump_motion_epoch()), never held across a
+    // join or a driver wait; getters never take it. Order: before the protocol wrapper's mutex and mutex_.
     std::mutex target_write_mutex_;
     // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
     // read-back and re-send. No getter takes it. Order: set_connected_mutex_, then this, then the protocol
@@ -3095,6 +3114,10 @@ private:
     // command owns the mount (sync_to_pair()).
     uint64_t slew_error_epoch_ = 0;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
+    // open-astro#2096: pulse_guide() holds it across its drain decision and pulse_slot_.start();
+    // reset_position_offsets() takes it first. Order: after initiator_mutex_, before pulse_mutex_. No body, getter,
+    // fence or set_connected() takes it, so holding it across start() cannot block a stale body.
+    std::mutex pulse_start_mutex_;
     mutable std::mutex pulse_mutex_;
     std::deque<PulseTask> pulse_queue_;
     bool pulse_drain_active_ = false;  // pulse_mutex_: a drain body runs and will take a queued task
@@ -3126,8 +3149,9 @@ private:
     mutable std::condition_variable goto_send_cv_;
     // Orders initiators (open-astro#2073): SlewAsync holds it across the claim and goto_slot_.start(); Park, FindHome,
     // MoveAxis and AbortSlew from before fence_goto() until their own command is sent, so no GOTO claims in between.
-    // Lock order: first, then mutex_, pulse_mutex_ and the protocol mutex. Not a state lock: no getter takes it, so it
-    // may be held across wire I/O. Never taken by a body, fence_goto(), a getter or set_connected().
+    // Lock order: first, then pulse_start_mutex_, pulse_mutex_, the protocol mutex and mutex_ last. Not a state lock:
+    // no getter takes it, so it may be held across wire I/O. Never taken by a body, fence_goto(), a getter or
+    // set_connected().
     std::mutex initiator_mutex_;
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
     std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting
