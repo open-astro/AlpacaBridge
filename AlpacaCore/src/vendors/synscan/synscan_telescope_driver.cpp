@@ -1386,26 +1386,32 @@ public:
             std::string last_error;
             auto& proto = SynScanProtocolWrapper::instance();
             // An RA pulse ran the motor at an absolute rate in place of tracking; while tracking, the tracking
-            // command alone ends it (see ra_motor_rate_locked). Read now: tracking may have changed mid-pulse.
-            // Without the equatorial model the pulse ran the guide rate alone, so it stops and then restores
-            // tracking as before.
+            // command alone ends it (see ra_motor_rate_locked). Without the equatorial model the pulse ran the guide
+            // rate alone, so it stops and then restores tracking as before.
             int end_tracking_mode = 0;
-            bool end_with_tracking = false;
-            if (axis == 0) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                end_tracking_mode = connected_ ? tracking_mode_cached_ : 0;
-                end_with_tracking = end_tracking_mode > 0 && equatorial_geometry_locked();
-            }
             for (int attempt = 0; attempt < kStopAttempts && !stopped; ++attempt) {
                 try {
-                    if (end_with_tracking) {
-                        proto.set_tracking_mode(end_tracking_mode);
-                    } else {
-                        proto.move_axis_variable_rate(axis, 0.0);
-                        if (end_tracking_mode > 0) {
-                            proto.set_tracking_mode(end_tracking_mode);
-                        }
+                    // The stop and the restore go out in one wire turn, and the mode to restore is read at the turn:
+                    // a Tracking write queued ahead of this body has landed by then and is the mode that stays, and
+                    // none can land between the stop and the restore (#2069).
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    const WireTurn turn(*this, lock);
+                    bool end_with_tracking = false;
+                    if (axis == 0) {
+                        end_tracking_mode = connected_ ? tracking_mode_cached_ : 0;
+                        end_with_tracking = end_tracking_mode > 0 && equatorial_geometry_locked();
                     }
+                    const int restore_mode = end_tracking_mode;
+                    without_lock(lock, [&] {
+                        if (end_with_tracking) {
+                            proto.set_tracking_mode(restore_mode);
+                        } else {
+                            proto.move_axis_variable_rate(axis, 0.0);
+                            if (restore_mode > 0) {
+                                proto.set_tracking_mode(restore_mode);
+                            }
+                        }
+                    });
                     stopped = true;
                 } catch (const std::exception& e) {
                     last_error = e.what();
