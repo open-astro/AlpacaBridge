@@ -1318,6 +1318,8 @@ public:
             }
         }
 
+        bump_motion_epoch();  // open-astro#1925: before ":Rv" and the jog
+
         // Pause the poll thread so its protocol reads don't hold the protocol
         // mutex while we send the rate + move commands. On Wi-Fi the poll
         // thread's reads can add 200-400ms of contention per blocked command.
@@ -1349,6 +1351,7 @@ public:
         }
 
         poll_pause_.store(false);
+        if (initiator_hook_) initiator_hook_("MoveAxis sent");
 
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[axis] = true;
@@ -1546,7 +1549,9 @@ public:
         fence_goto();
         reset_position_offsets();
         if (initiator_hook_) initiator_hook_("FindHome");
+        bump_motion_epoch();  // open-astro#1925: before ":hC"
         protocol_.go_home();
+        if (initiator_hook_) initiator_hook_("FindHome sent");
         std::lock_guard<std::mutex> lock(mutex_);
         parked_cached_ = false;
         park_command_active_ = false;
@@ -1589,11 +1594,13 @@ public:
         } catch (const std::exception&) {
             // Continue: older firmware may not expose mode flags consistently.
         }
+        bump_motion_epoch();  // open-astro#1925: before ":Td" and ":hP", after the no-op and AltAz returns
         // open-astro#2097: an AM5 on firmware 1.8.8 ignores ":hP#" while tracking is on (rig: no motion for 30 s, then
         // parked within 6 s of the same ":hP#" after ":Td#"). A parked mount does not track, so stop tracking first.
         set_tracking(false);
 
         protocol.park();
+        if (initiator_hook_) initiator_hook_("Park sent");
 
         std::lock_guard<std::mutex> lock(mutex_);
         parked_cached_ = false;
@@ -2045,9 +2052,9 @@ public:
 
         // Every newer initiator (GOTO, MoveAxis, FindHome, Park, Unpark, AbortSlew) bumps slew_error_epoch_. Once it
         // has moved, a newer command owns the motion and this older Sync must not stop it, unless that command is a
-        // GOTO the mount has not accepted yet: its retry restores its own target. Only GOTO acceptance is fenced
-        // exactly; MoveAxis, FindHome, Park and Unpark bump the epoch after their wire command, so a check that
-        // lands in that window can still stop them.
+        // GOTO the mount has not accepted yet: its retry restores its own target. GOTO, MoveAxis, FindHome, Park and
+        // Unpark bump it under target_write_mutex_ before their wire command (open-astro#1925), so each check below
+        // and the wire call it guards land wholly before that command or not at all.
         uint64_t sync_epoch = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2058,7 +2065,7 @@ public:
         auto require_ownership = [&]() {
             std::lock_guard<std::mutex> lock(mutex_);
             if (slew_error_epoch_ != sync_epoch && !goto_setup_pending_) {
-                throw AlpacaException("Sync superseded by a newer motion command", AlpacaError::InvalidOperation);
+                throw AlpacaException("Sync superseded by a newer command", AlpacaError::InvalidOperation);
             }
         };
 
@@ -2169,6 +2176,7 @@ public:
         fence_goto();
         reset_position_offsets();
         if (initiator_hook_) initiator_hook_("Unpark");
+        bump_motion_epoch();  // open-astro#1925: before ":Spu"
         auto& protocol = protocol_;
         // Guard the poll thread's park-state warm against re-parking us: some
         // firmware keeps reporting :Gps=Completed briefly after :Spu, and the
@@ -2198,6 +2206,7 @@ public:
                                 "Unpark returned 0 while :Gps is unavailable/not-parked; "
                                 "treating unpark as successful");
             }
+            if (initiator_hook_) initiator_hook_("Unpark sent");
 
             std::lock_guard<std::mutex> lock(mutex_);
             parked_cached_ = false;
@@ -2416,8 +2425,8 @@ private:
     void reset_position_offsets() {
         // One section: a pulse queued after it starts a drain this cancel cannot reach, and the cancelled drain's
         // reconciliation, which re-checks its stop reason under mutex_, cannot write offsets after they are zeroed.
-        std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> pulse_lock(pulse_mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         pulse_queue_.clear();
         pulse_queue_end_ = std::chrono::steady_clock::time_point{};
         pulse_drain_active_ = false;
@@ -2426,6 +2435,12 @@ private:
         dec_offset_deg_ = 0.0;
         pulse_guiding_end_ = clock_.now();
         snapshot_.write([](PolledFrame&) {});
+        // open-astro#2072: a step already past its check sends its ":Mg" after the cancel; wait for it, so the caller's
+        // own command follows it on the wire. pulse_mutex_ is released first (lock order: pulse_mutex_ before mutex_;
+        // pulse_guide() callers must not queue behind a wire wait). Bounded by that one blind write behind the
+        // exchange in flight. Call without the protocol mutex held: the counted send waits for it.
+        pulse_lock.unlock();
+        pulse_send_cv_.wait(lock, [this] { return pulse_sends_in_flight_ == 0; });
     }
 
     void ensure_not_parked(const char* operation) const {
@@ -2874,13 +2889,31 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_.load() || ctx.stop_reason() != util::StopReason::None) return;
+                // open-astro#2072: counted in the same section as the check, so a reset that cancels after it waits
+                // for this ":Mg" (reset_position_offsets()).
+                ++pulse_sends_in_flight_;
             }
-            try {
-                protocol.pulse_guide(task.direction, step);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ZWO", "PulseGuide command failed: " + std::string(e.what()));
-                break;
+            bool sent = true;
+            {
+                struct EndPulseSend {
+                    std::mutex& mutex;
+                    unsigned& in_flight;
+                    std::condition_variable& cv;
+                    ~EndPulseSend() {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        --in_flight;
+                        cv.notify_all();
+                    }
+                } end_send{mutex_, pulse_sends_in_flight_, pulse_send_cv_};
+                if (goto_send_hook_) goto_send_hook_(":Mg");
+                try {
+                    protocol.pulse_guide(task.direction, step);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("ZWO", "PulseGuide command failed: " + std::string(e.what()));
+                    sent = false;
+                }
             }
+            if (!sent) break;
             // One clock wait per step; a cancel wakes it at once.
             if (!ctx.wait_for(std::chrono::milliseconds(step))) return;
             remaining_ms -= step;
@@ -2937,6 +2970,16 @@ private:
         pulse_queue_.clear();
         pulse_queue_end_ = std::chrono::steady_clock::time_point{};
         pulse_drain_active_ = false;
+    }
+
+    // open-astro#1925: a motion initiator (MoveAxis jog, FindHome, Park, Unpark) moves the epoch before its wire
+    // command, under target_write_mutex_, so an older Sync's ownership check and its stop fall wholly before the
+    // command or see the new epoch and send nothing. A pure bump: the stored failure is cleared after the command, as
+    // before. Call with no lock held other than initiator_mutex_.
+    void bump_motion_epoch() {
+        std::lock_guard<std::mutex> target_lock(target_write_mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++slew_error_epoch_;
     }
 
     // open-astro#575: every clear of the stored slew failure (new initiator,
@@ -3037,8 +3080,9 @@ private:
     mutable std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
-    // Serializes target writes through CM/MS, never held across a join or a driver wait; getters never take it.
-    // Order: before the protocol wrapper's mutex and mutex_.
+    // Serializes target writes through CM/MS and the Sync epoch bumps (bump_motion_epoch()), never held across a join
+    // or a driver wait; getters never take it. Order: after initiator_mutex_, before the protocol wrapper's mutex and
+    // mutex_.
     std::mutex target_write_mutex_;
     // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
     // read-back and re-send. No getter takes it. Order: transition_mutex_, then this, then the protocol
@@ -3150,10 +3194,16 @@ private:
     std::uint64_t goto_claim_ = 0;
     unsigned goto_sends_in_flight_ = 0;
     mutable std::condition_variable goto_send_cv_;
+    // open-astro#2072, the pulse send gate (under mutex_): ":Mg" steps past their check and not yet sent, and the wait
+    // reset_position_offsets() makes for them. Separate from the GOTO count, so a GOTO send and fence_goto() never wait
+    // for a pulse.
+    unsigned pulse_sends_in_flight_ = 0;
+    std::condition_variable pulse_send_cv_;
     // Orders initiators (open-astro#2073): SlewAsync holds it across the claim and goto_slot_.start(); Park, FindHome,
     // MoveAxis and AbortSlew from before fence_goto() until their own command is sent, so no GOTO claims in between.
-    // Lock order: first, then mutex_, pulse_mutex_ and the protocol mutex. Not a state lock: no getter takes it, so it
-    // may be held across wire I/O. Never taken by a body, fence_goto(), a getter or set_connected().
+    // Lock order: taken first; after it target_write_mutex_ or pulse_mutex_, then the protocol mutex, with mutex_ last
+    // (the leaf). Not a state lock: no getter takes it, so it may be held across wire I/O, including the pulse-send
+    // wait in reset_position_offsets(). Never taken by a body, fence_goto(), a getter or set_connected().
     std::mutex initiator_mutex_;
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
     std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting

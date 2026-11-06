@@ -22,11 +22,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <variant>
@@ -36,6 +38,32 @@
 #include "fake_task_clock.h"
 
 namespace alpacacore::test {
+
+// A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
+struct Latch {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool open = false;
+
+    void block() {
+        std::unique_lock<std::mutex> lock(mutex);
+        entered = true;
+        cv.notify_all();
+        static_cast<void>(cv.wait_for(lock, std::chrono::seconds(2), [&] { return open; }));
+    }
+    bool wait_entered() {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
+    }
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            open = true;
+        }
+        cv.notify_all();
+    }
+};
 
 // Fails the test case unless fn throws an AlpacaException with expected_code.
 // A bare CHECK_THROWS_AS(..., AlpacaException) passes for any code.
