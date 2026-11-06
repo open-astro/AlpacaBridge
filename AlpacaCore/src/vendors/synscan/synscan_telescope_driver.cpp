@@ -1386,24 +1386,53 @@ public:
             std::string last_error;
             auto& proto = SynScanProtocolWrapper::instance();
             // An RA pulse ran the motor at an absolute rate in place of tracking; while tracking, the tracking
-            // command alone ends it (see ra_motor_rate_locked). Read now: tracking may have changed mid-pulse.
-            // Without the equatorial model the pulse ran the guide rate alone, so it stops and then restores
-            // tracking as before.
+            // command alone ends it (see ra_motor_rate_locked). Without the equatorial model the pulse ran the guide
+            // rate alone, so it stops and then restores tracking as before.
             int end_tracking_mode = 0;
-            bool end_with_tracking = false;
-            if (axis == 0) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                end_tracking_mode = connected_ ? tracking_mode_cached_ : 0;
-                end_with_tracking = end_tracking_mode > 0 && equatorial_geometry_locked();
-            }
             for (int attempt = 0; attempt < kStopAttempts && !stopped; ++attempt) {
                 try {
-                    if (end_with_tracking) {
-                        proto.set_tracking_mode(end_tracking_mode);
-                    } else {
-                        proto.move_axis_variable_rate(axis, 0.0);
-                        if (end_tracking_mode > 0) {
-                            proto.set_tracking_mode(end_tracking_mode);
+                    // The stop and the restore go out in one wire turn, and the mode to restore is read at the turn:
+                    // a Tracking write queued ahead of this body has landed by then and is the mode that stays, and
+                    // none can land between the stop and the restore (#2069).
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    const WireTurn turn(*this, lock);
+                    bool end_with_tracking = false;
+                    if (axis == 0) {
+                        end_tracking_mode = connected_ ? tracking_mode_cached_ : 0;
+                        end_with_tracking = end_tracking_mode > 0 && equatorial_geometry_locked();
+                    }
+                    const int restore_mode = end_tracking_mode;
+                    try {
+                        without_lock(lock, [&] {
+                            if (end_with_tracking) {
+                                proto.set_tracking_mode(restore_mode);
+                            } else {
+                                proto.move_axis_variable_rate(axis, 0.0);
+                                if (restore_mode > 0) {
+                                    proto.set_tracking_mode(restore_mode);
+                                }
+                            }
+                        });
+                    } catch (...) {
+                        // The restore may not have landed: keep the captured mode for AbortSlew/MoveAxis(0) to
+                        // restore; Tracking reports false until one of them, a Park, a disconnect or a Tracking write
+                        // clears this. Set under the turn, as MoveAxis does, so no later writer is overtaken.
+                        if (connected_ && restore_mode > 0) {
+                            ra_stop_unconfirmed_ = true;
+                        }
+                        throw;
+                    }
+                    // Written through, as AbortSlew's restore: a poll sampled mid-pulse read tracking off. Still in
+                    // the turn and under mutex_, so a Tracking write queued behind this body cannot be overwritten.
+                    if (axis == 0 && connected_ && restore_mode > 0) {
+                        set_tracking_mode_cached_locked(restore_mode);
+                        ra_stop_unconfirmed_ = false;
+                        // A same-mode T leaves the handset's readback regime as it is (measured); the pulse moved RA
+                        // by the estimate the override already reports.
+                        if (guide_position_valid_) {
+                            readback_top_hours_ = guide_position_ra_hours_;
+                        } else {
+                            invalidate_readback_top_locked();
                         }
                     }
                     stopped = true;
@@ -1416,26 +1445,7 @@ public:
                     break;
                 }
             }
-            if (stopped) {
-                if (axis == 0) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (!connected_) {
-                        return;
-                    }
-                    if (end_tracking_mode <= 0) {
-                        return;
-                    }
-                    // Written through, as AbortSlew's restore: a poll sampled mid-pulse read tracking off.
-                    set_tracking_mode_cached_locked(end_tracking_mode);
-                    // A same-mode T leaves the handset's readback regime as it is (measured); the pulse moved RA
-                    // by the estimate the override already reports.
-                    if (guide_position_valid_) {
-                        readback_top_hours_ = guide_position_ra_hours_;
-                    } else {
-                        invalidate_readback_top_locked();
-                    }
-                }
-            } else {
+            if (!stopped) {
                 ALPACA_LOG_ERROR("SynScan", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
                                                 " attempts on axis " + std::to_string(axis) +
                                                 " — axis may still be moving (mount runaway risk): " + last_error);
@@ -1445,11 +1455,6 @@ public:
                 // AbortSlew/MoveAxis(0) or disconnect clears it.
                 if (connected_) {
                     manual_axis_slewing_[axis] = true;
-                    // The restore may not have landed. Keep the captured mode for AbortSlew/MoveAxis(0) to restore;
-                    // Tracking reports false until one of them, a Park, a disconnect or a Tracking write clears this.
-                    if (end_tracking_mode > 0) {
-                        ra_stop_unconfirmed_ = true;
-                    }
                 }
             }
         }
