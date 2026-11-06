@@ -1350,6 +1350,7 @@ TEST_CASE("Celestron snapshot - past the staleness bound DeviceState is empty wi
     CHECK(driver->get_link_fault().empty());
     CHECK(driver->get_target_right_ascension() == 7.25);
     CHECK(driver->get_target_declination() == -30.25);
+    // Fault the link again: the staleness advance below times the loss from this second onset.
     st->mute = true;
     for (int i = 0; i < 3; ++i) (void)cel::poll_status_now_for_testing(*driver);
     REQUIRE_FALSE(driver->get_link_fault().empty());
