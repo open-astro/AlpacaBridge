@@ -6836,7 +6836,7 @@ int main() {
             return desc["Value"][key];
         };
 
-        // The sub-blocks below (six, the last carrying the five UTCDate
+        // The sub-blocks below (eight, the last carrying the five UTCDate
         // ladder cases) share this stub, so each starts from a known count
         // rather than inheriting the previous block's. Calling
         // this is what makes a block order-independent; a block that forgets
@@ -6888,8 +6888,9 @@ int main() {
         }
 
         // The host step does not depend on the driver accepting the write: a
-        // rejection (Bisque refuses every write; every driver throws
-        // NotConnected before connect) says nothing about the client's time.
+        // rejection (Bisque refuses every write; most drivers throw
+        // NotConnected before connect, the ZWO AM mount caches the write and
+        // succeeds) says nothing about the client's time.
         // The step happens first, once, and the driver's error goes back to
         // the client unchanged.
         for (const int code :
@@ -6909,23 +6910,6 @@ int main() {
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == code);
             EXPECT(set_calls == 1);
             EXPECT(scope->utc_writes == 1);
-        }
-
-        // A failed host step (clock_settime refused) neither blocks the driver
-        // write nor changes its result.
-        {
-            alpacahttp::Router clock_router;
-            clock_router.set_host_clock_hooks([] { return false; },
-                                              [](std::chrono::system_clock::time_point, std::string& error) {
-                                                  error = "operation not permitted";
-                                                  return false;
-                                              });
-            fresh_counts();
-            const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
-            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
-            EXPECT(scope->utc_writes == 1);
-            EXPECT(scope->get_utc_date() == expected);
         }
 
         // A malformed date is refused before the clock or the driver is touched.
@@ -6962,6 +6946,7 @@ int main() {
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
             EXPECT(set_calls == 0);
             EXPECT(scope->utc_writes == 1);
+            EXPECT(scope->get_utc_date() == expected);
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
