@@ -805,6 +805,28 @@ TEST_CASE("ZWO a long pulse pause preserves the link without renewing measuremen
     CHECK_FALSE(rig.driver->get_connected());
 }
 
+// open-astro#1834 PIN: an AbortSlew late in a long guide pause ends the pulse at once, and the no-sample deadline then
+// counts from the abort, not from the last measurement before the pause: reset_position_offsets() leaves the pulse
+// window's end at "now" rather than clearing it, so the first poll after the abort does not find 35 s of silence.
+// Falsified by: zwo_telescope_driver.cpp reset_position_offsets(): clearing the pulse window instead of ending it at
+// now, so the staleness base falls back to the measurement 35 s before and the link is dropped after the abort.
+TEST_CASE("ZWO an AbortSlew late in a long pulse pause keeps the link (#1834 PIN)",
+          "[zwo][telescope][telemetry][pulseguide]") {
+    Rig rig;
+    rig.connect();
+    const int pairs = rig.mount.count(":GR");
+    rig.driver->pulse_guide(0, 60000);
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
+    rig.tick(35000ms - rig.clock.now().time_since_epoch());
+    CHECK(rig.mount.count(":GR") == pairs);  // the paused poll took no measurement
+    REQUIRE(rig.driver->get_connected());
+    rig.driver->abort_slew();
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    rig.tick(250ms);  // the poll's next step checks link staleness first
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.driver->get_link_fault().empty());
+}
+
 TEST_CASE("ZWO a polled Park error remains on both completion properties", "[zwo][telescope][telemetry][arrival]") {
     Rig rig;
     rig.connect();
