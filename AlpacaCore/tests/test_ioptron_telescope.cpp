@@ -635,7 +635,7 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched faul
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron Telescope Driver - target getters refuse on a latched fault and serve the stored target after a good reply (#2075)",
+TEST_CASE("iOptron Telescope Driver - target getters refuse on a latched fault (#2075)",
           "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
