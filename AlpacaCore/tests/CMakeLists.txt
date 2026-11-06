@@ -227,6 +227,8 @@ if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_focuser_deferred_connect.cpp)
     # Getters served from a util::StateSnapshot (open-astro#1229).
     list(APPEND TEST_SOURCES test_gemini_focuser_snapshot.cpp)
+    # The connect-time first poll stays inside the 5 s Connecting budget (issue #2064).
+    list(APPEND TEST_SOURCES test_gemini_focuser_connect_budget.cpp)
     # Serial-port ownership through util::SerialLink (issue #1202).
     list(APPEND TEST_SOURCES test_gemini_serial_ownership.cpp)
 endif()
