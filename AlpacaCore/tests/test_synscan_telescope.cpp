@@ -201,8 +201,8 @@ TEST_CASE("SynScan Telescope Driver - Disconnected Behavior", "[synscan][telesco
     require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
-    // Slew and park require connection (or target not set, both throw AlpacaException)
-    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    // Slew and park require connection; the connection check precedes the unset target (#2075)
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
 
     // Action and command methods
