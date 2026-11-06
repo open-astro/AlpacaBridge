@@ -902,14 +902,14 @@ TEST_CASE("SkyWatcher async - a superseded MoveAxis leaves the superseding pulse
     });
     REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // MoveAxis(Dec) parked in the Dec stop-wait
     REQUIRE(step_clock(clock, std::chrono::milliseconds(25)));
-    driver->pulse_guide(0, 500);  // North: takes the Dec slot
+    driver->pulse_guide(0, 500);                                      // North: takes the Dec slot
     REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the pulse dispatch parked too
     // One poll step: the MoveAxis wakes, sees it is superseded and exits, long before the 800 ms ramp ends.
     REQUIRE(run_clock_until(clock, [&] { return done.load(); }, std::chrono::milliseconds(100)));
     mover.join();
     REQUIRE(threw.load());
     CHECK(mount.start_count(2) == dec_starts);  // the pulse has not dispatched yet
-    driver->move_axis(0, 1.0);                   // RA only: the pulse's slot must follow this bump
+    driver->move_axis(0, 1.0);                  // RA only: the pulse's slot must follow this bump
     REQUIRE(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
     driver->move_axis(0, 0.0);
