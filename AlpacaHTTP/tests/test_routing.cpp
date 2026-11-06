@@ -492,6 +492,9 @@ public:
             // the driver was written to. It is not a pre-write hook.
             on_utc_write();
         }
+        if (utc_throw_code != 0) {
+            throw alpacacore::AlpacaException("stub rejects UTCDate", utc_throw_code);
+        }
     }
 
     alpacacore::AlignmentMode get_alignment_mode() const override { return alpacacore::AlignmentMode::GermanPolar; }
@@ -585,6 +588,7 @@ public:
     void sync_to_alt_az(double, double) override {}
 
     int utc_writes = 0;
+    int utc_throw_code = 0;  // non-zero: set_utc_date throws AlpacaException with this code
     std::function<void()> on_utc_write;
 
 private:
@@ -6832,13 +6836,14 @@ int main() {
             return desc["Value"][key];
         };
 
-        // The sub-blocks below (six, the last carrying the five UTCDate
+        // The sub-blocks below (eight, the last carrying the five UTCDate
         // ladder cases) share this stub, so each starts from a known count
         // rather than inheriting the previous block's. Calling
         // this is what makes a block order-independent; a block that forgets
         // would assert against a carried-over number.
         auto fresh_counts = [&] {
             scope->utc_writes = 0;
+            scope->utc_throw_code = 0;
             scope->on_utc_write = nullptr;
         };
 
@@ -6882,6 +6887,48 @@ int main() {
             EXPECT(clock_field(desc, "ClockSource") == "client");
         }
 
+        // The host step does not depend on the driver accepting the write: a
+        // rejection (Bisque refuses every write; most drivers throw
+        // NotConnected before connect, the ZWO AM mount caches the write and
+        // succeeds) says nothing about the client's time.
+        // The step happens first, once, and the driver's error goes back to
+        // the client unchanged.
+        for (const int code :
+             {alpacacore::AlpacaError::PropertyNotImplemented, alpacacore::AlpacaError::NotConnected}) {
+            int set_calls = 0;
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [&](std::chrono::system_clock::time_point, std::string&) {
+                                                  ++set_calls;
+                                                  return true;
+                                              });
+            fresh_counts();
+            scope->utc_throw_code = code;
+            const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
+            scope->utc_throw_code = 0;
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == code);
+            EXPECT(set_calls == 1);
+            EXPECT(scope->utc_writes == 1);
+        }
+
+        // A malformed date is refused before the clock or the driver is touched.
+        {
+            int set_calls = 0;
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [&](std::chrono::system_clock::time_point, std::string&) {
+                                                  ++set_calls;
+                                                  return true;
+                                              });
+            fresh_counts();
+            const auto response = route_request(clock_router, "PUT", base + "/utcdate", R"({"UTCDate":"not-a-date"})");
+            EXPECT(response.status_code() != 200 ||
+                   nlohmann::json::parse(response.body(), nullptr, false).value("ErrorNumber", 0) != 0);
+            EXPECT(set_calls == 0);
+            EXPECT(scope->utc_writes == 0);
+        }
+
         // A disciplined host (NTP/chrony/GPS) is never stepped, however wrong
         // the client is -- but the driver still receives the value, because
         // UTCDate is the client's property to set.
@@ -6899,6 +6946,7 @@ int main() {
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
             EXPECT(set_calls == 0);
             EXPECT(scope->utc_writes == 1);
+            EXPECT(scope->get_utc_date() == expected);
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);

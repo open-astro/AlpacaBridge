@@ -3288,6 +3288,12 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
                 // the only correct time the host will ever see. Step the system
                 // clock from it when the kernel reports the clock undisciplined
                 // (never over NTP/chrony/GPS), then hand the driver the same value.
+                // The step does not depend on the driver's result: it runs before
+                // set_utc_date and stays if the driver throws (Bisque refuses every
+                // write; most drivers throw NotConnected before connect, though the
+                // ZWO AM mount caches an offline write and succeeds), because a
+                // rejection says nothing about whether the client's time is right.
+                // The driver's own result goes back to the client unchanged.
                 {
                     const auto step = host_clock_.step_from_client(time_point);
                     using Outcome = alpacacore::util::HostClock::Outcome;
