@@ -1073,6 +1073,8 @@ TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fau
     REQUIRE(driver->get_connected());
     pause_poll(*driver);
     const double latitude = driver->get_site_latitude();  // the connect read the site
+    driver->set_target_right_ascension(7.25);
+    driver->set_target_declination(-30.25);
     driver->pulse_guide(0, 5000);                         // commanded state the driver tracks
     REQUIRE(driver->get_is_pulse_guiding());
 
@@ -1089,6 +1091,8 @@ TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fau
         {"DeclinationRate", [&] { (void)driver->get_declination_rate(); }},
         {"RightAscensionRate", [&] { (void)driver->get_right_ascension_rate(); }},
         {"TrackingRate", [&] { (void)driver->get_tracking_rate(); }},
+        {"TargetRightAscension", [&] { (void)driver->get_target_right_ascension(); }},
+        {"TargetDeclination", [&] { (void)driver->get_target_declination(); }},
     };
     for (const auto& [name, read] : reads) {
         INFO(name);
@@ -1110,6 +1114,8 @@ TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fau
     CHECK_NOTHROW((void)driver->get_sidereal_time());
     CHECK_NOTHROW((void)driver->get_is_pulse_guiding());
     CHECK_NOTHROW((void)driver->get_tracking_rate());
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    CHECK(driver->get_target_declination() == -30.25);
     driver->set_connected(false);
 }
 

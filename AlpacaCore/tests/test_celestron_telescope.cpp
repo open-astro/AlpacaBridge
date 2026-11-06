@@ -60,6 +60,27 @@ using alpacacore::test::require_alpaca_error;
 using alpacacore::test::time_stamp_of;
 using alpacacore::test::timed;
 
+#ifndef _WIN32
+// A connected driver on a fake mount, for the members whose answer depends on being connected. The server is
+// declared first, so it outlives the driver. The canned position-pair reply keeps every fixed-length connect read
+// from waiting out its timeout (see test_celestron_concurrency_stress.cpp).
+struct ConnectedFakeCelestron {
+    alpacacore::test::FakeMountServer server{[](const std::string&) { return std::string("00000000,00000000#"); }};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    ConnectedFakeCelestron() {
+        REQUIRE(server.ok());
+        alpacacore::vendor::celestron::ConnectionInfo conn;
+        conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+        conn.host = "127.0.0.1";
+        conn.tcp_port = server.port();
+        conn.response_timeout_ms = 500;
+        driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    }
+};
+#endif
+
 } // namespace
 
 TEST_CASE("Celestron Telescope Driver - Defaults", "[celestron][telescope][unit]") {
@@ -147,8 +168,8 @@ TEST_CASE("Celestron Telescope Driver - Disconnected Behavior", "[celestron][tel
     require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
-    // Slew requires target set (throws before connection check)
-    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    // NotConnected precedes the unset-target error (#2075)
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
 
     // Park requires connection
     require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
@@ -226,12 +247,12 @@ TEST_CASE("Celestron Telescope Driver - Axis Rate Ranges", "[celestron][telescop
     require_alpaca_error([&]() { (void)driver->get_axis_rate_ranges(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
+// Reading a target back needs a connection (NotConnected precedes ValueNotSet, #2075), so the round trip runs on a
+// connected driver; the disconnected answer is pinned by the contract sweep and by the independence case below.
+#ifndef _WIN32
 TEST_CASE("Celestron Telescope Driver - Target Coordinate Persistence", "[celestron][telescope][unit]") {
-    alpacacore::vendor::celestron::ConnectionInfo conn;
-    conn.type = alpacacore::vendor::celestron::ConnectionType::Serial;
-    conn.port_path = "/dev/null";
-
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    ConnectedFakeCelestron mount;
+    auto& driver = mount.driver;
 
     REQUIRE_NOTHROW(driver->set_target_right_ascension(12.0));
     ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 12.0);
@@ -253,6 +274,7 @@ TEST_CASE("Celestron Telescope Driver - Target Coordinate Persistence", "[celest
     REQUIRE_NOTHROW(driver->set_target_declination(90.0));
     ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 90.0);
 }
+#endif
 
 TEST_CASE("Celestron Telescope Driver - Site Property Validation", "[celestron][telescope][unit]") {
     alpacacore::vendor::celestron::ConnectionInfo conn;
@@ -347,28 +369,43 @@ TEST_CASE("Celestron Telescope Driver - the two target properties are independen
     conn.port_path = "/dev/null";
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
 
+    // Disconnected, a read answers NotConnected before it can answer ValueNotSet (#2075), so the getters'
+    // independence is checked on a connected driver below.
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_target_right_ascension(7.25);
+
+    // Disconnected, SlewToTarget, SlewToTargetAsync and SyncToTarget answer NotConnected before the unset
+    // target (#2075); the half-set refusal is pinned on a connected driver below.
+    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::NotConnected);
+
+#ifndef _WIN32
+    ConnectedFakeCelestron mount;
+    auto& connected = *mount.driver;
     // Neither written yet: both refuse.
-    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)connected.get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)connected.get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // RA alone unlocks RA alone. This is the assertion that fails on one
     // shared flag: Dec used to read back 0.0 here.
-    driver->set_target_right_ascension(7.25);
-    CHECK(driver->get_target_right_ascension() == 7.25);
-    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    connected.set_target_right_ascension(7.25);
+    CHECK(connected.get_target_right_ascension() == 7.25);
+    require_alpaca_error([&]() { (void)connected.get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
-    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves:
-    // a half-set pair must refuse rather than slew to a default Dec. These
-    // guards run before the connection check, so they hold on a disconnected
-    // driver.
-    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves: a half-set pair must refuse
+    // rather than slew to a default Dec.
+    require_alpaca_error([&]() { connected.slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { connected.slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { connected.sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // Once Dec is written too, both read back.
-    driver->set_target_declination(-30.25);
-    CHECK(driver->get_target_right_ascension() == 7.25);
-    CHECK(driver->get_target_declination() == -30.25);
+    connected.set_target_declination(-30.25);
+    CHECK(connected.get_target_right_ascension() == 7.25);
+    CHECK(connected.get_target_declination() == -30.25);
+#endif
 }
 
 #ifndef _WIN32
@@ -593,12 +630,24 @@ TEST_CASE("Celestron Telescope Driver - non-finite input is rejected", "[celestr
 
     SECTION("TargetDeclination") {
         require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
-        require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+#ifndef _WIN32
+        // The rejected write must leave the target unset: readable only on a connected driver (#2075).
+        ConnectedFakeCelestron mount;
+        require_alpaca_error([&]() { mount.driver->set_target_declination(nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)mount.driver->get_target_declination(); },
+                             alpacacore::AlpacaError::ValueNotSet);
+#endif
     }
     SECTION("TargetRightAscension") {
         require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
-        require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); },
+#ifndef _WIN32
+        ConnectedFakeCelestron mount;
+        require_alpaca_error([&]() { mount.driver->set_target_right_ascension(nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)mount.driver->get_target_right_ascension(); },
                              alpacacore::AlpacaError::ValueNotSet);
+#endif
     }
     SECTION("SiteElevation") {
         require_alpaca_error([&]() { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
@@ -1316,11 +1365,25 @@ TEST_CASE("Celestron snapshot - past the staleness bound DeviceState is empty wi
     cel::set_status_poll_paused_for_testing(*driver, true);
     CHECK(snapshot_has_entry(*driver, "TimeStamp"));
     const double ra_at_connect = driver->get_right_ascension();
+    driver->set_target_right_ascension(7.25);
+    driver->set_target_declination(-30.25);
 
     st->mute = true;
     for (int i = 0; i < 3; ++i) (void)cel::poll_status_now_for_testing(*driver);
     CHECK_FALSE(driver->get_link_fault().empty());
     CHECK(driver->get_connected());  // a young fault keeps Connected
+    // Faulted, a commanded target is refused like the frame (decision 0009 rule 1), though the driver holds it.
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::DriverException);
+    st->mute = false;
+    CHECK(cel::poll_status_now_for_testing(*driver));  // a reply clears the fault
+    CHECK(driver->get_link_fault().empty());
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    CHECK(driver->get_target_declination() == -30.25);
+    // Fault the link again: the staleness advance below times the loss from this second onset.
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) (void)cel::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_link_fault().empty());
 
     clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
     (void)cel::poll_status_now_for_testing(*driver);

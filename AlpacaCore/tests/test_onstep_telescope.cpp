@@ -61,6 +61,34 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int device_number) {
     return alpacacore::vendor::onstep::create_onstep_telescope(device_number, conn);
 }
 
+#ifndef _WIN32
+// A connected driver on a fake mount that accepts every write, for the members whose answer depends on being
+// connected. The server is declared first, so it outlives the driver.
+struct ConnectedFakeMount {
+    alpacacore::test::FakeMountServer server{[](const std::string& chunk) {
+        if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
+            return std::string("1");
+        }
+        if (chunk.size() >= 2 && chunk[0] == 'K') {
+            return std::string(1, chunk[1]) + "#";
+        }
+        return std::string("0#");
+    }};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    ConnectedFakeMount() {
+        REQUIRE(server.ok());
+        alpacacore::vendor::onstep::ConnectionInfo conn;
+        conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+        conn.host = "127.0.0.1";
+        conn.tcp_port = server.port();
+        conn.response_timeout_ms = 50;
+        driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    }
+};
+#endif
+
 }  // namespace
 
 TEST_CASE("OnStep Telescope Driver - Defaults", "[onstep][telescope][unit]") {
@@ -110,7 +138,7 @@ TEST_CASE("OnStep Telescope Driver - Not connected throws", "[onstep][telescope]
     require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->slew_to_coordinates_async(1.0, 1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
@@ -128,16 +156,13 @@ TEST_CASE("OnStep Telescope Driver - Unsupported actions", "[onstep][telescope][
 TEST_CASE("OnStep Telescope Driver - Device-specific behavior", "[onstep][telescope][unit]") {
     auto driver = make_driver(0);
 
-    // Target coordinate persistence: independent RA/Dec storage, readable
-    // without a live connection (matches iOptron/SynScan convention).
+    // Target coordinates are stored without a live connection, but reading them back needs one: NotConnected
+    // precedes ValueNotSet (#2075). The sweep's target-flags case checks ValueNotSet, independence and the round trip
+    // on a connected driver.
     driver->set_target_right_ascension(12.5);
     driver->set_target_declination(-30.0);
-    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 12.5);
-    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), -30.0);
-
-    driver->set_target_right_ascension(1.25);
-    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 1.25);
-    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), -30.0);  // unaffected by the RA update
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
 
     // Axis rate ranges: primary/secondary valid, tertiary unsupported.
     auto primary = driver->get_axis_rate_range(0);
@@ -214,28 +239,43 @@ TEST_CASE("OnStep Telescope Driver - Unsupported methods", "[onstep][telescope][
 TEST_CASE("OnStep Telescope Driver - the two target properties are independent", "[onstep][telescope][unit]") {
     auto driver = make_driver(0);
 
+    // Disconnected, a read answers NotConnected before it can answer ValueNotSet (#2075), so the getters'
+    // independence is checked on a connected driver below.
+    driver->set_target_right_ascension(7.25);
+
+    // Disconnected, SlewToTarget, SlewToTargetAsync and SyncToTarget answer NotConnected before the unset
+    // target (#2075); the half-set refusal is pinned on a connected driver below.
+    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_target_declination(-30.25);
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+
+#ifndef _WIN32
+    ConnectedFakeMount mount;
+    auto& connected = *mount.driver;
     // Neither written yet: both refuse.
-    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)connected.get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)connected.get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // RA alone unlocks RA alone. This is the assertion that fails on one
     // shared flag: Dec used to read back 0.0 here.
-    driver->set_target_right_ascension(7.25);
-    CHECK(driver->get_target_right_ascension() == 7.25);
-    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    connected.set_target_right_ascension(7.25);
+    CHECK(connected.get_target_right_ascension() == 7.25);
+    require_alpaca_error([&]() { (void)connected.get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
-    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves:
-    // a half-set pair must refuse rather than slew to a default Dec. These
-    // guards run before the connection check, so they hold on a disconnected
-    // driver.
-    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves: a half-set pair must refuse
+    // rather than slew to a default Dec.
+    require_alpaca_error([&]() { connected.slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { connected.slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { connected.sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // Once Dec is written too, both read back.
-    driver->set_target_declination(-30.25);
-    CHECK(driver->get_target_right_ascension() == 7.25);
-    CHECK(driver->get_target_declination() == -30.25);
+    connected.set_target_declination(-30.25);
+    CHECK(connected.get_target_right_ascension() == 7.25);
+    CHECK(connected.get_target_declination() == -30.25);
+#endif
 }
 
 #ifndef _WIN32
@@ -666,12 +706,24 @@ TEST_CASE("OnStep Telescope Driver - non-finite input is rejected", "[onstep][te
 
     SECTION("TargetDeclination") {
         require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
-        require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+#ifndef _WIN32
+        // The rejected write must leave the target unset: readable only on a connected driver (#2075).
+        ConnectedFakeMount mount;
+        require_alpaca_error([&]() { mount.driver->set_target_declination(nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)mount.driver->get_target_declination(); },
+                             alpacacore::AlpacaError::ValueNotSet);
+#endif
     }
     SECTION("TargetRightAscension") {
         require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
-        require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); },
+#ifndef _WIN32
+        ConnectedFakeMount mount;
+        require_alpaca_error([&]() { mount.driver->set_target_right_ascension(nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)mount.driver->get_target_right_ascension(); },
                              alpacacore::AlpacaError::ValueNotSet);
+#endif
     }
     SECTION("SiteElevation") {
         require_alpaca_error([&]() { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);

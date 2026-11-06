@@ -1567,8 +1567,9 @@ public:
             if (park_failed_) clear_last_slew_error_locked();
         }
         // open-astro#720: a pending GOTO setup must not send ":MS" after ":hP". open-astro#2073: nor may a SlewAsync
-        // claim between the fence and ":hP" (initiator_mutex_, held to the end: one ":GU" exchange and the no-reply
-        // ":hP", wire time an AbortSlew would wait for on the I/O lock anyway).
+        // claim between the fence and ":hP" (initiator_mutex_, held to the end: the ":GU" mode read, the ":Td" and
+        // ":GU" of Tracking=false (#2097) and the no-reply ":hP", wire time an AbortSlew would wait for on the I/O
+        // lock anyway).
         std::lock_guard<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
         reset_position_offsets();
@@ -1588,6 +1589,9 @@ public:
         } catch (const std::exception&) {
             // Continue: older firmware may not expose mode flags consistently.
         }
+        // open-astro#2097: an AM5 on firmware 1.8.8 ignores ":hP#" while tracking is on (rig: no motion for 30 s, then
+        // parked within 6 s of the same ":hP#" after ":Td#"). A parked mount does not track, so stop tracking first.
+        set_tracking(false);
 
         protocol.park();
 
@@ -2275,6 +2279,25 @@ private:
             return ParkEvaluation::InProgress;
         };
 
+        // A stopped mount after a park command whose ":Gps#" answers not-parked or in-progress. Motion seen since
+        // ":hP#" and then a stop is a finished park. Stillness alone proves one only on the AM5N, whose ":hP#" does
+        // not move it (SUPPORTED-DRIVERS). Other models answer ":Gps#" and move to park; an AM5 on firmware 1.8.8
+        // ignores ":hP#" and keeps answering 0 (open-astro#2097), so a Park that never moved has failed: AtPark and
+        // Slewing raise it until the next command, AbortSlew or a reconnect, as a ":Gps#" park error does.
+        auto stationary_after_park_command = [&](const char* inferred) -> ParkEvaluation {
+            park_command_active_ = false;
+            if (park_motion_seen_ || mount_info_ == "AM5N") {
+                ALPACA_LOG_WARN("ZWO", inferred);
+                park_motion_seen_ = false;
+                parked_cached_ = true;
+                return ParkEvaluation::Parked;
+            }
+            park_failed_ = true;
+            last_slew_error_ = "Park failed: the mount did not move after :hP# and :Gps# does not report it parked";
+            ALPACA_LOG_WARN("ZWO", last_slew_error_);
+            return ParkEvaluation::NotParked;
+        };
+
         if (!park_status.has_value()) {
             return infer_with_unavailable_park_status();
         }
@@ -2304,13 +2327,9 @@ private:
                 }
 
                 if (park_motion_seen_ || now - park_command_started_ >= kParkMotionSettle) {
-                    ALPACA_LOG_WARN(
-                        "ZWO",
-                        ":Gps reported not-parked after park command, but mount is stationary; inferring park complete");
-                    park_command_active_ = false;
-                    park_motion_seen_ = false;
-                    parked_cached_ = true;
-                    return ParkEvaluation::Parked;
+                    return stationary_after_park_command(
+                        ":Gps reported not-parked after park command, but mount is stationary; inferring park "
+                        "complete");
                 }
             }
 
@@ -2333,13 +2352,8 @@ private:
                 }
 
                 if (park_motion_seen_ || now - park_command_started_ >= kParkMotionSettle) {
-                    ALPACA_LOG_WARN(
-                        "ZWO",
+                    return stationary_after_park_command(
                         ":Gps remained in-progress but mount is stationary; inferring park complete");
-                    park_command_active_ = false;
-                    park_motion_seen_ = false;
-                    parked_cached_ = true;
-                    return ParkEvaluation::Parked;
                 }
             }
 

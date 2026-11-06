@@ -48,11 +48,11 @@ constexpr auto kReal = 5s;  // real-time bound on a rendezvous, never a driver t
 
 struct Rig {
     FakeTaskClock clock;
-    FakeZwoMount mount{clock};
+    FakeZwoMount mount;
     std::unique_ptr<TelescopeDriver> driver;
     std::list<std::future<void>> calls;  // callers started with call(); finished before the driver is destroyed
 
-    Rig() {
+    explicit Rig(std::string model = "AM5N") : mount(clock, std::move(model)) {
         alpacacore::vendor::zwo::ConnectionInfo info;
         info.type = alpacacore::vendor::zwo::ConnectionType::Network;
         info.host = "127.0.0.1";
@@ -605,7 +605,8 @@ TEST_CASE("ZWO telescope clock - SlewToCoordinatesAsync reports Slewing for the 
 TEST_CASE("ZWO telescope clock - Park publishes completion only when the forced slew window ends",
           "[zwo][telescope][unit][clock]") {
     const auto duration = GENERATE(0ms, 6000ms);
-    Rig rig;
+    const std::string model = GENERATE("AM5N", "AM5");  // explicit :Gps=2 completion holds on every model
+    Rig rig(model);
     rig.connect();
     rig.mount.set_slew_duration(duration);
     rig.advance(250ms);
@@ -630,15 +631,13 @@ TEST_CASE("ZWO telescope clock - Park publishes completion only when the forced 
 
 TEST_CASE("ZWO telescope clock - inferred Park completion waits for the forced slew window",
           "[zwo][telescope][unit][clock]") {
-    const auto reply = GENERATE("0", "1", "x", "");
+    // "e1" is the AM5N's answer to the unsupported query. Park stops tracking first (#2097); a silent ":Gps#" would
+    // leave the next ":GU#" truncated to its first byte by the owed-reply fence, 'n' with tracking off.
+    const auto reply = GENERATE("0", "1", "x", "e1");
     Rig rig;
     rig.connect();
     rig.mount.set_slew_duration(0ms);
-    if (*reply) {
-        rig.mount.override_reply(":Gps", reply);  // unavailable completion indication, stationary mount
-    } else {
-        rig.mount.go_silent(":Gps");
-    }
+    rig.mount.override_reply(":Gps", reply);  // unavailable completion indication, stationary mount
     rig.advance(250ms);
     rig.driver->park();
     for (int i = 0; i < 7; ++i) rig.advance(250ms);  // 1.75 s since the command
@@ -649,6 +648,111 @@ TEST_CASE("ZWO telescope clock - inferred Park completion waits for the forced s
     CHECK_FALSE(rig.driver->get_at_park());
     CHECK(rig.driver->get_slewing());
     for (int i = 0; i < 13; ++i) rig.advance(250ms);  // 5.5 s
+    CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// #2097: an AM5 on firmware 1.8.8 ignores ":hP#": no motion, ":Gps#" stays 0. Only the AM5N infers a park from
+// stillness; elsewhere, a Park the mount says it has not done fails, and both completion properties keep the error.
+TEST_CASE("ZWO telescope clock - a Park the mount ignores fails instead of inferring park (#2097)",
+          "[zwo][telescope][unit][clock][park]") {
+    const std::string model = GENERATE("AM3", "AM5", "AM7");
+    const std::string reply = GENERATE("0", "1");  // not parked, or a stale in-progress
+    Rig rig(model);
+    rig.connect();
+    rig.mount.set_slew_duration(0ms);  // ":hP" lands at once: ":GU" never reports motion
+    rig.mount.override_reply(":Gps", reply);
+    rig.advance(250ms);
+    rig.driver->park();
+    for (int i = 0; i < 19; ++i) {  // to 4.75 s: the start guard keeps the Park pending
+        rig.advance(250ms);
+        CHECK_FALSE(rig.driver->get_at_park());
+        CHECK(rig.driver->get_slewing());
+    }
+    const int gps_before = rig.mount.count(":Gps");
+    for (int i = 0; i < 3; ++i) rig.advance(250ms);  // 5.5 s: the guard has ended
+    CHECK(rig.mount.count(":Gps") > gps_before);     // the poll judged the Park after the guard
+    CHECK_FALSE(rig.mount.slewing());                // and the mount never moved
+    for (int read = 0; read < 2; ++read) {
+        try {
+            rig.driver->get_at_park();
+            FAIL("AtPark must report the failed Park");
+        } catch (const AlpacaException& ex) {
+            CHECK(ex.error_code() == AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).find("Park failed") != std::string::npos);
+        }
+        try {
+            rig.driver->get_slewing();
+            FAIL("Slewing must report the failed Park");
+        } catch (const AlpacaException& ex) {
+            CHECK(std::string(ex.what()).find("Park failed") != std::string::npos);
+        }
+        rig.advance(250ms);
+    }
+    rig.driver->abort_slew();
+    CHECK_FALSE(rig.driver->get_at_park());
+    rig.advance(250ms);
+    CHECK_FALSE(rig.driver->get_slewing());
+    // A new Park clears the old failure before it sends ":hP".
+    rig.driver->park();
+    CHECK(rig.mount.count(":hP") == 2);
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(rig.driver->get_slewing());
+}
+
+// #2097 root cause on the rig: an AM5 on firmware 1.8.8 ignores ":hP#" while tracking is on, and parks after ":Td#".
+// Park stops tracking before it sends ":hP#".
+TEST_CASE("ZWO telescope clock - Park stops tracking before :hP so a tracking AM5 parks (#2097)",
+          "[zwo][telescope][unit][clock][park]") {
+    const std::string model = GENERATE("AM5N", "AM5");
+    Rig rig(model);
+    rig.mount.set_ignore_park_while_tracking(true);
+    rig.mount.set_slew_duration(3000ms);
+    rig.connect();
+    rig.driver->set_tracking(true);
+    rig.advance(250ms);
+    REQUIRE(rig.driver->get_tracking());
+    rig.driver->park();
+    const auto sent = rig.mount.commands();
+    const auto td = std::find(sent.begin(), sent.end(), ":Td");
+    const auto hp = std::find(sent.begin(), sent.end(), ":hP");
+    REQUIRE(hp != sent.end());
+    CHECK(td < hp);  // tracking stopped before the park command
+    rig.advance(250ms);
+    CHECK(rig.mount.slewing());                       // the mount moves to park
+    for (int i = 0; i < 22; ++i) rig.advance(250ms);  // 5.75 s
+    CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_tracking());
+}
+
+// #2097 keeps the stillness inference where nothing else can tell: a mount that does not answer ":Gps#".
+TEST_CASE("ZWO telescope clock - an AM5 without a usable :Gps still infers park from stillness",
+          "[zwo][telescope][unit][clock][park]") {
+    const std::string reply = GENERATE("x", "e1");
+    Rig rig("AM5");
+    rig.connect();
+    rig.mount.set_slew_duration(0ms);
+    rig.mount.override_reply(":Gps", reply);
+    rig.advance(250ms);
+    rig.driver->park();
+    for (int i = 0; i < 22; ++i) rig.advance(250ms);  // 5.5 s
+    CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// #2097 scopes the failure to a Park that never moved: motion, then a stop with ":Gps#" 0, still infers park.
+TEST_CASE("ZWO telescope clock - an AM5 Park that moved and stopped still infers park on :Gps 0",
+          "[zwo][telescope][unit][clock][park]") {
+    Rig rig("AM5");
+    rig.connect();
+    rig.mount.set_slew_duration(3000ms);
+    rig.mount.override_reply(":Gps", "0");
+    rig.advance(250ms);
+    rig.driver->park();
+    rig.advance(250ms);
+    REQUIRE(rig.mount.slewing());                     // the poll sees motion
+    for (int i = 0; i < 21; ++i) rig.advance(250ms);  // 5.5 s: stopped since 3 s
     CHECK(rig.driver->get_at_park());
     CHECK_FALSE(rig.driver->get_slewing());
 }

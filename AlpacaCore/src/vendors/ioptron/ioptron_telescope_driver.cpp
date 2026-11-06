@@ -1431,6 +1431,7 @@ public:
     
     double get_target_declination() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -1450,6 +1451,7 @@ public:
     
     double get_target_right_ascension() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }

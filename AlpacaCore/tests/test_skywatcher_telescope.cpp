@@ -136,6 +136,10 @@ TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][tele
     // covered on a connected driver in test_skywatcher_async.cpp.
     require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
+    // The target-consuming members answer NotConnected before the unset target too (#2075).
+    require_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_target(); }, alpacacore::AlpacaError::NotConnected);
     // The setters validate first, then refuse while disconnected (decision 0009 rule 3, open-astro#1786).
     require_alpaca_error([&] { driver->set_target_right_ascension(12.5); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_target_declination(-30.25); }, alpacacore::AlpacaError::NotConnected);

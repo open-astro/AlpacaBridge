@@ -53,6 +53,25 @@ alpacacore::vendor::bisque::ConnectionInfo loopback(int port) {
 
 std::string answer_one(const std::string&) { return "1#"; }
 
+// A connected driver on a fake TheSkyX, for the members whose answer depends on being connected (NotConnected
+// precedes ValueNotSet, #2075). The server is declared first, so it outlives the driver.
+struct ConnectedFakeBisque {
+    alpacacore::test::FakeMountServer server{[](const std::string& chunk) {
+        // A wrapped command (try { ... } Out = 'OK#') wants TheSkyX's success text; the handshake and queries take
+        // the plain reply.
+        return std::string(chunk.find("try {") != std::string::npos ? "|No error. Error = 0.OK#" : "1#");
+    }};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    ConnectedFakeBisque() {
+        REQUIRE(server.ok());
+        driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()));
+        REQUIRE_NOTHROW(driver->set_connected(true));
+        alpacacore::vendor::bisque::set_status_poll_paused_for_testing(*driver, true);
+        REQUIRE(driver->get_connected());
+    }
+};
+
 // The driver's status poll sleeps on the task clock (decision 0010). Cases that count TheSkyX commands or step the
 // clock pause it, so no tick lands between their steps, and run exactly the ticks they need through poll_now().
 void pause_poll(alpacacore::TelescopeDriver& driver) {
@@ -212,8 +231,8 @@ TEST_CASE("Bisque Telescope Driver - Disconnected Behavior", "[bisque][telescope
     require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
-    // Slew requires target set (throws before connection check)
-    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    // NotConnected precedes the unset-target error (#2075)
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
 
     // Park requires connection
     require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
@@ -299,12 +318,11 @@ TEST_CASE("Bisque Telescope Driver - Axis Rate Ranges", "[bisque][telescope][uni
     require_alpaca_error([&]() { (void)driver->get_axis_rate_ranges(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
+// Reading a target back needs a connection (NotConnected precedes ValueNotSet, #2075), so the round trip runs on a
+// connected driver; the disconnected answer is pinned by the contract sweep and by the independence case below.
 TEST_CASE("Bisque Telescope Driver - Target Coordinate Persistence", "[bisque][telescope][unit]") {
-    alpacacore::vendor::bisque::ConnectionInfo conn;
-    conn.host = "localhost";
-    conn.tcp_port = 3040;
-
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+    ConnectedFakeBisque mount;
+    auto& driver = mount.driver;
 
     REQUIRE_NOTHROW(driver->set_target_right_ascension(12.0));
     ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 12.0);
@@ -409,28 +427,41 @@ TEST_CASE("Bisque Telescope Driver - the two target properties are independent",
     conn.tcp_port = 3040;
     auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
 
+    // Disconnected, a read answers NotConnected before it can answer ValueNotSet (#2075), so the getters'
+    // independence is checked on a connected driver below.
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_target_right_ascension(7.25);
+
+    // Disconnected, SlewToTarget, SlewToTargetAsync and SyncToTarget answer NotConnected before the unset
+    // target (#2075); the half-set refusal is pinned on a connected driver below.
+    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::NotConnected);
+
+    ConnectedFakeBisque mount;
+    auto& connected = *mount.driver;
     // Neither written yet: both refuse.
-    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)connected.get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)connected.get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // RA alone unlocks RA alone. This is the assertion that fails on one
     // shared flag: Dec used to read back 0.0 here.
-    driver->set_target_right_ascension(7.25);
-    CHECK(driver->get_target_right_ascension() == 7.25);
-    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    connected.set_target_right_ascension(7.25);
+    CHECK(connected.get_target_right_ascension() == 7.25);
+    require_alpaca_error([&]() { (void)connected.get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
 
-    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves:
-    // a half-set pair must refuse rather than slew to a default Dec. These
-    // guards run before the connection check, so they hold on a disconnected
-    // driver.
-    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
-    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves: a half-set pair must refuse
+    // rather than slew to a default Dec.
+    require_alpaca_error([&]() { connected.slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { connected.slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { connected.sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
 
     // Once Dec is written too, both read back.
-    driver->set_target_declination(-30.25);
-    CHECK(driver->get_target_right_ascension() == 7.25);
-    CHECK(driver->get_target_declination() == -30.25);
+    connected.set_target_declination(-30.25);
+    CHECK(connected.get_target_right_ascension() == 7.25);
+    CHECK(connected.get_target_declination() == -30.25);
 }
 
 // #627: `x < min || x > max` is false for NaN, so NaN passed every range check
@@ -447,12 +478,19 @@ TEST_CASE("Bisque Telescope Driver - non-finite input is rejected", "[bisque][te
 
     SECTION("TargetDeclination") {
         require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
-        // Nothing was stored: the property still reads as never written.
-        require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+        // Nothing was stored: the property still reads as never written (readable only on a connected driver, #2075).
+        ConnectedFakeBisque mount;
+        require_alpaca_error([&]() { mount.driver->set_target_declination(nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)mount.driver->get_target_declination(); },
+                             alpacacore::AlpacaError::ValueNotSet);
     }
     SECTION("TargetRightAscension") {
         require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
-        require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); },
+        ConnectedFakeBisque mount;
+        require_alpaca_error([&]() { mount.driver->set_target_right_ascension(nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)mount.driver->get_target_right_ascension(); },
                              alpacacore::AlpacaError::ValueNotSet);
     }
     SECTION("SiteElevation") {
