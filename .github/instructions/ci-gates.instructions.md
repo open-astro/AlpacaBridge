@@ -58,7 +58,7 @@ author must do. Read the docstring before changing a gate.
   `$GITHUB_BASE_REF`, which a `merge_group` run does not set, so they stay `pull_request` only; a
   job skipped by its `if:` still satisfies a required check. Keep `cancel-in-progress` off for
   `merge_group`, so a run the queue waits on is never cancelled.
-- **PR body gates** (`.github/workflows/pr-body.yml`, not required checks): `falsified-by`
+- **PR body gates** (`.github/workflows/pr-body.yml`, required checks on `main`; every job skips on `merge_group`, because the body was judged on the PR): `falsified-by`
   (`scripts/check_falsified_by.py`, pre-flight gate 2b2) needs a `## Falsified by` line for
   every test case the PR adds or renames (see the [testing rules](testing.instructions.md#new-test-cases-name-their-falsifying-mutation));
   `pr-template` (`scripts/check_pr_template.py`, gate 2b3) needs every `## ` section of
@@ -68,8 +68,8 @@ author must do. Read the docstring before changing a gate.
   `decision-records` (`scripts/check_adr_scope.py`) needs the `## Decision records` section to name
   every record in `docs/decisions/` the PR changes.
   `gh pr create --body` and agents skip GitHub's template fill-in, so write every section.
-- **Decision-record authorization** (`.github/workflows/decision-records.yml`, the `adr-authorization`
-  commit status): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <sha>`
+- **Decision-record authorization** (`.github/workflows/decision-records.yml`, the required `adr-authorization`
+  commit status; `adr-merge-queue.yml` reports that context on the queued merge commit, and never runs on a PR, so a job can't satisfy the check there): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <sha>`
   comment, which holds until a push changes one of the PR's record files; `scripts/check_adr_authorization.py` runs from the default branch, never from the PR. The
   review bot gets the in-scope rules from the default branch's `scripts/check_adr_scope.py --list`, run
   over the base branch's records; when a base with records gives no list, the review does not run. The

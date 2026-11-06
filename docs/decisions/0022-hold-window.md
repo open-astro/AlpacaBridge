@@ -46,7 +46,7 @@ Symbol: `HoldWindow`
 | iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | partial | #1831 | slew window and pulse windows (rules 1, 4; rule 2 except the clear on landing); landing (`get_slewing()`, the Park/FindHome motion end) still waits on the 5 s window and does not clear it (rules 2 and 3) until a rig shows `:GLS#` reports the GOTO at once |
 | Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | planned | #1832 | slew window only |
 | Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | planned | #1833 | |
-| ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | planned | #1834 | |
+| ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | partial | #1834 | slew window and one pulse window for both axes (rules 1, 4); rule 2 except: MoveAxis, FindHome, Park and Unpark arm after their command, a failed `:Mg` leaves the pulse window armed, and nothing clears the window on landing; landing (GOTO completion and the forced stop flag in `refresh_cached_values()`, Park and FindHome completion) still waits on the 5 s / 2 s window (rule 3) until a rig shows the first `:GU#` after `:MS#`, `:hC#` and `:hP#` reports motion |
 | OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1835 | slew window and per-axis pulse windows |
 | SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | planned | #1836 | |
 

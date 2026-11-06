@@ -202,6 +202,25 @@ TEST_CASE("ZWO telescope clock - Tracking on waits for an in-flight pulse that e
     CHECK(rig.mount.count(":Te") == enables + 1);
 }
 
+// open-astro#1834 PIN: the Tracking-on wait sleeps to the pulse's exact end, not to the next 200 ms step: the pulse
+// ends 1300 ms into the wait, so the write is done at 1300 ms, not 1400 ms.
+// Falsified by: zwo_telescope_driver.cpp set_tracking() wait_for_pulse_completion: sleeping a fixed 200 ms step
+// instead of min(remaining, 200 ms), so the write returns at 1400 ms.
+TEST_CASE("ZWO telescope clock - Tracking on returns at the pulse end, not at the next 200 ms step (#1834 PIN)",
+          "[zwo][telescope][unit][clock]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 3000);  // pauses the poll, so the cached Tracking state ages past 2 s
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    for (int i = 0; i < 22; ++i) rig.advance(100ms);  // 2200 ms; the pulse ends at 3500 ms
+    auto& write = rig.call([&] { rig.driver->set_tracking(true); });
+    rig.wait_for_blocked_caller(2);                   // the poll loop and the pulse worker wait on the clock too
+    for (int i = 0; i < 12; ++i) rig.advance(100ms);  // 1200 ms into the wait
+    CHECK_FALSE(ready(write));
+    rig.advance(100ms);  // 1300 ms: the pulse ends
+    CHECK(ready(write, kReal));
+}
+
 TEST_CASE("ZWO telescope clock - Tracking on stops waiting for a longer pulse after 1500 ms",
           "[zwo][telescope][unit][clock]") {
     Rig rig;

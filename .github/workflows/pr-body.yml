@@ -18,6 +18,11 @@ name: PR body
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
+  # These checks are required on main, and the queue needs a result for each
+  # one on the merge commit. The body was judged on the PR, so every job skips
+  # here; a skipped job satisfies a required check.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -25,6 +30,7 @@ permissions:
 jobs:
   falsified-by:
     name: falsified-by (PR body)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
@@ -71,7 +77,7 @@ jobs:
   pr-template:
     name: pr-template (PR body)
     # Dependabot writes its own body; the template is for people and agents.
-    if: github.event.pull_request.user.type != 'Bot'
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
@@ -90,7 +96,7 @@ jobs:
 
   decision-records:
     name: decision-records (PR body)
-    if: github.event.pull_request.user.type != 'Bot'
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
