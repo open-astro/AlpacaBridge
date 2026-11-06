@@ -185,8 +185,7 @@ TEST_CASE("ZWO telescope clock - a slew ends IsPulseGuiding at once", "[zwo][tel
 // open-astro#2094: MoveAxis, like every other motion initiator, cancels the queued and running guide pulses: after the
 // stop no further ":Mg" is sent and IsPulseGuiding reads false; the same for a jog.
 // Falsified by: zwo_telescope_driver.cpp move_axis() not calling reset_position_offsets() after fence_goto().
-TEST_CASE("ZWO telescope clock - MoveAxis stop cancels a running guide pulse (2094)",
-          "[zwo][telescope][unit][clock]") {
+TEST_CASE("ZWO telescope clock - MoveAxis stop cancels a running guide pulse (2094)", "[zwo][telescope][unit][clock]") {
     const double rate = GENERATE(0.0, 1.0);
     Rig rig;
     rig.connect();
