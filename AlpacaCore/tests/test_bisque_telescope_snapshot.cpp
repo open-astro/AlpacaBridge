@@ -467,6 +467,90 @@ TEST_CASE("Bisque snapshot - past the staleness bound DeviceState is empty with 
     bq::set_status_poll_paused_for_testing(*rig.driver, true);
 }
 
+TEST_CASE("Bisque snapshot - own-state reads refuse on a faulted link and TrackingRate needs a connection",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    rig.mount.mute = true;
+    for (int i = 0; i < 3; ++i) rig.poll();
+    REQUIRE_FALSE(rig.driver->get_link_fault().empty());
+    REQUIRE(rig.driver->get_connected());
+    auto& d = *rig.driver;
+    auto refused = [](auto&& read) {
+        alpacacore::test::require_alpaca_error([&] { (void)read(); }, alpacacore::AlpacaError::DriverException);
+    };
+    refused([&] { return d.get_at_home(); });
+    refused([&] { return d.get_at_park(); });
+    refused([&] { return d.get_slewing(); });
+    refused([&] { return d.get_is_pulse_guiding(); });
+    refused([&] { return d.get_target_right_ascension(); });
+    refused([&] { return d.get_target_declination(); });
+    refused([&] { return d.get_declination_rate(); });
+    refused([&] { return d.get_right_ascension_rate(); });
+    refused([&] { return d.get_tracking(); });  // control: already refused
+    refused([&] { return d.get_tracking_rate(); });
+    refused([&] { return d.get_guide_rate(); });
+
+    rig.mount.mute = false;
+    d.set_connected(false);
+    alpacacore::test::require_alpaca_error([&] { (void)d.get_tracking_rate(); }, alpacacore::AlpacaError::NotConnected);
+    alpacacore::test::require_alpaca_error([&] { (void)d.get_guide_rate(); }, alpacacore::AlpacaError::NotConnected);
+    alpacacore::test::require_alpaca_error([&] { d.set_tracking_rate(0); }, alpacacore::AlpacaError::NotConnected);
+    // InvalidValue precedes the connection check.
+    alpacacore::test::require_alpaca_error([&] { d.set_tracking_rate(1); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("Bisque snapshot - writes refuse on a faulted link, send nothing and keep the stored value",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    auto& d = *rig.driver;
+    d.set_target_right_ascension(3.5);
+    d.set_target_declination(12.0);
+    alpacacore::GuideRate guide{0.002, 0.001};
+    d.set_guide_rate(guide);
+    rig.mount.mute = true;
+    for (int i = 0; i < 3; ++i) rig.poll();
+    REQUIRE_FALSE(d.get_link_fault().empty());
+    REQUIRE(d.get_connected());
+    const int wire = rig.mount.transactions.load();
+    auto refused = [](auto&& write) {
+        alpacacore::test::require_alpaca_error([&] { write(); }, alpacacore::AlpacaError::DriverException);
+    };
+    refused([&] { d.set_tracking(false); });
+    refused([&] { d.set_tracking_rate(0); });
+    refused([&] { d.set_guide_rate({0.003, 0.003}); });
+    refused([&] { d.set_target_right_ascension(7.0); });
+    refused([&] { d.set_target_declination(-5.0); });
+    refused([&] { d.find_home(); });
+    refused([&] { d.park(); });
+    refused([&] { d.unpark(); });
+    refused([&] { d.set_park(); });
+    refused([&] { d.pulse_guide(0, 100); });
+    refused([&] { d.slew_to_coordinates(1.0, 1.0); });
+    refused([&] { d.slew_to_coordinates_async(1.0, 1.0); });
+    refused([&] { d.slew_to_target(); });
+    refused([&] { d.slew_to_target_async(); });
+    refused([&] { d.sync_to_coordinates(1.0, 1.0); });
+    refused([&] { d.sync_to_target(); });
+    refused([&] { d.move_axis(0, 0.5); });
+    // InvalidValue validation still comes first.
+    alpacacore::test::require_alpaca_error([&] { d.set_target_declination(95.0); },
+                                           alpacacore::AlpacaError::InvalidValue);
+    CHECK(rig.mount.transactions.load() == wire);
+    CHECK(rig.mount.slew_commands.load() == 0);
+    CHECK(rig.mount.park_commands.load() == 0);
+
+    // One good reply recovers: the stored values survived the fault and the refused writes.
+    rig.mount.mute = false;
+    REQUIRE(rig.poll());
+    CHECK(d.get_target_right_ascension() == 3.5);
+    CHECK(d.get_target_declination() == 12.0);
+    CHECK(d.get_guide_rate().ra == 0.002);
+    CHECK_FALSE(d.get_at_park());
+    CHECK_FALSE(d.get_slewing());
+    CHECK(d.get_declination_rate() == 0.0);
+    CHECK(d.get_tracking_rate() == 0);
+}
+
 TEST_CASE("Bisque snapshot - a reply clears a latched fault without a reconnect", "[bisque][telescope][snapshot]") {
     Rig rig;
     rig.mount.mute = true;
