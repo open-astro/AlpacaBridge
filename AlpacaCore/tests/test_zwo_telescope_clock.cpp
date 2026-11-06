@@ -28,6 +28,8 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
@@ -453,6 +455,89 @@ TEST_CASE("ZWO an older Sync sends no last-resort :CM once a newer GOTO is accep
     CHECK(rig.mount.count(":CM") == 0);
     CHECK(rig.driver->get_slewing());  // the GOTO still runs
     require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
+// open-astro#1925: an older Sync settling on "e4" must not stop a newer MoveAxis jog, FindHome, Park or Unpark. The
+// initiator seam holds each one right after its wire command, where the old code had not yet moved the Sync epoch;
+// the Sync's settle timer runs meanwhile, so its ownership check lands in that window. It must throw, with the
+// neutral message, and send nothing (":Q", ":SMMC", ":Sr", ":CM") after the newer command.
+// Falsified by: zwo_telescope_driver.cpp park() (and find_home(), move_axis(), unpark()): removing the
+// bump_motion_epoch() call before the wire command, so the epoch moves only after it and the Sync still stops it.
+TEST_CASE("ZWO an older Sync never stops a newer MoveAxis, FindHome, Park or Unpark (#1925)",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    const auto initiator_and_command = GENERATE(
+        std::pair<std::string, std::string>{"Park", ":hP"}, std::pair<std::string, std::string>{"FindHome", ":hC"},
+        std::pair<std::string, std::string>{"MoveAxis", ":Me"}, std::pair<std::string, std::string>{"Unpark", ":Spu"});
+    const std::string& label = initiator_and_command.first;
+    const std::string& command = initiator_and_command.second;
+    CAPTURE(label);
+    alpacacore::test::Latch latch;
+    Rig rig;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == label + " sent") latch.block();
+    });
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its first ":Q" and waits out the 200 ms settle
+
+    auto& initiator = rig.call([&] {
+        if (label == "Park") rig.driver->park();
+        if (label == "FindHome") rig.driver->find_home();
+        if (label == "MoveAxis") rig.driver->move_axis(0, 1.0);
+        if (label == "Unpark") rig.driver->unpark();
+    });
+    const bool held = latch.wait_entered();
+    const bool command_sent = rig.mount.wait_for_count(command, 1, kReal);
+    if (held && command_sent) rig.advance_until([&] { return ready(sync); }, 200ms, 3s);
+    latch.release();  // before any REQUIRE can unwind, so the Rig never waits on the latch
+    REQUIRE(held);
+    REQUIRE(command_sent);
+    REQUIRE(ready(sync, kReal));
+    REQUIRE(ready(initiator, kReal));
+    initiator.get();
+
+    const auto all = rig.mount.commands();
+    const auto command_at =
+        std::find_if(all.begin(), all.end(), [&](const std::string& c) { return c.starts_with(command); });
+    REQUIRE(command_at != all.end());
+    const auto from_sync = [](const std::string& c) {
+        return c == ":Q" || c.starts_with(":SMMC") || c.starts_with(":Sr") || c == ":CM";
+    };
+    CHECK(std::none_of(command_at + 1, all.end(), from_sync));
+    try {
+        sync.get();
+        FAIL("an older Sync must not complete over a newer command");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::InvalidOperation);
+        CHECK(std::string(ex.what()) == "Sync superseded by a newer command");
+    }
+    if (label == "MoveAxis") rig.driver->move_axis(0, 0.0);
+}
+
+// open-astro#1925 item 2: an AbortSlew during the settle starts no motion, so the superseded text must not say it did.
+// Falsified by: zwo_telescope_driver.cpp sync_to_pair(): restoring the message "Sync superseded by a newer motion
+// command".
+TEST_CASE("ZWO an older Sync superseded by AbortSlew says so without claiming motion (#1925)",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();
+    rig.driver->abort_slew();
+    rig.advance_until([&] { return ready(sync); }, 200ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    CHECK(rig.mount.count(":SMMC") == 1);
+    try {
+        sync.get();
+        FAIL("a Sync superseded by AbortSlew must fail");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::InvalidOperation);
+        CHECK(std::string(ex.what()) == "Sync superseded by a newer command");
+    }
 }
 
 TEST_CASE("ZWO SyncToCoordinates sends its own pair, not a target set earlier",
