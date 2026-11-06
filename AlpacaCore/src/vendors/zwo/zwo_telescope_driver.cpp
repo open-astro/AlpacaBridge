@@ -2409,8 +2409,8 @@ private:
     void reset_position_offsets() {
         // One section: a pulse queued after it starts a drain this cancel cannot reach, and the cancelled drain's
         // reconciliation, which re-checks its stop reason under mutex_, cannot write offsets after they are zeroed.
-        std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> pulse_lock(pulse_mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         pulse_queue_.clear();
         pulse_queue_end_ = std::chrono::steady_clock::time_point{};
         pulse_drain_active_ = false;
@@ -2419,6 +2419,12 @@ private:
         dec_offset_deg_ = 0.0;
         pulse_guiding_end_ = clock_.now();
         snapshot_.write([](PolledFrame&) {});
+        // open-astro#2072: a step already past its check sends its ":Mg" after the cancel; wait for it, so the caller's
+        // own command follows it on the wire. pulse_mutex_ is released first (lock order: pulse_mutex_ before mutex_;
+        // pulse_guide() callers must not queue behind a wire wait). Bounded by that one blind write behind the
+        // exchange in flight. Call without the protocol mutex held: the counted send waits for it.
+        pulse_lock.unlock();
+        pulse_send_cv_.wait(lock, [this] { return pulse_sends_in_flight_ == 0; });
     }
 
     void ensure_not_parked(const char* operation) const {
@@ -2867,13 +2873,31 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_.load() || ctx.stop_reason() != util::StopReason::None) return;
+                // open-astro#2072: counted in the same section as the check, so a reset that cancels after it waits
+                // for this ":Mg" (reset_position_offsets()).
+                ++pulse_sends_in_flight_;
             }
-            try {
-                protocol.pulse_guide(task.direction, step);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ZWO", "PulseGuide command failed: " + std::string(e.what()));
-                break;
+            bool sent = true;
+            {
+                struct EndPulseSend {
+                    std::mutex& mutex;
+                    unsigned& in_flight;
+                    std::condition_variable& cv;
+                    ~EndPulseSend() {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        --in_flight;
+                        cv.notify_all();
+                    }
+                } end_send{mutex_, pulse_sends_in_flight_, pulse_send_cv_};
+                if (goto_send_hook_) goto_send_hook_(":Mg");
+                try {
+                    protocol.pulse_guide(task.direction, step);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("ZWO", "PulseGuide command failed: " + std::string(e.what()));
+                    sent = false;
+                }
             }
+            if (!sent) break;
             // One clock wait per step; a cancel wakes it at once.
             if (!ctx.wait_for(std::chrono::milliseconds(step))) return;
             remaining_ms -= step;
@@ -3144,11 +3168,16 @@ private:
     std::uint64_t goto_claim_ = 0;
     unsigned goto_sends_in_flight_ = 0;
     mutable std::condition_variable goto_send_cv_;
+    // open-astro#2072, the pulse send gate (under mutex_): ":Mg" steps past their check and not yet sent, and the wait
+    // reset_position_offsets() makes for them. Separate from the GOTO count, so a GOTO send and fence_goto() never wait
+    // for a pulse.
+    unsigned pulse_sends_in_flight_ = 0;
+    std::condition_variable pulse_send_cv_;
     // Orders initiators (open-astro#2073): SlewAsync holds it across the claim and goto_slot_.start(); Park, FindHome,
     // MoveAxis and AbortSlew from before fence_goto() until their own command is sent, so no GOTO claims in between.
-    // Lock order: first, then target_write_mutex_, mutex_, pulse_mutex_ and the protocol mutex. Not a state lock: no
-    // getter takes it, so it may be held across wire I/O. Never taken by a body, fence_goto(), a getter or
-    // set_connected().
+    // Lock order: taken first; after it target_write_mutex_ or pulse_mutex_, then the protocol mutex, with mutex_ last
+    // (the leaf). Not a state lock: no getter takes it, so it may be held across wire I/O, including the pulse-send
+    // wait in reset_position_offsets(). Never taken by a body, fence_goto(), a getter or set_connected().
     std::mutex initiator_mutex_;
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
     std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting

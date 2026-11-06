@@ -35,7 +35,8 @@ void set_goto_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
 /// Test-only: called with the frame prefix (":Sr", ":MS", ...) after a GOTO wire call is counted at the send gate and
-/// before it is sent (call before the first slew).
+/// before it is sent, and with ":Mg" after a guide pulse step passed its check and before it is sent (call before the
+/// first slew or pulse).
 void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
 
 /// Test-only: called with the initiator's name ("Park", "FindHome", "MoveAxis", "AbortSlew", "Unpark") after its GOTO
