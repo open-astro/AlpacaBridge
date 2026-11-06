@@ -414,7 +414,7 @@ private:
         std::unique_lock<std::mutex>& lock_;
     };
     double current_utc_locked() const;
-    std::chrono::system_clock::time_point client_utc_now_locked() const;
+    std::chrono::system_clock::time_point utc_now_locked() const;
     bool client_utc_offset_survives_locked(std::chrono::system_clock::time_point system_now) const;
     void require_site_locked() const;
     void validate_site_and_coordinates(double ra, double dec, const char* operation) const;
@@ -586,7 +586,10 @@ void CelestronCgxTelescopeDriver::require_healthy_transport() const {
                               AlpacaError::DriverException);
 }
 
-double CelestronCgxTelescopeDriver::current_utc_locked() const {
+// The one time source (decision 0001, #2166): UTCDate, SiderealTime and pointing all read it, so a
+// client can explain SiderealTime from its own UTCDate and SiteLongitude reads. The motors have no
+// clock: this is the host clock, plus a client's UTCDate offset only while the host is undisciplined.
+std::chrono::system_clock::time_point CelestronCgxTelescopeDriver::utc_now_locked() const {
     const auto system_now = system_now_();
     const bool offset_survives = client_utc_offset_survives_locked(system_now);
     if (offset_survives && !utc_offset_host_was_synchronized_) {
@@ -596,22 +599,18 @@ double CelestronCgxTelescopeDriver::current_utc_locked() const {
             if (util::ClientUtcWarning::host_synchronized()) {
                 utc_offset_host_was_synchronized_ = true;
                 ALPACA_LOG_INFO("Celestron CGX",
-                                "Host clock became NTP-disciplined after UTCDate; pointing by host time while "
-                                "UTCDate readback continues to honor the client");
+                                "Host clock became NTP-disciplined after UTCDate; UTCDate, SiderealTime and "
+                                "pointing now use the host clock");
             }
         }
     }
-    const auto pointing_now =
-        util::HostClock::pointing_uses_client_offset(offset_survives, utc_offset_host_was_synchronized_)
-            ? system_now + utc_offset_
-            : system_now;
-    return std::chrono::duration<double>(pointing_now.time_since_epoch()).count();
+    return util::HostClock::pointing_uses_client_offset(offset_survives, utc_offset_host_was_synchronized_)
+               ? system_now + utc_offset_
+               : system_now;
 }
 
-std::chrono::system_clock::time_point CelestronCgxTelescopeDriver::client_utc_now_locked() const {
-    const auto system_now = system_now_();
-    if (client_utc_offset_survives_locked(system_now)) return system_now + utc_offset_;
-    throw AlpacaException("UTCDate has not been established; set the mount time first", AlpacaError::InvalidOperation);
+double CelestronCgxTelescopeDriver::current_utc_locked() const {
+    return std::chrono::duration<double>(utc_now_locked().time_since_epoch()).count();
 }
 
 bool CelestronCgxTelescopeDriver::client_utc_offset_survives_locked(
@@ -1453,17 +1452,24 @@ void CelestronCgxTelescopeDriver::set_tracking_rate(int rate) {
 std::chrono::system_clock::time_point CelestronCgxTelescopeDriver::get_utc_date() const {
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
-    return client_utc_now_locked();
+    return utc_now_locked();
 }
 void CelestronCgxTelescopeDriver::set_utc_date(std::chrono::system_clock::time_point utc) {
     require_connected();
+    // Decision 0001 (#2166): an NTP-disciplined host has a better clock than the client, and the
+    // interface lets a mount with its own time source refuse the write, so it throws and changes nothing.
+    if (util::ClientUtcWarning::host_synchronized()) {
+        throw AlpacaException(
+            "UTCDate cannot be set: the host clock is NTP-synchronized, and the mount takes its time from it",
+            AlpacaError::PropertyNotImplemented);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     const auto system_now = system_now_();
     utc_offset_ = utc - system_now;
     utc_anchor_system_ = system_now;
     utc_anchor_steady_ = clock_.now();
     has_utc_offset_ = true;
-    utc_offset_host_was_synchronized_ = util::ClientUtcWarning::host_synchronized();
+    utc_offset_host_was_synchronized_ = false;
     next_utc_discipline_resample_ = clock_.now() + kHostDisciplineResampleInterval;
 }
 int CelestronCgxTelescopeDriver::get_tracking_rate() const {
