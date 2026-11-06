@@ -277,6 +277,41 @@ TEST_CASE("iOptron Telescope Driver - a client UTCDate write after the clock syn
     driver->set_connected(false);
 }
 
+TEST_CASE("iOptron Telescope Driver - client site writes after the clock sync's site commands keep their values",
+          "[ioptron][telescope][unit][fake][taskclock]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297, 10.0,
+                                                              true, clock);
+    // The client's writes land after the body's :SLA/:SLO and before the body publishes its state.
+    auto* raw = driver.get();
+    ioptron::set_clock_sync_utc_hook_for_testing(*driver, [raw](bool after_send) {
+        if (!after_send) return;
+        raw->set_site_latitude(51.477833);
+        raw->set_site_longitude(-0.001500);
+        raw->set_site_elevation(42.0);
+    });
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(250));
+    // The body's publication replaces the fake mount's year-2000 UTC with host time: the signal it has published.
+    const auto published = [&] {
+        try {
+            return driver->get_utc_date() > std::chrono::system_clock::time_point(std::chrono::seconds(1700000000));
+        } catch (const std::exception&) {
+            return false;
+        }
+    };
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!published() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    REQUIRE(published());
+    CHECK(std::abs(driver->get_site_latitude() - 51.477833) < 1e-6);
+    CHECK(std::abs(driver->get_site_longitude() - -0.001500) < 1e-6);
+    CHECK(driver->get_site_elevation() == 42.0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("iOptron Telescope Driver - a :SUT retry sends the host time of that attempt",
           "[ioptron][telescope][unit][fake][taskclock]") {
     alpacacore::test::FakeIoptronMount mount("0036", 0.0);

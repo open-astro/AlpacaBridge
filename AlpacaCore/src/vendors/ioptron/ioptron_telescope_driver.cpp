@@ -1156,6 +1156,7 @@ public:
             );
         }
         site_elevation_m_ = elevation;
+        ++site_elevation_write_generation_;  // the background clock sync must not publish over this write
     }
     
     double get_site_latitude() const override {
@@ -1175,6 +1176,7 @@ public:
         protocol.set_hemisphere(latitude >= 0.0);
         site_latitude_cached_ = latitude;
         hemisphere_north_ = (latitude >= 0.0);
+        ++site_latitude_write_generation_;  // the background clock sync must not publish over this write
         site_info_valid_ = true;
         last_site_info_fetch_ = clock_.now();
     }
@@ -1194,6 +1196,7 @@ public:
         const Wire protocol = wire();
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
+        ++site_longitude_write_generation_;  // the background clock sync must not publish over this write
         site_info_valid_ = true;
         last_site_info_fetch_ = clock_.now();
     }
@@ -3011,6 +3014,8 @@ private:
         std::optional<double> lat, lon;
         std::optional<int> elev;
         bool do_clock_sync = false;
+        // Client write generations seen with our own write (start snapshot, then the successful send).
+        uint64_t lat_generation = 0, lon_generation = 0, elev_generation = 0;
         {
             StateLock lock(lock_gate_, StateLock::Mode::State);
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
@@ -3020,6 +3025,9 @@ private:
             lon = pending_site_longitude_;
             elev = pending_site_elevation_;
             do_clock_sync = sync_time_on_connect_;
+            lat_generation = site_latitude_write_generation_;
+            lon_generation = site_longitude_write_generation_;
+            elev_generation = site_elevation_write_generation_;
         }
 
         // Each command takes the operation lock and the state lock for itself, like a client's command, and
@@ -3032,14 +3040,29 @@ private:
 
         if (lat.has_value()) {
             double latitude = lat.value();
-            retry_mount_command("site latitude", [&]() { exchange([&] { protocol.set_latitude(latitude); }); }, &ctx);
+            retry_mount_command(
+                "site latitude",
+                [&]() {
+                    exchange([&] {
+                        protocol.set_latitude(latitude);
+                        lat_generation = site_latitude_write_generation_;
+                    });
+                },
+                &ctx);
             retry_mount_command(
                 "hemisphere", [&]() { exchange([&] { protocol.set_hemisphere(latitude >= 0.0); }); }, &ctx);
         }
         if (lon.has_value()) {
             double longitude = lon.value();
             retry_mount_command(
-                "site longitude", [&]() { exchange([&] { protocol.set_longitude(longitude); }); }, &ctx);
+                "site longitude",
+                [&]() {
+                    exchange([&] {
+                        protocol.set_longitude(longitude);
+                        lon_generation = site_longitude_write_generation_;
+                    });
+                },
+                &ctx);
         }
 
         util::UtcOffset synced_time;
@@ -3073,18 +3096,19 @@ private:
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                 return;
             }
-            if (lat.has_value()) {
+            // A client site write after our own send is later on the wire, so it keeps its value.
+            if (lat.has_value() && lat_generation == site_latitude_write_generation_) {
                 site_latitude_cached_ = lat.value();
                 hemisphere_north_ = (lat.value() >= 0.0);
                 site_info_valid_ = true;
                 last_site_info_fetch_ = clock_.now();
             }
-            if (lon.has_value()) {
+            if (lon.has_value() && lon_generation == site_longitude_write_generation_) {
                 site_longitude_cached_ = lon.value();
                 site_info_valid_ = true;
                 last_site_info_fetch_ = clock_.now();
             }
-            if (elev.has_value()) {
+            if (elev.has_value() && elev_generation == site_elevation_write_generation_) {
                 site_elevation_m_ = elev.value();
             }
             if (do_clock_sync) {
@@ -3449,6 +3473,10 @@ private:
     std::function<void(bool)> clock_sync_utc_hook_;
     // Bumped by every client UTCDate write (under the operation lock); the clock sync compares it at publication.
     uint64_t utc_write_generation_ = 0;
+    // Bumped by each client site write (under mutex_), compared like utc_write_generation_; one per field.
+    uint64_t site_latitude_write_generation_ = 0;
+    uint64_t site_longitude_write_generation_ = 0;
+    uint64_t site_elevation_write_generation_ = 0;
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
