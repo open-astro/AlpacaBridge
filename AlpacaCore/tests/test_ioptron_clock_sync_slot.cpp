@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <future>
 #include <memory>
@@ -245,6 +246,75 @@ TEST_CASE("iOptron Telescope Driver - a superseded clock-sync body sends no furt
     // Only the second body reaches the longitude and the clock commands.
     CHECK(mount.count(":SLO") == 1);
     CHECK(mount.count(":SUT") == 1);
+}
+
+TEST_CASE("iOptron Telescope Driver - a client UTCDate write after the clock sync's :SUT keeps the anchor",
+          "[ioptron][telescope][unit][fake][taskclock]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
+                                                              std::nullopt, true, clock);
+    // The client's write lands after the body's :SUT and before the body publishes its state.
+    const auto client_utc = std::chrono::system_clock::time_point(std::chrono::seconds(1900000000));
+    auto* raw = driver.get();
+    ioptron::set_clock_sync_utc_hook_for_testing(*driver, [raw, client_utc](bool after_send) {
+        if (after_send) raw->set_utc_date(client_utc);
+    });
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(250));
+    // The body's publication also caches the site latitude; it is the signal that the body has published.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::abs(driver->get_site_latitude() - -33.856784) > 1e-6 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(std::abs(driver->get_site_latitude() - -33.856784) < 1e-6);
+    CHECK(mount.count(":SUT") == 2);  // the body's, then the client's
+    const auto utc = driver->get_utc_date();
+    CHECK(utc >= client_utc);
+    CHECK(utc - client_utc < std::chrono::seconds(2));
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - a :SUT retry sends the host time of that attempt",
+          "[ioptron][telescope][unit][fake][taskclock]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
+                                                              std::nullopt, true, clock);
+    // Attempt 1 fails before the send. Attempt 2 waits until the host clock has moved on by 2 ms, then notes it.
+    std::atomic<int> attempts{0};
+    std::atomic<long long> floor_ms{0};
+    ioptron::set_clock_sync_utc_hook_for_testing(*driver, [&](bool after_send) {
+        if (after_send) return;
+        if (attempts.fetch_add(1) == 0) throw std::runtime_error("first attempt fails");
+        const auto start = std::chrono::system_clock::now();
+        while (std::chrono::system_clock::now() - start < std::chrono::milliseconds(2)) {
+        }
+        floor_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::system_clock::now() -
+                           std::chrono::system_clock::time_point(std::chrono::seconds(946728000)))
+                           .count());
+    });
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(250));
+    const auto first = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (attempts.load() < 1 && std::chrono::steady_clock::now() < first) std::this_thread::yield();
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the retry wait
+    clock.advance(std::chrono::milliseconds(750));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (mount.count(":SUT") < 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    driver->set_connected(false);
+    REQUIRE(mount.count(":SUT") == 1);
+    for (const auto& cmd : mount.commands()) {
+        if (cmd.rfind(":SUT", 0) != 0) continue;
+        CHECK(std::stoll(cmd.substr(4, 13)) >= floor_ms.load());
+    }
 }
 
 #endif  // _WIN32
