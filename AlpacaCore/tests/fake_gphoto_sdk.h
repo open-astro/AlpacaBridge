@@ -107,9 +107,15 @@ inline std::string unique_test_model(const std::string& base) {
  *  - `has_widget` is inferred from map presence (choices / toggle_value /
  *    text_value), not from a widget tree, so a widget that exists with an
  *    EMPTY choice list cannot be modelled: it reads as absent.
- *  - `close_camera` is the one method `throw_from` cannot target. Deliberate:
- *    it mirrors the real close_session_locked, which never throws, so a
- *    throwing close would test a path the driver can never see.
+ *  - `close_camera` and `get_gphoto_version` are the methods `throw_from`
+ *    cannot target. Deliberate: `close_camera` mirrors the real
+ *    close_session_locked, which never throws, so a throwing close would test a
+ *    path the driver can never see. `get_gphoto_version` mirrors the real
+ *    gp_library_version() read, which takes no lock and cannot fail; it skips
+ *    the call log, `throw_from`, `fail_from` and `before_call` so that
+ *    LockedGPhotoSDK can forward it under its own mutex (open-astro#2148). A
+ *    test that needs a failing version read would add a dedicated knob guarded
+ *    by its own lock, not restore the call log here.
  *  - `set_choice_value` / `set_toggle_value` on an UNMODELLED widget insert a
  *    new map entry and succeed, where GPhotoSDKWrapper throws
  *    PropertyNotImplemented. Unreachable today (every production write is
@@ -146,7 +152,8 @@ inline std::string unique_test_model(const std::string& base) {
  * relies on (e.g. "shutterspeed2" absent but "shutterspeed" present).
  *
  * Failure injection: add a method name to `throw_from` and every call to
- * that method throws AlpacaException regardless of arguments.
+ * that method throws AlpacaException regardless of arguments (not
+ * `close_camera` or `get_gphoto_version`; see KNOWN PARITY GAPS).
  */
 class FakeGPhotoSDK : public vendor::gphoto::GPhotoSDK {
 public:
@@ -175,10 +182,10 @@ public:
         std::lock_guard<std::mutex> lock(fail_from_mutex_);
         failing_name_.clear();
     }
-    // Persistent, not a one-shot: runs before every call until it is cleared (after the call is counted, before
-    // throw_from), so a case can make one named call block or move a FakeTaskClock. Null in every ordinary
-    // test; the contract sweep sets it on the connect call to hold a connect open, and the [taskclock] cases
-    // set it to drive the exposure and bulb loops.
+    // Persistent, not a one-shot: runs before every call except get_gphoto_version() until it is cleared (after the
+    // call is counted, before throw_from), so a case can make one named call block or move a FakeTaskClock. Null in
+    // every ordinary test; the contract sweep sets it on the connect call to hold a connect open, and the
+    // [taskclock] cases set it to drive the exposure and bulb loops.
     // Ownership (as fake_qhy_sdk.h): set before the driver exists, never changed while a connect is in flight.
     std::function<void(const std::string&)> before_call;
     // The widget name of the has_widget / get_choices / set_choice_value call now running, set before before_call
