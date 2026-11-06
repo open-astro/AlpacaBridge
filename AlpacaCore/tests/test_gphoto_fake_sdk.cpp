@@ -38,6 +38,7 @@
 #include "fake_raw_decoder.h"
 #include "fake_task_clock.h"
 #include "getter_stall_probe.h"
+#include "locked_gphoto_sdk.h"
 
 using alpacacore::AlpacaException;
 using alpacacore::test::FakeGPhotoSDK;
@@ -200,6 +201,42 @@ TEST_CASE("GPhoto camera fake - connect populates handle and balances open/close
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
     CHECK(fake.close_count == 1);
+}
+
+// open-astro#2148: the real GPhotoSDKWrapper::get_gphoto_version() takes no lock, so the SDK-version hook must not
+// wait behind an open_camera() in flight. LockedGPhotoSDK used to forward it under the one mutex the held open sleeps
+// under, so the contract sweep's "firmware and SDK hooks do not block" case failed whenever the hook landed inside
+// the open (the #1646 shape, here only in the decorator).
+// Falsified by: AlpacaCore/tests/locked_gphoto_sdk.h get_gphoto_version(): forwarding under the shared mutex_
+// (locked([&] {...})), so the hook waits out the 300 ms open.
+TEST_CASE("FakeGPhotoSDK via LockedGPhotoSDK - SDK version hook does not wait on an in-flight open",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+    std::atomic<bool> in_open{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name == "open_camera") {
+            in_open.store(true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));  // a slow USB open, held in real time
+        }
+    };
+    alpacacore::test::LockedGPhotoSDK sdk(fake);
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, sdk, decoder);
+
+    driver->connect();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!in_open.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(in_open.load());
+    CHECK(alpacacore::test::timed([&] { (void)driver->get_device_sdk_version(); }) < std::chrono::milliseconds(100));
+
+    while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    driver->set_connected(false);
 }
 
 TEST_CASE("GPhoto camera fake - exposure validation distinguishes global and connected camera limits",
