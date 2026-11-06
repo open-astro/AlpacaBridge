@@ -1531,6 +1531,7 @@ public:
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         protocol.set_utc_time(utc);
         utc_offset_.set(utc, clock_.now());
+        ++utc_write_generation_;  // the background clock sync must not publish over this write
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("iOptron", client_minus_host, client_disagreement_warned_);
@@ -3042,9 +3043,9 @@ private:
         }
 
         util::UtcOffset synced_time;
+        uint64_t synced_generation = 0;
         if (do_clock_sync) {
             auto tz_info = compute_local_timezone_info();
-            auto now_utc = std::chrono::system_clock::now();
             retry_mount_command(
                 "timezone offset", [&]() { exchange([&] { protocol.set_timezone_offset(tz_info.offset_minutes); }); },
                 &ctx);
@@ -3054,13 +3055,18 @@ private:
                 "UTC clock",
                 [&]() {
                     exchange([&] {
+                        if (clock_sync_utc_hook_) clock_sync_utc_hook_(false);
+                        // Fresh host time for each send attempt: a retry must not send the first attempt's time.
+                        const auto now_utc = std::chrono::system_clock::now();
                         const auto sent_at = clock_.now();
                         protocol.set_utc_time(now_utc);
                         synced_time.set(now_utc, sent_at);
+                        synced_generation = utc_write_generation_;
                     });
                 },
                 &ctx);
         }
+        if (clock_sync_utc_hook_) clock_sync_utc_hook_(true);
 
         {
             StateLock lock(lock_gate_, StateLock::Mode::State);
@@ -3086,7 +3092,8 @@ private:
                 timezone_offset_minutes_ = tz_info.offset_minutes;
                 timezone_offset_valid_ = true;
                 dst_observed_ = tz_info.dst_active;
-                if (synced_time.valid()) utc_offset_ = synced_time;
+                // A client UTCDate write after our :SUT is later on the wire, so it keeps the anchor.
+                if (synced_time.valid() && synced_generation == utc_write_generation_) utc_offset_ = synced_time;
             }
         }
     }
@@ -3173,6 +3180,7 @@ public:
         slew_.set_spawn_for_testing(std::move(spawn));
     }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
+    void set_clock_sync_utc_hook_for_testing(std::function<void(bool)> hook) { clock_sync_utc_hook_ = std::move(hook); }
     void start_clock_sync_for_testing() { start_clock_sync(); }
     std::optional<std::string> clock_sync_failure_for_testing() const { return clock_sync_.last_failure(); }
 
@@ -3437,6 +3445,10 @@ private:
     std::mutex clock_sync_reap_mutex_;
     // Test seam, set before connect: runs on the clock-sync body after its start delay.
     std::function<void()> clock_sync_test_hook_;
+    // Test hook: called with false before each :SUT send attempt (operation lock held), true after the sends.
+    std::function<void(bool)> clock_sync_utc_hook_;
+    // Bumped by every client UTCDate write (under the operation lock); the clock sync compares it at publication.
+    uint64_t utc_write_generation_ = 0;
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
@@ -3629,6 +3641,12 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_clock_sync_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_clock_sync_utc_hook_for_testing(TelescopeDriver& driver, std::function<void(bool)> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_clock_sync_utc_hook_for_testing(std::move(hook));
     }
 }
 
