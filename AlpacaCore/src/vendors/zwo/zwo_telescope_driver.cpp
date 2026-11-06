@@ -1230,6 +1230,9 @@ public:
         // the command; it is released before the tracking restore.
         std::unique_lock<std::mutex> initiator_lock(initiator_mutex_);
         fence_goto();
+        // open-astro#2094: like every motion initiator, cancel queued and running guide pulses (stop and jog), so no
+        // ":Mg" follows this command and IsPulseGuiding reads false.
+        reset_position_offsets();
         if (initiator_hook_) initiator_hook_("MoveAxis");
 
         auto& protocol = protocol_;
