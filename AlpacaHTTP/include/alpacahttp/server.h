@@ -322,6 +322,10 @@ private:
     // a thread, so it cannot be raced by a restart.
     void join_server_thread(std::thread::id current_id, bool only_if_stopped = false);
     void reset_queues_for_start();
+    // With a shutdown callback installed the callback owns the stop, and the
+    // request is single-shot: shutdown_requested_ is cleared only by a start, so
+    // an embedder whose callback declines to stop cannot shut down through the
+    // endpoint again (the response still says "Shutdown initiated").
     void handle_shutdown_request();
     void handle_restart_request();
 

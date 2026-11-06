@@ -222,26 +222,28 @@ TEST_CASE("Bisque Telescope Driver - Disconnected Behavior", "[bisque][telescope
     REQUIRE_FALSE(driver->get_connected());
 
     // Position queries require connection
-    CHECK_THROWS_AS(driver->get_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_declination(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_altitude(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_azimuth(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
 
     // Tracking requires connection
-    CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
     // NotConnected precedes the unset-target error (#2075)
     require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
 
     // Park requires connection
-    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
 
     // Action and command methods
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_bool("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("Bisque Telescope Driver - Unsupported actions", "[bisque][telescope][unit]") {
@@ -253,10 +255,12 @@ TEST_CASE("Bisque Telescope Driver - Unsupported actions", "[bisque][telescope][
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_bool("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("Bisque Telescope Driver - Target Range Validation", "[bisque][telescope][unit]") {
@@ -778,7 +782,7 @@ TEST_CASE("Bisque Telescope Driver - handshake timeout releases the wrapper", "[
     REQUIRE(healthy.ok());
 
     auto stuck = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(silent.port()));
-    CHECK_THROWS_AS(stuck->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { stuck->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(stuck->get_connected());
 
     auto retry = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(healthy.port()));
@@ -834,7 +838,8 @@ TEST_CASE("Bisque protocol wrapper - a reply that arrives after its timeout is n
         ~Disconnect() { w.disconnect(); }
     } disconnect_at_exit{wrapper};
 
-    CHECK_THROWS_AS(wrapper.send_command("Out = 'R1#';", 0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)wrapper.send_command("Out = 'R1#';", 0); },
+                         alpacacore::AlpacaError::DriverException);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));  // the late reply is now in the socket
     CHECK(wrapper.send_command("Out = 'R2#';", 0) == "R2");
     CHECK(wrapper.send_command("Out = 'R3#';", 0) == "R3");

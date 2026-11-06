@@ -100,10 +100,6 @@ TEST_CASE("Gemini Flat Panel v2 Driver - Unsupported actions", "[gemini][flatpan
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("noop", false); },

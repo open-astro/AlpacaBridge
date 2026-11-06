@@ -45,6 +45,7 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using alpacacore::test::require_alpaca_error;
 
 struct FakeCelestronState {
     // The GOTO timer reads the driver's task clock (a FakeTaskClock in these
@@ -376,7 +377,7 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     // slew or axis jog cannot silently clobber it (ParkedException, 0x408).
     driver->park();
     REQUIRE(driver->get_slewing());
-    CHECK_THROWS_AS(driver->move_axis(0, 0.5), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->move_axis(0, 0.5); }, alpacacore::AlpacaError::InvalidWhileParked);
     // Tracking is off on this fake: the parked refusal comes first (open-astro#1274).
     try {
         driver->slew_to_coordinates_async(5.0, 20.0);
@@ -384,7 +385,7 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
     }
-    CHECK_THROWS_AS(driver->sync_to_coordinates(5.0, 20.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->sync_to_coordinates(5.0, 20.0); }, alpacacore::AlpacaError::InvalidWhileParked);
     try {
         driver->move_axis(0, 0.5);
     } catch (const alpacacore::AlpacaException& ex) {
@@ -570,7 +571,7 @@ TEST_CASE("Celestron async - Park completion poll failure persists through Slewi
         2, std::chrono::milliseconds(250), 48));
     CHECK(read_slewing_error(*driver));
     // The failed polls also latched the link fault (decision 0009 rule 1): AtPark refuses with its text.
-    CHECK_THROWS_AS(driver->get_at_park(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_at_park(); }, alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
 }
 

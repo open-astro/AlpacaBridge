@@ -1596,7 +1596,7 @@ TEST_CASE("ZWO async - a repeated Connected=false waits for the running teardown
 // finds the slots empty. It can pass by accident and never fails by accident; under ThreadSanitizer
 // (sanitizers-tsan, [stress-guard]) it also checks the reapers.
 // Falsified by: zwo_telescope_driver.cpp abort_slew(): reaping the GOTO slot itself (goto_slot_.cancel_all_and_join()
-// after fence_goto(), a reaper outside set_connected_mutex_ that races disconnect's reap, failure 0011).
+// after fence_goto(), a reaper outside transition_mutex_ that races disconnect's reap, failure 0011).
 TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO target write",
           "[zwo][telescope][async][operation-slot][stress-guard]") {
     const bool abort_first = GENERATE(true, false);

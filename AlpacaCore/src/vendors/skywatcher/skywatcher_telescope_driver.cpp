@@ -5793,7 +5793,13 @@ private:
                     continue;
                 }
                 if (send_final_approach_locked(lock)) {
-                    continue;  // open-astro#437: land the final leg the same way
+                    // open-astro#437: land the final leg the same way, with its own
+                    // start grace: a stopped read right after its ":J" is not the end.
+                    // The 180 s Slew timeout restarts with it, so a goto that owes a
+                    // final leg may wait up to about 360 s in all.
+                    saw_slewing = false;
+                    start = clock_.now();
+                    continue;
                 }
                 break;
             }
@@ -6348,6 +6354,8 @@ private:
     util::AsyncOperation& stop_op(int axis) { return stop_ops_[axis]; }
 
 public:
+    /// Replaces the slew slot's thread factory, for a test that must hold back or
+    /// refuse a slew body's thread. Call before the first slew.
     void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         slew_.set_spawn_for_testing(std::move(spawn));
     }

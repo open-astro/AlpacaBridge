@@ -158,15 +158,6 @@ TEST_CASE("QHY Camera Driver - Not connected throws", "[qhy][camera][unit]") {
     require_alpaca_error([&] { driver->set_set_ccd_temperature(0.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_cooler_on(true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_cooler_on(false); }, alpacacore::AlpacaError::NotConnected);
-    CHECK_THROWS_AS(driver->get_gain(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_gain(100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_offset(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->start_exposure(1.0, true), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->stop_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->abort_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->pulse_guide(0, 100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_image_ready(), alpacacore::AlpacaException);
 }
 
 TEST_CASE("QHY Camera Driver - Disconnected state", "[qhy][camera][unit]") {
@@ -189,17 +180,19 @@ TEST_CASE("QHY Camera Driver - Unsupported actions", "[qhy][camera][unit]") {
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("anything", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->action("anything", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_blind("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_bool("", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_string("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("QHY Camera Driver - Sub-exposure not supported", "[qhy][camera][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0);
 
-    CHECK_THROWS_AS(driver->get_sub_exposure_duration(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_sub_exposure_duration(1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_sub_exposure_duration(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("QHY Camera Driver - ASCOM Error Codes", "[qhy][camera][unit]") {
@@ -260,7 +253,7 @@ TEST_CASE("QHY Camera Driver - A failed connect rolls back the ref-counted open"
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
 
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
     CHECK(fake.physical_opens == 1);
     CHECK(fake.physical_closes == 1);  // rolled back
@@ -490,7 +483,7 @@ TEST_CASE("QHY Camera Driver - a failed connect-time CURTEMP read keeps CCDTempe
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    CHECK_THROWS_AS(driver->get_ccd_temperature(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_ccd_temperature(); }, alpacacore::AlpacaError::InvalidOperation);
     driver->set_connected(false);
 }
 
@@ -1653,8 +1646,11 @@ TEST_CASE("QHY Camera Driver - failed control writes never leave a trusted old v
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
     driver->set_connected(true);
     fake.throw_from.insert("set_param");
-    CHECK_THROWS_AS(gain ? driver->set_gain(42) : driver->set_offset(17), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(gain ? driver->get_gain() : driver->get_offset(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { gain ? driver->set_gain(42) : driver->set_offset(17); },
+                         alpacacore::AlpacaError::DriverException);
+    // The failed write cleared the cached value, so the read reports the empty cache.
+    require_alpaca_error([&] { (void)(gain ? driver->get_gain() : driver->get_offset()); },
+                         alpacacore::AlpacaError::InvalidOperation);
     fake.throw_from.clear();
     if (gain)
         driver->set_gain(43);
@@ -3141,7 +3137,7 @@ TEST_CASE("QHY Camera Driver - reconnect clears an unprepared cooler off before 
     };
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(2, seconds(2)));
-    CHECK_THROWS_AS(driver->set_cooler_on(false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_cooler_on(false); }, alpacacore::AlpacaError::DriverException);
     disconnect();  // Preparation fails again; no action owns this Pending request.
     REQUIRE(fake.call_count("prepare_cooler_off") == 2);
     CHECK(sdk.pwm_off_writes.load() == 0);
@@ -3287,7 +3283,7 @@ TEST_CASE("QHY Camera Driver - failed cooler off cleanup still closes the camera
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(2, seconds(2)));
     if (failure == "prepare_cooler_off") {
-        CHECK_THROWS_AS(driver->set_cooler_on(false), alpacacore::AlpacaException);
+        require_alpaca_error([&] { driver->set_cooler_on(false); }, alpacacore::AlpacaError::DriverException);
     } else {
         driver->set_cooler_on(false);
     }

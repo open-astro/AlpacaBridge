@@ -63,7 +63,8 @@ SKIP = {"debhelper-compat"}
 CI = ".github/workflows/ci.yml"
 # (ci.yml step name, purl template): tools CI downloads at a pinned version.
 CI_TOOL_STEPS = (("Build cppcheck 2.17.x from source", "pkg:github/danmar/cppcheck@{ver}"),
-                 ("Install zizmor", "pkg:github/zizmorcore/zizmor@v{ver}"))
+                 ("Install zizmor", "pkg:github/zizmorcore/zizmor@v{ver}"),
+                 ("Install PMD", "pkg:github/pmd/pmd@{ver}"))
 # The same ver= pins in other workflows: {workflow path: ((step name, purl template), ...)}.
 WORKFLOW_TOOL_STEPS = {".github/workflows/osv-scan.yml": (("Install OSV-Scanner",
                                                           "pkg:github/google/osv-scanner@v{ver}"),)}
@@ -170,7 +171,7 @@ def parse_step_pins(text: str, path: str, steps) -> tuple[list[str], list[str]]:
 def parse_ci_tools(text: str) -> tuple[list[str], list[str]]:
     """Return (purls, errors) for the tools ci.yml installs outside debian/control.
 
-    cppcheck and zizmor are pinned by a ``ver=`` line in their install step; the
+    cppcheck, zizmor and PMD are pinned by a ``ver=`` line in their install step; the
     CI_APT_TOOLS come unpinned from the runner's apt (Ubuntu 24.04), so their purls
     carry no version.
     """
@@ -820,11 +821,13 @@ def self_test() -> int:
           "      - name: Build cppcheck 2.17.x from source\n        run: |\n"
           "          ver=2.17.1\n          sha256=00\n"
           "      - name: Install zizmor\n        run: |\n          ver=1.25.2\n"
+          "      - name: Install PMD\n        run: |\n          ver=7.7.0\n"
           "      - name: Later\n        run: ver=9.9.9\n")
     tools, errs = parse_ci_tools(ci)
     apt = [f"pkg:deb/ubuntu/{t}?{CI_APT_QUALIFIERS}" for t in CI_APT_TOOLS]
     assert errs == [] and tools == ["pkg:github/danmar/cppcheck@2.17.1",
-                                    "pkg:github/zizmorcore/zizmor@v1.25.2", *apt], (tools, errs)
+                                    "pkg:github/zizmorcore/zizmor@v1.25.2",
+                                    "pkg:github/pmd/pmd@7.7.0", *apt], (tools, errs)
     assert "cmake" in parse_apt_installs(ci) and "-y" not in parse_apt_installs(ci)
     assert "echo" not in parse_apt_installs(ci), "a continuation ends at a line without a backslash"
     # A commented-out install is not an install.
@@ -835,7 +838,7 @@ def self_test() -> int:
         assert parse_apt_installs(line) == {"gcovr"}, (sep, parse_apt_installs(line))
     # A reworded step or a dropped apt line is reported, never silently omitted.
     tools, errs = parse_ci_tools(ci.replace("Install zizmor", "Fetch zizmor").replace("catch2 ", ""))
-    assert tools == ["pkg:github/danmar/cppcheck@2.17.1", *apt[1:]], tools
+    assert tools == ["pkg:github/danmar/cppcheck@2.17.1", "pkg:github/pmd/pmd@7.7.0", *apt[1:]], tools
     assert len(errs) == 2 and "'Install zizmor'" in errs[0] and "catch2" in errs[1], errs
     # A tool named outside an apt-get install (here: an echo) is not an install.
     _, errs = parse_ci_tools(ci.replace(" shellcheck nodejs", " shellcheck"))

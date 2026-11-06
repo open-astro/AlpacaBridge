@@ -91,10 +91,12 @@ TEST_CASE("Gemini PDH Switch Driver - Unsupported actions", "[gemini][switch][un
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
 
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_bool("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("Gemini PDH Switch Driver - Value range validation", "[gemini][switch][unit]") {

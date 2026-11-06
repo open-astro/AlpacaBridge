@@ -85,9 +85,8 @@ TEST_CASE("FakeQHYSDK - closing an unopened camera is counted, not thrown", "[qh
 
 TEST_CASE("FakeQHYSDK - per-camera calls require an open handle", "[qhy][fake][unit]") {
     auto fake = make_fake();
-    CHECK_THROWS_AS(fake.init_camera("fake-qhy-0"), AlpacaException);
-    CHECK_THROWS_AS(fake.get_param("fake-qhy-0", control::GAIN), AlpacaException);
-    CHECK_THROWS_AS(fake.get_cfw_position("fake-qhy-0"), AlpacaException);
+    require_alpaca_error([&] { fake.init_camera("fake-qhy-0"); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)fake.get_cfw_position("fake-qhy-0"); }, AlpacaError::NotConnected);
 
     try {
         fake.get_param("fake-qhy-0", control::GAIN);
@@ -152,9 +151,9 @@ TEST_CASE("FakeQHYSDK - an unavailable SDK resource fails the three entry points
     fake.sdk_resource_available = false;
 
     std::string model;
-    CHECK_THROWS_AS(fake.enumerate_cameras(), AlpacaException);
-    CHECK_THROWS_AS(fake.get_camera_model("fake-qhy-0", model), AlpacaException);
-    CHECK_THROWS_AS(fake.open_camera("fake-qhy-0"), AlpacaException);
+    require_alpaca_error([&] { (void)fake.enumerate_cameras(); }, AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)fake.get_camera_model("fake-qhy-0", model); }, AlpacaError::DriverException);
+    require_alpaca_error([&] { fake.open_camera("fake-qhy-0"); }, AlpacaError::DriverException);
     CHECK(fake.physical_opens == 0);
 }
 
@@ -468,7 +467,7 @@ TEST_CASE("FakeQHYSDK - an empty readout-mode list still accepts index 0", "[qhy
     REQUIRE(fake.get_num_readout_modes("fake-qhy-0") == 1);
     CHECK_NOTHROW(fake.set_readout_mode("fake-qhy-0", 0));
     // One past the advertised count is still a DriverException.
-    CHECK_THROWS_AS(fake.set_readout_mode("fake-qhy-0", 1), AlpacaException);
+    require_alpaca_error([&] { fake.set_readout_mode("fake-qhy-0", 1); }, AlpacaError::DriverException);
     // The synthesized name is unchanged by the floor.
     CHECK(fake.get_readout_mode_name("fake-qhy-0", 0) == "Mode 0");
 }

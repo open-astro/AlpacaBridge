@@ -783,7 +783,7 @@ TEST_CASE("SynScan snapshot - a configured, handset-read or set site is served",
         auto driver = connected_driver_without_site(server, poll_clock, 300);
         REQUIRE(driver->get_connected());
         sc::set_status_poll_paused_for_testing(*driver, true);
-        CHECK_THROWS_AS(driver->get_site_latitude(), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)driver->get_site_latitude(); }, alpacacore::AlpacaError::ValueNotSet);
         st->w_site = true;
         poll_clock.advance(seconds(3));  // past the site retry delay
         for (int tick = 0; tick < 20 && !site_served(*driver); ++tick) {
@@ -793,7 +793,7 @@ TEST_CASE("SynScan snapshot - a configured, handset-read or set site is served",
         CHECK(driver->get_site_longitude() == Catch::Approx(151.0 + 12.0 / 60.0 + 54.0 / 3600.0));
         driver->set_connected(false);
         // Disconnected, the getters refuse before anything else, like the other reads.
-        CHECK_THROWS_AS(driver->get_site_latitude(), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)driver->get_site_latitude(); }, alpacacore::AlpacaError::NotConnected);
     }
 }
 

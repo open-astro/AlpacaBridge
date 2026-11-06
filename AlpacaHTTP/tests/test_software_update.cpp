@@ -989,6 +989,20 @@ int main() {
         EXPECT(after_apt.find("=== RESULT: failure") < after_apt.find("=== RESULT: success"));
     }
 
+    {
+        // case: the update fetch is https only, so a plain http URL is refused before any connection (#1741)
+        // Falsified by: software_update.cpp fetch_url CURLOPT_PROTOCOLS_STR set back to "http,https" fails it
+        // (curl then tries port 1 and reports "Couldn't connect to server" instead of "Unsupported protocol").
+        alpacahttp::util::SystemSoftwareUpdateBackend backend("u.service", "", "", "");
+        std::string what;
+        try {
+            backend.fetch_url("http://127.0.0.1:1/Packages", std::chrono::seconds(1));
+        } catch (const SoftwareUpdateError& e) {
+            what = e.what();
+        }
+        EXPECT(what.find("Unsupported protocol") != std::string::npos);
+    }
+
     if (std::system("command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1") == 0) {
         // case: a stop signal during the apt-get update puts the previous drop-in back and leaves no temp file
         // Falsified by: SystemSoftwareUpdateBackend::read_channel (software_update.cpp) always returning Beta fails

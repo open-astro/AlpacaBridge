@@ -808,9 +808,12 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
     // slew or axis jog cannot silently clobber it (ParkedException, 0x408).
     driver->park();
     REQUIRE(driver->get_slewing());
-    CHECK_THROWS_AS(driver->move_axis(0, 0.5), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->slew_to_coordinates_async(5.0, 20.0), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->sync_to_coordinates(5.0, 20.0), alpacacore::AlpacaException);
+    alpacacore::test::require_alpaca_error([&] { driver->move_axis(0, 0.5); },
+                                           alpacacore::AlpacaError::InvalidWhileParked);
+    alpacacore::test::require_alpaca_error([&] { driver->slew_to_coordinates_async(5.0, 20.0); },
+                                           alpacacore::AlpacaError::InvalidWhileParked);
+    alpacacore::test::require_alpaca_error([&] { driver->sync_to_coordinates(5.0, 20.0); },
+                                           alpacacore::AlpacaError::InvalidWhileParked);
     try {
         driver->move_axis(0, 0.5);
     } catch (const alpacacore::AlpacaException& ex) {

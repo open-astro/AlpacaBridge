@@ -224,11 +224,11 @@ public:
             }
         }
         // Join EVERY background body before members are destroyed, under
-        // set_connected_mutex_ like the other reapers (failure 0011): the GOTO
+        // transition_mutex_ like the other reapers (failure 0011): the GOTO
         // body (fenced first), the last disconnect teardown (which itself joins
         // the pulse drain and the poll), and -- if we were never connected or a
         // teardown never ran -- the pulse drain and the poll directly.
-        std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
+        std::lock_guard<std::mutex> lifecycle_lock(transition_mutex_);
         fence_goto();
         goto_slot_.cancel_all_and_join();
         teardown_slot_.cancel_all_and_join();
@@ -313,7 +313,7 @@ public:
         // slot from two threads and re-clear poll_stop_ under the other
         // side's join -- a permanent wedge (found by the [stress] telescope
         // suite; failure 0011). No body takes this mutex.
-        std::lock_guard<std::mutex> lifecycle_lock(set_connected_mutex_);
+        std::lock_guard<std::mutex> lifecycle_lock(transition_mutex_);
 
         if (!connected) {
             connected_.store(false);
@@ -385,7 +385,7 @@ public:
         // strict ordering).
         teardown_slot_.cancel_all_and_join();
 
-        // set_connected_mutex_ is this driver's transition lock and the protocol wrapper's own mutex is
+        // transition_mutex_ is this driver's transition lock and the protocol wrapper's own mutex is
         // its I/O lock: the handshake below runs under them and never under mutex_, which each step
         // takes for the short state publish only (decision 0016).
         auto& protocol = protocol_;
@@ -523,7 +523,9 @@ public:
                 site_elevation_m_ = pending_site_elevation_.value();
             }
         };
-        auto sync_mount_time_if_configured = [&]() {
+        // `client_writes_seen`: utc_client_writes_ when the link went up. A client UTCDate write that landed since
+        // is newer than the host clock and wins: the sync skips the time write (the site still goes out).
+        auto sync_mount_time_if_configured = [&](std::uint64_t client_writes_seen) {
             if (!sync_time_on_connect_) {
                 return;
             }
@@ -549,6 +551,13 @@ public:
             // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
             const int offset_minutes = 0;
             TimeInfo info = from_utc_time_point(now, offset_minutes);
+            std::lock_guard<std::mutex> time_write(time_write_mutex_);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (utc_client_writes_ != client_writes_seen) {
+                    return;
+                }
+            }
             protocol.set_time_info(info);
             std::lock_guard<std::mutex> lock(mutex_);
             utc_offset_.set(now, clock_.now());
@@ -570,10 +579,11 @@ public:
             stop_poll_thread();
             poll_stop_.store(false);
             reset_session_state_for_connect(/*keep_telemetry_caches=*/true);
+            const std::uint64_t client_writes_seen = utc_client_writes_copy();
             apply_or_load_site_info();
             apply_pending_elevation();
             try {
-                sync_mount_time_if_configured();
+                sync_mount_time_if_configured(client_writes_seen);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
@@ -620,6 +630,7 @@ public:
                     mount_info_ = mount_info;
                 }
                 protocol.finish_identity_check();
+                const std::uint64_t client_writes_seen = utc_client_writes_copy();
                 connected_.store(true);
 
                 apply_or_load_site_info();
@@ -669,7 +680,7 @@ public:
                 }
 
                 try {
-                    sync_mount_time_if_configured();
+                    sync_mount_time_if_configured(client_writes_seen);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO",
                                     "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
@@ -1509,8 +1520,13 @@ public:
         TimeInfo info = from_utc_time_point(utc, offset_minutes);
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
 
+        // The wire write and the anchor below go together, so the connect's host-time
+        // sync cannot land between them and leave the mount and the anchor apart.
+        std::lock_guard<std::mutex> time_write(time_write_mutex_);
         if (connected_.load()) {
             protocol_.set_time_info(info);
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++utc_client_writes_;  // newer than the connect's host-time sync, which then skips
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -3076,9 +3092,19 @@ private:
     // mutex_.
     std::mutex target_write_mutex_;
     // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
-    // read-back and re-send. No getter takes it. Order: set_connected_mutex_, then this, then the protocol
+    // read-back and re-send. No getter takes it. Order: transition_mutex_, then this, then the protocol
     // wrapper's mutex, then mutex_.
     std::mutex site_write_mutex_;
+    // Serialises every time write with the anchor it sets: set_utc_date() and the
+    // connect's time sync. No getter takes it. Order: transition_mutex_, then this,
+    // then the protocol wrapper's mutex, then mutex_.
+    std::mutex time_write_mutex_;
+    std::uint64_t utc_client_writes_ = 0;  // client UTCDate writes that reached the wire; guarded by mutex_
+
+    std::uint64_t utc_client_writes_copy() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return utc_client_writes_;
+    }
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     std::string mount_info_;
@@ -3158,7 +3184,7 @@ private:
     // start/reap and their stop flags can never interleave between two
     // bodies. Taken after the base pending-disconnect gates; never taken by
     // any body.
-    std::mutex set_connected_mutex_;
+    std::mutex transition_mutex_;
     std::chrono::steady_clock::time_point pulse_queue_end_;
     mutable bool parked_cached_;
     mutable bool park_command_active_;

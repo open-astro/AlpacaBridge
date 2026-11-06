@@ -24,8 +24,8 @@ Badge (check 25's number): python3 scripts/check_docs_drift.py --badge
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
      docs/development.md build-options table.
-  2. The zizmor pinned version + sha256 are identical between ci.yml and
-     ci_preflight.sh.
+  2. The zizmor and PMD pinned versions + sha256 are identical between ci.yml
+     and ci_preflight.sh.
   3. The cppcheck --suppress list is identical between ci.yml and
      ci_preflight.sh (ci-gates instructions, Docs drift bullet: "keep the
      cppcheck --suppress lists identical").
@@ -298,6 +298,30 @@ def check_zizmor_pin_sync():
             "zizmor sha256 mismatch: ci.yml has %s, ci_preflight.sh has %s"
             % (ci_sha.group(1), pf_sha.group(1))
         )
+    failures.extend(_pmd_pin_findings(ci, preflight))
+    return failures
+
+
+def _pmd_pin_findings(ci, preflight):
+    """The PMD pins of the duplication job and ci_preflight.sh agree (#1755). Pure,
+    so --self-test can drive it."""
+    ci_block = _scoped_block(ci, "- name: Install PMD", ("- name:",))
+    if ci_block is None:
+        return ["could not find the 'Install PMD' step in ci.yml"]
+    pins = {
+        "ci.yml version": re.search(r"^\s*ver=([0-9.]+)\s*$", ci_block, re.MULTILINE),
+        "ci.yml sha256": re.search(r"^\s*sha256=([0-9a-f]{64})\s*$", ci_block, re.MULTILINE),
+        "ci_preflight.sh version": re.search(r'^PMD_VER="([0-9.]+)"', preflight, re.MULTILINE),
+        "ci_preflight.sh sha256": re.search(r'^PMD_SHA256="([0-9a-f]{64})"', preflight, re.MULTILINE),
+    }
+    missing = [name for name, m in pins.items() if not m]
+    if missing:
+        return ["could not find the PMD pin(s): %s" % ", ".join(missing)]
+    failures = []
+    for what in ("version", "sha256"):
+        a, b = pins["ci.yml " + what].group(1), pins["ci_preflight.sh " + what].group(1)
+        if a != b:
+            failures.append("PMD %s mismatch: ci.yml has %s, ci_preflight.sh has %s" % (what, a, b))
     return failures
 
 
@@ -1167,6 +1191,10 @@ MEMORY_COMMENT_PATH_RE = re.compile(r"\bdocs/(?:failures|decisions)/[A-Za-z0-9._
 # A comment may cite a record by number only (`docs/decisions/0008`, PR #1410 audit):
 # the number must name exactly one record.
 MEMORY_COMMENT_ID_RE = re.compile(r"\bdocs/(failures|decisions)/(\d{4})(?!-|\w|\.\w)")
+# A record cited in words (`decision 0009`), in a source comment or anywhere in a
+# docs page; about 1,100 such citations exist and a renumbered record would
+# otherwise pass (#2080).
+DECISION_WORD_RE = re.compile(r"\bdecision (\d{4})\b", re.I)
 FIRST_PARTY_COMMENT_EXTENSIONS = {".cpp", ".h", ".js", ".py", ".sh"}
 # The real tree has ~330 candidate files; the self-test fixture has a handful.
 MIN_MEMORY_COMMENT_FILES = 5
@@ -1180,11 +1208,12 @@ def check_memory_comment_paths_exist(root=ROOT):
     """
     failures = []
     scanned = 0
-    for component in ("AlpacaCore", "AlpacaHTTP", "scripts"):
+    for component in ("AlpacaCore", "AlpacaHTTP", "scripts", "docs"):
         if not (root / component).is_dir():
             continue
         for path in (root / component).rglob("*"):
-            if not path.is_file() or path.suffix not in FIRST_PARTY_COMMENT_EXTENSIONS:
+            is_doc = component == "docs" and path.suffix == ".md"
+            if not path.is_file() or (path.suffix not in FIRST_PARTY_COMMENT_EXTENSIONS and not is_doc):
                 continue
             rel = path.relative_to(root)
             # Exclusions match repo-relative DIRECTORY components only. The
@@ -1195,14 +1224,16 @@ def check_memory_comment_paths_exist(root=ROOT):
             directories = rel.parts[:-1]
             if "external" in directories or any(part.startswith("build") for part in directories):
                 continue
-            scanned += 1
+            if not is_doc:
+                scanned += 1
             for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                if not line.lstrip().startswith(("//", "#", "*")):
+                if not is_doc and not line.lstrip().startswith(("//", "#", "*")):
                     continue
                 for reference in MEMORY_COMMENT_PATH_RE.findall(line):
                     if not (root / reference).is_file():
                         failures.append("%s:%d references a missing memory record: %s" % (rel, lineno, reference))
-                for directory, number in MEMORY_COMMENT_ID_RE.findall(line):
+                cited = MEMORY_COMMENT_ID_RE.findall(line) + [("decisions", n) for n in DECISION_WORD_RE.findall(line)]
+                for directory, number in cited:
                     hits = list((root / "docs" / directory).glob(number + "-*.md"))
                     if len(hits) != 1:
                         failures.append("%s:%d cites docs/%s/%s, which names %d records (expected 1)"
@@ -2351,7 +2382,7 @@ DECISION_INDEX_LINK_RE = re.compile(r"^- \[[^\]]+\]\((\d{4}-[^)]+\.md)\)( \(reti
 # defect with an issue, never a clause (README.md, "Rules"). A rule whose bound
 # needs one of these words ends with ` <!-- allowed -->` (DECISION_RULE_RE's
 # `allowed` group, so check_adr_scope.py reads a marked rule as any other).
-DECISION_EXCEPTION_WORD_RE = re.compile(r"\b(except|unless|until|for now)\b", re.I)
+DECISION_EXCEPTION_WORD_RE = re.compile(r"\b(except|exception|unless|until|for now)\b", re.I)
 # `Checked by: review` names no evidence, so the bot has nothing to apply. New
 # rules write `review (<what to look for>)`; the records below keep the bare
 # form they had when the form changed, and this baseline may only fall: lower
@@ -2361,7 +2392,7 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0002-server-thread-ownership.md": 1,
     "0003-docs-drift-gates.md": 1,
     "0005-task-clock.md": 4,
-    "0006-async-operation-ownership.md": 3,
+    "0006-async-operation-ownership.md": 0,
     "0007-lan-surface-threat-model.md": 13,
     "0009-link-loss-and-relink-policy.md": 0,
     "0011-cgx-logical-reference-continuity.md": 0,
@@ -2370,7 +2401,7 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0014-utc-offset.md": 2,
     "0015-sdk-seams.md": 4,
     "0016-getters-never-wait-on-device-io.md": 0,
-    "0017-serial-port-ownership.md": 8,
+    "0017-serial-port-ownership.md": 0,
     "0019-connect-without-site.md": 1,
 }
 # The negative catalogue's rules have no natural file scope, so it alone may
@@ -2812,7 +2843,7 @@ def print_badge(root=ROOT):
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
-    ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
+    ("zizmor and PMD pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
     ("cppcheck --suppress sync (ci.yml vs ci_preflight.sh)", check_cppcheck_suppress_sync),
     ("VERSION matches README badge", check_version_matches_readme),
     ("Blocking get_connected() list matches the code", check_blocking_get_connected_list),
@@ -3058,6 +3089,12 @@ def self_test():
             "AlpacaCore/build/gen.cpp": "// See docs/failures/0005-missing.md\n",
             "AlpacaCore/external/sdk.h": "// See docs/failures/0006-missing.md\n",
             "AlpacaCore/src/notes.txt": "// See docs/failures/0007-missing.md\n",
+            # A record cited by its number in words (#2080): the number must
+            # name exactly one record, in a source comment and in a docs page.
+            "docs/decisions/0001-present.md": "# present\n",
+            "AlpacaCore/src/word_ok.cpp": "// decision 0001 rule 2\n",
+            "AlpacaCore/src/word_bad.cpp": "// Decision 0099 rule 2\n",
+            "docs/page.md": "See decision 0098 for the rule.\n",
         }
         for name, text in fixture.items():
             (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -3075,7 +3112,13 @@ def self_test():
               not any("gen.cpp" in f or "sdk.h" in f for f in found))
         check("memory comment check: only first-party source extensions are scanned",
               not any("notes.txt" in f for f in found))
-        check("memory comment check: exactly the two expected findings", len(found) == 2)
+        check("memory comment check: a `decision NNNN` citation of a present record is not reported",
+              not any("word_ok.cpp" in f for f in found))
+        check("memory comment check: a `decision NNNN` citation of a missing record is reported",
+              any(f.startswith("AlpacaCore/src/word_bad.cpp:1 ") and "decisions/0099" in f for f in found))
+        check("memory comment check: a `decision NNNN` citation in a docs page is checked",
+              any(f.startswith("docs/page.md:1 ") and "decisions/0098" in f for f in found))
+        check("memory comment check: exactly the four expected findings", len(found) == 4)
         empty = Path(tmp) / "empty"
         empty.mkdir()
         check("memory comment check: a root with no first-party files trips the floor",
@@ -3843,6 +3886,18 @@ def self_test():
           any("0 bare `Checked by: review` rules remain but DECISION_BARE_REVIEW_BASELINE allows 1" in x for x in f))
     f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing unless asked."))
     check("decision records: an exception word in a rule is reported", any("rule 1 says `unless`" in x for x in f))
+    f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing, with one exception."))
+    check("decision records: the word `exception` in a rule is reported (#2080)",
+          any("rule 1 says `exception`" in x for x in f))
+
+    pmd_ci = ("      - name: Install PMD\n        run: |\n          ver=7.7.0\n          sha256=" + "a" * 64 +
+              "\n      - name: Next\n          ver=9.9.9\n")
+    pmd_pf = 'PMD_VER="7.7.0"\nPMD_SHA256="' + "a" * 64 + '"\n'
+    check("PMD pins: equal pins pass, scoped to the Install PMD step", _pmd_pin_findings(pmd_ci, pmd_pf) == [])
+    check("PMD pins: a sha256 mismatch is reported",
+          any("PMD sha256 mismatch" in x for x in _pmd_pin_findings(pmd_ci, pmd_pf.replace("a" * 64, "b" * 64))))
+    check("PMD pins: a missing preflight pin is reported",
+          any("could not find the PMD pin" in x for x in _pmd_pin_findings(pmd_ci, "")))
     f = records(first=good_record.replace("1. Do a thing. Scope: `src/a.cpp`. Checked by: review.",
                                           "1. Do a thing until told. Scope: `src/a.cpp`. Checked by: review. <!-- allowed -->"))
     check("decision records: the allowed marker admits a bounded rule", f == [])

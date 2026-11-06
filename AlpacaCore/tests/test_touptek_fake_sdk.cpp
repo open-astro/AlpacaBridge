@@ -276,7 +276,7 @@ TEST_CASE("ToupTek camera - connect-path failure releases the shared open (r18 #
     fake.throw_from.insert("put_trigger_mode");
 
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
-    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
     // The open must be balanced — a leaked ref here means the NEXT connect
     // returns the same stale handle with open_count 2 and Close never fires.
@@ -361,7 +361,7 @@ TEST_CASE("ToupTek thermal switch - failed connect releases the shared open", "[
     fake.throw_from.insert("get_heat_max");
 
     auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
-    CHECK_THROWS_AS(thermal->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { thermal->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(thermal->get_connected() == false);
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
@@ -459,7 +459,7 @@ TEST_CASE("ToupTek focuser - connect-path failure releases the shared open", "[t
     fake.throw_from.insert("aaf_range");
 
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", fake);
-    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
     CHECK(fake.ref_count("fake-aaf-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/observingconditions_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <chrono>
 #include <functional>
@@ -74,5 +75,13 @@ std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
                                                                             const WeeWxHttpConfig& config,
                                                                             WeeWxFetcher fetcher);
+
+/**
+ * @brief As above, with the poll waiting on `clock` (a test seam; the clock must outlive the driver).
+ */
+std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
+                                                                            const WeeWxHttpConfig& config,
+                                                                            WeeWxFetcher fetcher,
+                                                                            util::TaskClock& clock);
 
 } // namespace alpacacore::vendor::weewx

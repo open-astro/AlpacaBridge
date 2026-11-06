@@ -72,6 +72,19 @@ public:
         frame_ = std::move(frame);
     }
     void set_muted(bool muted) { muted_.store(muted); }
+    /// Frames written to the pty so far.
+    long long frames_sent() const { return frames_sent_.load(); }
+    /// Returns once the worker has finished two passes after this call: a frame it was writing when
+    /// set_muted(true) landed is then on the pty, and no other follows while muted. False past @p limit.
+    bool wait_for_quiet(std::chrono::milliseconds limit) const {
+        const long long target = passes_.load() + 2;
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        while (passes_.load() < target) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    }
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return commands_;
@@ -129,7 +142,9 @@ private:
                     frame = frame_;
                 }
                 pty_write_bounded(pty_.master_fd(), frame, stop_);
+                frames_sent_.fetch_add(1);
             }
+            passes_.fetch_add(1);
         }
     }
 
@@ -139,6 +154,8 @@ private:
     std::thread worker_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> muted_{false};
+    std::atomic<long long> frames_sent_{0};
+    std::atomic<long long> passes_{0};
     const int first_frame_hold_ms_;
     int interval_ms_;
 
