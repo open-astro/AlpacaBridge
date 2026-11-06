@@ -315,4 +315,69 @@ TEST_CASE("ZWO mount reply sync - a reply that arrives during the blind drain le
     });
 }
 
+TEST_CASE("ZWO mount reply sync - a query the fence left no time for returns no reply, not its first byte",
+          "[zwo][reply-sync][issue2103]") {
+    on_both_transports(slow_position_mount(true), [](ZWOMountProtocolWrapper& wrapper) {
+        CHECK_THROWS(wrapper.send_command(":GD", true, kQueryTimeoutMs));
+        // The owed :GD reply never comes, so the fence spends this exchange's whole 250 ms. The status answer
+        // "GN#" is then already on the line, and only its first byte would fit in the late slice.
+        const auto start = Clock::now();
+        CHECK(wrapper.send_command(":GU", false, kQueryTimeoutMs).empty());
+        CHECK(ms_since(start) >= 240);
+        // The cut status is owed and fenced: the next query reads its own whole reply.
+        CHECK(wrapper.send_command(":GU", false) == "GN");
+    });
+}
+
+TEST_CASE("ZWO mount reply sync - a query reply cut by its own deadline is not returned",
+          "[zwo][reply-sync][issue2103]") {
+    // The first :GU gets no reply from the responder; the test pushes it in two parts that straddle the
+    // 250 ms deadline. Later :GU queries answer at once.
+    auto first_seen = std::make_shared<std::atomic<bool>>(false);
+    const Responder mount = [first_seen](const std::string& chunk) {
+        std::string out;
+        std::size_t pos = 0;
+        while (pos < chunk.size()) {
+            const std::size_t end = chunk.find('#', pos);
+            if (end == std::string::npos) break;
+            const std::string cmd = chunk.substr(pos, end - pos);
+            pos = end + 1;
+            if (cmd == ":GU" && !first_seen->exchange(true)) continue;
+            if (cmd == ":GU") out += "GN#";
+        }
+        return out;
+    };
+    on_both_transports(mount, [first_seen](ZWOMountProtocolWrapper& wrapper, const Push& push) {
+        // Real-time transport latency: "nN" at 200 ms (inside the deadline, no 100 ms idle gap before it
+        // ends), the rest at 300 ms (inside the late slice of both transports).
+        std::thread late([&] {
+            const auto give_up = Clock::now() + std::chrono::seconds(2);  // a query never sent fails, not hangs
+            while (!first_seen->load() && Clock::now() < give_up) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            push("nN");
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            push("HGM#");
+        });
+        std::string cut = "not read";
+        CHECK_NOTHROW(cut = wrapper.send_command(":GU", false, kQueryTimeoutMs));
+        late.join();
+        CHECK(cut.empty());
+        CHECK(wrapper.send_command(":GU", false) == "GN");
+    });
+}
+
+TEST_CASE("ZWO mount reply sync - a write ack in the late slice is still its reply", "[zwo][reply-sync][issue2103]") {
+    // :Sr acks 300 ms after it is sent: past the 250 ms timeout, inside the late slice.
+    const Responder mount = [](const std::string& chunk) {
+        if (chunk.rfind(":Sr", 0) != 0) return std::string{};
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        return std::string{"1"};
+    };
+    on_both_transports(mount, [](ZWOMountProtocolWrapper& wrapper) {
+        CHECK(wrapper.send_command(":Sr02:30:00", false, kQueryTimeoutMs) == "1");
+    });
+}
+
 #endif  // _WIN32
