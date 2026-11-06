@@ -261,10 +261,9 @@ public:
         }
     }
 
-    std::string get_gphoto_version() override {
-        log_and_maybe_throw("get_gphoto_version");
-        return gphoto_version;
-    }
+    // Like the real wrapper's gp_library_version() read: no call log and no before_call hook, so LockedGPhotoSDK can
+    // forward it under its own mutex while another call holds the shared one (open-astro#2148).
+    std::string get_gphoto_version() override { return gphoto_version; }
 
     std::string get_camera_summary(int handle) override {
         log_and_maybe_throw("get_camera_summary");
