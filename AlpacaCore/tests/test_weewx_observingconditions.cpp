@@ -541,11 +541,14 @@ TEST_CASE("WeeWX ObservingConditions Driver - feed stalls after connect: values 
     CHECK(after >= before);
     CHECK(driver->get_connected());
     CHECK(driver->get_temperature() == temp);
+    // An explicit Refresh against the failing feed throws and keeps the last reading.
+    CHECK_THROWS(driver->refresh());
+    CHECK(driver->get_temperature() == temp);
 
     // Recovery needs no reconnect: the next poll fetches again and succeeds.
     fake.fail_next(0);
     poll_once();
-    CHECK(fake.calls() == calls + 3);
+    CHECK(fake.calls() == calls + 4);
     CHECK(driver->get_connected());
     CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
 

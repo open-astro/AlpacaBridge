@@ -405,7 +405,12 @@ public:
                 update_property_timestamp_locked("skytemperature", snapshot.sky_temperature_c);
             }
             connected_.store(true);
-            start_polling();
+            try {
+                start_polling();
+            } catch (...) {
+                connected_.store(false);  // no poll thread: do not report Connected
+                throw;
+            }
         } else {
             stop_polling();
             connected_.store(false);

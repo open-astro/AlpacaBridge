@@ -1122,6 +1122,30 @@ TEST_CASE("ZWO redundant connect retries an unavailable mount clock only while U
     CHECK(rig.mount.count(":GMTI") == 2);
 }
 
+// Falsified by: the connect's host-time sync ignoring utc_client_writes_ (zwo_telescope_driver.cpp, the
+// `utc_client_writes_ != client_writes_seen` early return): it would send a second :SMTI and re-anchor to the host
+// clock.
+TEST_CASE("ZWO a client UTCDate write during connect wins over the host-time sync",
+          "[zwo][telescope][utc][connect][timing]") {
+    Rig rig(500, 0, /*sync_time=*/true);
+    REQUIRE(rig.mount.ok());
+    rig.mount.hold_reply(":Ggr");
+    auto connecting = std::async(std::launch::async, [&] { rig.driver->set_connected(true); });
+    REQUIRE(rig.mount.wait_until_held(5s));
+    const auto client = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 3h + 4min + 5s;
+    auto writing = std::async(std::launch::async, [&] { rig.driver->set_utc_date(client); });
+    // The write takes time_write_mutex_ first and then waits on the wire behind the held read; give it time to get
+    // that far, so the connect's sync can only reach the time write after the write has bumped the counter.
+    (void)writing.wait_for(300ms);
+    rig.mount.release();
+    REQUIRE(writing.wait_for(5s) == std::future_status::ready);
+    writing.get();
+    REQUIRE(connecting.wait_for(5s) == std::future_status::ready);
+    connecting.get();
+    CHECK(rig.mount.count(":SMTI") == 1);
+    CHECK(vendor::zwo::utc_anchor_for_testing(*rig.driver) == client);
+}
+
 TEST_CASE("ZWO UTC anchor preserves fractional elapsed time and earlier or later client writes",
           "[zwo][telescope][utc][issue1522]") {
     Rig rig;
