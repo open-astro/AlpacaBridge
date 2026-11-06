@@ -833,6 +833,45 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
+// #2067: the mirror of the #1706 cases. A MoveAxis already parked in its own axis's stop-wait must
+// survive a pulse that starts on the OTHER axis: the pulse's generation bump carried only a pulse
+// slot forward, so the MoveAxis threw "Motion superseded before dispatch". Both orders.
+TEST_CASE("SkyWatcher async - a pulse on the other axis does not supersede a MoveAxis stop-wait (#2067)",
+          "[skywatcher][async][pulseguide]") {
+    const bool move_ra = GENERATE(true, false);
+    CAPTURE(move_ra);
+    const int moved_axis = move_ra ? 0 : 1;
+    const int moved_channel = moved_axis + 1;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->move_axis(moved_axis, 1.0);
+    REQUIRE(mount.axis_running(moved_channel));
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread mover([&] {
+        try {
+            driver->move_axis(moved_axis, 2.0);
+        } catch (const alpacacore::AlpacaException&) {
+            threw = true;
+        }
+        done = true;
+    });
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // MoveAxis parked in its stop-wait
+    driver->pulse_guide(move_ra ? 0 : 2, 500);                        // North, or East: the other axis
+    const bool settled = run_clock_until(
+        clock, [&] { return done.load() && !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(20000));
+    mover.join();
+    CHECK(settled);
+    CHECK_FALSE(threw.load());
+    CHECK(mount.axis_running(moved_channel));  // the MoveAxis restarted its axis at the new rate
+    driver->move_axis(moved_axis, 0.0);
+    driver->set_connected(false);
+}
+
 // #1706 review: the pulse exception must belong to the pulse's own wait. An older MoveAxis(Dec)
 // stop-wait on the same axis stays superseded, or both commands own Dec and the pulse times out.
 // The two waiters poll 25 ms apart, so MoveAxis always sees the stopped axis first: without the
