@@ -4,7 +4,8 @@
 # collaborator (write, maintain or admin) to comment `ADR authorized <sha>`,
 # naming a commit (normally the head) at which the PR's record files had their current content.
 # scripts/check_adr_authorization.py decides and posts the result as the
-# commit status `adr-authorization` on the PR head, which the ruleset requires.
+# commit status `adr-authorization` on the PR head, which the ruleset requires
+# (adr-merge-queue.yml reports it in the merge queue).
 #
 # Two triggers, one result. pull_request_target re-evaluates on every push (a
 # push that changes a record file needs a new authorization; one that leaves
@@ -28,6 +29,10 @@ concurrency:
 
 jobs:
   adr-authorization:
+    # The job has its own name: the required context `adr-authorization` must
+    # be the status this job posts, because a job of that name that passes
+    # would satisfy the check even when the status fails.
+    name: adr-authorization (evaluate)
     # issue_comment fires for issues too; only PR comments matter.
     if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
     runs-on: ubuntu-24.04-arm

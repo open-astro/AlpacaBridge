@@ -15,6 +15,7 @@
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
@@ -200,8 +201,6 @@ public:
           timezone_valid_(false),
           manual_axis_slewing_({false, false}),
           manual_axis_tracking_restore_({std::nullopt, std::nullopt}),
-          slew_force_until_(std::chrono::steady_clock::time_point{}),
-          pulse_guiding_end_(std::chrono::steady_clock::time_point{}),
           pulse_queue_end_(std::chrono::steady_clock::time_point{}),
           parked_cached_(false),
           park_command_active_(false),
@@ -348,8 +347,8 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     manual_axis_slewing_[0] = false;
                     manual_axis_slewing_[1] = false;
-                    slew_force_until_ = std::chrono::steady_clock::time_point{};
-                    pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
+                    slew_hold_.clear();
+                    pulse_hold_.clear();
                     ra_offset_hours_ = 0.0;
                     dec_offset_deg_ = 0.0;
                     park_command_active_ = false;
@@ -395,8 +394,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point{};
-            pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
+            slew_hold_.clear();
+            pulse_hold_.clear();
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
             if (!keep_telemetry_caches) {
@@ -803,7 +802,7 @@ public:
         check_connected();
         const auto now = clock_.now();
         std::lock_guard<std::mutex> lock(mutex_);
-        return pulse_guiding_end_ > now;
+        return pulse_hold_.active(now);
     }
 
     bool get_can_set_declination_rate() const override { return false; }
@@ -866,7 +865,7 @@ public:
                 std::chrono::steady_clock::time_point pulse_end;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    pulse_end = pulse_guiding_end_;
+                    pulse_end = pulse_hold_.until();
                 }
                 const auto now = clock_.now();
                 if (pulse_end <= now) {
@@ -1361,7 +1360,7 @@ public:
         park_command_active_ = false;
         park_motion_seen_ = false;
         parked_cached_ = false;
-        slew_force_until_ = clock_.now() + std::chrono::seconds(2);
+        slew_hold_.arm(clock_.now(), std::chrono::seconds(2));
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
         // goto failed.
@@ -1402,7 +1401,7 @@ public:
             if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
                 return true;
             }
-            if (slew_force_until_ > now) {
+            if (slew_hold_.active(now)) {
                 return true;
             }
             if (goto_active_) return true;
@@ -1558,7 +1557,7 @@ public:
         park_motion_seen_ = false;
         park_state_cached_ = false;
         park_state_at_ = std::chrono::steady_clock::time_point{};
-        slew_force_until_ = clock_.now() + std::chrono::seconds(5);
+        slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that calls FindHome after a failed GOTO must not be told the OLD
         // goto failed while it's homing.
@@ -1607,7 +1606,7 @@ public:
         park_command_active_ = true;
         park_command_started_ = clock_.now();
         park_motion_seen_ = false;
-        slew_force_until_ = clock_.now() + std::chrono::seconds(5);
+        slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that calls Park after a failed GOTO must not be told the OLD goto
         // failed while it's parking.
@@ -1635,7 +1634,7 @@ public:
         manual_axis_tracking_restore_[1] = std::nullopt;
         park_command_active_ = false;
         park_motion_seen_ = false;
-        slew_force_until_ = std::chrono::steady_clock::time_point{};
+        slew_hold_.clear();
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next
         // Slewing read must answer normally again.
@@ -1724,7 +1723,7 @@ public:
             ra_offset_hours_ += expected_hours;
             dec_offset_deg_ += expected_dec;
             dec_offset_deg_ = std::clamp(dec_offset_deg_, -180.0, 180.0);
-            pulse_guiding_end_ = pulse_queue_end_ + kPulseGuideHold;
+            pulse_hold_.arm(now, (pulse_queue_end_ - now) + kPulseGuideHold);
             pulse_queue_.push_back(task);
             snapshot_.write([](PolledFrame&) {});
             // A drain that is running takes the task; only the caller that finds none starts one.
@@ -1842,7 +1841,7 @@ public:
         std::uint64_t claim = 0;
         bool setup_was_pending = false;
         bool goto_was_active = false;
-        auto force_until_before = std::chrono::steady_clock::time_point{};
+        util::HoldWindow hold_before;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // Race (b): a disconnect that fenced after check_connected() above.
@@ -1857,12 +1856,12 @@ public:
             goto_send_cv_.notify_all();
             setup_was_pending = goto_setup_pending_;
             goto_was_active = goto_active_;
-            force_until_before = slew_force_until_;
+            hold_before = slew_hold_;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             manual_axis_tracking_restore_[0] = std::nullopt;
             manual_axis_tracking_restore_[1] = std::nullopt;
-            slew_force_until_ = clock_.now() + std::chrono::seconds(5);
+            slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
             goto_active_ = true;
             goto_setup_pending_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
@@ -1890,7 +1889,11 @@ public:
             if (goto_claim_ == claim) {
                 goto_setup_pending_ = false;
                 goto_active_ = setup_was_pending ? false : goto_was_active;
-                slew_force_until_ = setup_was_pending ? std::chrono::steady_clock::time_point{} : force_until_before;
+                if (setup_was_pending) {
+                    slew_hold_.clear();
+                } else {
+                    slew_hold_ = hold_before;
+                }
                 write_frame_locked();
             }
             if (!connected_.load()) {
@@ -1910,7 +1913,7 @@ public:
         auto abandon = [&]() {
             std::lock_guard<std::mutex> lock(mutex_);
             if (goto_claim_ != claim) return;
-            slew_force_until_ = std::chrono::steady_clock::time_point{};
+            slew_hold_.clear();
             goto_active_ = false;
             goto_setup_pending_ = false;
             poll_pause_.store(false);
@@ -1955,7 +1958,7 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (goto_claim_ == claim) {
                         goto_setup_pending_ = false;
-                        slew_force_until_ = clock_.now() + std::chrono::seconds(5);
+                        slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
                         // A stopped sample taken before MS acceptance cannot finish this GOTO.
                         snapshot_.write([](PolledFrame&) {});
                         poll_pause_.store(false);
@@ -2220,7 +2223,7 @@ public:
             // successful unpark.
             park_state_cached_ = false;
             park_state_at_ = clock_.now();
-            slew_force_until_ = clock_.now() + std::chrono::seconds(2);
+            slew_hold_.arm(clock_.now(), std::chrono::seconds(2));
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that unparks after a failed GOTO must not be told the OLD
             // goto failed.
@@ -2260,7 +2263,7 @@ private:
             return ParkEvaluation::InProgress;
         }
         // Early stationary/completed replies can precede motion; keep completion behind the startup guard.
-        if (park_command_active_ && slew_force_until_ > now && park_status != ParkStatus::Error) {
+        if (park_command_active_ && slew_hold_.active(now) && park_status != ParkStatus::Error) {
             return ParkEvaluation::InProgress;
         }
         auto infer_with_unavailable_park_status = [&]() -> ParkEvaluation {
@@ -2433,7 +2436,8 @@ private:
         pulse_slot_.cancel();
         ra_offset_hours_ = 0.0;
         dec_offset_deg_ = 0.0;
-        pulse_guiding_end_ = clock_.now();
+        // until = now, not clear(): the no-sample deadline counts from this reset (update_link_state()).
+        pulse_hold_.arm(clock_.now(), std::chrono::nanoseconds::zero());
         snapshot_.write([](PolledFrame&) {});
         // open-astro#2072: a step already past its check sends its ":Mg" after the cancel; wait for it, so the caller's
         // own command follows it on the wire. pulse_mutex_ is released first (lock order: pulse_mutex_ before mutex_;
@@ -2573,7 +2577,7 @@ private:
         const bool expired =
             caches_ready_.load() &&
             (health_.faulted() ? health_.fault_stale(now)
-                               : now - std::max(last_mandatory_at_, pulse_guiding_end_) >= util::kLinkStalenessBound);
+                               : now - std::max(last_mandatory_at_, pulse_hold_.until()) >= util::kLinkStalenessBound);
         if (!transport_lost && !expired) return;
         loss_reason_ = link_fault_locked();
         if (loss_reason_.empty())
@@ -2631,7 +2635,7 @@ private:
             frame.tracking = tracking_state_valid_ ? std::optional<bool>(tracking_state_cached_) : std::nullopt;
             frame.parked = park_command_active_ ? std::optional<bool>(false) : park_state_cached_;
             if (frame.status && (goto_active_ || park_command_active_ || manual_axis_slewing_[0] ||
-                                 manual_axis_slewing_[1] || slew_force_until_ > clock_.now())) {
+                                 manual_axis_slewing_[1] || slew_hold_.active(clock_.now()))) {
                 frame.status->at_home = false;
                 frame.status->stop_or_tracking = false;
             }
@@ -2641,7 +2645,7 @@ private:
     bool telemetry_paused() const {
         if (poll_pause_.load() || poll_stop_.load()) return true;
         std::lock_guard<std::mutex> lock(mutex_);
-        return clock_.now() < pulse_guiding_end_;
+        return pulse_hold_.active(clock_.now());
     }
 
     void refresh_cached_values() const {
@@ -2709,7 +2713,7 @@ private:
             if (!connected_.load() || token != snapshot_.begin_poll()) return;
             const auto now = clock_.now();
             // Frame, GOTO completion and Park evaluation must all use this mandatory sample's guard deadline.
-            if (slew_force_until_ > *frame.mandatory_at) frame.status->stop_or_tracking = false;
+            if (slew_hold_.active(*frame.mandatory_at)) frame.status->stop_or_tracking = false;
             if (park_command_active_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] ||
                 !frame.status->stop_or_tracking) {
                 frame.status->at_home = false;
@@ -2724,7 +2728,7 @@ private:
             last_mandatory_at_ = *frame.mandatory_at;
             restored = health_.on_reply();
             // Setup/retries are not arrival; after MS acceptance, completion still needs the final pair.
-            if (!goto_setup_pending_ && status->stop_or_tracking && slew_force_until_ <= *frame.mandatory_at)
+            if (!goto_setup_pending_ && status->stop_or_tracking && !slew_hold_.active(*frame.mandatory_at))
                 goto_active_ = false;
         }
         if (restored) ALPACA_LOG_INFO("ZWO", "Mount communications restored");
@@ -2799,14 +2803,14 @@ private:
             auto next_time_refresh = clock_.now() + 30s;
             while (!poll_stop_.load() && ctx.stop_reason() == util::StopReason::None) {
                 update_link_state();
-                // pulse_guiding_end_ is mutex_-guarded everywhere else; an
+                // pulse_hold_ is mutex_-guarded everywhere else; an
                 // unlocked read here is torn against a concurrent pulse (M12).
-                std::chrono::steady_clock::time_point pulse_end;
+                util::HoldWindow pulse;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    pulse_end = pulse_guiding_end_;
+                    pulse = pulse_hold_;
                 }
-                if (poll_pause_.load() || clock_.now() < pulse_end) {
+                if (poll_pause_.load() || pulse.active(clock_.now())) {
                     if (!ctx.wait_for(50ms)) break;
                     continue;
                 }
@@ -2873,8 +2877,8 @@ private:
             if (ctx.stop_reason() != util::StopReason::None) return;
             const auto now = clock_.now();
             const auto end = now + std::chrono::milliseconds(task.duration_ms) + kPulseGuideHold;
-            if (end > pulse_guiding_end_) {
-                pulse_guiding_end_ = end;
+            if (!pulse_hold_.active(end)) {  // extend only: arm when end >= until (equal is a no-op)
+                pulse_hold_.arm(now, end - now);
             }
         }
 
@@ -3034,7 +3038,7 @@ private:
     void fence_goto() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (goto_claim_ != 0 && goto_setup_pending_) {
-            slew_force_until_ = std::chrono::steady_clock::time_point{};
+            slew_hold_.clear();
             poll_pause_.store(false);
         }
         goto_active_ = false;
@@ -3146,14 +3150,16 @@ private:
 
     std::array<bool, 2> manual_axis_slewing_;
     std::array<std::optional<bool>, 2> manual_axis_tracking_restore_;
-    std::chrono::steady_clock::time_point slew_force_until_;
+    // The Slewing force window (decision 0022, util::HoldWindow): armed for 2 s / 5 s by the initiators, read by
+    // get_slewing(), the frame and park/GOTO completion. Under mutex_.
+    util::HoldWindow slew_hold_;
     // A GOTO this driver started may still be in flight (open-astro#1274):
     // see own_goto_in_flight_locked(). Under mutex_.
     mutable bool goto_active_ = false;
     bool goto_setup_pending_ = false;  // mutex_: retries remain setup until MS succeeds
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, logged and forgotten by the setup body) used
-    // to leave Slewing read FALSE once slew_force_until_ expired --
+    // to leave Slewing read FALSE once slew_hold_ expired --
     // indistinguishable from a landed goto. Set (under mutex_) by the GOTO
     // body on a REAL failure while it holds its claim (never once it was
     // stopped), cleared by the next slew initiator, AbortSlew, and
@@ -3164,7 +3170,9 @@ private:
     // motion-ownership epoch, so an older Sync learns that a newer motion
     // command owns the mount (sync_to_pair()).
     uint64_t slew_error_epoch_ = 0;
-    std::chrono::steady_clock::time_point pulse_guiding_end_;
+    // The IsPulseGuiding window (decision 0022, util::HoldWindow): one window for both axes, ending at the last queued
+    // pulse plus kPulseGuideHold; its end is also the link-staleness base during a guide pause. Under mutex_.
+    util::HoldWindow pulse_hold_;
     mutable std::mutex pulse_mutex_;
     std::deque<PulseTask> pulse_queue_;
     bool pulse_drain_active_ = false;  // pulse_mutex_: a drain body runs and will take a queued task
