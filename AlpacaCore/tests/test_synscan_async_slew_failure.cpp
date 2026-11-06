@@ -26,9 +26,11 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -70,6 +72,28 @@ struct FakeSynScanState {
     std::atomic<bool> land_on_goto{true};
     std::mutex landed_mutex;
     std::string landed;
+    // A test that sets hold_tracking_write parks the next tracking write 'T' inside the handset until it
+    // release_tracking_write()s; tracking_write_held says the write has arrived there.
+    std::atomic<bool> hold_tracking_write{false};
+    std::mutex hold_mutex;
+    std::condition_variable hold_cv;
+    bool tracking_write_held = false;
+    bool tracking_write_released = false;
+    void park_tracking_write() {
+        std::unique_lock<std::mutex> lock(hold_mutex);
+        tracking_write_held = true;
+        hold_cv.notify_all();
+        hold_cv.wait(lock, [this] { return tracking_write_released; });
+    }
+    bool wait_tracking_write_held() {
+        std::unique_lock<std::mutex> lock(hold_mutex);
+        return hold_cv.wait_for(lock, std::chrono::seconds(5), [this] { return tracking_write_held; });
+    }
+    void release_tracking_write() {
+        std::lock_guard<std::mutex> lock(hold_mutex);
+        tracking_write_released = true;
+        hold_cv.notify_all();
+    }
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -133,6 +157,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
             case 'L':
                 return st->goto_in_progress() ? "1#" : "0#";
             case 'T':  // tracking mode write
+                if (st->hold_tracking_write.exchange(false)) st->park_tracking_write();
                 if (chunk.size() >= 2) {
                     st->tracking_mode.store(static_cast<unsigned char>(chunk[1]));
                 }
@@ -195,10 +220,11 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
 }
 
 // The driver on a caller-owned task clock, so a case steps its waits with advance_until() instead of sleeping.
-std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock) {
+std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock,
+                                                         int timeout_ms = 1000) {
     return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
-        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+        0, endpoint(port, timeout_ms), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
 }
 
 // Runs a blocking driver call on its own thread, stepping the clock until it returns, then rethrows what it threw.
@@ -1291,4 +1317,67 @@ TEST_CASE("SynScan MoveAxis - a Dec jog does not hide a keypad change from the n
     CHECK(st->command_count('T') == writes_before);
     driver->move_axis(1, 0.0);
     driver->set_connected(false);
+}
+
+// #2069: a Tracking write that reaches the wire ahead of the end of an RA pulse is the mode that stays. The write is
+// parked inside the handset so the pulse end wakes while it is on the wire, with the mode it cached before the write
+// landed; the end then sends its stop and restore behind it, in the wire turn, and must not put the old mode back.
+TEST_CASE("SynScan PulseGuide - the end of an RA pulse leaves a Tracking write that reached the wire first",
+          "[synscan][telescope][pulseguiding][tracking]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock, 10000);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    driver->pulse_guide(2, 500);
+
+    st->hold_tracking_write = true;
+    std::thread client([&] { driver->set_tracking(false); });
+    REQUIRE(st->wait_tracking_write_held());
+
+    // The pulse is over; its body wakes and reads the mode while the write is still parked.
+    const int stops_before = st->command_count('P');
+    // Stepped until the body's timer fires: it may not have parked on the clock yet when the pulse call returned.
+    // The write is still parked, so the body can only be woken, not past its turn.
+    REQUIRE(wait_until([&]() { return clock.waiter_count() >= 1; }, 4000));
+    clock.advance(std::chrono::milliseconds(600));
+    clock.wait_for_woken_settled(std::chrono::milliseconds(300));
+    st->release_tracking_write();
+    client.join();
+
+    // The pulse end's stop is on the wire; its cache write-through ran in the same turn, so Tracking is still off.
+    REQUIRE(advance_until(clock, [&]() { return st->command_count('P') > stops_before; }));
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);  // joins the pulse body, which has sent or skipped its stop and restore
+    CHECK(st->tracking_mode.load() == 0);
+}
+
+// The pulse end now waits in the wire turn, so a disconnect that joins it must still return once the turn comes.
+TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for its wire turn",
+          "[synscan][telescope][pulseguiding][disconnect]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock, 10000);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    driver->pulse_guide(2, 500);
+
+    st->hold_tracking_write = true;
+    std::thread client([&] { driver->set_tracking(false); });
+    REQUIRE(st->wait_tracking_write_held());
+    clock.advance(std::chrono::milliseconds(600));
+    clock.wait_for_woken_settled(std::chrono::milliseconds(300));
+
+    auto disconnected = std::async(std::launch::async, [&] { driver->set_connected(false); });
+    st->release_tracking_write();
+    client.join();
+    REQUIRE(disconnected.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    disconnected.get();
+    CHECK_FALSE(driver->get_connected());
 }
