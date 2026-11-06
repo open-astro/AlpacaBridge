@@ -1,0 +1,1 @@
+- QHY SDK: stop tracking the unbuilt `libqhyccd.a`, `usr/local/testapp/` and `usr/local/doc/` (about 16,000 lines); CMake still links `libqhyccd.so` and `debian/rules` still ships `.so*`. `AlpacaCore/.gitignore` keeps them out of the next SDK bump (issue #1741).
