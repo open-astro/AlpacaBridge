@@ -1339,11 +1339,18 @@ TEST_CASE("SynScan PulseGuide - the end of an RA pulse leaves a Tracking write t
     REQUIRE(st->wait_tracking_write_held());
 
     // The pulse is over; its body wakes and reads the mode while the write is still parked.
+    const int stops_before = st->command_count('P');
+    // Stepped until the body's timer fires: it may not have parked on the clock yet when the pulse call returned.
+    // The write is still parked, so the body can only be woken, not past its turn.
+    REQUIRE(wait_until([&]() { return clock.waiter_count() >= 1; }, 4000));
     clock.advance(std::chrono::milliseconds(600));
     clock.wait_for_woken_settled(std::chrono::milliseconds(300));
     st->release_tracking_write();
     client.join();
 
+    // The pulse end's stop is on the wire; its cache write-through ran in the same turn, so Tracking is still off.
+    REQUIRE(advance_until(clock, [&]() { return st->command_count('P') > stops_before; }));
+    CHECK_FALSE(driver->get_tracking());
     driver->set_connected(false);  // joins the pulse body, which has sent or skipped its stop and restore
     CHECK(st->tracking_mode.load() == 0);
 }
