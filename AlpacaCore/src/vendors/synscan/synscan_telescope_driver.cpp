@@ -904,7 +904,9 @@ public:
     }
 
     int get_tracking_rate() const override {
-        throw_if_link_lost_or_faulted();
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        throw_if_link_faulted();
         return 0;
     }
 
