@@ -457,7 +457,7 @@ public:
     }
 
     void set_tracking(bool tracking) override {
-        check_connected_now();
+        check_link_now();
         auto& protocol = BisqueProtocolWrapper::instance();
         // ignore_rates=true uses sidereal. The exchange runs without mutex_.
         protocol.set_tracking(tracking, true, 0.0, 0.0);
@@ -479,6 +479,7 @@ public:
 
     GuideRate get_guide_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
         return guide_rate_;
     }
 
@@ -492,6 +493,7 @@ public:
             throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
         guide_rate_ = rate;
     }
 
@@ -619,6 +621,7 @@ public:
     void set_target_declination(double dec) override {
         util::validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
@@ -635,12 +638,13 @@ public:
     void set_target_right_ascension(double ra) override {
         util::validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
 
     int get_tracking_rate() const override {
-        check_connected_now();
+        check_link_now();
         return 0; // Sidereal
     }
 
@@ -672,7 +676,7 @@ public:
     void find_home() override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_link_locked();
             check_not_parked("FindHome");
         }
         auto& protocol = BisqueProtocolWrapper::instance();
@@ -707,7 +711,7 @@ public:
             std::lock_guard<std::mutex> ilock(initiator_mutex_);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                check_connected();
+                check_link_locked();
                 parking_ = true;
                 guard.epoch = ++park_epoch_;
                 guard.armed = true;
@@ -752,7 +756,7 @@ public:
             throw AlpacaException("PulseGuide duration must be at most 30000 ms", AlpacaError::InvalidValue);
         }
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         check_not_parked("PulseGuide");
         if (duration == 0) {
             return;
@@ -867,7 +871,7 @@ public:
     }
 
     void set_park() override {
-        check_connected_now();
+        check_link_now();
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.set_park_position();
     }
@@ -879,11 +883,11 @@ public:
         // wire, so an AbortSlew cannot slip between them. Released before the wait loop.
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         check_not_parked("SlewToCoordinates");
         check_tracking_for_slew(lock, "SlewToCoordinates");
         // mutex_ was released for the tracking read: a disconnect or a park may have landed meanwhile (#1838).
-        check_connected();
+        check_link_locked();
         check_not_parked("SlewToCoordinates");
 
         auto& protocol = BisqueProtocolWrapper::instance();
@@ -909,11 +913,11 @@ public:
         detail::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see slew_to_coordinates()
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         check_not_parked("SlewToCoordinatesAsync");
         check_tracking_for_slew(lock, "SlewToCoordinatesAsync");
         // See slew_to_coordinates().
-        check_connected();
+        check_link_locked();
         check_not_parked("SlewToCoordinatesAsync");
 
         auto& protocol = BisqueProtocolWrapper::instance();
@@ -932,7 +936,7 @@ public:
         double ra, dec;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();  // before the unset target (#2075)
+            check_link_locked();  // before the unset target (#2075)
             if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
             }
@@ -946,7 +950,7 @@ public:
         double ra, dec;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();  // before the unset target (#2075)
+            check_link_locked();  // before the unset target (#2075)
             if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
             }
@@ -961,7 +965,7 @@ public:
         detail::validate_ra_dec(ra, dec, "SyncToCoordinates");
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_link_locked();
             check_not_parked("SyncToCoordinates");
         }
 
@@ -981,7 +985,7 @@ public:
         double ra, dec;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();  // before the unset target (#2075)
+            check_link_locked();  // before the unset target (#2075)
             if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
             }
@@ -992,7 +996,7 @@ public:
     }
 
     void unpark() override {
-        check_connected_now();
+        check_link_now();
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.unpark();
         // Confirm unpark.
@@ -1022,7 +1026,7 @@ public:
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_link_locked();
             check_not_parked("MoveAxis");
         }
 
@@ -1071,6 +1075,7 @@ public:
         // Initiator lock: the state clear and the command follow any initiator whose command is on the wire.
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
+        // Only a lost link refuses: a latched fault still lets the stop try, as OnStep and SynScan do (#2102).
         check_connected();
         ++slew_epoch_;
         parking_ = false;  // a park poll still running no longer blocks slews
@@ -1154,6 +1159,11 @@ private:
             throw AlpacaException("Bisque mount communications compromised: " + position_link_health_.fault(),
                                   AlpacaError::DriverException);
         }
+    }
+
+    void check_link_now() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
     }
 
     void check_connected_now() const {
