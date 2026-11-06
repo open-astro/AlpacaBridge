@@ -48,6 +48,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZwoMount;
+using alpacacore::test::Latch;
 using alpacacore::test::timed;
 
 alpacacore::vendor::zwo::ConnectionInfo endpoint(int port, int response_timeout_ms) {
@@ -1179,32 +1180,6 @@ TEST_CASE("ZWO async - Park or a jog during a held GOTO target write waits one e
 
 namespace {
 
-// A latch a test seam blocks on. The wait has a real-time bound, so a regression fails the case instead of hanging it.
-struct Latch {
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool entered = false;
-    bool open = false;
-
-    void block() {
-        std::unique_lock<std::mutex> lock(mutex);
-        entered = true;
-        cv.notify_all();
-        static_cast<void>(cv.wait_for(lock, std::chrono::seconds(2), [&] { return open; }));
-    }
-    bool wait_entered() {
-        std::unique_lock<std::mutex> lock(mutex);
-        return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
-    }
-    void release() {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            open = true;
-        }
-        cv.notify_all();
-    }
-};
-
 std::thread refuse_thread(std::function<void()>) {
     throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
 }
@@ -1398,6 +1373,63 @@ TEST_CASE("ZWO async - a SlewAsync during Unpark's fence-to-command gap is refus
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
     }
     CHECK_FALSE(goto_sent_within_setup_window(mount));
+    driver->set_connected(false);
+}
+
+// open-astro#2072: a guide pulse step checks its stop reason under mutex_ and then sends ":Mg" with no lock held. An
+// AbortSlew, Park or FindHome that cancels the pulse in that gap must not send its own command first: the reset waits
+// for the step already past its check, so the initiator's command follows that ":Mg" and stops or supersedes it. The
+// seam holds the step between its check and its send; a command that reaches the mount within 200 ms real time
+// meanwhile overtook it (a bounded negative check, as sent_while_held above).
+// Falsified by: zwo_telescope_driver.cpp reset_position_offsets(): removing the wait for pulse_sends_in_flight_ == 0,
+// so the initiator's command goes out while the counted ":Mg" is still unsent.
+TEST_CASE("ZWO async - AbortSlew, Park or FindHome during a guide pulse send waits for its :Mg (#2072)",
+          "[zwo][telescope][async][operation-slot]") {
+    const auto initiator_and_command = GENERATE(std::pair<std::string, std::string>{"AbortSlew", ":Q"},
+                                                std::pair<std::string, std::string>{"Park", ":hP"},
+                                                std::pair<std::string, std::string>{"FindHome", ":hC"});
+    const std::string& label = initiator_and_command.first;
+    const std::string& command = initiator_and_command.second;
+    CAPTURE(label);
+    Latch latch;
+    std::atomic<int> pulses_held{0};
+    Rig rig(5000);
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    // ":Q" exactly: a prefix would also count ":Qe" / ":Qw".
+    const auto sent = [&] { return label == "AbortSlew" ? count_exact(mount, ":Q") : mount.count(command); };
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == ":Mg" && pulses_held.fetch_add(1) == 0) latch.block();
+    });
+    rig.connect();
+
+    driver->pulse_guide(0, 3000);
+    REQUIRE(latch.wait_entered());
+    auto initiator = std::async(std::launch::async, [&] {
+        if (label == "AbortSlew") driver->abort_slew();
+        if (label == "Park") driver->park();
+        if (label == "FindHome") driver->find_home();
+    });
+    const bool sent_while_counted = wait_until([&] { return sent() > 0; }, 200);
+    latch.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the latch
+    const bool returned = initiator.wait_for(kInitiatorBudget) == std::future_status::ready;
+    initiator.wait();
+    REQUIRE_NOTHROW(initiator.get());
+    CHECK_FALSE(sent_while_counted);
+    CHECK(returned);
+    // The fake records a command when it reads it off the socket; wait for the released ":Mg" before reading order.
+    REQUIRE(mount.wait_for_count(":Mg", 1, std::chrono::seconds(2)));
+
+    const auto all = mount.commands();
+    const auto pulse_at =
+        std::find_if(all.begin(), all.end(), [](const std::string& c) { return c.starts_with(":Mg"); });
+    const auto command_at = std::find_if(all.begin(), all.end(), [&](const std::string& c) {
+        return label == "AbortSlew" ? c == ":Q" : c.starts_with(command);
+    });
+    REQUIRE(pulse_at != all.end());
+    REQUIRE(command_at != all.end());
+    CHECK(pulse_at < command_at);
+    CHECK(mount.count(":Mg") == 1);
     driver->set_connected(false);
 }
 

@@ -348,11 +348,11 @@ it is never reachable through `router.cpp` or the web UI.
   `DeviceState`'s `TimeStamp` when `:GA#`/`:GZ#` reads fail while `:GU#` and RA/Dec answer, because they keep
   their last values. The reads that answer from the driver's own state,
   `SiteLatitude`, `SiteLongitude`, `UTCDate`, `SiderealTime`, `DestinationSideOfPier`,
+  `TargetRightAscension`/`TargetDeclination` (#2075),
   `DoesRefraction`, `IsPulseGuiding`, `Slewing` (also while a `Park` or `FindHome` is pending or within
   the slew grace) and the rate getters (`DeclinationRate`, `RightAscensionRate`, `TrackingRate`, which
   read lock-free from the latched fault text), throw the fault too (decision 0009 rule 1, as in
-  Sky-Watcher, open-astro#882). The client's own values answer: `TargetRightAscension`/
-  `TargetDeclination`, `SlewSettleTime`, `SiteElevation` (the device config), `GuideRate`
+  Sky-Watcher, open-astro#882). The client's own values answer: `SlewSettleTime`, `SiteElevation` (the device config), `GuideRate`
   (informational) and the `Can*` constants. A getter asks the mount nothing while faulted, so a faulted
   `DeviceState` costs no reply timeout (the 2 s back-off of #1626 is gone with the getter reads). Writes
   throw the same `DriverException` (`refuse_while_faulted_locked()`; the motion and state commands and

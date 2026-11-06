@@ -168,12 +168,14 @@ TEST_CASE("iOptron telescope - members that need no device access answer while a
     check_answers_at_once("CanPark", [&] { CHECK(driver->get_can_park()); });
     check_answers_at_once("AxisRates", [&] { CHECK_FALSE(driver->get_axis_rate_ranges(0).empty()); });
     check_answers_at_once("SupportedActions", [&] { CHECK(driver->get_supported_actions().empty()); });
-    // The contract's answers while the connect is still running.
+    // The contract's answers while the connect is still running. The target getters read driver state only,
+    // yet NotConnected precedes ValueNotSet (#2075), so they answer NotConnected until the connect has finished.
     check_answers_at_once("TargetDeclination", [&] {
-        alpacacore::test::require_alpaca_error([&] { driver->get_target_declination(); }, AlpacaError::ValueNotSet);
+        alpacacore::test::require_alpaca_error([&] { driver->get_target_declination(); }, AlpacaError::NotConnected);
     });
     check_answers_at_once("TargetRightAscension", [&] {
-        alpacacore::test::require_alpaca_error([&] { driver->get_target_right_ascension(); }, AlpacaError::ValueNotSet);
+        alpacacore::test::require_alpaca_error([&] { driver->get_target_right_ascension(); },
+                                               AlpacaError::NotConnected);
     });
     check_answers_at_once("UTCDate", [&] {
         alpacacore::test::require_alpaca_error([&] { driver->get_utc_date(); }, AlpacaError::NotConnected);
