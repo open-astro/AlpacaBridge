@@ -850,6 +850,7 @@ TEST_CASE("SkyWatcher async - a pulse on the other axis does not supersede a Mov
     mount.jump_axis_degrees(2, 45.0);
     driver->move_axis(moved_axis, 1.0);
     REQUIRE(mount.axis_running(moved_channel));
+    const uint32_t period_at_1x = mount.step_period(moved_channel);
     std::atomic<bool> done{false};
     std::atomic<bool> threw{false};
     std::thread mover([&] {
@@ -868,6 +869,7 @@ TEST_CASE("SkyWatcher async - a pulse on the other axis does not supersede a Mov
     CHECK(settled);
     CHECK_FALSE(threw.load());
     CHECK(mount.axis_running(moved_channel));  // the MoveAxis restarted its axis at the new rate
+    CHECK(mount.step_period(moved_channel) != period_at_1x);
     driver->move_axis(moved_axis, 0.0);
     driver->set_connected(false);
 }

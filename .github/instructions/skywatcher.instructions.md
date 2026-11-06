@@ -542,7 +542,7 @@ below was one of them.
 - **A retry loop whose supersession test compares against a generation captured before the loop
   can only ever run once.** Review of the branch above: the rate check's second sample was
   unreachable, because the attempt-0 recovery is itself a motion command (its own
-  `++motion_generation_`, and `start_speed_motion_locked()` bumps it again), so attempt 1's first
+  generation bump, `bump_motion_generation_locked(kAxisRa)`, and `start_speed_motion_locked()` bumps it again), so attempt 1's first
   re-lock read the check's OWN restart as another command's supersession and returned. The
   "restart did not correct it" WARN could never be emitted, and a restart that also latched wrong
   ran at the wrong rate in silence -- the exact failure the check exists to surface. Fixed by
