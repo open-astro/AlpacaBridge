@@ -124,11 +124,11 @@ public:
     /// frame at once ("Px#"), as a wedged firmware does, without the serial
     /// timeout a silent fake costs.
     void set_garbage_state_replies(bool on) { garbage_state_.store(on); }
-    /// ":06#" answers garbage while the other state queries stay good (a
-    /// focuser without a temperature probe).
     /// Persistent: Position, IsMoving and temperature requests get no reply at all (the handshake and firmware
     /// query still answer), unlike the one-shot hold_reply_to().
     void set_silent_state_replies(bool on) { silent_state_.store(on); }
+    /// ":06#" answers garbage while the other state queries stay good (a
+    /// focuser without a temperature probe).
     void set_garbage_temperature(bool on) { garbage_temperature_.store(on); }
     /// ":24#" answers a frame the temperature compensation parser rejects ("Qx#"), the other queries stay good.
     void set_garbage_temp_comp(bool on) { garbage_temp_comp_.store(on); }

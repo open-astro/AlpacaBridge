@@ -24,14 +24,8 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_gemini_focuser.h"
-
-namespace {
-using clock = std::chrono::steady_clock;
-long ms_since(clock::time_point t) {
-    return static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t).count());
-}
-}  // namespace
 
 TEST_CASE("Gemini focuser - Connect to a port that goes silent after the handshake fails inside the 5 s budget (#2064)",
           "[gemini][focuser][unit][fake][connect_budget]") {
@@ -39,9 +33,12 @@ TEST_CASE("Gemini focuser - Connect to a port that goes silent after the handsha
     fake.set_silent_state_replies(true);
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
 
-    const auto t0 = clock::now();
-    CHECK_THROWS(driver->set_connected(true));
-    const long connect_ms = ms_since(t0);
+    const auto connect_ms = alpacacore::test::timed([&] {
+                                alpacacore::test::require_alpaca_error([&] { driver->set_connected(true); },
+                                                                       alpacacore::AlpacaError::DriverException);
+                            }).count() /
+                            1000;
+    REQUIRE(fake.count(":00#") >= 1);
     WARN("connect_ms=" << connect_ms);
     CHECK(connect_ms <= 5000);  // Platform 7 / ConformU Connecting budget
     CHECK_FALSE(driver->get_connected());
@@ -61,9 +58,7 @@ TEST_CASE("Gemini focuser - Disconnect during a silent connect-time probe waits 
     });
     for (int i = 0; i < 400 && fake.count(":00#") == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     REQUIRE(fake.count(":00#") >= 1);
-    const auto d0 = clock::now();
-    driver->set_connected(false);
-    const long wait_ms = ms_since(d0);
+    const auto wait_ms = alpacacore::test::timed([&] { driver->set_connected(false); }).count() / 1000;
     connector.join();
     WARN("disconnect_wait_ms=" << wait_ms);
     CHECK(wait_ms <= 3500);
