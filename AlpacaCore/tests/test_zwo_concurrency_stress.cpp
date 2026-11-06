@@ -53,6 +53,7 @@
 #include "locked_zwo_efw_sdk.h"
 #include "locked_zwo_sdk.h"
 #include "rotator_sync_offset_test_dir.h"
+#include "zwo_exposure_wait.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -126,6 +127,12 @@ TEST_CASE("ZWO camera - connected SDK acquisition lifecycle stress", "[zwo][came
     auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
 
+    // Undisturbed exposure first: under CPU starvation the storm below can end before its one exposure body reaches the
+    // download, so the get_data_after_exposure coverage check must not depend on the storm (#2099).
+    driver->start_exposure(0.001, true);
+    REQUIRE(alpacacore::test::wait_exposure_end(*driver, std::chrono::seconds(30)));
+    REQUIRE(driver->get_image_ready());
+
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
@@ -155,6 +162,11 @@ TEST_CASE("ZWO camera - connected lifecycle stress behind LockedZWOSDK", "[zwo][
     alpacacore::test::LockedZWOSDK sdk(fake);
     auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, sdk);
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    // Undisturbed exposure first, as in the case above (#2099).
+    driver->start_exposure(0.001, true);
+    REQUIRE(alpacacore::test::wait_exposure_end(*driver, std::chrono::seconds(30)));
+    REQUIRE(driver->get_image_ready());
 
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
