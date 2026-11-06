@@ -833,6 +833,89 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
+// #2067: the mirror of the #1706 cases. A MoveAxis already parked in its own axis's stop-wait must
+// survive a pulse that starts on the OTHER axis: the pulse's generation bump carried only a pulse
+// slot forward, so the MoveAxis threw "Motion superseded before dispatch". Both orders.
+TEST_CASE("SkyWatcher async - a pulse on the other axis does not supersede a MoveAxis stop-wait (#2067)",
+          "[skywatcher][async][pulseguide]") {
+    const bool move_ra = GENERATE(true, false);
+    CAPTURE(move_ra);
+    const int moved_axis = move_ra ? 0 : 1;
+    const int moved_channel = moved_axis + 1;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->move_axis(moved_axis, 1.0);
+    REQUIRE(mount.axis_running(moved_channel));
+    const uint32_t period_at_1x = mount.step_period(moved_channel);
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread mover([&] {
+        try {
+            driver->move_axis(moved_axis, 2.0);
+        } catch (const alpacacore::AlpacaException&) {
+            threw = true;
+        }
+        done = true;
+    });
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // MoveAxis parked in its stop-wait
+    driver->pulse_guide(move_ra ? 0 : 2, 500);                        // North, or East: the other axis
+    const bool settled = run_clock_until(
+        clock, [&] { return done.load() && !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(20000));
+    mover.join();
+    CHECK(settled);
+    CHECK_FALSE(threw.load());
+    CHECK(mount.axis_running(moved_channel));  // the MoveAxis restarted its axis at the new rate
+    CHECK(mount.step_period(moved_channel) != period_at_1x);
+    driver->move_axis(moved_axis, 0.0);
+    driver->set_connected(false);
+}
+
+// #2067 review: a superseded MoveAxis must not clear the slot of the pulse that superseded it. Dec pulse
+// takes the Dec slot from a MoveAxis(Dec) stop-wait; the MoveAxis exits (superseded) while the pulse is
+// still in its own stop-wait; then an RA MoveAxis lands. The pulse must still follow that RA bump and
+// dispatch. Without the owner == gen check in start_speed_motion_locked()'s slot clear, the old MoveAxis
+// empties the pulse's slot on exit and the RA bump supersedes the pulse.
+TEST_CASE("SkyWatcher async - a superseded MoveAxis leaves the superseding pulse's slot to follow (#2067)",
+          "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    const int dec_starts = mount.start_count(2);
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread mover([&] {
+        try {
+            driver->move_axis(1, 2.0);
+        } catch (const alpacacore::AlpacaException&) {
+            threw = true;
+        }
+        done = true;
+    });
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // MoveAxis(Dec) parked in the Dec stop-wait
+    REQUIRE(step_clock(clock, std::chrono::milliseconds(25)));
+    driver->pulse_guide(0, 500);                                      // North: takes the Dec slot
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the pulse dispatch parked too
+    // One poll step: the MoveAxis wakes, sees it is superseded and exits, long before the 800 ms ramp ends.
+    REQUIRE(run_clock_until(clock, [&] { return done.load(); }, std::chrono::milliseconds(100)));
+    mover.join();
+    REQUIRE(threw.load());
+    CHECK(mount.start_count(2) == dec_starts);  // the pulse has not dispatched yet
+    driver->move_axis(0, 1.0);                  // RA only: the pulse's slot must follow this bump
+    REQUIRE(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    driver->move_axis(0, 0.0);
+    driver->set_connected(false);
+}
+
 // #1706 review: the pulse exception must belong to the pulse's own wait. An older MoveAxis(Dec)
 // stop-wait on the same axis stays superseded, or both commands own Dec and the pulse times out.
 // The two waiters poll 25 ms apart, so MoveAxis always sees the stopped axis first: without the

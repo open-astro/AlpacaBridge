@@ -1933,7 +1933,7 @@ public:
                 }
                 const Wire proto = wire();
                 if (axis == kAxisDec) {
-                    start_speed_motion_locked(lock, kAxisDec, dec_rate, false, /*pulse=*/true);
+                    start_speed_motion_locked(lock, kAxisDec, dec_rate, false, /*axis_owner=*/true);
                 } else if (restore_tracking && !pulse_restart) {
                     // No ":i" readback here: the axis is already running at
                     // the pulse rate once ":I" is acknowledged, and the pulse
@@ -1970,12 +1970,12 @@ public:
                     // north of the equator and >= 0 south of it): a live ":I"
                     // write cannot reverse the axis — stop and restart in the
                     // pulse direction instead.
-                    start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate, false, /*pulse=*/true);
+                    start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate, false, /*axis_owner=*/true);
                 } else {
                     // Not tracking: nudge the RA axis directly like DEC, in
                     // the hemisphere's axis sense for East/West.
                     double rate = ra_axis_sign_locked() * (direction == 2 ? -guide_rate_.ra : guide_rate_.ra);
-                    start_speed_motion_locked(lock, kAxisRa, rate, false, /*pulse=*/true);
+                    start_speed_motion_locked(lock, kAxisRa, rate, false, /*axis_owner=*/true);
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
@@ -2626,7 +2626,8 @@ public:
                 if (from_rest) {
                     seed_limit_guard_baseline_locked();
                 }
-                start_speed_motion_locked(lock, channel, sky_move_axis_rate_locked(axis, rate), /*anchor_model=*/true);
+                start_speed_motion_locked(lock, channel, sky_move_axis_rate_locked(axis, rate), /*anchor_model=*/true,
+                                          /*axis_owner=*/true);
                 manual_axis_slewing_[axis] = true;
                 started = true;
             } else if (manual_axis_slewing_[axis]) {
@@ -4367,18 +4368,18 @@ private:
     // slew task was cancelled) — the caller MUST NOT issue further motor
     // commands for its now-stale operation (PR #216 review: an AbortSlew
     // landing in the unlock window otherwise saw its goto re-dispatched).
-    // open-astro#1706: a pulse's dispatch owns only its own axis, so a command on the other axis alone
-    // (a start or a stop, bump_motion_generation_locked()) moves the pulse's generation along instead of
-    // superseding it. A command that owns both axes (goto, Park, sync, abort, home, reconnect) bumps
-    // motion_generation_ directly, leaves pulse_wait_gen_ behind and still supersedes. Only the pulse's
-    // own wait (gen == pulse_owner_gen_) follows; an older waiter on the same axis stays superseded.
+    // open-astro#1706, #2067: a pulse's or a MoveAxis's dispatch owns only its own axis, so a command on the
+    // other axis alone (a start or a stop, bump_motion_generation_locked()) moves its generation along instead
+    // of superseding it. A command that owns both axes (goto, Park, sync, abort, home, reconnect) bumps
+    // motion_generation_ directly, leaves pulse_wait_gen_ behind and still supersedes. Only the
+    // owner's own wait (gen == pulse_owner_gen_) follows; an older waiter on the same axis stays superseded.
     [[nodiscard]] bool superseded_locked(int channel, uint64_t gen) const {
         const int i = channel - 1;
         return motion_generation_ != gen && !(gen == pulse_owner_gen_[i] && motion_generation_ == pulse_wait_gen_[i]);
     }
 
-    // The bump for a command on `channel` (kAxisRa or kAxisDec) alone: a pulse dispatch waiting on the other axis
-    // follows it. An empty slot (0) never matches: connect bumps first, in reset_runtime_state_locked().
+    // The bump for a command on `channel` (kAxisRa or kAxisDec) alone: a pulse or MoveAxis dispatch waiting on the
+    // other axis follows it. An empty slot (0) never matches: connect bumps first, in reset_runtime_state_locked().
     uint64_t bump_motion_generation_locked(int channel) {
         uint64_t& other_pulse_wait = pulse_wait_gen_[2 - channel];
         const bool other_pulse_follows = other_pulse_wait == motion_generation_;
@@ -4432,25 +4433,27 @@ private:
     // the old rate and again once the new one starts, so neither rate is
     // applied over the other's time.
     void start_speed_motion_locked(StateLock& lock, int channel, double signed_rate_deg_per_sec,
-                                   bool anchor_model = false, bool pulse = false) {
+                                   bool anchor_model = false, bool axis_owner = false) {
         const Wire protocol = wire();
         const uint64_t gen = bump_motion_generation_locked(channel);
         if (anchor_model) {
             advance_model_anchor_locked();
         }
-        // Clears the pulse's slot on every exit (a stop timeout included) with mutex_ held, as every exit of
-        // stop_axis_and_wait_locked() is. Always this pulse's: pulse_guide() joins its axis's old body first.
+        // Clears this command's slot on every exit (a stop timeout included) with mutex_ held, as every exit of
+        // stop_axis_and_wait_locked() is. Only if it is still this command's: a newer same-axis MoveAxis may
+        // have taken the slot over (#2067).
         struct PulseSlot {
             uint64_t& owner;
             uint64_t& wait;
+            uint64_t gen;
             bool armed;
             ~PulseSlot() {
-                if (armed) {
+                if (armed && owner == gen) {
                     owner = wait = 0;
                 }
             }
-        } pulse_slot{pulse_owner_gen_[channel - 1], pulse_wait_gen_[channel - 1], pulse};
-        if (pulse) {
+        } pulse_slot{pulse_owner_gen_[channel - 1], pulse_wait_gen_[channel - 1], gen, axis_owner};
+        if (axis_owner) {
             pulse_owner_gen_[channel - 1] = pulse_wait_gen_[channel - 1] = gen;
         }
         const bool kept = stop_axis_and_wait_locked(lock, channel, gen);
@@ -6628,8 +6631,8 @@ private:
     bool dec_offset_running_ = false;
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
-    uint64_t pulse_owner_gen_[2] = {0, 0};  // the generation a pulse dispatch's own stop-wait holds, 0 = none
-    uint64_t pulse_wait_gen_[2] = {0, 0};   // a pulse dispatch's stop-wait generation per axis, 0 = none (#1706)
+    uint64_t pulse_owner_gen_[2] = {0, 0};  // the gen. a pulse's or MoveAxis's own stop-wait holds, 0 = none
+    uint64_t pulse_wait_gen_[2] = {0, 0};   // that stop-wait's current generation per axis, 0 = none (#1706, #2067)
     bool park_position_set_ = false;
     double park_ra_axis_deg_ = 0.0;
     double park_dec_axis_deg_ = 0.0;
