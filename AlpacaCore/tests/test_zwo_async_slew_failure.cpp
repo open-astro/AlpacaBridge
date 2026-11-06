@@ -12,7 +12,7 @@
 
 // open-astro#575, ZWO: the GOTO setup thread sends ":MS" after the initiator
 // returned; a mount that rejects it ("Mount rejected GOTO request") was logged
-// as "GOTO failed" and Slewing simply dropped to false once slew_force_until_
+// as "GOTO failed" and Slewing simply dropped to false once its force window (slew_hold_)
 // expired. The next Slewing read must return an Alpaca error instead
 // (contract reference in test_skywatcher_async_slew_failure.cpp).
 
