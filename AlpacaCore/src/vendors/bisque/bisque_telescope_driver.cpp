@@ -649,10 +649,12 @@ public:
     }
 
     void set_tracking_rate(int rate) override {
-        if (rate == 0) return; // Sidereal — already default
         // TODO: Support solar/lunar/custom rates via SetTracking.
-        throw AlpacaException("Only sidereal tracking rate is currently supported",
-                              AlpacaError::InvalidValue);
+        if (rate != 0) {
+            throw AlpacaException("Only sidereal tracking rate is currently supported",
+                                  AlpacaError::InvalidValue);
+        }
+        check_link_now(); // sidereal is already the default; a write still needs a live link
     }
 
     std::vector<int> get_tracking_rates() const override {

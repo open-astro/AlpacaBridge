@@ -494,6 +494,9 @@ TEST_CASE("Bisque snapshot - own-state reads refuse on a faulted link and Tracki
     d.set_connected(false);
     alpacacore::test::require_alpaca_error([&] { (void)d.get_tracking_rate(); }, alpacacore::AlpacaError::NotConnected);
     alpacacore::test::require_alpaca_error([&] { (void)d.get_guide_rate(); }, alpacacore::AlpacaError::NotConnected);
+    alpacacore::test::require_alpaca_error([&] { d.set_tracking_rate(0); }, alpacacore::AlpacaError::NotConnected);
+    // InvalidValue precedes the connection check.
+    alpacacore::test::require_alpaca_error([&] { d.set_tracking_rate(1); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("Bisque snapshot - writes refuse on a faulted link, send nothing and keep the stored value",
@@ -513,6 +516,7 @@ TEST_CASE("Bisque snapshot - writes refuse on a faulted link, send nothing and k
         alpacacore::test::require_alpaca_error([&] { write(); }, alpacacore::AlpacaError::DriverException);
     };
     refused([&] { d.set_tracking(false); });
+    refused([&] { d.set_tracking_rate(0); });
     refused([&] { d.set_guide_rate({0.003, 0.003}); });
     refused([&] { d.set_target_right_ascension(7.0); });
     refused([&] { d.set_target_declination(-5.0); });
