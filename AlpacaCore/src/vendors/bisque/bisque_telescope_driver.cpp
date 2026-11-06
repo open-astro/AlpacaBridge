@@ -389,13 +389,13 @@ public:
 
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         return at_home_;
     }
 
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         return parked_;
     }
 
@@ -410,7 +410,7 @@ public:
 
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         if (!pulse_guide_error_.empty()) {
             throw AlpacaException(pulse_guide_error_, AlpacaError::DriverException);
         }
@@ -437,7 +437,8 @@ public:
     }
 
     double get_declination_rate() const override {
-        check_connected();
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
         return 0.0;
     }
 
@@ -500,7 +501,8 @@ public:
     }
 
     double get_right_ascension_rate() const override {
-        check_connected();
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
         return 0.0;
     }
 
@@ -599,7 +601,7 @@ public:
 
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         // Not served from the frame but from the control path's own state (like AtPark): a slew start, an abort and
         // a completion decide it under mutex_. It never touches the socket.
         return get_slewing_locked();
@@ -607,7 +609,7 @@ public:
 
     double get_target_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -623,7 +625,7 @@ public:
 
     double get_target_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_link_locked();
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -638,6 +640,7 @@ public:
     }
 
     int get_tracking_rate() const override {
+        check_connected_now();
         return 0; // Sidereal
     }
 
@@ -1144,6 +1147,15 @@ private:
         }
     }
 
+    // A lost link (NotConnected) or a latched fault (DriverException, Connected stays true, decision 0009 point 1).
+    void check_link_locked() const {
+        check_connected();
+        if (position_link_health_.faulted()) {
+            throw AlpacaException("Bisque mount communications compromised: " + position_link_health_.fault(),
+                                  AlpacaError::DriverException);
+        }
+    }
+
     void check_connected_now() const {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -1179,11 +1191,7 @@ private:
     // (DriverException "communications compromised", Connected stays true, decision 0009 point 1), no frame yet.
     // A frame past kSnapshotMaxAge is served as it is: stale is not lost.
     util::StateSnapshot<PolledFrame>::Reading served_frame_locked() const {
-        check_connected();
-        if (position_link_health_.faulted()) {
-            throw AlpacaException("Bisque mount communications compromised: " + position_link_health_.fault(),
-                                  AlpacaError::DriverException);
-        }
+        check_link_locked();
         auto reading = snapshot_.read();
         if (!reading) {
             throw AlpacaException(

@@ -1,0 +1,3 @@
+### Fixed
+
+- **Bisque own-state reads on a faulted link**, Bisque telescope driver, issue #2102. `AtHome`, `AtPark`, `Slewing`, `IsPulseGuiding`, `TargetRightAscension`, `TargetDeclination`, `DeclinationRate` and `RightAscensionRate` now throw a driver error ("communications compromised") while the position link is faulted, as `Tracking` already did, instead of answering from cached state. `TrackingRate` now throws `NotConnected` while disconnected. Covered by "Bisque snapshot - own-state reads refuse on a faulted link and TrackingRate needs a connection" in `AlpacaCore/tests/test_bisque_telescope_snapshot.cpp`.

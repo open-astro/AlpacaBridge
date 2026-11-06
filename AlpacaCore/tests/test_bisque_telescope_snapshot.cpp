@@ -467,6 +467,32 @@ TEST_CASE("Bisque snapshot - past the staleness bound DeviceState is empty with 
     bq::set_status_poll_paused_for_testing(*rig.driver, true);
 }
 
+TEST_CASE("Bisque snapshot - own-state reads refuse on a faulted link and TrackingRate needs a connection",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    rig.mount.mute = true;
+    for (int i = 0; i < 3; ++i) rig.poll();
+    REQUIRE_FALSE(rig.driver->get_link_fault().empty());
+    REQUIRE(rig.driver->get_connected());
+    auto& d = *rig.driver;
+    auto refused = [](auto&& read) {
+        alpacacore::test::require_alpaca_error([&] { (void)read(); }, alpacacore::AlpacaError::DriverException);
+    };
+    refused([&] { return d.get_at_home(); });
+    refused([&] { return d.get_at_park(); });
+    refused([&] { return d.get_slewing(); });
+    refused([&] { return d.get_is_pulse_guiding(); });
+    refused([&] { return d.get_target_right_ascension(); });
+    refused([&] { return d.get_target_declination(); });
+    refused([&] { return d.get_declination_rate(); });
+    refused([&] { return d.get_right_ascension_rate(); });
+    refused([&] { return d.get_tracking(); });  // control: already refused
+
+    rig.mount.mute = false;
+    d.set_connected(false);
+    alpacacore::test::require_alpaca_error([&] { (void)d.get_tracking_rate(); }, alpacacore::AlpacaError::NotConnected);
+}
+
 TEST_CASE("Bisque snapshot - a reply clears a latched fault without a reconnect", "[bisque][telescope][snapshot]") {
     Rig rig;
     rig.mount.mute = true;
