@@ -67,18 +67,32 @@ public:
     bool get_temp_comp() const override { return false; }
     void set_temp_comp(bool) override {}
     double get_temperature() const override { return 0.0; }
-    void halt() override {}
+    void halt() override {
+        if (halt_invalid_operation_) {
+            throw alpacacore::AlpacaException("Focuser is parked", alpacacore::AlpacaError::InvalidOperation);
+        }
+    }
+    void set_halt_invalid_operation(bool value) { halt_invalid_operation_ = value; }
     void move(int) override {}
 
 private:
     int number_;
     bool connected_ = false;
+    bool halt_invalid_operation_ = false;
 };
 
 alpacahttp::Response route_get(alpacahttp::Router& router, const std::string& path) {
     alpacahttp::Request request;
     std::ostringstream raw;
     raw << "GET " << path << " HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    EXPECT(request.parse(raw.str()));
+    return router.route(request, 1);
+}
+
+alpacahttp::Response route_put(alpacahttp::Router& router, const std::string& path) {
+    alpacahttp::Request request;
+    std::ostringstream raw;
+    raw << "PUT " << path << " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
     EXPECT(request.parse(raw.str()));
     return router.route(request, 1);
 }
@@ -131,6 +145,50 @@ int main() {
                 if (c.message == line) {
                     ++matched;
                     EXPECT(c.level == alpacacore::logging::LogLevel::Debug);
+                }
+            }
+            EXPECT(matched == 1);
+        }
+
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Focuser, kNumber);
+    }
+
+    {
+        // case: a driver's InvalidOperation reply is client-triggered, so it is logged at DEBUG, not ERROR (#2076)
+        constexpr int kNumber = 9334;
+        auto focuser = std::make_shared<DisconnectedFocuser>(kNumber);
+        focuser->set_halt_invalid_operation(true);
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(focuser));
+
+        std::vector<std::pair<alpacacore::logging::LogLevel, std::string>> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(level, std::string(message));
+            });
+
+        const auto resp = route_put(router, "/api/v1/focuser/" + std::to_string(kNumber) + "/halt");
+        EXPECT(resp.status_code() == 200);
+        EXPECT(nlohmann::json::parse(resp.body()).value("ErrorNumber", 0) == 1035);
+
+        {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            int matched = 0;
+            for (const auto& c : captured) {
+                EXPECT(c.first != alpacacore::logging::LogLevel::Error);
+                if (c.second.find("Focuser is parked") != std::string::npos) {
+                    ++matched;
+                    EXPECT(c.first == alpacacore::logging::LogLevel::Debug);
                 }
             }
             EXPECT(matched == 1);
