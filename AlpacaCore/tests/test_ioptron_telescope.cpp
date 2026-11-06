@@ -635,6 +635,45 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched faul
     driver->set_connected(false);
 }
 
+TEST_CASE("iOptron Telescope Driver - target getters refuse on a latched fault (#2075)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_target_right_ascension(7.25);
+    driver->set_target_declination(-30.25);
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(contains(sync_failure(*driver), kReadFailure));
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+
+    // Latched: the stored target is not served, the same refusal as the other commanded-state reads.
+    for (const auto& read : {std::function<void()>([&] { (void)driver->get_target_right_ascension(); }),
+                             std::function<void()>([&] { (void)driver->get_target_declination(); })}) {
+        try {
+            read();
+            FAIL("answered during the fault");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(contains(ex.what(), kLatched));
+        }
+    }
+
+    // The sent stop is a good reply and clears the latch; the stored target is served again. sync_failure's
+    // SyncToCoordinates(12, 20) stored its coordinates as the target before its read failed.
+    mount.set_fail_reads(false);
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(driver->get_target_right_ascension() == 12.0);
+    CHECK(driver->get_target_declination() == 20.0);
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fault keeps the latch (#728)",
           "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
