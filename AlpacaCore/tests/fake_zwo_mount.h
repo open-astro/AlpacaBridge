@@ -154,6 +154,12 @@ public:
         moving_ = on;
     }
 
+    /// ":hP" is received but does nothing while tracking is on, as on an AM5 with firmware 1.8.8 (open-astro#2097).
+    void set_ignore_park_while_tracking(bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ignore_park_while_tracking_ = on;
+    }
+
     /// The next command that starts with @p prefix waits @p delay in real time before it is answered (one shot).
     void delay_next(std::string prefix, std::chrono::milliseconds delay) {
         std::lock_guard<std::mutex> lock(delay_mutex_);
@@ -533,6 +539,7 @@ private:
             return "1#";
         }
         if (command == ":hP") {
+            if (ignore_park_while_tracking_ && tracking_) return {};
             target_ra_ = ra_hours_;
             target_dec_ = dec_degrees_;
             start_slew_locked();
@@ -590,6 +597,7 @@ private:
     double ra_hours_ = 12.0, dec_degrees_ = 45.0;
     double target_ra_ = 12.0, target_dec_ = 45.0;
     bool tracking_ = true;
+    bool ignore_park_while_tracking_ = false;
     int tracking_rate_ = 0;
     double move_rate_ = 0.0;
     std::string guide_rate_ = "0.50";
