@@ -6892,7 +6892,8 @@ int main() {
         // NotConnected before connect) says nothing about the client's time.
         // The step happens first, once, and the driver's error goes back to
         // the client unchanged.
-        for (const int code : {alpacacore::AlpacaError::PropertyNotImplemented, alpacacore::AlpacaError::NotConnected}) {
+        for (const int code :
+             {alpacacore::AlpacaError::PropertyNotImplemented, alpacacore::AlpacaError::NotConnected}) {
             int set_calls = 0;
             alpacahttp::Router clock_router;
             clock_router.set_host_clock_hooks([] { return false; },
@@ -6938,7 +6939,8 @@ int main() {
                                               });
             fresh_counts();
             const auto response = route_request(clock_router, "PUT", base + "/utcdate", R"({"UTCDate":"not-a-date"})");
-            EXPECT(response.status_code() != 200 || nlohmann::json::parse(response.body(), nullptr, false).value("ErrorNumber", 0) != 0);
+            EXPECT(response.status_code() != 200 ||
+                   nlohmann::json::parse(response.body(), nullptr, false).value("ErrorNumber", 0) != 0);
             EXPECT(set_calls == 0);
             EXPECT(scope->utc_writes == 0);
         }
