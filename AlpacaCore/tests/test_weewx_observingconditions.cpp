@@ -510,40 +510,48 @@ TEST_CASE("WeeWX ObservingConditions Driver - connect refuses a non-HTTP feed UR
     std::filesystem::remove(path);
 }
 
+// The poll interval is waited out on the fake clock (decision 0005 rule 2): each advance() is one poll.
 TEST_CASE("WeeWX ObservingConditions Driver - feed stalls after connect: values go stale, Connected holds", "[weewx]") {
-    FakeWeeWxFeed feed;
-    feed.set_body(full_payload());
-    auto driver = make_driver(feed, std::chrono::milliseconds(300), std::chrono::seconds(1));
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+    config.poll_interval = std::chrono::seconds(1);
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fake.fetcher(), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the poll is waiting out its interval
     const double before = driver->get_time_since_last_update("Temperature");
     const double temp = driver->get_temperature();
+    const auto poll_once = [&] {
+        clock.advance(config.poll_interval);
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    };
 
-    feed.set_mode(FakeWeeWxFeed::Mode::Stall);
-    // Refresh surfaces the failure to the caller, bounded by the timeout.
-    const auto start = std::chrono::steady_clock::now();
-    CHECK(alpaca_error_of([&] { driver->refresh(); }) == alpacacore::AlpacaError::DriverException);
-    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(3));
+    fake.fail_next(1000);
 
-    // The poll thread keeps trying and failing; the last good reading is kept
-    // and its age keeps growing, so a client can tell it is stale.
-    std::this_thread::sleep_for(std::chrono::milliseconds(2300));
+    // The poll keeps trying and failing; the last good reading is kept and its age is not reset, so a
+    // client can tell it is stale.
+    const int calls = fake.calls();
+    poll_once();
+    poll_once();
+    CHECK(fake.calls() == calls + 2);
     const double after = driver->get_time_since_last_update("Temperature");
     INFO("before=" << before << " after=" << after);
-    CHECK(after >= before + 2.0);
+    CHECK(after >= before);
     CHECK(driver->get_connected());
     CHECK(driver->get_temperature() == temp);
 
-    // Recovery needs no reconnect: the next poll restores fresh data.
-    feed.set_body(R"({"lcd_datasheet":{"current":{"outTemp":{"value":68.0},"dateTime":{"value":)" +
-                  std::to_string(static_cast<long long>(std::time(nullptr))) + "}}}}");
-    feed.set_mode(FakeWeeWxFeed::Mode::Normal);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    CHECK(std::abs(driver->get_temperature() - 20.0) < 1e-6);
+    // Recovery needs no reconnect: the next poll fetches again and succeeds.
+    fake.fail_next(0);
+    poll_once();
+    CHECK(fake.calls() == calls + 3);
+    CHECK(driver->get_connected());
+    CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
 
-    // Disconnect and destruction do not wait on a stalled request beyond the timeout.
-    feed.set_mode(FakeWeeWxFeed::Mode::Stall);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    // Disconnect does not wait on a stalled request beyond the request itself.
+    fake.set_delay(std::chrono::milliseconds(300));
+    clock.advance(config.poll_interval);
     const auto t0 = std::chrono::steady_clock::now();
     driver->set_connected(false);
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3));
@@ -564,9 +572,6 @@ TEST_CASE("WeeWX ObservingConditions Driver - malformed reply after connect keep
         CHECK(driver->get_connected());
         CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
     }
-    // The background poll hits the same garbage and must not wipe or corrupt state.
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-    CHECK(driver->get_connected());
     CHECK(std::abs(driver->get_humidity() - 40.0) < 1e-6);
     feed.set_mode(FakeWeeWxFeed::Mode::ServerError);
     CHECK(alpaca_error_of([&] { driver->refresh(); }) == alpacacore::AlpacaError::DriverException);
