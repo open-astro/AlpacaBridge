@@ -1258,7 +1258,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - error codes and input precedence
                          alpacacore::AlpacaError::MethodNotImplemented);
 }
 
-TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate readback and pointing follow HostClock policy",
+TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate, SiderealTime and pointing read one time source",
           "[celestron][cgx][telescope][unit]") {
     struct ProbeGuard {
         ~ProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
@@ -1284,22 +1284,26 @@ TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate readback and pointing fo
     CHECK(std::abs(std::remainder(driver->get_sidereal_time() - client_lst, 24.0)) < 1e-9);
 
     // A later system-clock step invalidates the saved offset rather than
-    // applying it on top of the corrected host time.
+    // applying it on top of the corrected host time: all three return to the host clock.
     epoch_seconds.fetch_add(10);
-    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(driver->get_utc_date() == now());
+    const auto stepped_lst =
+        alpacacore::vendor::celestron::cgx_local_sidereal_time_hours(now(), info.site_longitude_degrees.value());
+    CHECK(std::abs(std::remainder(driver->get_sidereal_time() - stepped_lst, 24.0)) < 1e-9);
 
+    // Decision 0001 (#2166): a disciplined host refuses the write and changes nothing.
     alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
     const auto synchronized_host_utc = now();
-    const auto disagreeing_client_utc = synchronized_host_utc + std::chrono::hours(2);
-    driver->set_utc_date(disagreeing_client_utc);
-    CHECK(driver->get_utc_date() == disagreeing_client_utc);
+    require_alpaca_error([&] { driver->set_utc_date(synchronized_host_utc + std::chrono::hours(2)); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(driver->get_utc_date() == synchronized_host_utc);
     const auto host_lst = alpacacore::vendor::celestron::cgx_local_sidereal_time_hours(
         synchronized_host_utc, info.site_longitude_degrees.value());
     CHECK(std::abs(std::remainder(driver->get_sidereal_time() - host_lst, 24.0)) < 1e-9);
     driver->set_connected(false);
 }
 
-TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate requires an established client time",
+TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate answers from a fresh connect (#2166)",
           "[celestron][cgx][telescope][unit][utcdate]") {
     struct ProbeGuard {
         ~ProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
@@ -1317,10 +1321,20 @@ TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate requires an established 
     for (int session = 0; session < 2; ++session) {
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
-        REQUIRE_NOTHROW(driver->get_sidereal_time());
-        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
-        driver->set_utc_date(now());
+        // No client write yet: the host clock is the time source, for UTCDate as for SiderealTime.
         CHECK(driver->get_utc_date() == now());
+        const auto host_lst =
+            alpacacore::vendor::celestron::cgx_local_sidereal_time_hours(now(), info.site_longitude_degrees.value());
+        CHECK(std::abs(std::remainder(driver->get_sidereal_time() - host_lst, 24.0)) < 1e-9);
+        const auto client_utc = now() + std::chrono::hours(2);
+        if (disciplined) {
+            require_alpaca_error([&] { driver->set_utc_date(client_utc); },
+                                 alpacacore::AlpacaError::PropertyNotImplemented);
+            CHECK(driver->get_utc_date() == now());
+        } else {
+            driver->set_utc_date(client_utc);
+            CHECK(driver->get_utc_date() == client_utc);
+        }
         driver->set_connected(false);
         require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::NotConnected);
     }
@@ -1378,7 +1392,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate step detection reads the
     CHECK(rig.driver->get_utc_date() == client_utc + 60s);
 
     rig.step(10s);
-    require_alpaca_error([&] { (void)rig.driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.driver->get_utc_date() == rig.now());
+    CHECK(rig.points_at(rig.now()));
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - host discipline is re-checked every 30 s on the task clock",
@@ -1396,7 +1411,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - host discipline is re-checked ev
     CHECK(rig.points_at(client_utc + 29999ms));
     rig.pass(1ms);
     CHECK(rig.points_at(rig.now()));
-    CHECK(rig.driver->get_utc_date() == client_utc + 30s);
+    // One time source: the UTCDate readback moves to the host clock with pointing.
+    CHECK(rig.driver->get_utc_date() == rig.now());
 }
 
 TEST_CASE("Celestron CGX USB Telescope Driver - a UTCDate write restarts the 30 s re-check window",
@@ -2354,7 +2370,6 @@ TEST_CASE("Celestron CGX USB Telescope Driver - reference publication cannot ado
         else
             driver->find_home();
         const bool label_ack_held = mount.wait_for_reply_fragment(2s);
-        driver->set_utc_date(std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
         hold_utc.store(true);
         auto utc = std::async(std::launch::async, [&] { return driver->get_utc_date(); });
         const bool mutex_held = utc_entered.get_future().wait_for(2s) == std::future_status::ready;
