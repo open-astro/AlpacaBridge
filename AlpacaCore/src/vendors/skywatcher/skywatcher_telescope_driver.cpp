@@ -5992,8 +5992,8 @@ private:
         // 250 ms while MoveAxis drives an axis, 2 s while only tracking.
         constexpr auto kManualPoll = kGuardManualPoll;
         constexpr auto kTrackingPoll = std::chrono::milliseconds(2000);
-        // A stop that failed stays owed and is resent on every tick, with no fresh sample (a faulted link
-        // gives none), until it is acked or the link is lost (open-astro#2068).
+        // A stop that failed stays owed and is resent on every tick, sample or not (a faulted link
+        // mostly gives none), until it is acked or the link is lost (open-astro#2068).
         bool owed_ra = false;
         bool owed_dec = false;
         bool owed_tracking = false;
