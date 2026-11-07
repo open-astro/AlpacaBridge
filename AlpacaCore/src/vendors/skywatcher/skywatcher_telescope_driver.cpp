@@ -36,6 +36,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <exception>
 #include <mutex>
 #include <numbers>
 #include <optional>
@@ -996,10 +997,12 @@ public:
         bool started = false;
         {
             StateLock lock(lock_gate_);
-            check_writable_locked();
             if (tracking) {
+                check_writable_locked();
                 check_not_parked_locked("Tracking");
                 require_site_locked();  // the RA drive direction reads the hemisphere
+            } else {
+                check_stop_allowed_locked();  // open-astro#2068: the stop is sent on a faulted link
             }
             if (tracking == tracking_) {
                 // Keep-alive reassertion (many clients poll-set Tracking):
@@ -2573,13 +2576,16 @@ public:
         // axis is not validated until the lock below: nothing indexes the
         // per-axis stop slots before it has been.
         constexpr double kStopEpsilon = 1e-9;
+        // A stop is sent on a faulted link, a start is refused (open-astro#2068).
+        const bool is_stop = std::abs(rate) <= kStopEpsilon;
+        const auto check_gate = [&] { is_stop ? check_stop_allowed_locked() : check_writable_locked(); };
         {
             // Gate BEFORE reaping the pulse (open-astro#630): a reaped pulse
             // task leaves its axis to the reaper, so a refused MoveAxis, or a
             // MoveAxis(axis, 0) with no manual motion (which commands
             // nothing), must not cancel a pulse it will never stop.
             StateLock lock(lock_gate_);
-            check_writable_locked();
+            check_gate();
             check_not_parked_locked("MoveAxis");
             validate_move_axis(axis, rate);
             require_site_locked();  // MoveAxis is sky-referenced (#297)
@@ -2599,7 +2605,7 @@ public:
         int channel = kAxisRa;
         {
             StateLock lock(lock_gate_);
-            check_writable_locked();
+            check_gate();
             check_not_parked_locked("MoveAxis");
             validate_move_axis(axis, rate);
 
@@ -2795,7 +2801,7 @@ public:
         // re-slews after the abort's stop).
         slew_.cancel();
         StateLock lock(lock_gate_);
-        check_writable_locked();
+        check_stop_allowed_locked();  // open-astro#2068: the stop is sent on a faulted link
         check_not_fully_parked_locked("AbortSlew");
         // open-astro#1341: a MoveAxis(axis, 0) stop body still polling would
         // restore tracking a second time after the restore below. cancel() never
@@ -2820,8 +2826,24 @@ public:
         // is to stop NOW, and the ramp-down from an 800x slew otherwise leaves
         // the axes reporting a GOTO in progress for over a second, which the
         // next ConformU test observes as Slewing stuck true.
-        protocol.instant_stop(kAxisRa);
-        protocol.instant_stop(kAxisDec);
+        // On a faulted link both stops are tried and a failure ends the call with the fault, the state
+        // untouched (open-astro#2068); otherwise the first failure ends it as before.
+        const bool faulted = link_faulted_locked();
+        std::exception_ptr stop_error;
+        for (const int channel : {kAxisRa, kAxisDec}) {
+            try {
+                protocol.instant_stop(channel);
+            } catch (...) {
+                if (!faulted) {
+                    throw;
+                }
+                stop_error = stop_error ? stop_error : std::current_exception();
+            }
+        }
+        if (stop_error) {
+            throw_if_link_faulted_locked();
+            std::rethrow_exception(stop_error);
+        }
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         goto_in_progress_ = false;
@@ -2839,7 +2861,7 @@ public:
         invalidate_position_cache_locked();
         bool need_duty = false;
         bool restarted = false;
-        if (restore_tracking) {
+        if (restore_tracking && !link_faulted_locked()) {  // the restore is a start (open-astro#2068)
             try {
                 set_tracking_locked(lock, true);
             } catch (const std::exception& e) {
@@ -2911,11 +2933,17 @@ private:
     // which has no caller to refuse to.
     bool link_faulted_locked() const { return !board_reset_fault_.empty() || !protocol_->link_fault().empty(); }
 
-    // A command that reaches the wire: refused while faulted, nothing sent.
+    // A start that reaches the wire: refused while faulted, nothing sent. The stops use
+    // check_stop_allowed_locked() below.
     void check_writable_locked() const {
         check_connected();
         throw_if_link_faulted_locked();
     }
+
+    // A stop (AbortSlew, MoveAxis(axis, 0), Tracking=false, the limit guard's stops) goes out best effort
+    // on a faulted link (open-astro#2068): only a lost or absent link refuses it. A stop whose reply fails
+    // then throws the fault from the exchange. Every start keeps check_writable_locked().
+    void check_stop_allowed_locked() const { check_connected(); }
 
     // A park in flight (parking_) gates the same members as a completed park
     // so a slew/MoveAxis/sync cannot silently clobber it; AbortSlew and
@@ -5936,6 +5964,11 @@ private:
         // 250 ms while MoveAxis drives an axis, 2 s while only tracking.
         constexpr auto kManualPoll = kGuardManualPoll;
         constexpr auto kTrackingPoll = std::chrono::milliseconds(2000);
+        // A stop that failed stays owed and is resent on every tick, with no fresh sample (a faulted link
+        // gives none), until it is acked or the link is lost (open-astro#2068).
+        bool owed_ra = false;
+        bool owed_dec = false;
+        bool owed_tracking = false;
         for (;;) {
             std::chrono::milliseconds poll = kTrackingPoll;
             auto crossing = util::LimitCrossing::None;
@@ -5960,6 +5993,7 @@ private:
                 }
                 if (goto_in_progress_ || parking_ || homing_ || slewing_cached_ || restoring_tracking_) {
                     limit_guard_baseline_.reset();
+                    owed_ra = owed_dec = owed_tracking = false;  // a newer motion owns the axes
                 } else {
                     try {
                         refresh_for_guard_locked();
@@ -5982,9 +6016,15 @@ private:
                     stop_ra = manual_axis_slewing_[0];
                     stop_dec = manual_axis_slewing_[1];
                     stop_tracking = tracking_;
+                } else {
+                    // Only what still runs: a client's own stop in between settles the debt.
+                    stop_ra = owed_ra && manual_axis_slewing_[0];
+                    stop_dec = owed_dec && manual_axis_slewing_[1];
+                    stop_tracking = owed_tracking && tracking_;
                 }
             }
-            if (crossing != util::LimitCrossing::None && ctx.stop_reason() != util::StopReason::Cancelled) {
+            const bool owed = stop_ra || stop_dec || stop_tracking;
+            if ((crossing != util::LimitCrossing::None || owed) && ctx.stop_reason() != util::StopReason::Cancelled) {
                 const bool at_floor = crossing == util::LimitCrossing::AltitudeFloor;
                 const std::string what =
                     at_floor
@@ -5993,10 +6033,13 @@ private:
                         : "Meridian limit (" + limit_number(motion_limits_.meridian_limit_minutes.value_or(0.0)) +
                               " min) crossed at " + limit_number(sample.counterweight_up_deg * 4.0) +
                               " min past the meridian";
-                ALPACA_LOG_WARN("SkyWatcher", what + ": stopping" + (stop_tracking ? " tracking" : "") +
-                                                  (stop_ra || stop_dec ? " MoveAxis" : ""));
+                if (crossing != util::LimitCrossing::None) {
+                    ALPACA_LOG_WARN("SkyWatcher", what + ": stopping" + (stop_tracking ? " tracking" : "") +
+                                                      (stop_ra || stop_dec ? " MoveAxis" : ""));
+                }
                 bool all_stopped = true;
-                const auto stop = [&](bool wanted, const auto& command) {
+                const auto stop = [&](bool wanted, bool& still_owed, const auto& command) {
+                    still_owed = false;
                     if (!wanted) {
                         return;
                     }
@@ -6008,14 +6051,20 @@ private:
                     }
                     try {
                         command();
+                    } catch (const AlpacaException& e) {
+                        all_stopped = false;
+                        // A lost link is not retried (decision 0009); a fault is.
+                        still_owed = e.error_code() != AlpacaError::NotConnected;
+                        ALPACA_LOG_ERROR("SkyWatcher", std::string("Motion limit guard: stop failed: ") + e.what());
                     } catch (const std::exception& e) {
                         all_stopped = false;
+                        still_owed = true;
                         ALPACA_LOG_ERROR("SkyWatcher", std::string("Motion limit guard: stop failed: ") + e.what());
                     }
                 };
-                stop(stop_dec, [this] { move_axis(1, 0.0); });
-                stop(stop_tracking, [this] { set_tracking(false); });
-                stop(stop_ra, [this] { move_axis(0, 0.0); });
+                stop(stop_dec, owed_dec, [this] { move_axis(1, 0.0); });
+                stop(stop_tracking, owed_tracking, [this] { set_tracking(false); });
+                stop(stop_ra, owed_ra, [this] { move_axis(0, 0.0); });
                 if (all_stopped) {
                     StateLock lock(lock_gate_);
                     // Not when a sync, goto or newer body has reset or taken

@@ -1012,6 +1012,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     expect_compromised([&] { driver->pulse_guide(0, 500); });
     expect_compromised([&] { driver->sync_to_coordinates(1.0, 10.0); });
     expect_compromised([&] { driver->slew_to_coordinates_async(1.0, 10.0); });
+    // open-astro#2068: AbortSlew sends its ':L' stops (the silent board never acks them, so it still throws).
     expect_compromised([&] { driver->abort_slew(); });
     expect_compromised([&] { driver->set_tracking_rate(1); });
     expect_compromised([&] { driver->command_string("V1", true); });
@@ -1032,10 +1033,13 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     expect_compromised([&] { driver->get_at_park(); });
     expect_compromised([&] { driver->get_side_of_pier(); });
     const auto frames = board.frames();
+    int stop_frames = 0;
     for (std::size_t i = frames_before; i < frames.size(); ++i) {
         INFO("unexpected frame on a faulted link: " << frames[i]);
-        CHECK((frames[i][0] == 'f' || frames[i][0] == 'j'));
+        CHECK((frames[i][0] == 'f' || frames[i][0] == 'j' || frames[i][0] == 'L'));
+        stop_frames += frames[i][0] == 'L' ? 1 : 0;
     }
+    CHECK(stop_frames >= 1);  // the AbortSlew above
 
     CHECK(driver->get_connected());               // DriverException, not NotConnected
     CHECK_NOTHROW(driver->get_alignment_mode());  // static metadata keeps answering

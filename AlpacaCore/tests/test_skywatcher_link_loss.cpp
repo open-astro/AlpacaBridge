@@ -19,6 +19,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/motion_limits.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
@@ -426,7 +427,11 @@ struct RestartedBoardRig {
     sw::SkyWatcherProtocolWrapper* protocol = nullptr;
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
 
-    RestartedBoardRig() {
+    // @p ra_axis_deg places the RA axis before the connect; @p limits arm the motion-limit guard.
+    explicit RestartedBoardRig(double ra_axis_deg = 0.0, alpacacore::util::MotionLimits limits = {}) {
+        if (ra_axis_deg != 0.0) {
+            board.jump_axis_degrees(1, ra_axis_deg);
+        }
         sw::ConnectionInfo info;
         info.type = sw::ConnectionType::Serial;
         info.port_path = board.slave_path();
@@ -434,7 +439,8 @@ struct RestartedBoardRig {
         info.response_timeout_ms = 100;
         auto owned = std::make_unique<sw::SkyWatcherProtocolWrapper>();
         protocol = owned.get();
-        driver = sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0, std::move(owned), {}, clock);
+        driver =
+            sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0, std::move(owned), limits, clock);
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
         driver->set_tracking(true);
@@ -595,4 +601,89 @@ TEST_CASE("SkyWatcher link loss - a MoveAxis stop checks for a board restart its
 
     CHECK(r.frames_since(from, "KGIJ") == 0);
     sw::set_status_poll_paused_for_testing(*r.driver, false);
+}
+
+// open-astro#2068: a client's stop must still reach the board while the link fault is latched (best
+// effort); starts stay refused. The fault is latched by muting the fake board for three exchanges and then
+// unmuting it (a board that would obey a stop); no step() runs, so the status poll cannot clear the latch.
+namespace {
+
+void latch_fault_then_unmute(RestartedBoardRig& r) {
+    r.board.set_muted(true);
+    for (int i = 0; i < 3; ++i) CHECK_THROWS(r.protocol->inquire_position(sw::kAxisRa));
+    REQUIRE(r.protocol->link_faulted());
+    r.board.set_muted(false);
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher link loss - AbortSlew sends its stop while the link fault is latched",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    latch_fault_then_unmute(r);
+    const std::size_t from = r.board.frames().size();
+    CHECK_NOTHROW(r.driver->abort_slew());
+    CHECK(r.frames_since(from, "L") >= 1);
+}
+
+TEST_CASE("SkyWatcher link loss - MoveAxis(axis, 0) sends its stop while the link fault is latched",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    latch_fault_then_unmute(r);
+    const std::size_t from = r.board.frames().size();
+    CHECK_NOTHROW(r.driver->move_axis(0, 0.0));
+    CHECK(r.frames_since(from, "K") >= 1);
+}
+
+TEST_CASE("SkyWatcher link loss - Tracking=false sends its stop while the link fault is latched",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    latch_fault_then_unmute(r);
+    const std::size_t from = r.board.frames().size();
+    CHECK_NOTHROW(r.driver->set_tracking(false));
+    CHECK(r.frames_since(from, "K") >= 1);
+}
+
+TEST_CASE("SkyWatcher link loss - a stop the silent board never acks throws the fault after it was sent",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    latch_fault_then_unmute(r);
+    r.board.set_muted(true);  // still latched, and nothing answers the stop
+    const std::size_t from = r.board.frames().size();
+    CHECK_THROWS_WITH(r.driver->abort_slew(), Catch::Matchers::ContainsSubstring("communications compromised"));
+    CHECK(r.frames_since(from, "L") >= 1);
+}
+
+TEST_CASE("SkyWatcher link loss - starts stay refused while the link fault is latched",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    r.driver->set_tracking(false);
+    latch_fault_then_unmute(r);
+    const std::size_t from = r.board.frames().size();
+    CHECK_THROWS_WITH(r.driver->move_axis(0, 1.0), Catch::Matchers::ContainsSubstring("communications compromised"));
+    CHECK_THROWS_WITH(r.driver->set_tracking(true), Catch::Matchers::ContainsSubstring("communications compromised"));
+    CHECK(r.frames_since(from, "KLSGIJ") == 0);
+}
+
+// A limit-guard stop whose reply never comes stays owed: a faulted link gives the guard no sample, so
+// without the debt the stop would not be sent again. The board is muted once the guard's first stop is on
+// the wire; every later K is a resend with no sample behind it (a failed stop is three K frames).
+TEST_CASE("SkyWatcher link loss - a limit-guard stop that failed is resent while the link is faulted",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    alpacacore::util::MotionLimits limits;
+    limits.meridian_limit_minutes = 10.0;
+    RestartedBoardRig r(92.0, limits);  // 8 min past the meridian: inside the limit
+    r.step(30);                         // the guard takes its baseline
+    const std::size_t from = r.board.frames().size();
+    r.board.drop_next_frames('K', 1000);
+    r.board.jump_axis_degrees(1, 94.0);  // 16 min past the meridian
+    for (int i = 0; i < 100 && r.frames_since(from, "K") == 0; ++i) r.step();
+    REQUIRE(r.frames_since(from, "K") >= 1);
+    r.board.set_muted(true);
+    const int at_mute = r.frames_since(from, "K");
+    r.step(60);  // several guard ticks with every exchange failing
+    CHECK(r.frames_since(from, "K") >= at_mute + 4);
 }
