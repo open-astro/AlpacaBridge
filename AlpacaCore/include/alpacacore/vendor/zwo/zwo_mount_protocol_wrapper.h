@@ -140,6 +140,18 @@ public:
                              int timeout_ms_override = 0);
     void send_command_blind(const std::string& command);
 
+    /// open-astro#2165: marks the calling thread as background I/O (the driver's telemetry poll) while it lives.
+    /// Before each of its exchanges a background thread yields the I/O lock to every client exchange already
+    /// waiting for it, so a client write or stop waits for at most the one background exchange in flight, not a
+    /// whole poll cycle. Not nestable; one per thread.
+    class BackgroundIoScope {
+    public:
+        BackgroundIoScope();
+        ~BackgroundIoScope();
+        BackgroundIoScope(const BackgroundIoScope&) = delete;
+        BackgroundIoScope& operator=(const BackgroundIoScope&) = delete;
+    };
+
     std::string get_mount_info();
     std::string get_mount_serial_number();
     // Call only after fresh model/serial verification and the driver's identity claim.

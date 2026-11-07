@@ -970,4 +970,37 @@ TEST_CASE("ZWO telescope clock - a redundant connect never overlaps the running 
     CHECK(pulses == std::vector<std::string>{":Mgn3000", ":Mgn3000", ":Mgs1000"});  // C was dropped, B came last
 }
 
+// open-astro#2165: a client write or MoveAxis stop issued while the telemetry poll owns the link (its ":GR" held in
+// flight) reaches the wire right after that exchange, not after the rest of the poll cycle (":GD", ":GZ", ...).
+// Falsified by: zwo_mount_protocol_wrapper.cpp lock_exchange() taking mutex_ for a background exchange without
+// waiting for the client exchanges already waiting, so the poll thread re-locks it first for every remaining query.
+TEST_CASE("ZWO telescope clock - a client command waits for at most one poll exchange (#2165)",
+          "[zwo][telescope][unit][clock]") {
+    const bool stop = GENERATE(false, true);  // a guide-rate write, or a MoveAxis stop
+    const std::string expected = stop ? ":Qe" : ":Rg";
+    Rig rig;
+    rig.connect();
+    if (stop) rig.driver->move_axis(0, 1.0);  // a jog to stop
+    rig.mount.hold_reply(":GR");
+    rig.clock.advance(250ms);  // the poll starts a cycle: ":GU", then its ":GR" is held
+    REQUIRE(rig.mount.wait_until_held(kReal));
+    const int poll_queries = static_cast<int>(rig.mount.commands().size());
+    auto& client = rig.call([&] {
+        if (stop) {
+            rig.driver->move_axis(0, 0.0);
+        } else {
+            rig.driver->set_guide_rate_right_ascension(0.002089);  // 0.5x sidereal
+        }
+    });
+    // Real time for the client to reach the I/O lock behind the held exchange (a rendezvous, not a driver timer).
+    CHECK_FALSE(ready(client, 200ms));
+    rig.mount.release();
+    REQUIRE(ready(client, kReal));
+    client.get();
+    const auto sent = rig.mount.commands();
+    REQUIRE(static_cast<int>(sent.size()) > poll_queries);
+    INFO("first command after the held :GR: " << sent[static_cast<std::size_t>(poll_queries)]);
+    CHECK(sent[static_cast<std::size_t>(poll_queries)].rfind(expected, 0) == 0);
+}
+
 #endif  // !_WIN32

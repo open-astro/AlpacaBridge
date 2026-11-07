@@ -2786,6 +2786,8 @@ private:
         poll_stop_.store(false);
         poll_operation_.start([this](util::OperationContext& ctx) {
             using namespace std::chrono_literals;
+            // open-astro#2165: the poll's exchanges yield the I/O lock to waiting client commands between queries.
+            const ZWOMountProtocolWrapper::BackgroundIoScope background_io;
             auto next_time_refresh = clock_.now() + 30s;
             while (!poll_stop_.load() && ctx.stop_reason() == util::StopReason::None) {
                 update_link_state();
