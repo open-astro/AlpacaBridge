@@ -2539,12 +2539,14 @@ private:
         const auto axis_max = protocol.get_axis1_limit_degrees(true);
         if (!flips) {
             why = ":GX94# did not answer \"<n>\" or \"<n> N\"";
-        } else if (!east || !west) {
-            why = ":GXE9#/:GXEA# did not answer a whole number of minutes";
-        } else if (!axis_min || !axis_max) {
-            why = ":GXEe#/:GXEw# did not answer a whole number of degrees";
+            return std::nullopt;
         }
-        if (!why.empty()) {
+        if (!east || !west) {
+            why = ":GXE9#/:GXEA# did not answer a whole number of minutes";
+            return std::nullopt;
+        }
+        if (!axis_min || !axis_max) {
+            why = ":GXEe#/:GXEw# did not answer a whole number of degrees";
             return std::nullopt;
         }
         settings.flips_enabled = *flips;

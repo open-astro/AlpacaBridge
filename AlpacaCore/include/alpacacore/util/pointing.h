@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -117,7 +118,7 @@ constexpr int pier_side_for_hour_angle(double ha_hours) { return ha_hours >= 0.0
 // Angles are degrees, hour angles hours; "instrument axes" are the mount's two axes in the controller's own frame.
 
 /// Which side the controller prefers for a GOTO.
-enum class GemPierPreference { East, West, Best, Auto };
+enum class GemPierPreference : std::uint8_t { East, West, Best, Auto };
 
 /// How far each side can point: the meridian limits and the RA-axis (axis 1) limits.
 struct GemPierLimits {
