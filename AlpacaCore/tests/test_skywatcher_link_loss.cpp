@@ -684,6 +684,19 @@ TEST_CASE("SkyWatcher link loss - a stop the silent board never acks throws the 
     const std::size_t from = r.board.frames().size();
     CHECK_THROWS_WITH(r.driver->abort_slew(), Catch::Matchers::ContainsSubstring("communications compromised"));
     CHECK(r.frames_since(from, "L") >= 1);
+    // Both axes are tried even though the first stop failed.
+    // Falsified by: break out of abort_slew's stop loop after the first failure (no L2 frame goes out).
+    const auto frames = r.board.frames();
+    int l1 = 0;
+    int l2 = 0;
+    for (std::size_t i = from; i < frames.size(); ++i) {
+        if (frames[i].size() > 1 && frames[i][0] == 'L') {
+            if (frames[i][1] == '1') ++l1;
+            if (frames[i][1] == '2') ++l2;
+        }
+    }
+    CHECK(l1 >= 1);
+    CHECK(l2 >= 1);
 }
 
 TEST_CASE("SkyWatcher link loss - MoveAxis(axis, 0) throws the fault when its stop is never acked",
