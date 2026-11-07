@@ -2931,8 +2931,9 @@ private:
 
     // open-astro#882: refuse with the read paths' "communications compromised"
     // DriverException while the fault latch is set (or the board restarted
-    // under a recovered link). The status poll, not a client call, is what
-    // clears the latch (decision 0010), so refusing here cannot block recovery.
+    // under a recovered link). The status poll or an acked stop (a stop is
+    // sent while faulted, #2068) clears the latch (decision 0010), so refusing
+    // a start here cannot block recovery.
     void throw_if_link_faulted_locked() const {
         throw_if_board_reset_locked();
         const std::string fault = protocol_->link_fault();

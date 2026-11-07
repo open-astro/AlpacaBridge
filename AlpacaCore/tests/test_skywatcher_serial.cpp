@@ -979,7 +979,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire write without sending",
+TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every start without sending; AbortSlew stop goes out",
           "[skywatcher][serial][linkhealth]") {
     // open-astro#882: driver-lifecycle.instructions.md "Cache-backed reads must track link health" —
     // value reads AND writes throw the same DriverException while latched.
