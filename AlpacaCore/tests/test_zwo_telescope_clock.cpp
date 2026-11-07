@@ -22,12 +22,14 @@
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
 #include <list>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -458,7 +460,7 @@ TEST_CASE("ZWO an older Sync sends no last-resort :CM once a newer GOTO is accep
 
 // #2093: a PulseGuide accepted while an older Sync waits out an "e4" reply is a newer motion command, as a GOTO is:
 // the Sync sends nothing after the pulse's ":Mg" (no ":Q" that would stop the pulse, no retried sync).
-// Falsified by: zwo_telescope_driver.cpp pulse_guide() without its bump_motion_epoch() call.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide() without the ++slew_error_epoch_ in its queue section.
 TEST_CASE("ZWO an older Sync never stops a newer PulseGuide (#2093)", "[zwo][telescope][unit][clock][sync-fence]") {
     const bool last_resort = GENERATE(false, true);  // the pulse lands in the 200 ms settle, or the 300 ms one
     Rig rig;
@@ -487,6 +489,49 @@ TEST_CASE("ZWO an older Sync never stops a newer PulseGuide (#2093)", "[zwo][tel
         CHECK(sent[i].rfind(":SMMC", 0) != 0);
         CHECK(sent[i] != ":CM");
         CHECK(sent[i] != ":Sr06:00:00");
+    }
+    require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
+// #2093: a PulseGuide held before it queues (after its checks) while a Sync passes its reset and reads its epoch. The
+// pulse then queues and moves the epoch, so the Sync, settling after an "e4", sends nothing after the pulse's ":Mg".
+// Falsified by: zwo_telescope_driver.cpp moving the epoch bump out of pulse_guide()'s queue section to before the
+// "PulseGuideQueue" seam (the Sync reads the moved epoch as its own and stops the pulse).
+TEST_CASE("ZWO a Sync whose reset runs before a PulseGuide queues never stops that pulse (#2093)",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    std::promise<void> entered;
+    std::promise<void> go;
+    auto go_future = go.get_future().share();
+    std::atomic<bool> armed{true};
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == "PulseGuideQueue" && armed.exchange(false)) {
+            entered.set_value();
+            (void)go_future.wait_for(kReal);
+        }
+    });
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto pulse = std::async(std::launch::async, [&] { rig.driver->pulse_guide(0, 1000); });
+    REQUIRE(entered.get_future().wait_for(kReal) == std::future_status::ready);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync passed its reset, sent its first ":Q" and waits out the 200 ms settle
+    go.set_value();
+    REQUIRE_NOTHROW(pulse.get());
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    const auto before = rig.mount.commands();
+    const auto pulse_at = static_cast<std::size_t>(
+        std::find_if(before.begin(), before.end(), [](const std::string& c) { return c.rfind(":Mg", 0) == 0; }) -
+        before.begin());
+    rig.advance_until([&] { return ready(sync); }, 100ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    const auto sent = rig.mount.commands();
+    for (std::size_t i = pulse_at + 1; i < sent.size(); ++i) {
+        INFO("after the pulse: " << sent[i]);
+        CHECK(sent[i] != ":Q");
+        CHECK(sent[i].rfind(":SMMC", 0) != 0);
+        CHECK(sent[i] != ":CM");
     }
     require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
 }
@@ -888,9 +933,11 @@ TEST_CASE("ZWO telescope clock - a pulse after a reconnect reaches the mount",
 }
 
 // #2095: a redundant Connected=true drops the queued pulses but leaves the running drain in charge, so the next
-// PulseGuide queues behind the step in flight instead of sending its ":Mg" over it.
+// PulseGuide queues behind the step in flight instead of sending its ":Mg" over it. IsPulseGuiding covers the
+// running pulse and B's wait behind it.
 // Falsified by: zwo_telescope_driver.cpp reset_session_state_for_connect() clearing pulse_drain_active_ on the
-// redundant path too, so the next pulse starts a new drain that supersedes the running one.
+// redundant path too, so the next pulse starts a new drain that supersedes the running one; or zeroing
+// pulse_guiding_end_ and pulse_queue_end_ there while the drain is kept, so IsPulseGuiding reads false while A runs.
 TEST_CASE("ZWO telescope clock - a redundant connect never overlaps the running pulse (#2095)",
           "[zwo][telescope][unit][clock][operation-slot]") {
     Rig rig;
@@ -903,9 +950,19 @@ TEST_CASE("ZWO telescope clock - a redundant connect never overlaps the running 
     for (int i = 0; i < 200 && redundant.wait_for(10ms) != std::future_status::ready; ++i) rig.advance(10ms);
     REQUIRE(redundant.wait_for(0ms) == std::future_status::ready);
     redundant.get();
+    CHECK(rig.driver->get_is_pulse_guiding());               // A still runs
     rig.driver->pulse_guide(1, 1000);                        // B
     CHECK_FALSE(rig.mount.wait_for_count(":Mg", 2, 200ms));  // B waits for A's step
-    rig.advance_until([&] { return rig.mount.count(":Mg") >= 3; }, 100ms, 10s);
+    bool guiding_until_b = true;
+    rig.advance_until(
+        [&] {
+            const bool guiding = rig.driver->get_is_pulse_guiding();
+            if (!guiding && rig.mount.count(":Mgs") == 0) guiding_until_b = false;
+            return rig.mount.count(":Mg") >= 3;
+        },
+        100ms, 10s);
+    CHECK(guiding_until_b);  // never false before B's ":Mg"
+
     std::vector<std::string> pulses;
     for (const auto& command : rig.mount.commands()) {
         if (command.rfind(":Mg", 0) == 0) pulses.push_back(command);
