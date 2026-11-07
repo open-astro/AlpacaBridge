@@ -50,6 +50,7 @@ struct FakeSynScanState {
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
     std::atomic<bool> goto_stopped{false};
+    std::atomic<bool> fail_tracking_write{false};  // 'T' gets no answer (timeout) while set
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -98,6 +99,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 st->goto_stopped.store(true);
                 return "#";
             case 'T':  // tracking mode write
+                return st->fail_tracking_write.load() ? "" : "#";
             case 'P':  // passthrough
                 return "#";
             case 'm':
@@ -273,6 +275,25 @@ TEST_CASE("SynScan slot - a refused RA pulse timer start restores tracking after
 
     CHECK(rig.st->command_count('T') > tracking_before);
     CHECK(rig.driver->get_tracking());
+}
+
+TEST_CASE("SynScan slot - a refused start whose tracking restore lands clears the unconfirmed flag",
+          "[synscan][telescope][async][slot]") {
+    Rig rig;
+    rig.driver->set_tracking(true);
+    alpacacore::vendor::synscan::set_pulse_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    rig.st->fail_tracking_write.store(true);
+    require_alpaca_error([&] { rig.driver->pulse_guide(2, 200); }, alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(rig.driver->get_tracking());  // the restore failed: the mount may not be tracking
+
+    rig.st->fail_tracking_write.store(false);
+    const int tracking_before = rig.st->command_count('T');
+    require_alpaca_error([&] { rig.driver->pulse_guide(2, 200); }, alpacacore::AlpacaError::DriverException);
+    CHECK(rig.st->command_count('T') > tracking_before);
+    CHECK(rig.driver->get_tracking());  // the restore landed: the flag clears and the mode is written through
 }
 
 #endif  // _WIN32

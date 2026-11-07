@@ -1358,6 +1358,11 @@ public:
                         ra_stop_unconfirmed_ = true;  // Tracking reads false until a restore lands
                         ALPACA_LOG_ERROR("SynScan", "PulseGuide tracking restore after a refused timer start failed: " +
                                                         restore_error);
+                    } else if (restore_mode > 0) {
+                        // Written through, so a poll sampled during the RA stop (tracking off) cannot publish over it.
+                        set_tracking_mode_cached_locked(restore_mode);
+                        ra_stop_unconfirmed_ = false;
+                        invalidate_readback_top_locked();
                     }
                 } catch (...) {
                     manual_axis_slewing_[axis] = true;  // the axis may still be moving
@@ -2493,6 +2498,11 @@ private:
         if (!restore_error.empty()) {
             ra_stop_unconfirmed_ = true;  // Tracking reads false until a restore lands
             ALPACA_LOG_ERROR("SynScan", "tracking restore after refused slew start failed: " + restore_error);
+        } else if (stop_error.empty() && restore_mode > 0) {
+            // Written through, as AbortSlew's restore: a poll sampled during the RA stop cannot publish over it.
+            set_tracking_mode_cached_locked(restore_mode);
+            ra_stop_unconfirmed_ = false;
+            invalidate_readback_top_locked();
         }
         if (stop_error.empty()) {
             set_slewing_locked(false);
