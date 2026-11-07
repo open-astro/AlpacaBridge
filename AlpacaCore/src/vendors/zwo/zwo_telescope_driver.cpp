@@ -2936,7 +2936,8 @@ private:
     // Stops the pulse drain and drops what it had queued. The pulse slot's reapers are the disconnect teardown,
     // connect (after it reaped the teardown) and the destructor, never two at once.
     void stop_pulse_drain() {
-        // Never between a PulseGuide's drain decision and its start (#2096): no body takes this lock.
+        // Never between a PulseGuide's drain decision and its start (#2096). The disconnect teardown body takes it here
+        // too; that is safe because no pulse body takes it and pulse_guide() never waits on the teardown slot.
         std::lock_guard<std::mutex> start_lock(pulse_start_mutex_);
         pulse_slot_.cancel_all_and_join();
         std::lock_guard<std::mutex> lock(pulse_mutex_);
@@ -3113,15 +3114,17 @@ private:
     // connect/disconnect. Consulted by get_slewing() before the force window.
     mutable std::string last_slew_error_;
     mutable bool park_failed_ = false;
-    // Bumped by every clear_last_slew_error_locked() (under mutex_): Sync's
-    // motion-ownership epoch, so an older Sync learns that a newer motion
-    // command owns the mount (sync_to_pair()).
+    // Bumped by every clear_last_slew_error_locked() and by pulse_guide()'s queue section (#2093), under mutex_:
+    // Sync's motion-ownership epoch, so an older Sync learns that a newer motion command owns the mount
+    // (sync_to_pair()).
     uint64_t slew_error_epoch_ = 0;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
     // open-astro#2096: pulse_guide() holds it across its queue section and pulse_slot_.start();
     // reset_position_offsets() and stop_pulse_drain() (the teardown, connect, destructor) take it first. Order: after
-    // initiator_mutex_ and set_connected_mutex_, before target_write_mutex_ and pulse_mutex_. No body, getter or fence
-    // takes it, so holding it across start() or a drain join cannot block a body.
+    // initiator_mutex_ and set_connected_mutex_, before target_write_mutex_ and pulse_mutex_. Of the slot bodies only
+    // the disconnect teardown takes it (through stop_pulse_drain()); no pulse body, getter or fence does, and
+    // pulse_guide() never waits on the teardown slot, so holding it across start() or the drain join cannot deadlock.
+    // A teardown can wait behind a PulseGuide's start() (its 2 s stale-body bound).
     std::mutex pulse_start_mutex_;
     mutable std::mutex pulse_mutex_;
     std::deque<PulseTask> pulse_queue_;

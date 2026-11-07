@@ -1074,8 +1074,8 @@ TEST_CASE("ZWO async - redundant Connected=true preserves a stored slew failure"
 }
 
 // PIN (#2093): a PulseGuide moves the Sync ownership epoch but is not a motion recovery: a stored GOTO failure stays.
-// Falsified by: zwo_telescope_driver.cpp pulse_guide() calling clear_last_slew_error_locked() (under mutex_) instead of
-// bump_motion_epoch(), which clears the stored failure.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide() calling clear_last_slew_error_locked() in its queue section
+// instead of the plain ++slew_error_epoch_, which clears the stored failure.
 TEST_CASE("ZWO async - a PulseGuide keeps a stored slew failure (#2093)", "[zwo][telescope][async][slewfailure]") {
     Rig rig;
     auto& mount = rig.mount;
