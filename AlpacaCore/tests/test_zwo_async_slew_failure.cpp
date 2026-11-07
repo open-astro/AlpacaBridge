@@ -1467,6 +1467,49 @@ TEST_CASE("ZWO async - a stale pulse drain start never cuts a newer accepted pul
     driver->set_connected(false);
 }
 
+// open-astro#2096, disconnect sibling: a PulseGuide (A) held between its drain decision and its start must not start a
+// drain over one that a reconnect and a newer PulseGuide (B, 6000 ms) started in that gap. The disconnect teardown's
+// stop_pulse_drain() waits for A's start, so A's drain is the one the teardown joins.
+// Falsified by: zwo_telescope_driver.cpp stop_pulse_drain(): removing its pulse_start_mutex_ lock (the reconnect
+// completes while A is held, and A's late start cuts B's second step).
+TEST_CASE("ZWO async - a stale pulse drain start never cuts a pulse after a reconnect (#2096)",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    std::atomic<bool> armed{true};
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == "PulseGuide" && armed.exchange(false)) latch.block();  // the first PulseGuide only
+    });
+    rig.connect();
+
+    auto a = std::async(std::launch::async, [&] { driver->pulse_guide(0, 500); });
+    REQUIRE(latch.wait_entered());  // A decided to start the drain and has not started it
+    auto cycle = std::async(std::launch::async, [&] {
+        return alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(5)) &&
+               alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5));
+    });
+    // Stays under the latch's 2 s self-release.
+    const bool cycled_while_held = cycle.wait_for(std::chrono::milliseconds(1500)) == std::future_status::ready;
+    if (!cycled_while_held) latch.release();  // the teardown waits for A's start: let A start, then it runs
+    REQUIRE(cycle.get());
+    auto b = std::async(std::launch::async, [&] { driver->pulse_guide(1, 6000); });  // B: two 3000 ms steps
+    const bool b_first_step = mount.wait_for_count(":Mgs", 1, std::chrono::milliseconds(1500));
+    b.wait();
+    latch.release();  // A's start, if it was still held
+    a.wait();
+    REQUIRE_NOTHROW(b.get());
+    const bool b_drain_waits = b_first_step && rig.clock.wait_for_waiters(2, std::chrono::seconds(2));
+    if (b_drain_waits) rig.tick(std::chrono::milliseconds(3000));  // B's first step ends
+
+    CHECK_FALSE(cycled_while_held);
+    CHECK(b_first_step);
+    CHECK(b_drain_waits);
+    CHECK(mount.wait_for_count(":Mgs", 2, std::chrono::seconds(2)));  // B's second step reached the mount
+    driver->set_connected(false);
+}
+
 // decision 0006 "Thread refusal": a second GOTO whose body the slot cannot start supersedes the first (held on ":Sr")
 // and publishes the stopped state itself: Slewing false, and the poll it paused reads status again.
 // Falsified by: zwo_telescope_driver.cpp slew_to_target_async(): removing the poll_pause_ release in the refused-start
