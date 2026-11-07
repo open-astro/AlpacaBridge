@@ -1373,6 +1373,10 @@ public:
                 // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
                 // on this firmware and Dec pulse polarity flips with pier side.
                 // Slewing stays true while a trim pulse runs.
+                // Issue #2063: the client's pulse takes over from the trim of a GOTO the mount already finished.
+                if (pulse_window_open() && goto_seen_stopped_) {
+                    return false;
+                }
                 if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
                     // The trim reads the position itself. Under the state lock alone (the slew hold closed
                     // between the freshness check and the read of `now` above) the refused exchange would be
