@@ -24,6 +24,7 @@
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_qhy_cfw3.h"
+#include "fake_task_clock.h"
 #include "stalled_outq_probe.h"
 
 namespace {
@@ -675,4 +676,54 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A wheel not taking data fails the move
     CHECK(message.find("unplug and replug") != std::string::npos);
     CHECK(elapsed < std::chrono::milliseconds(2500));  // the 500 ms drain bound, not the 3 s move timeout
     CHECK(driver->get_connected());                    // the node is still there: not a lost link
+}
+
+TEST_CASE("QHY CFW3 Filter Wheel Driver - Link loss follows decision 0009 (#2065)",
+          "[qhy][filterwheel][cfw3][unit][link_loss]") {
+    FakeQhyCfw3 fake(7);
+    auto driver = make_driver(fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    // A clean Disconnect is not a loss: no stamp.
+    driver->set_connected(false);
+    CHECK_FALSE(alpacacore::vendor::qhy::consume_link_lost_at_for_testing(*driver).has_value());
+    driver->set_connected(true);
+
+    fake.sever();
+    driver->set_position(2);  // the transaction that notices the loss
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (driver->get_connected() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    // One fault text, kept until the next Connect or Disconnect.
+    CHECK(driver->get_link_fault().find("link lost") != std::string::npos);
+    // Stamped once, and consume clears it.
+    CHECK(alpacacore::vendor::qhy::consume_link_lost_at_for_testing(*driver).has_value());
+    CHECK_FALSE(alpacacore::vendor::qhy::consume_link_lost_at_for_testing(*driver).has_value());
+    CHECK_FALSE(driver->get_link_fault().empty());
+    // A client Disconnect clears it.
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+}
+
+TEST_CASE("QHY CFW3 protocol - link loss is stamped on the task clock (#2065)",
+          "[qhy][filterwheel][cfw3][unit][link_loss]") {
+    FakeQhyCfw3 fake(7);
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::vendor::qhy::Cfw3ProtocolWrapper wrapper(clock);
+    alpacacore::vendor::qhy::Cfw3ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    config.boot_timeout_ms = fast_settings().boot_timeout_ms;
+    config.reply_timeout_ms = fast_settings().reply_timeout_ms;
+    config.move_timeout_ms = fast_settings().move_timeout_ms;
+    wrapper.connect(config);
+
+    fake.sever();
+    require_alpaca_error([&]() { wrapper.get_position(); }, alpacacore::AlpacaError::NotConnected);
+    const auto lost = wrapper.consume_link_lost_at();
+    REQUIRE(lost.has_value());
+    CHECK(*lost == clock.now());
 }
