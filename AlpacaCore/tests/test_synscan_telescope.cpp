@@ -968,6 +968,78 @@ TEST_CASE("SynScan Telescope Driver - a cancelled pulse whose stop fails logs th
     }
 }
 
+// The cancelled pulse's stop is sent with no wire turn (run_pulse_stop_body): that is safe only because a replacing
+// initiator joins the slot before it takes its own turn. A replacement must send the first pulse's stop before the
+// rate command of its own turn (the tracking mode is cached here, so no mode read goes out).
+// Falsified by: synscan_telescope_driver.cpp pulse_guide, send the rate command before pulse_ops_[axis].cancel()
+// joins the slot: the replacement's rate command then precedes the first pulse's stop.
+TEST_CASE("SynScan Telescope Driver - a cancelled pulse stop precedes the replacement pulse's turn",
+          "[synscan][telescope][unit]") {
+    auto log = std::make_shared<std::vector<std::string>>();
+    auto log_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([log, log_mutex](const std::string& command) {
+        {
+            std::lock_guard<std::mutex> lock(*log_mutex);
+            log->push_back(command);
+        }
+        switch (command.empty() ? '\0' : command[0]) {
+            case 'K':
+                return std::string(1, command.size() > 1 ? command[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return std::string("12AB0500,20000500#");
+            case 't':
+                return std::string(1, '\x01') + "#";
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'L':
+                return std::string("0#");
+            default:
+                return std::string("#");
+        }
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    alpacacore::test::FakeTaskClock clock;  // neither 300 ms pulse elapses on its own
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->pulse_guide(2, 300);  // East, RA
+    {
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        log->clear();
+    }
+    driver->pulse_guide(2, 300);  // replaces the first pulse on the same axis
+
+    std::vector<std::string> sent;
+    {
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        sent = *log;
+    }
+    // RA axis is device 16; the stop is the zero-rate variable command, the start a non-zero rate.
+    const auto is_rate = [](const std::string& c) {
+        return c.size() >= 6 && c[0] == 'P' && c[2] == '\x10' && c[1] == '\x03';
+    };
+    const auto stop = std::find_if(sent.begin(), sent.end(),
+                                   [&](const std::string& c) { return is_rate(c) && c[4] == '\0' && c[5] == '\0'; });
+    const auto start = std::find_if(sent.begin(), sent.end(),
+                                    [&](const std::string& c) { return is_rate(c) && (c[4] != '\0' || c[5] != '\0'); });
+    REQUIRE(stop != sent.end());
+    REQUIRE(start != sent.end());
+    CHECK(stop < start);
+    driver.reset();
+}
+
 // Steps the fake clock until `pred` holds, so a pulse timer parked on it fires without a sleep. Each step waits for
 // the woken task to settle; the 10 s bound is real time (the handset's response timeouts run on it).
 bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred) {
