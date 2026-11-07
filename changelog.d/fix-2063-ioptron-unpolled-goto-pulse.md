@@ -1,0 +1,3 @@
+### Fixed
+
+- **iOptron PulseGuide after an unpolled async GOTO**, iOptron telescope driver, issue #2063. When a client never reads `Slewing` after a `SlewToCoordinatesAsync`, `PulseGuide` now asks the mount before the pulse starts and, finding it stopped, no longer reports `Slewing` true for the pulse; a later `MoveAxis` no longer records the finished GOTO as driver motion. The GOTO settle trim is unchanged. Covered by `iOptron Telescope Driver - Slewing stays false for a PulseGuide after an unpolled async GOTO finished` and `iOptron Telescope Driver - MoveAxis after an unpolled finished GOTO leaves no driver motion` in `AlpacaCore/tests/test_ioptron_telescope.cpp`.
