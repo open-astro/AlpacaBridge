@@ -1,0 +1,3 @@
+### Fixed
+
+- **SynScan tracking after a refused slot start**, SynScan driver, issue #2071. A goto-over-goto start or an RA PulseGuide timer start that the OS refuses (EAGAIN) stops the mount, and the stop ends sidereal tracking. The driver now sends the cached tracking mode again after that stop, as AbortSlew does, so `Tracking` no longer reads true while the mount is not tracking; a failed re-send is logged and `Tracking` reads false until a restore lands. Covered by `SynScan slot - a refused goto-over-goto start restores tracking after the stop` and `SynScan slot - a refused RA pulse timer start restores tracking after the stop` in `AlpacaCore/tests/test_synscan_slot.cpp`.
