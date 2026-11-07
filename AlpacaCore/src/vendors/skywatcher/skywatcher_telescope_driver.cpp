@@ -1004,6 +1004,7 @@ public:
             } else {
                 check_stop_allowed_locked();  // open-astro#2068: the stop is sent on a faulted link
             }
+            // Tracking=false with tracking already off sends nothing, faulted or not (a no-op stop).
             if (tracking == tracking_) {
                 // Keep-alive reassertion (many clients poll-set Tracking):
                 // the requested state already holds — do not stop/restart
@@ -2845,8 +2846,15 @@ public:
             }
         }
         if (stop_error) {
-            throw_if_link_faulted_locked();
-            std::rethrow_exception(stop_error);
+            try {
+                std::rethrow_exception(stop_error);
+            } catch (const AlpacaException& e) {
+                // As faulted_stop_locked(): a lost link (NotConnected) passes through, anything else is the fault.
+                if (e.error_code() != AlpacaError::NotConnected) {
+                    throw_if_link_faulted_locked();
+                }
+                throw;
+            }
         }
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;

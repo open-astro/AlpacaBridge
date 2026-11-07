@@ -627,6 +627,17 @@ TEST_CASE("SkyWatcher link loss - AbortSlew sends its stop while the link fault 
     CHECK(r.frames_since(from, "L") >= 1);
 }
 
+TEST_CASE("SkyWatcher link loss - AbortSlew after a board restart sends its stop and does not restore tracking",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    r.restart_board();
+    const std::size_t from = r.board.frames().size();
+    CHECK_NOTHROW(r.driver->abort_slew());
+    CHECK(r.frames_since(from, "L") >= 1);
+    CHECK(r.frames_since(from, "GIJ") == 0);  // the tracking restore is a start: refused while faulted
+}
+
 TEST_CASE("SkyWatcher link loss - MoveAxis(axis, 0) sends its stop while the link fault is latched",
           "[skywatcher][linkloss][serial][stop-while-faulted]") {
     RestartedBoardRig r;
