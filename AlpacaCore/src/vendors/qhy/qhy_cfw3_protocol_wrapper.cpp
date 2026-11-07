@@ -23,6 +23,7 @@
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
 
 #include <algorithm>
@@ -328,7 +329,7 @@ std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms) {
 
 class Cfw3ProtocolWrapper::Impl {
 public:
-    Impl() = default;
+    explicit Impl(util::TaskClock& clock) : clock_(clock) {}
     ~Impl() {
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
@@ -579,7 +580,7 @@ private:
                 std::lock_guard<std::mutex> lock(fault_mutex_);
                 link_fault_ = "QHYCFW3 link lost on " + config_.serial_port;
             }
-            link_lost_at_.note(std::chrono::steady_clock::now());
+            link_lost_at_.note(clock_.now());
             link_lost_.store(true);
             connected_ = false;
             close_port_locked();
@@ -636,6 +637,7 @@ private:
     mutable std::mutex mutex_;
     mutable std::mutex fault_mutex_;  // leaf: guards link_fault_
     std::string link_fault_;
+    util::TaskClock& clock_;
     util::LinkLostStamp link_lost_at_;
     Cfw3ConnectionConfig config_;
     bool connected_ = false;
@@ -648,7 +650,7 @@ private:
 #endif
 };
 
-Cfw3ProtocolWrapper::Cfw3ProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
+Cfw3ProtocolWrapper::Cfw3ProtocolWrapper(util::TaskClock& clock) : impl_(std::make_unique<Impl>(clock)) {}
 Cfw3ProtocolWrapper::~Cfw3ProtocolWrapper() = default;
 
 Cfw3DeviceInfo Cfw3ProtocolWrapper::connect(const Cfw3ConnectionConfig& config) { return impl_->connect(config); }

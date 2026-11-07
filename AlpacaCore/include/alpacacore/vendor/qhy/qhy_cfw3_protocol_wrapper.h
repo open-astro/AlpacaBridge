@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -102,7 +104,9 @@ std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms = 25000);
  */
 class Cfw3ProtocolWrapper {
 public:
-    Cfw3ProtocolWrapper();
+    /// The link-loss stamp (decision 0005 rule 6) reads @p clock; tests pass a FakeTaskClock.
+    /// Read timeouts and the move deadline stay on steady_clock.
+    explicit Cfw3ProtocolWrapper(util::TaskClock& clock = util::default_task_clock());
     ~Cfw3ProtocolWrapper();
 
     Cfw3ProtocolWrapper(const Cfw3ProtocolWrapper&) = delete;
