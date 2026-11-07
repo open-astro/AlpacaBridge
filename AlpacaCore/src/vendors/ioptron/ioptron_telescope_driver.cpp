@@ -1290,7 +1290,8 @@ public:
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
         // goto failed.
-        const DriverMotion motion = slew_in_progress_ ? DriverMotion::Goto : driver_motion_;
+        // A GOTO a status refresh already saw stopped is finished (issue #2063), not driver motion.
+        const DriverMotion motion = (slew_in_progress_ && !goto_seen_stopped_) ? DriverMotion::Goto : driver_motion_;
         supersede_slew_dispatch_locked();
         clear_slew_hold_locked();  // MoveAxis starts no GOTO: Slewing follows the axis flags and the mount
         // open-astro#843: :qR#/:qD# stop arrow motion only ("other slewing and tracking are not affected",
@@ -1359,7 +1360,8 @@ public:
                     // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
                     // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
                     // dispatching and no Park/FindHome still moving (driver_motion_).
-                    return !(pulse_window_open() && !slew_in_progress_ && driver_motion_ == DriverMotion::None);
+                    return !(pulse_window_open() && (!slew_in_progress_ || goto_seen_stopped_) &&
+                             driver_motion_ == DriverMotion::None);
                 }
                 // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
                 // compensating sidereal motion during its final ~1 s approach, so
@@ -1417,6 +1419,7 @@ public:
                                                            " ms, final-approach firmware quirk)");
                             send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
                                                        [&] { protocol.pulse_guide(direction, duration_ms); });
+                            goto_seen_stopped_ = false;  // the trim pulse is part of the GOTO: Slewing stays true
                             status_cache_valid_ = false;
                             position_cache_valid_ = false;
                             return true;
@@ -1710,6 +1713,11 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         ensure_not_parked_fast_locked("PulseGuide");
+        // Issue #2063: a GOTO nobody polled is still flagged here. Ask the mount before the pulse starts, while its
+        // status is still the GOTO's: the pulse itself makes the firmware report slewing.
+        if (slew_in_progress_ && !goto_seen_stopped_ && !slew_hold_.active(clock_.now())) {
+            refresh_status_cache_locked(/*force=*/true);
+        }
 
         const Wire protocol = wire();
         int calibrated_direction = direction;
@@ -1941,6 +1949,7 @@ public:
             supersede_slew_dispatch_locked();
             generation = slew_operation_generation_;
             slew_in_progress_ = true;
+            goto_seen_stopped_ = false;
             // Same reason as prepare_slew_state_locked(): Slewing must read
             // true from the moment this initiator returns, not from when the
             // dispatch body gets the mutex.
@@ -2409,6 +2418,7 @@ private:
         target_ra_set_ = true;
         target_dec_set_ = true;
         slew_in_progress_ = true;
+        goto_seen_stopped_ = false;
         slew_target_ra_hours_ = phys_ra;
         slew_target_dec_degrees_ = phys_dec;
         slew_refine_count_ = 0;
@@ -2651,12 +2661,19 @@ private:
         if (reached_home || (!cached_status_.is_slewing && !slew_hold_.active(now))) {
             driver_motion_ = DriverMotion::None;
         }
+        // Issue #2063: a status that shows the mount stopped past the dispatch window ends the GOTO for the
+        // PulseGuide mask and MoveAxis even if no client reads Slewing. slew_in_progress_ stays for get_slewing(),
+        // which still runs the settle trim and clears it.
+        if (!cached_status_.is_slewing && !slew_hold_.active(now)) {
+            goto_seen_stopped_ = true;
+        }
     }
 
     // See park(): once an :MP1# park has physically arrived, some firmware
     // (HAE29C) stays wedged in "slewing" until tracking is explicitly turned
     // off. Runs after every fresh status fetch; best-effort — a failure here
-    // just retries on the next refresh.
+    // just retries on the next refresh. Known limit: while the finalizer keeps failing the mount stays
+    // "slewing", so driver_motion_ stays Park until Unpark or AbortSlew (conservative: Slewing stays true).
     void finalize_wedged_park_locked() const {
         if (!park_finalize_pending_) {
             return;
@@ -3424,6 +3441,9 @@ private:
 
     mutable util::UtcOffset utc_offset_;
     mutable bool slew_in_progress_ = false;
+    // Under mutex_: a fresh status showed the mount stopped while slew_in_progress_ was still set (nobody read
+    // Slewing). Reset by every GOTO initiator and by a settle trim dispatch.
+    mutable bool goto_seen_stopped_ = false;
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those), or
     // from a GOTO whose dispatch a MoveAxis superseded: keeps get_slewing() true when a PulseGuide
     // arrives mid-motion. Set by park()/find_home() and move_axis(), cleared by

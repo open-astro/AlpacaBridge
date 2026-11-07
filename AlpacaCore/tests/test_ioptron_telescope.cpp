@@ -2632,3 +2632,49 @@ TEST_CASE("iOptron Telescope Driver - SupportedActions and CanAction do not wait
     (void)reply.get();
     driver->set_connected(false);
 }
+
+// Issue #2063: an async GOTO that nobody polls leaves slew_in_progress_ set after the mount stopped.
+TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after an unpolled async GOTO finished",
+          "[ioptron][telescope][unit][fake][pulseguide][repro2063]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    // The fake lands at once and reports status 0. The client never reads Slewing; time passes past the
+    // dispatch override, and PulseGuide's own status refresh sees the mount stopped before the pulse starts.
+    clock.advance(std::chrono::seconds(10));
+    (void)driver->get_right_ascension();
+    driver->pulse_guide(3, 2704);
+    // The pulse makes the firmware report slewing (status 2), as a HAE29C does.
+    mount.set_system_status(2);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Issue #2063: MoveAxis after a GOTO that finished unpolled must not keep it as driver motion.
+TEST_CASE("iOptron Telescope Driver - MoveAxis after an unpolled finished GOTO leaves no driver motion",
+          "[ioptron][telescope][unit][fake][pulseguide][repro2063]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::seconds(10));
+    (void)driver->get_right_ascension();
+    driver->move_axis(0, 0.0);
+    driver->pulse_guide(3, 2704);
+    mount.set_system_status(2);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
