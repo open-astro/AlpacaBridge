@@ -1336,9 +1336,36 @@ public:
             position_override_until_ = util::TaskClock::clock::time_point::min();
             if (connected_) {
                 try {
+                    // Stopping RA ends sidereal tracking too: restore the mode read at the turn, as AbortSlew does.
+                    int restore_mode = 0;
+                    std::string restore_error;
                     send_in_turn(
-                        lock, [this] { return static_cast<bool>(connected_); },
-                        [axis] { SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0); });
+                        lock,
+                        [this, axis, &restore_mode] {
+                            restore_mode = axis == 0 ? tracking_mode_cached_ : 0;
+                            return static_cast<bool>(connected_);
+                        },
+                        [axis, &restore_mode, &restore_error] {
+                            auto& protocol = SynScanProtocolWrapper::instance();
+                            protocol.move_axis_variable_rate(axis, 0.0);
+                            if (restore_mode > 0) {
+                                try {
+                                    protocol.set_tracking_mode(restore_mode);
+                                } catch (const std::exception& e) {
+                                    restore_error = e.what();  // the stop landed: do not report it as failed
+                                }
+                            }
+                        });
+                    if (!restore_error.empty()) {
+                        ra_stop_unconfirmed_ = true;  // Tracking reads false until a restore lands
+                        ALPACA_LOG_ERROR("SynScan", "PulseGuide tracking restore after a refused timer start failed: " +
+                                                        restore_error);
+                    } else if (restore_mode > 0) {
+                        // Written through, so a poll sampled during the RA stop (tracking off) cannot publish over it.
+                        set_tracking_mode_cached_locked(restore_mode);
+                        ra_stop_unconfirmed_ = false;
+                        invalidate_readback_top_locked();
+                    }
                 } catch (...) {
                     manual_axis_slewing_[axis] = true;  // the axis may still be moving
                     ALPACA_LOG_ERROR("SynScan", "PulseGuide stop after a refused timer start failed on axis " +
@@ -2445,10 +2472,35 @@ private:
     // still be moving.
     void stop_after_refused_start_locked(std::unique_lock<std::mutex>& lock) {
         std::string stop_error;
+        std::string restore_error;
+        int restore_mode = 0;
         if (!send_in_turn(
-                lock, [this] { return static_cast<bool>(connected_); },
-                [&stop_error] { stop_error = stop_park_slew_wire(); })) {
+                lock,
+                [this, &restore_mode] {
+                    restore_mode = tracking_mode_cached_;  // read at the turn, as AbortSlew's restore
+                    return static_cast<bool>(connected_);
+                },
+                [&stop_error, &restore_error, &restore_mode] {
+                    stop_error = stop_park_slew_wire();
+                    // The RA stop ended sidereal tracking; a failed re-send is logged and never hides the stop.
+                    if (stop_error.empty() && restore_mode > 0) {
+                        try {
+                            SynScanProtocolWrapper::instance().set_tracking_mode(restore_mode);
+                        } catch (const std::exception& e) {
+                            restore_error = e.what();
+                        }
+                    }
+                })) {
             return;
+        }
+        if (!restore_error.empty()) {
+            ra_stop_unconfirmed_ = true;  // Tracking reads false until a restore lands
+            ALPACA_LOG_ERROR("SynScan", "tracking restore after refused slew start failed: " + restore_error);
+        } else if (stop_error.empty() && restore_mode > 0) {
+            // Written through, as AbortSlew's restore: a poll sampled during the RA stop cannot publish over it.
+            set_tracking_mode_cached_locked(restore_mode);
+            ra_stop_unconfirmed_ = false;
+            invalidate_readback_top_locked();
         }
         if (stop_error.empty()) {
             set_slewing_locked(false);
