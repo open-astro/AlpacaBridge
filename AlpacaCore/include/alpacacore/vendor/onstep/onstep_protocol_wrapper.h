@@ -83,6 +83,9 @@ struct AltitudeLimits {
  *
  * side_of_pier: -1 = unknown/not reported, 0 = pier east ('T'), 1 = pier west
  * ('W'). 'E' in :GU# is the mount type (GEM), not the pier side (#1217).
+ * is_gem: the mount-type letter is 'E' (OnStepX writes 'E' GEM, 'K' fork, 'A' alt-az, 'L' alt-alt; the
+ * uppercase letters appear nowhere else in the reply). False for the other types and for firmware that
+ * sends no type.
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
  * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
@@ -103,6 +106,7 @@ struct MountStatus {
     // when a MoveAxis is still running on the other axis.
     bool is_pulse_guide_active = false;
     int side_of_pier = -1;
+    bool is_gem = false;
     std::string raw_status;
 };
 
@@ -218,6 +222,36 @@ public:
     std::optional<int> get_mount_coords_mode();
 
     /**
+     * @brief Get OnStepX's preferred pier side (:GX96#, '#'-terminated).
+     *
+     * One letter: 'E' east, 'W' west, 'B' best, 'A' auto (main only; 10.23a has E/W/B). With the meridian flips
+     * disabled the firmware answers 'E'. Returns std::nullopt for any other reply. OnStepX only (#2179).
+     */
+    std::optional<char> get_preferred_pier_side();
+
+    /**
+     * @brief Whether OnStepX does meridian flips (:GX94#, '#'-terminated).
+     *
+     * The reply is "<n>" with the flips on and "<n> N" with them off (n 0 none, 1 east, 2 west).
+     * Returns the flips-enabled flag, or std::nullopt for any other reply. OnStepX only (#2179).
+     */
+    std::optional<bool> get_pier_flips_enabled();
+
+    /**
+     * @brief Get a meridian limit in minutes past the meridian (:GXE9# east, :GXEA# west).
+     *
+     * A whole number of minutes, which may be 0 or negative. std::nullopt for any other reply. OnStepX only.
+     */
+    std::optional<int> get_meridian_limit_minutes(bool east);
+
+    /**
+     * @brief Get an RA-axis limit in whole degrees (:GXEe# minimum, :GXEw# maximum).
+     *
+     * std::nullopt for any other reply. OnStepX only.
+     */
+    std::optional<int> get_axis1_limit_degrees(bool maximum);
+
+    /**
      * @brief Get current RA/Dec position.
      *
      * Sends :GRa# and :GDe# (OnStep's high-precision reply variants —
@@ -269,6 +303,16 @@ public:
      * unspecified, see the OnStepX :MS# reference).
      */
     std::string slew_to_target();
+
+    /**
+     * @brief GOTO the mount's current RA/Dec on the given side of the pier (:MNe# for 'e', :MNw# for 'w').
+     *
+     * OnStepX only (10.02g and later). With the flips off it gets the unknown-command "0", read as accepted, so
+     * the caller sends it only when CanSetPierSide holds (OnStepX GEM, flips on).
+     * The reply is one digit with no '#', read like slew_to_target(): "0" accepted, otherwise the :MS# refusal
+     * digit. Neither the targets nor the preferred-side setting change.
+     */
+    std::string goto_current_position_on_side(char side);
 
     /**
      * @brief Sync to the previously set target RA/Dec.

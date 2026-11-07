@@ -29,7 +29,12 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | --- | --- | --- | --- |
 | `:GVP#` / `:GVN#` | identity probe, firmware version | `name#` / `M.mm...#` | `#`-terminated; product must be `OnStep` or `On-Step` |
 | `:GXEE#` | coordinate mode (`DoesRefraction`, #1216) | `0#`, `1#`, ... | read without waiting for `#` |
-| `:GU#` | status (tracking, slewing, park, home, guide, pier side) | packed status `#` | `#`-terminated; see the status table below |
+| `:GU#` | status (tracking, slewing, park, home, guide, mount type, pier side) | packed status `#` | `#`-terminated; see the status table below |
+| `:GX96#` | preferred pier side (OnStepX, #2179) | `E`/`W`/`B`/`A` `#` (`A` on main only; `E` with the flips off) | `#`-terminated; one of the four letters, else unknown |
+| `:GX94#` | meridian flips switch (OnStepX, #2179) | `<n>#` flips on, `<n> N#` off (n 0 none, 1 east, 2 west) | `#`-terminated; strict, else unknown |
+| `:GXE9#` / `:GXEA#` | meridian limit east / west (OnStepX, #2179) | whole minutes past the meridian `#`, may be 0 or negative | `#`-terminated; whole number, else unknown |
+| `:GXEe#` / `:GXEw#` | RA-axis limit min / max (OnStepX, #2179) | whole degrees `#` | `#`-terminated; whole number, else unknown |
+| `:MNe#` / `:MNw#` | GOTO the current RA/Dec on the east / west side of the pier (the flip, #2179; OnStepX) | one digit, codes as `:MS#` | bare digit, no `#` (suppressFrame, like `:MS#`); `0` accepted; with the flips off the firmware answers the unknown-command `0`, so only a `CanSetPierSide` mount sends it |
 | `:GRa#` / `:GDe#` | RA / Dec | `HH:MM:SS.SSSS#` / `sDD*MM:SS.SSS#` | `#`-terminated. Not in the reference: aliases of `:GRH#`/`:GDH#` (OnStepX `Mount.command.cpp`, the `'a'`/`'e'` parameter) |
 | `:GA#` / `:GZ#` | altitude / azimuth | `sDD*MM#` or `sDD*MM'SS#` / `DDD*MM#` or `DDD*MM'SS#` | `#`-terminated |
 | `:Gh#` / `:Go#` | horizon / overhead limit (MoveAxis gate, #1378) | `sDD*#` / `DD*#` | `#`-terminated |
@@ -134,22 +139,51 @@ it is never reachable through `router.cpp` or the web UI.
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
   checked before the connected, link-fault and parked checks, as are `SyncToCoordinates`' and
   `DestinationSideOfPier`'s RA and Dec.
-- **SideOfPier must be computed from hour angle, not read from `:GU#`'s pier-side letter** — the same
-  lesson iOptron already learned from its `:GEP#` raw pier value (see the [iOptron notes](ioptron.instructions.md)):
-  a mount's raw physical-pier-side report does not match the ASCOM convention once tracking past
-  the meridian. An earlier version of this driver preferred the `:GU#` flag over the hour-angle
-  computation and failed ConformU's SideofPier check on real hardware: `Reported SideofPier at
-  HA -9, +9: EE` instead of the required `WE` (flips with HA sign — ASCOM's pointing-state
-  contract). That `EE` was not the physical pier side: the driver read `E`, which OnStepX writes
-  for the mount type (GEM) on every reply, as "pier east" (#1217). The pier side is `T`/`W`/`o`
-  (table below). `get_side_of_pier()` now always computes from hour angle (`LST − synced RA`);
-  `:GU#`'s pier side is parsed into `MountStatus` but intentionally unused for this property. Do not
-  reintroduce a firmware-flag-preferred branch here without re-validating against ConformU's
-  SideofPier/DestinationSideofPier checks. `get_side_of_pier()` takes the RA from the polled frame
-  (below) and never reads the mount: a live `:GRa#`/`:GDe#` pair there (~25 ms each on the HM-17 at
-  9600 baud; ~0.16s each while `read_response()` slept 10 ms after every reply character, #1242)
-  cost ConformU's 0.1 s FAST target, and the hour-angle *sign* tolerates the frame's second of RA
-  staleness.
+- **SideOfPier is the mount's own side, from the `:GU#` letter** (#2179). On an OnStepX German mount (`E` in
+  `:GU#`) the polled frame's pier-side letter (`T` east, `W` west, `o` none) is served as it is; a fork or alt-az
+  mount and OnStep 4.x, not checked on a rig, keep the hour-angle rule. OnStepX's default preferred pier side, Best, keeps the mount on
+  the side it is on past the meridian, up to the meridian limit (60 minutes on the HM-17), "BEST stays on current
+  side if possible" (`Goto.cpp` `setTarget`), so the hour-angle sign names the wrong side there (rig: East at HA
+  +20 min with the mount still on the west), and NINA, which skips a flip when SideOfPier already reads the side
+  expected after the meridian, logs "No flip is required" and lets the mount run into its limit. The
+  hour-angle rule is used there and when the frame has no side: `o` (parked or at home) or firmware that sends no letter,
+  and then it needs the site (`SideOfPier needs the site`, #1893). The old reason for the hour-angle rule, ConformU
+  reading `EE` at HA -9 and +9, was the #1217 misparse: `E` is the mount-type letter (GEM), not the pier side, and
+  `parse_status` no longer reads it as one. `get_side_of_pier()` takes the frame and never reads the mount (a live
+  `:GRa#`/`:GDe#` pair there cost ConformU's 0.1 s FAST target, #1242). Any change to a pier-side source needs a
+  ConformU SideofPier/DestinationSideofPier run on the bare mount.
+- **DestinationSideOfPier models the firmware's choice, SideOfPier can be set** (#2179). The settings the choice
+  depends on are read on OnStepX (`is_onstepx_version()`) at connect and every tenth poll tick, and cached under
+  `mutex_` (`PierSettings`), so the getters never wait on the wire: the preferred side `:GX96#`, the flips switch
+  `:GX94#`, the meridian limits `:GXE9#`/`:GXEA#` and the RA-axis limits `:GXEe#`/`:GXEw#`. The read stops after
+  `:GX96#` when it is not a letter, so a firmware or fake that does not know the commands costs one exchange; a read
+  that fails leaves the settings unknown (connect) or as they were (poll). `DestinationSideOfPier` and
+  `CanSetPierSide` read the frame's pier-side letter, mount type and RA/Dec stale or not (decision 0010 rule 6);
+  with no frame they fall back to the hour-angle rule or false. The model is `util::gem_destination_pier_side()`
+  in `util/pointing.h` (OnStepX `Goto.cpp` `setTarget` and `validateTarget`, read at 10.23a and 10.29c): the current
+  side, the preference (Best stays unless the other side needs strictly less axis travel; East/West/Auto start from
+  their side; at home the side follows the target's hour angle), and reach inside the meridian and axis limits
+  (axis 1 may shift by 360 degrees). With the settings, the polled side and a GEM (`MountStatus::is_gem`) it answers
+  `DestinationSideOfPier`; with any of them unknown, or when no side reaches the target (the firmware would refuse
+  the GOTO), the hour-angle rule answers, as before. Best, E, W and A are the preferred-side letters (10.23a has
+  E/W/B; main adds A). With the flips off (`!transform.meridianFlips`) OnStepX forces the east side only, `:GX96#`
+  reads `E`, `:GX94#` reads `"<n> N"` and `:MNe#`/`:MNw#` get the unknown-command `0` (read as accepted: the `CanSetPierSide` gate keeps them from being sent); the model then reaches East only. OnStepX turns the flips on for every GEM (`Transform.cpp`), so this is a fork or alt-az case.
+- **`CanSetPierSide` and the flip** (#2179). `CanSetPierSide` is true only on OnStepX, on a German mount (`E` in
+  `:GU#`), with the flips on and a read preferred-side letter; it answers from the driver's state and is false
+  while disconnected. `SideOfPier = n` is a command (operation lock) with the order: value 0 or 1 (`InvalidValue`,
+  before the connection check), connected, `CanSetPierSide` (else `PropertyNotImplemented`), parked, link fault,
+  Tracking on, no GOTO running (the slews' refusals, reading `:GU#` now), a mount that reports no side (`o`, at
+  home) is `InvalidOperation` (OnStepX's `setTarget` overrides the requested side with the target's hour angle at
+  home, so the flip would not go where asked), a mount already on that side
+  (nothing sent), then the live position: a side that cannot reach it inside the RA-axis and meridian limits is
+  `InvalidOperation`. Then `:MNe#`/`:MNw#` (OnStepX `Goto.command.cpp`: GOTO the current RA/Dec on that side of the
+  pier; one reply digit with no `#`, codes as `:MS#`; only sent while `CanSetPierSide` holds, see the flips-off note above), sent through the same
+  dispatch as the coordinate slews (`dispatch_goto_locked()`: re-checks, arms the slew hold, raises the digit as
+  the `:MS#` refusals do, and writes `Slewing` through). It sends no `:Sr`/`:Sd`/`:MS#`, leaves
+  `TargetRightAscension`/`TargetDeclination` alone, does not touch the preferred-side setting, and writes nothing
+  to the mount's non-volatile memory. The call returns once the GOTO is accepted. Notes: with the meridian-flip
+  pause-at-home setting the flip waits at home for the user; the GOTO is refused by the mount's own limits like any
+  other (`:MS#` reply 6). Fork, alt-az and alt-alt mounts (`K`, `A`, `L`) and OnStep 4.x keep `CanSetPierSide` false.
 - **`:GU#` status-character table**, confirmed against real hardware traces (`nNpHrsEo180` etc.
   observed live): `n`/`N` = **NOT** tracking / **NOT** slewing respectively (`== npos` check, i.e.
   the character's *absence* means the state is active — this is the opposite polarity of what
@@ -454,7 +488,9 @@ it is never reachable through `router.cpp` or the web UI.
   frame, stale or not (`kSnapshotMaxAge` 3 s is the freshness bound; stale never refuses, decision 0010
   rule 6): `RightAscension`, `Declination`, `Altitude`, `Azimuth`, `Tracking`, `AtPark`, `AtHome`,
   `Slewing` (with the driver's own MoveAxis flags, slew grace and pending Park/FindHome), `SideOfPier`
-  (from the frame's RA) and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
+  (on an OnStepX German mount the frame's `:GU#` pier-side letter; otherwise, or when there is none, the hour-angle
+  rule from the frame's RA, #2179)
+  and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
   (`device_state_age()`). A field the mount has not answered yet throws `DriverException` "not
   available"; a latched fault and a lost link refuse as above. While the frame has no status (every `:GU#`
   since the connect failed), a command that checks for a park or writes the status through (`PulseGuide`, a
@@ -616,8 +652,9 @@ it is never reachable through `router.cpp` or the web UI.
   alignment, so it does not require native AltAz mount support. `SyncToAltAz` is not implemented
   (`CanSyncAltAz=false`) since OnStep has no native Alt/Az sync command.
 - `CanSetGuideRates=false` (guide rate is not queryable/settable over this protocol — the
-  `GuideRate` property returns an informational fixed value only) and `CanSetPierSide=false`
-  (no distinct "set pier side" command). `CanSetDeclinationRate`/`CanSetRightAscensionRate` are
+  `GuideRate` property returns an informational fixed value only). `CanSetPierSide` is true only on an OnStepX
+  German mount with the flips on (#2179, the flip bullet above); the flip is `:MNe#`/`:MNw#`, a GOTO to the
+  current position on the other side. `CanSetDeclinationRate`/`CanSetRightAscensionRate` are
   also `false` — custom tracking-rate commands were not confirmed against real OnStep firmware
   during this implementation, so the setters throw `PropertyNotImplemented` rather than
   advertise support that might silently no-op. The getters read 0, and throw `NotConnected` while
@@ -638,8 +675,9 @@ it is never reachable through `router.cpp` or the web UI.
   command, so it is client-side only. `SiteLatitude` and `SiteLongitude` throw `InvalidOperation`
   (with the reason the last `:Gt#`/`:Gg#` read failed) until the coordinate is known: written from
   the device config at connect, by a client, or read from the mount at connect or by the status poll
-  (#1783; they answered a default 0.0 before, decision 0019). `SideOfPier`, `DestinationSideOfPier`,
-  `SiderealTime` and both `SlewToAltAz` forms throw `InvalidOperation` too ("<member> needs the site", with the
+  (#1783; they answered a default 0.0 before, decision 0019). `DestinationSideOfPier`, the `SideOfPier` write,
+  `SiderealTime`, both `SlewToAltAz` forms, and `SideOfPier` when the mount reports no side (`o`; a `T`/`W`
+  letter needs no site, #2179) throw `InvalidOperation` too ("<member> needs the site", with the
   same reason) until both coordinates are known (#1893; they used latitude and longitude 0 before): decision 0019
   rule 2, followed for consistency, since its rule 3 covers controllers that store no site. An Alt/Az slew retries
   the site read first (at most every `kSiteInfoRetryDelay`) and sends nothing when it still fails. With a known

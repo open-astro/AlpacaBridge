@@ -29,6 +29,7 @@
 #include <exception>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1589,6 +1590,122 @@ TEST_CASE("OnStep protocol wrapper - :GU# pier side is T/W/o and not the mount-t
     auto tracking_east = status_for("NpET180");
     CHECK(tracking_east.side_of_pier == 0);
     CHECK(tracking_east.is_tracking);
+}
+
+// Falsified by: is_gem reading anything but the uppercase mount-type letter 'E' (#2179).
+TEST_CASE("OnStep protocol wrapper - :GU# mount type E is a German mount", "[onstep][telescope][unit][pierside]") {
+    auto reply = std::make_shared<std::string>();
+    auto reply_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([reply, reply_mutex](const std::string& chunk) {
+        if (chunk.rfind(":GU", 0) == 0) {
+            std::lock_guard<std::mutex> lock(*reply_mutex);
+            return *reply;
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(conn));
+    struct DisconnectOnExit {
+        alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
+        ~DisconnectOnExit() { w.disconnect(); }
+    } disconnect_on_exit{wrapper};
+    const auto is_gem = [&](const std::string& raw) {
+        {
+            std::lock_guard<std::mutex> lock(*reply_mutex);
+            *reply = raw + "#";
+        }
+        return wrapper.get_status().is_gem;
+    };
+
+    CHECK(is_gem("nNpEW180"));
+    CHECK(is_gem("NpET1:0"));
+    CHECK(is_gem("nNPHEo180"));
+    CHECK_FALSE(is_gem("nNpKo180"));  // fork
+    CHECK_FALSE(is_gem("nNpAo180"));  // alt-az
+    CHECK_FALSE(is_gem("nNpLo180"));  // alt-alt
+    CHECK_FALSE(is_gem("Np180"));     // no type sent
+}
+
+// The settings reads are strict: a reply that does not parse is unknown, never a guess (#2179).
+// Falsified by: a parser that takes a prefix ("60x"), an empty reply, or a "<n> N" with another suffix.
+TEST_CASE("OnStep protocol wrapper - the pier-side settings parse strictly", "[onstep][telescope][unit][pierside]") {
+    auto replies = std::make_shared<std::map<std::string, std::string>>();
+    auto reply_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([replies, reply_mutex](const std::string& chunk) {
+        std::lock_guard<std::mutex> lock(*reply_mutex);
+        const auto found = replies->find(chunk.substr(0, 6));
+        return found == replies->end() ? std::string("0#") : found->second;
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(conn));
+    struct DisconnectOnExit {
+        alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
+        ~DisconnectOnExit() { w.disconnect(); }
+    } disconnect_on_exit{wrapper};
+    const auto answer = [&](const std::string& command, const std::string& reply) {
+        std::lock_guard<std::mutex> lock(*reply_mutex);
+        (*replies)[command] = reply;
+    };
+
+    for (const char letter : {'E', 'W', 'B', 'A'}) {
+        answer(":GX96#", std::string(1, letter) + "#");
+        CHECK(wrapper.get_preferred_pier_side() == letter);
+    }
+    for (const char* bad : {"X#", "BB#", "#", "b#", "0#"}) {
+        answer(":GX96#", bad);
+        CHECK_FALSE(wrapper.get_preferred_pier_side().has_value());
+    }
+
+    for (const char* on : {"0#", "1#", "2#"}) {
+        answer(":GX94#", on);
+        CHECK(wrapper.get_pier_flips_enabled() == true);
+    }
+    for (const char* off : {"0 N#", "1 N#", "2 N#"}) {
+        answer(":GX94#", off);
+        CHECK(wrapper.get_pier_flips_enabled() == false);
+    }
+    for (const char* bad : {"3#", "2 X#", "2N#", "2  N#", "#", "x#", "12#"}) {
+        answer(":GX94#", bad);
+        CHECK_FALSE(wrapper.get_pier_flips_enabled().has_value());
+    }
+
+    for (const auto& [reply, expected] : std::vector<std::pair<const char*, int>>{
+             {"60#", 60}, {"0#", 0}, {"-15#", -15}, {"+10#", 10}, {"180#", 180}, {"-180#", -180}}) {
+        answer(":GXE9#", reply);
+        answer(":GXEA#", reply);
+        answer(":GXEe#", reply);
+        answer(":GXEw#", reply);
+        CHECK(wrapper.get_meridian_limit_minutes(true) == expected);
+        CHECK(wrapper.get_meridian_limit_minutes(false) == expected);
+        CHECK(wrapper.get_axis1_limit_degrees(false) == expected);
+        CHECK(wrapper.get_axis1_limit_degrees(true) == expected);
+    }
+    for (const char* bad : {"#", "60x#", "x60#", "6 0#", "-#", "1.5#", "1234567#"}) {
+        answer(":GXE9#", bad);
+        answer(":GXEw#", bad);
+        CHECK_FALSE(wrapper.get_meridian_limit_minutes(true).has_value());
+        CHECK_FALSE(wrapper.get_axis1_limit_degrees(true).has_value());
+    }
+
+    // The flip GOTO reads a bare digit, like :MS#.
+    answer(":MNe#", "0");
+    CHECK(wrapper.goto_current_position_on_side('e') == "0");
+    answer(":MNw#", "6");
+    CHECK(wrapper.goto_current_position_on_side('w') == "6");
+    answer(":MNe#", "");  // no reply: empty, which the driver treats as refused
+    CHECK(wrapper.goto_current_position_on_side('e').empty());
 }
 
 TEST_CASE("OnStep protocol wrapper - a long reply costs no time per character", "[onstep][telescope][unit]") {
