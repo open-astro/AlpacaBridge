@@ -1017,7 +1017,11 @@ public:
             if (tracking && from_rest) {
                 seed_limit_guard_baseline_locked();
             }
-            set_tracking_locked(lock, tracking);
+            if (!tracking && link_faulted_locked()) {
+                faulted_stop_locked([&] { set_tracking_locked(lock, false); });
+            } else {
+                set_tracking_locked(lock, tracking);
+            }
             need_duty = tracking_ && (ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0);
             started = tracking_;
         }
@@ -2643,7 +2647,7 @@ public:
                 // the axis reports fully stopped (the deceleration ramp can
                 // exceed 1 s), then restores the previous tracking state per
                 // ASCOM.
-                wire().stop_motion(channel);
+                faulted_stop_locked([&] { wire().stop_motion(channel); });
                 advance_model_anchor_locked();  // keep the motion up to the stop
                 cmd_axis_rate_deg_s_[axis] = 0.0;
                 // The stop is a motion command: bump and capture the
@@ -2944,6 +2948,21 @@ private:
     // on a faulted link (open-astro#2068): only a lost or absent link refuses it. A stop whose reply fails
     // then throws the fault from the exchange. Every start keeps check_writable_locked().
     void check_stop_allowed_locked() const { check_connected(); }
+
+    // Runs a stop's exchange. When the fault was latched at entry and the reply fails, the call ends with the
+    // fault text (as AbortSlew does); NotConnected passes through (the limit guard does not retry it).
+    template <typename F>
+    void faulted_stop_locked(F&& stop) {
+        const bool faulted = link_faulted_locked();
+        try {
+            stop();
+        } catch (const AlpacaException& e) {
+            if (faulted && e.error_code() != AlpacaError::NotConnected) {
+                throw_if_link_faulted_locked();
+            }
+            throw;
+        }
+    }
 
     // A park in flight (parking_) gates the same members as a completed park
     // so a slew/MoveAxis/sync cannot silently clobber it; AbortSlew and
@@ -5973,6 +5992,7 @@ private:
             std::chrono::milliseconds poll = kTrackingPoll;
             auto crossing = util::LimitCrossing::None;
             util::MotionSample sample;
+            bool sampled = false;
             bool stop_ra = false;
             bool stop_dec = false;
             bool stop_tracking = false;
@@ -5998,6 +6018,7 @@ private:
                     try {
                         refresh_for_guard_locked();
                         sample = limit_sample_locked();
+                        sampled = true;
                         if (limit_guard_baseline_) {
                             crossing = util::crossed(motion_limits_, *limit_guard_baseline_, sample);
                         }
@@ -6065,7 +6086,8 @@ private:
                 stop(stop_dec, owed_dec, [this] { move_axis(1, 0.0); });
                 stop(stop_tracking, owed_tracking, [this] { set_tracking(false); });
                 stop(stop_ra, owed_ra, [this] { move_axis(0, 0.0); });
-                if (all_stopped) {
+                // Only a sample taken this tick is a baseline; with none the last inside one stays.
+                if (all_stopped && sampled) {
                     StateLock lock(lock_gate_);
                     // Not when a sync, goto or newer body has reset or taken
                     // the baseline since the decision.

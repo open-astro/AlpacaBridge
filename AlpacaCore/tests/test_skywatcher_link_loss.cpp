@@ -657,6 +657,27 @@ TEST_CASE("SkyWatcher link loss - a stop the silent board never acks throws the 
     CHECK(r.frames_since(from, "L") >= 1);
 }
 
+TEST_CASE("SkyWatcher link loss - MoveAxis(axis, 0) throws the fault when its stop is never acked",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    latch_fault_then_unmute(r);
+    r.board.set_muted(true);
+    const std::size_t from = r.board.frames().size();
+    CHECK_THROWS_WITH(r.driver->move_axis(0, 0.0), Catch::Matchers::ContainsSubstring("communications compromised"));
+    CHECK(r.frames_since(from, "K") >= 1);
+}
+
+TEST_CASE("SkyWatcher link loss - Tracking=false throws the fault when its stop is never acked",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    latch_fault_then_unmute(r);
+    r.board.set_muted(true);
+    const std::size_t from = r.board.frames().size();
+    CHECK_THROWS_WITH(r.driver->set_tracking(false), Catch::Matchers::ContainsSubstring("communications compromised"));
+    CHECK(r.frames_since(from, "K") >= 1);
+}
+
 TEST_CASE("SkyWatcher link loss - starts stay refused while the link fault is latched",
           "[skywatcher][linkloss][serial][stop-while-faulted]") {
     RestartedBoardRig r;
