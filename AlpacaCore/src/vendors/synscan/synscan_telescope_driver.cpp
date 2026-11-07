@@ -1360,8 +1360,9 @@ public:
                 // teardown goes on and the error is not stored for the next command.
                 // Sent with no WireTurn, unlike the refused-start stop in pulse_guide: every initiator that cancels
                 // this slot (replacement pulse, MoveAxis, slews, park, AbortSlew, disconnect) joins it before it takes
-                // its own turn, so this stop cannot land inside another turn. Pinned by the "cancelled pulse stop
-                // precedes the replacement pulse's turn" test.
+                // its own turn, so this stop goes out before any command of the initiator that cancelled it. It can
+                // still fall inside the other axis's pulse-end turn, which sends nothing for this axis. Pinned by the
+                // "cancelled pulse stop precedes the replacement pulse's turn" test.
                 std::string stop_error;
                 try {
                     SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);

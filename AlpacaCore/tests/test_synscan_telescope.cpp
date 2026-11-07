@@ -971,8 +971,8 @@ TEST_CASE("SynScan Telescope Driver - a cancelled pulse whose stop fails logs th
 // The cancelled pulse's stop is sent with no wire turn (run_pulse_stop_body): that is safe only because a replacing
 // initiator joins the slot before it takes its own turn. A replacement must send the first pulse's stop before the
 // rate command of its own turn (the tracking mode is cached here, so no mode read goes out).
-// Falsified by: synscan_telescope_driver.cpp pulse_guide, send the rate command before pulse_ops_[axis].cancel()
-// joins the slot: the replacement's rate command then precedes the first pulse's stop.
+// Falsified by: synscan_telescope_driver.cpp pulse_guide, move pulse_ops_[axis].cancel_all_and_join() below the rate
+// command (after the mutex_ block, before start()): the replacement's rate command then precedes the first pulse's stop.
 TEST_CASE("SynScan Telescope Driver - a cancelled pulse stop precedes the replacement pulse's turn",
           "[synscan][telescope][unit]") {
     auto log = std::make_shared<std::vector<std::string>>();
