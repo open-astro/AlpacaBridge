@@ -627,6 +627,24 @@ TEST_CASE("SkyWatcher link loss - AbortSlew sends its stop while the link fault 
     CHECK(r.frames_since(from, "L") >= 1);
 }
 
+// Falsified by: invalidate_position_cache_locked(false) in abort_slew (the lazy read-back skips the
+// board-restart check, so the restore sends 3 G/I/J frames to the restarted board).
+TEST_CASE("SkyWatcher link loss - AbortSlew restores no tracking on a board that restarted while the link was muted",
+          "[skywatcher][linkloss][serial][stop-while-faulted]") {
+    RestartedBoardRig r;
+    r.driver->move_axis(0, 1.0);
+    r.board.set_muted(true);
+    for (int i = 0; i < 3; ++i) CHECK_THROWS(r.protocol->inquire_position(sw::kAxisRa));
+    REQUIRE(r.protocol->link_faulted());
+    r.board.set_init_done(false);
+    r.board.set_muted(false);  // no step(): the status poll never sees the restart
+    const std::size_t from = r.board.frames().size();
+    CHECK_NOTHROW(r.driver->abort_slew());
+    CHECK(r.frames_since(from, "L") >= 1);
+    CHECK(r.frames_since(from, "GIJ") == 0);
+    CHECK(r.driver->get_link_fault().find("restarted") != std::string::npos);
+}
+
 TEST_CASE("SkyWatcher link loss - AbortSlew after a board restart sends its stop and does not restore tracking",
           "[skywatcher][linkloss][serial][stop-while-faulted]") {
     RestartedBoardRig r;

@@ -309,8 +309,9 @@ datagrams before each send so replies cannot get off-by-one.
   call succeeds; a stop whose reply fails ends the call with the fault `DriverException`, sent but unconfirmed.
   `AbortSlew` tries both axes' `:L`; before them it cancels the MoveAxis stop bodies, bumps `motion_generation_` and cancels
   the rate verify, and when a stop fails it leaves its commanded-state and tracking flags untouched. Its tracking restore is
-  a start: skipped while faulted, and after an acked `:L` clears the latch it runs the board-restart check on its first
-  read, so a restarted board is sent no `:G`/`:I`/`:J`. Every start (non-zero `MoveAxis`, slews, `Tracking=true`, `PulseGuide`, Park, FindHome, the duty
+  a start: skipped while faulted, and after an acked `:L` clears the latch the position read-back before the gate
+  (`invalidate_position_cache_locked()`, eager) runs the board-restart check, so a restarted board is latched and sent
+  no `:G`/`:I`/`:J`. Every start (non-zero `MoveAxis`, slews, `Tracking=true`, `PulseGuide`, Park, FindHome, the duty
   burst start) stays refused with the fault text and sends nothing. `run_limit_guard()` keeps a failed stop owed (not on
   `NotConnected`) and resends it on each later guard tick (a tick with a sample too) while that axis or tracking still runs, until a
   stop is acked or the link is lost. Tests: `[stop-while-faulted]` in `test_skywatcher_link_loss.cpp`.

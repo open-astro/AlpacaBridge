@@ -2870,6 +2870,8 @@ public:
         manual_axis_slewing_[1] = false;
         restore_tracking_after_slew_ = false;
         tracking_ = false;
+        // Keep this read-back eager (open-astro#2068): its refresh runs the board-restart check, which latches a
+        // restarted board before the restore gate below; set_tracking_locked reads no position before its start.
         invalidate_position_cache_locked();
         bool need_duty = false;
         bool restarted = false;
