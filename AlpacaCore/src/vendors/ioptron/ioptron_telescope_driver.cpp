@@ -3447,7 +3447,7 @@ private:
     mutable util::UtcOffset utc_offset_;
     mutable bool slew_in_progress_ = false;
     // Under mutex_: a fresh status showed the mount stopped while slew_in_progress_ was still set (nobody read
-    // Slewing). Reset by every GOTO initiator and by a settle trim dispatch.
+    // Slewing). Reset by every GOTO initiator, by dispatch_slew_command_locked() and by a settle trim dispatch.
     mutable bool goto_seen_stopped_ = false;
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those), or
     // from a GOTO whose dispatch a MoveAxis superseded: keeps get_slewing() true when a PulseGuide

@@ -2751,3 +2751,28 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during
     driver->abort_slew();
     driver->set_connected(false);
 }
+
+// Issue #2063: the settle trim is part of the GOTO. The stop seen before the trim must not outlive it, or a client
+// pulse during the trimmed GOTO masks Slewing.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after a settle trim",
+          "[ioptron][telescope][unit][fake][pulseguide][repro2063]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    auto driver = io::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    pass_connect_cache(clock);
+
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    clock.advance(std::chrono::seconds(6));
+    // Fresh status past the dispatch window: the mount stopped 12" off, so the trim pulse goes out.
+    CHECK(driver->get_slewing());
+    REQUIRE(mount.count(":ZQ") == 1);
+    driver->pulse_guide(3, 3000);
+    mount.set_system_status(2);
+    clock.advance(std::chrono::milliseconds(2100));  // past the trim hold, inside the client's pulse window
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
