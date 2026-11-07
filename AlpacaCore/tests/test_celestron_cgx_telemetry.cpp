@@ -103,8 +103,9 @@ TEST_CASE("CGX coordinate getters and DeviceState serve the polled frame without
         const int guide_ra = rig.mount.count_command(0x10, 0x27);
         const int guide_dec = rig.mount.count_command(0x11, 0x27);
         const auto state = rig.driver->get_device_state();
-        CHECK(state.size() == 12);
-        CHECK(std::none_of(state.begin(), state.end(), [](const auto& entry) { return entry.name == "UTCDate"; }));
+        // UTCDate answers from the host clock without a client write (#2166), so DeviceState carries it.
+        CHECK(state.size() == 13);
+        CHECK(std::any_of(state.begin(), state.end(), [](const auto& entry) { return entry.name == "UTCDate"; }));
         for (int pass = 0; pass < 3; ++pass) {
             rig.coordinates();
             CHECK_FALSE(rig.driver->get_is_pulse_guiding());
