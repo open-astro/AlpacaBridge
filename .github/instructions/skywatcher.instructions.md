@@ -302,6 +302,19 @@ datagrams before each send so replies cannot get off-by-one.
   that is served. A test that rendezvouses with a task on a `FakeTaskClock` counts the poll as
   one waiter that is always parked (`kPollerWaiter`), or pauses it with
   `set_status_poll_paused_for_testing()`.
+- **Stops go out on a faulted link; starts do not** (open-astro#2068, [decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md)).
+  While the fault latch is set (`Connected` true), `AbortSlew`, `MoveAxis(axis, 0)` and `Tracking=false` skip the
+  `check_writable_locked()` refusal (`check_stop_allowed_locked()` keeps only the `NotConnected` check, so a lost link still
+  sends nothing) and send their stop frames best effort. A reply that comes clears the latch as for any exchange and the
+  call succeeds; a stop whose reply fails ends the call with the fault `DriverException`, sent but unconfirmed.
+  `AbortSlew` tries both axes' `:L`; before them it cancels the MoveAxis stop bodies, bumps `motion_generation_` and cancels
+  the rate verify, and when a stop fails it leaves its commanded-state and tracking flags untouched. Its tracking restore is
+  a start: skipped while faulted, and after an acked `:L` clears the latch the position read-back before the gate
+  (`invalidate_position_cache_locked()`, eager) runs the board-restart check, so a restarted board is latched and sent
+  no `:G`/`:I`/`:J`. Every start (non-zero `MoveAxis`, slews, `Tracking=true`, `PulseGuide`, Park, FindHome, the duty
+  burst start) stays refused with the fault text and sends nothing. `run_limit_guard()` keeps a failed stop owed (not on
+  `NotConnected`) and resends it on each later guard tick (a tick with a sample too) while that axis or tracking still runs, until a
+  stop is acked or the link is lost. Tests: `[stop-while-faulted]` in `test_skywatcher_link_loss.cpp`.
 - **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
   #1530). Order: `transition_mutex_` (`set_connected()` against `set_connected()`; no getter takes it) -> `duty_transition_mutex_` (`start_duty_worker()` against `stop_duty_worker()`, held across the duty join; no slot body takes it) -> `io_mutex_`
   (the operation lock) -> `mutex_` (the state lock, a leaf) -> the protocol wrapper's own lock. Every member that
