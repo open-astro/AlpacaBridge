@@ -16,6 +16,7 @@
 // AlpacaCore/external/QHY/QHYCFW3-USB-protocol.md.
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
@@ -348,7 +349,7 @@ public:
         // closes it) reopens and pays the boot again.
         const bool held = link_.is_open() && opened_port_config_ == config.serial_port;
         config_ = config;
-        link_lost_.store(false);
+        clear_link_loss();
         if (!held) {
             close_port_locked();
             open_port_locked();
@@ -442,6 +443,7 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
+        clear_link_loss();
 #ifndef _WIN32
         if (serial_fd_ >= 0) {
             ALPACA_LOG_INFO(kLogTag, "QHYCFW3 disconnected; " + config_.serial_port +
@@ -457,6 +459,13 @@ public:
     }
 
     bool link_alive() const noexcept { return !link_lost_.load(); }
+
+    // Own leaf mutex: never the I/O mutex_, which a move holds for seconds (decision 0016).
+    std::string link_fault() const {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        return link_fault_;
+    }
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at() { return link_lost_at_.consume(); }
 
     int get_position() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -566,6 +575,11 @@ private:
     [[noreturn]] void fail_link_locked() {
         if (!in_connect_) {
             ALPACA_LOG_ERROR(kLogTag, "QHYCFW3 link lost on " + config_.serial_port + " (port released)");
+            {
+                std::lock_guard<std::mutex> lock(fault_mutex_);
+                link_fault_ = "QHYCFW3 link lost on " + config_.serial_port;
+            }
+            link_lost_at_.note(std::chrono::steady_clock::now());
             link_lost_.store(true);
             connected_ = false;
             close_port_locked();
@@ -611,7 +625,18 @@ private:
 #endif
     }
 
+    // A new Connect or a Disconnect ends the outage: drop the reason, and the stamp (no #521 consumer yet).
+    void clear_link_loss() {
+        link_lost_.store(false);
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        link_fault_.clear();
+        link_lost_at_.consume();
+    }
+
     mutable std::mutex mutex_;
+    mutable std::mutex fault_mutex_;  // leaf: guards link_fault_
+    std::string link_fault_;
+    util::LinkLostStamp link_lost_at_;
     Cfw3ConnectionConfig config_;
     bool connected_ = false;
     std::atomic<bool> link_lost_{false};
@@ -630,6 +655,10 @@ Cfw3DeviceInfo Cfw3ProtocolWrapper::connect(const Cfw3ConnectionConfig& config) 
 void Cfw3ProtocolWrapper::disconnect() { impl_->disconnect(); }
 bool Cfw3ProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 bool Cfw3ProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
+std::string Cfw3ProtocolWrapper::link_fault() const { return impl_->link_fault(); }
+std::optional<std::chrono::steady_clock::time_point> Cfw3ProtocolWrapper::consume_link_lost_at() {
+    return impl_->consume_link_lost_at();
+}
 int Cfw3ProtocolWrapper::get_position() { return impl_->get_position(); }
 int Cfw3ProtocolWrapper::goto_slot(int slot, const std::atomic<bool>& cancel) { return impl_->goto_slot(slot, cancel); }
 

@@ -684,6 +684,11 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - Link loss follows decision 0009 (#2065
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());
+    // A clean Disconnect is not a loss: no stamp.
+    driver->set_connected(false);
+    CHECK_FALSE(alpacacore::vendor::qhy::consume_link_lost_at_for_testing(*driver).has_value());
+    driver->set_connected(true);
+
     fake.sever();
     driver->set_position(2);  // the transaction that notices the loss
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -694,6 +699,9 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - Link loss follows decision 0009 (#2065
     require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
     // One fault text, kept until the next Connect or Disconnect.
     CHECK(driver->get_link_fault().find("link lost") != std::string::npos);
+    // Stamped once, and consume clears it.
+    CHECK(alpacacore::vendor::qhy::consume_link_lost_at_for_testing(*driver).has_value());
+    CHECK_FALSE(alpacacore::vendor::qhy::consume_link_lost_at_for_testing(*driver).has_value());
     CHECK_FALSE(driver->get_link_fault().empty());
     // A client Disconnect clears it.
     driver->set_connected(false);

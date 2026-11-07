@@ -13,6 +13,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -130,6 +131,12 @@ public:
      * NotConnected until a new connect(). Lock-free.
      */
     bool link_alive() const noexcept;
+
+    /** @brief Why the link was lost (one text); empty until a loss, cleared by connect() and disconnect(). */
+    std::string link_fault() const;
+
+    /** @brief When the link was lost (stamped once per outage), read and cleared; nullopt after a clean disconnect. */
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
 
     /** @brief "NOW" -> current slot, 0-based. */
     int get_position();

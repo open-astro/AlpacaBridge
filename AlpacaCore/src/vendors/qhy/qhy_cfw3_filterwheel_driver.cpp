@@ -110,6 +110,8 @@ public:
     // has seen the port die the wrapper latches link_lost_ and releases the fd.
     // Both reads are lock-free; this stays a FAST-timing getter.
     bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
+    std::string get_link_fault() const override { return protocol_.link_fault(); }
+
     void connect() override { start_connection_task(true); }
     void disconnect() override {
         stop_connection_thread();
@@ -319,6 +321,10 @@ public:
         }
         filter_names_ = std::move(staged);
         apply_default_names_locked();
+    }
+
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at_for_testing() {
+        return protocol_.consume_link_lost_at();
     }
 
     void set_position_read_gap_hook_for_testing(std::function<void()> hook) {
@@ -561,6 +567,13 @@ std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int devi
     return create_qhy_cfw3_filterwheel_deferred(device_number, [wheel_index, settings] {
         return resolve_qhy_cfw3_filterwheel_by_index(wheel_index, settings);
     });
+}
+
+std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at_for_testing(FilterWheelDriver& driver) {
+    if (auto* cfw3 = dynamic_cast<QhyCfw3FilterWheelDriver*>(&driver)) {
+        return cfw3->consume_link_lost_at_for_testing();
+    }
+    return std::nullopt;
 }
 
 void set_position_read_gap_hook_for_testing(FilterWheelDriver& driver, std::function<void()> hook) {
