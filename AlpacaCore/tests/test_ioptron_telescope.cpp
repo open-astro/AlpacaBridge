@@ -2722,3 +2722,32 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
+
+// Issue #2063: a status read while the async body waits for mutex_ sees the mount still stopped; the GOTO that goes
+// out after it must clear that stop, or a PulseGuide masks the running slew.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during a GOTO sent after a held body",
+          "[ioptron][telescope][unit][fake][pulseguide][repro2063]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    FakeTaskClock clock;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    HeldSlewBody body;  // released before the driver joins its slot
+    driver = io::create_ioptron_telescope_with_slew_worker_hook(0, loopback_endpoint(mount.port()), body.hook(),
+                                                                std::nullopt, std::nullopt, {}, {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    pass_connect_cache(clock);
+
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    clock.advance(std::chrono::seconds(6));
+    (void)driver->get_tracking();  // fresh status past the initiator's window: the mount has not moved yet
+    body.release();
+    REQUIRE(wait_for_goto_dispatch(mount));
+    mount.set_system_status(2);
+    clock.advance(std::chrono::seconds(6));
+    CHECK(driver->get_slewing());
+    driver->pulse_guide(3, 2704);
+    CHECK(driver->get_slewing());
+    driver->abort_slew();
+    driver->set_connected(false);
+}

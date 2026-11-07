@@ -2491,6 +2491,7 @@ private:
             // Decision 0022 rule 2: re-armed before the :MS1# goes out, so the window runs from the GOTO itself
             // and not from an initiator whose body waited for mutex_.
             slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
+            goto_seen_stopped_ = false;  // a stop seen while the body waited predates this GOTO
             accepted = protocol.slew_to_ra_dec();
             if (!accepted) {
                 accepted = protocol.slew_to_ra_dec_cw_up();
