@@ -1358,6 +1358,11 @@ public:
                 // AbortSlew restores tracking itself; teardown must not. A failed stop is logged and the axis
                 // marked as possibly moving, as the refused-start path does (#1725); the caller's own stop or
                 // teardown goes on and the error is not stored for the next command.
+                // Sent with no WireTurn, unlike the refused-start stop in pulse_guide: every initiator that cancels
+                // this slot (replacement pulse, MoveAxis, slews, park, AbortSlew, disconnect) joins it before it takes
+                // its own turn, so this stop goes out before any command of the initiator that cancelled it. It can
+                // still fall inside the other axis's pulse-end turn, which sends nothing for this axis. Pinned by the
+                // "cancelled pulse stop precedes the replacement pulse's turn" test.
                 std::string stop_error;
                 try {
                     SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);
