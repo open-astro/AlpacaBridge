@@ -1722,6 +1722,8 @@ public:
             snapshot_.write([](PolledFrame&) {});
             // A drain that is running takes the task; only the caller that finds none starts one.
             start_drain = !pulse_drain_active_;
+            // A new drain has taken no task yet: a redundant connect before it pops one keeps no stale end (#2095).
+            if (start_drain) pulse_task_end_ = now;
             pulse_drain_active_ = true;
         }
         if (!start_drain) return;
@@ -3129,7 +3131,8 @@ private:
     mutable std::mutex pulse_mutex_;
     std::deque<PulseTask> pulse_queue_;
     bool pulse_drain_active_ = false;  // pulse_mutex_: a drain body runs and will take a queued task
-    // pulse_mutex_: the end of the task the drain last took, set when it pops it (#2095 redundant connect).
+    // pulse_mutex_: the end of the task the drain last took, set when it pops it, and to now when a new drain starts
+    // (#2095 redundant connect); a cancelled or failed task's end is therefore never read by a later drain.
     std::chrono::steady_clock::time_point pulse_task_end_;
     // Serializes set_connected() bodies (sync PUT / async task / refresh) and
     // the destructor's reaps, so the poll, pulse, GOTO and teardown slots'

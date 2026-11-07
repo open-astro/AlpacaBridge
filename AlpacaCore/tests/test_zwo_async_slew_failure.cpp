@@ -1510,6 +1510,43 @@ TEST_CASE("ZWO async - a stale pulse drain start never cuts a pulse after a reco
     driver->set_connected(false);
 }
 
+// open-astro#2095: a redundant Connected=true that lands after a new PulseGuide decided to start its drain, and before
+// that drain took its task, keeps no pulse window: the queued pulse is dropped and nothing runs, so IsPulseGuiding must
+// not cover the rest of an earlier pulse that AbortSlew cancelled.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide(): removing "if (start_drain) pulse_task_end_ = now;", so the kept
+// window is armed from the cancelled pulse's end and IsPulseGuiding stays true with no pulse running.
+TEST_CASE("ZWO async - a redundant connect before a new drain runs keeps no stale pulse window (#2095)",
+          "[zwo][telescope][async][operation-slot]") {
+    Latch latch;
+    std::atomic<bool> armed{false};
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*driver, [&](std::string_view name) {
+        if (name == "PulseGuide" && armed.exchange(false)) latch.block();
+    });
+    rig.connect();
+
+    driver->pulse_guide(0, 6000);  // A: runs its first 3000 ms step
+    REQUIRE(mount.wait_for_count(":Mgn", 1, std::chrono::seconds(2)));
+    driver->abort_slew();  // cancels A
+    armed = true;
+    auto b = std::async(std::launch::async, [&] { driver->pulse_guide(1, 1000); });
+    REQUIRE(latch.wait_entered());  // B decided to start a new drain and has not started it
+    auto redundant = std::async(std::launch::async, [&] { driver->set_connected(true); });
+    for (int i = 0; i < 100 && redundant.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready; ++i) {
+        rig.tick(std::chrono::milliseconds(50));
+    }
+    REQUIRE(redundant.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE_NOTHROW(redundant.get());  // B's queued pulse is dropped
+    latch.release();
+    REQUIRE_NOTHROW(b.get());
+    for (int i = 0; i < 4; ++i) rig.tick(std::chrono::milliseconds(250));  // 1 s
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(mount.count(":Mgs") == 0);  // nothing of B ran
+    driver->set_connected(false);
+}
+
 // decision 0006 "Thread refusal": a second GOTO whose body the slot cannot start supersedes the first (held on ":Sr")
 // and publishes the stopped state itself: Slewing false, and the poll it paused reads status again.
 // Falsified by: zwo_telescope_driver.cpp slew_to_target_async(): removing the poll_pause_ release in the refused-start
