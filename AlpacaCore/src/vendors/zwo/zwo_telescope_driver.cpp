@@ -396,7 +396,11 @@ public:
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             slew_force_until_ = std::chrono::steady_clock::time_point{};
-            pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
+            // A kept drain (#2095, below) still runs the task it popped: the pulse window and the next pulse's start
+            // cover it, not the dropped queue.
+            const bool drain_kept = keep_telemetry_caches && pulse_drain_active_;
+            pulse_guiding_end_ =
+                drain_kept ? pulse_task_end_ + kPulseGuideHold : std::chrono::steady_clock::time_point{};
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
             if (!keep_telemetry_caches) {
@@ -425,10 +429,12 @@ public:
                 tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             poll_pause_.store(false);
-            // A drain still running keeps its current task; the next pulse starts a new drain.
+            // A redundant connect drops the queued pulses but keeps a running drain in charge (pulse_drain_active_
+            // stays set), so the next pulse queues behind its step instead of overlapping it (#2095). A real connect
+            // has joined the drain (stop_pulse_drain()) and clears the flag.
             pulse_queue_.clear();
-            pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-            pulse_drain_active_ = false;
+            pulse_queue_end_ = drain_kept ? pulse_task_end_ : std::chrono::steady_clock::time_point{};
+            if (!keep_telemetry_caches) pulse_drain_active_ = false;
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
@@ -1690,11 +1696,21 @@ public:
         task.expected_ra_hours = expected_hours;
         task.expected_dec_degrees = expected_dec;
 
+        if (initiator_hook_) initiator_hook_("PulseGuideQueue");
+        // open-astro#2096: the drain decision and its start are one step against a reset and another PulseGuide, so a
+        // late start never supersedes a newer drain that already took a task.
+        std::lock_guard<std::mutex> start_lock(pulse_start_mutex_);
         bool start_drain = false;
         {
+            // open-astro#2093: the epoch moves in the same section that queues the task, under target_write_mutex_,
+            // so an older Sync's ownership check and its stop fall wholly before the queue (and its reset drops this
+            // pulse, or it sees the new epoch) and never after this pulse's ":Mg". A pure bump: a stored slew failure
+            // stays.
+            std::lock_guard<std::mutex> target_lock(target_write_mutex_);
             // Match the connect reset's pulse -> state order (#714); state remains the leaf.
             std::lock_guard<std::mutex> lock(pulse_mutex_);
             std::lock_guard<std::mutex> state_lock(mutex_);
+            ++slew_error_epoch_;
             const auto now = clock_.now();
             const auto start_time = std::max(pulse_queue_end_, now);
             pulse_queue_end_ = start_time + std::chrono::milliseconds(effective_duration);
@@ -1706,9 +1722,12 @@ public:
             snapshot_.write([](PolledFrame&) {});
             // A drain that is running takes the task; only the caller that finds none starts one.
             start_drain = !pulse_drain_active_;
+            // A new drain has taken no task yet: a redundant connect before it pops one keeps no stale end (#2095).
+            if (start_drain) pulse_task_end_ = now;
             pulse_drain_active_ = true;
         }
         if (!start_drain) return;
+        if (initiator_hook_) initiator_hook_("PulseGuide");
         try {
             pulse_slot_.start([this](util::OperationContext& ctx) { drain_pulses(ctx); });
         } catch (...) {
@@ -2023,20 +2042,18 @@ public:
         // A pending setup/retry must not consume the target registers replaced by Sync.
         // This clears setup ownership/errors, not an accepted physical slew; moving-response recovery below stops it.
         fence_goto();
-        reset_position_offsets();
+        // The epoch is read in the reset's section (#2093): a pulse queued before it is dropped, one queued after it
+        // moves the epoch this Sync checks.
+        const uint64_t sync_epoch = reset_position_offsets();
 
         auto& protocol = protocol_;
 
-        // Every newer initiator (GOTO, MoveAxis, FindHome, Park, Unpark, AbortSlew) bumps slew_error_epoch_. Once it
-        // has moved, a newer command owns the motion and this older Sync must not stop it, unless that command is a
-        // GOTO the mount has not accepted yet: its retry restores its own target. Only GOTO acceptance is fenced
-        // exactly; MoveAxis, FindHome, Park and Unpark bump the epoch after their wire command, so a check that
-        // lands in that window can still stop them.
-        uint64_t sync_epoch = 0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            sync_epoch = slew_error_epoch_;
-        }
+        // Every newer initiator (GOTO, PulseGuide, MoveAxis, FindHome, Park, Unpark, AbortSlew) bumps
+        // slew_error_epoch_. Once it has moved, a newer command owns the motion and this older Sync must not stop it,
+        // unless that command is a GOTO the mount has not accepted yet: its retry restores its own target. GOTO
+        // acceptance and PulseGuide (#2093, in the section that queues its pulse) are fenced exactly; MoveAxis,
+        // FindHome, Park and Unpark bump the epoch after their wire command, so a check that lands in that window can
+        // still stop them.
         // Caller holds target_write_mutex_: a newer GOTO holds it across each MS attempt and clears
         // goto_setup_pending_ on acceptance under it, so the check and MS acceptance cannot interleave.
         auto require_ownership = [&]() {
@@ -2397,9 +2414,12 @@ private:
         require_tracking_for_slew(who);
     }
 
-    void reset_position_offsets() {
+    // Returns slew_error_epoch_ as read in its section (sync_to_pair(), #2093).
+    uint64_t reset_position_offsets() {
         // One section: a pulse queued after it starts a drain this cancel cannot reach, and the cancelled drain's
         // reconciliation, which re-checks its stop reason under mutex_, cannot write offsets after they are zeroed.
+        // pulse_start_mutex_ first: never between a PulseGuide's drain decision and its start (#2096).
+        std::lock_guard<std::mutex> start_lock(pulse_start_mutex_);
         std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         pulse_queue_.clear();
@@ -2410,6 +2430,7 @@ private:
         dec_offset_deg_ = 0.0;
         pulse_guiding_end_ = clock_.now();
         snapshot_.write([](PolledFrame&) {});
+        return slew_error_epoch_;
     }
 
     void ensure_not_parked(const char* operation) const {
@@ -2827,6 +2848,7 @@ private:
                 }
                 task = pulse_queue_.front();
                 pulse_queue_.pop_front();
+                pulse_task_end_ = clock_.now() + std::chrono::milliseconds(task.duration_ms);
             }
             run_pulse_task(task, ctx);
         }
@@ -2916,6 +2938,9 @@ private:
     // Stops the pulse drain and drops what it had queued. The pulse slot's reapers are the disconnect teardown,
     // connect (after it reaped the teardown) and the destructor, never two at once.
     void stop_pulse_drain() {
+        // Never between a PulseGuide's drain decision and its start (#2096). The disconnect teardown body takes it here
+        // too; that is safe because no pulse body takes it and pulse_guide() never waits on the teardown slot.
+        std::lock_guard<std::mutex> start_lock(pulse_start_mutex_);
         pulse_slot_.cancel_all_and_join();
         std::lock_guard<std::mutex> lock(pulse_mutex_);
         pulse_queue_.clear();
@@ -3021,8 +3046,9 @@ private:
     mutable std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
-    // Serializes target writes through CM/MS, never held across a join or a driver wait; getters never take it.
-    // Order: before the protocol wrapper's mutex and mutex_.
+    // Serializes target writes through CM/MS and PulseGuide's queue section (its epoch bump, #2093), never held across
+    // a join or a driver wait; getters never take it. Order: after pulse_start_mutex_, before pulse_mutex_, the
+    // protocol wrapper's mutex and mutex_.
     std::mutex target_write_mutex_;
     // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
     // read-back and re-send. No getter takes it. Order: set_connected_mutex_, then this, then the protocol
@@ -3090,14 +3116,24 @@ private:
     // connect/disconnect. Consulted by get_slewing() before the force window.
     mutable std::string last_slew_error_;
     mutable bool park_failed_ = false;
-    // Bumped by every clear_last_slew_error_locked() (under mutex_): Sync's
-    // motion-ownership epoch, so an older Sync learns that a newer motion
-    // command owns the mount (sync_to_pair()).
+    // Bumped by every clear_last_slew_error_locked() and by pulse_guide()'s queue section (#2093), under mutex_:
+    // Sync's motion-ownership epoch, so an older Sync learns that a newer motion command owns the mount
+    // (sync_to_pair()).
     uint64_t slew_error_epoch_ = 0;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
+    // open-astro#2096: pulse_guide() holds it across its queue section and pulse_slot_.start();
+    // reset_position_offsets() and stop_pulse_drain() (the teardown, connect, destructor) take it first. Order: after
+    // initiator_mutex_ and set_connected_mutex_, before target_write_mutex_ and pulse_mutex_. Of the slot bodies only
+    // the disconnect teardown takes it (through stop_pulse_drain()); no pulse body, getter or fence does, and
+    // pulse_guide() never waits on the teardown slot, so holding it across start() or the drain join cannot deadlock.
+    // A teardown can wait behind a PulseGuide's start() (its 2 s stale-body bound).
+    std::mutex pulse_start_mutex_;
     mutable std::mutex pulse_mutex_;
     std::deque<PulseTask> pulse_queue_;
     bool pulse_drain_active_ = false;  // pulse_mutex_: a drain body runs and will take a queued task
+    // pulse_mutex_: the end of the task the drain last took, set when it pops it, and to now when a new drain starts
+    // (#2095 redundant connect); a cancelled or failed task's end is therefore never read by a later drain.
+    std::chrono::steady_clock::time_point pulse_task_end_;
     // Serializes set_connected() bodies (sync PUT / async task / refresh) and
     // the destructor's reaps, so the poll, pulse, GOTO and teardown slots'
     // start/reap and their stop flags can never interleave between two
@@ -3126,8 +3162,9 @@ private:
     mutable std::condition_variable goto_send_cv_;
     // Orders initiators (open-astro#2073): SlewAsync holds it across the claim and goto_slot_.start(); Park, FindHome,
     // MoveAxis and AbortSlew from before fence_goto() until their own command is sent, so no GOTO claims in between.
-    // Lock order: first, then mutex_, pulse_mutex_ and the protocol mutex. Not a state lock: no getter takes it, so it
-    // may be held across wire I/O. Never taken by a body, fence_goto(), a getter or set_connected().
+    // Lock order: first, then pulse_start_mutex_, target_write_mutex_, pulse_mutex_, the protocol mutex and mutex_
+    // last. Not a state lock: no getter takes it, so it may be held across wire I/O. Never taken by a body,
+    // fence_goto(), a getter or set_connected().
     std::mutex initiator_mutex_;
     std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
     std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting
