@@ -24,6 +24,7 @@
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_qhy_cfw3.h"
+#include "fake_task_clock.h"
 #include "stalled_outq_probe.h"
 
 namespace {
@@ -706,4 +707,23 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - Link loss follows decision 0009 (#2065
     // A client Disconnect clears it.
     driver->set_connected(false);
     CHECK(driver->get_link_fault().empty());
+}
+
+TEST_CASE("QHY CFW3 protocol - link loss is stamped on the task clock (#2065)",
+          "[qhy][filterwheel][cfw3][unit][link_loss]") {
+    FakeQhyCfw3 fake(7);
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::vendor::qhy::Cfw3ProtocolWrapper wrapper(clock);
+    alpacacore::vendor::qhy::Cfw3ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    config.boot_timeout_ms = fast_settings().boot_timeout_ms;
+    config.reply_timeout_ms = fast_settings().reply_timeout_ms;
+    config.move_timeout_ms = fast_settings().move_timeout_ms;
+    wrapper.connect(config);
+
+    fake.sever();
+    require_alpaca_error([&]() { wrapper.get_position(); }, alpacacore::AlpacaError::NotConnected);
+    const auto lost = wrapper.consume_link_lost_at();
+    REQUIRE(lost.has_value());
+    CHECK(*lost == clock.now());
 }
