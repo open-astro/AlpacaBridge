@@ -1428,7 +1428,9 @@ private:
             reply_owed_ = true;
             owed_until_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(kOwedReplyBoundMs);
         }
-        if (!require_hash_terminator) return finish();
+        // A timed-out query's partial bytes are not its reply: with no time left after the owed-reply fence, the one
+        // late byte is the reply's first byte (#2103). The rest is owed, so the next fence settles it.
+        if (!require_hash_terminator) return reply_expected ? std::string{} : finish();
         throw AlpacaException("Timeout waiting for ZWO mount response", AlpacaError::DriverException);
     }
 

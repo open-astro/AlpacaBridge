@@ -1,0 +1,3 @@
+### Fixed
+
+- **ZWO AM: a status query no longer returns a reply cut to one byte** (AlpacaCore, issue #2103): when a `:G` query timed out, the mount wrapper returned the bytes it had read so far as the whole reply. After an unanswered query (for example a silent `:Gps#`), the owed-reply fence could spend the next query's whole timeout, so a `:GU#` status came back as its first byte, and tracking, stopped, home and the other flags were all read from it (`n` read as moving). A timed-out `:G` query now returns no reply and its reply stays owed, so the next fence settles it; a late `#` still completes a reply, and a write's late ack is unchanged. It needs a configured response timeout of about 600 ms or less; the 5000 ms default leaves the fence time to spare.
