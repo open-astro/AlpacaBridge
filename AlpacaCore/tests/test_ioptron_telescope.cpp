@@ -430,9 +430,10 @@ TEST_CASE("iOptron Telescope Driver - Tracking stays true while the mount report
     REQUIRE(mount.ok());
     mount.set_pulse_reports_guiding(true);
     alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
+    // With a site, so the Alt/Az refusal below is the Tracking one, not the missing-site one (decision 0019).
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
+        0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
     REQUIRE(driver->get_tracking());
 
@@ -444,6 +445,17 @@ TEST_CASE("iOptron Telescope Driver - Tracking stays true while the mount report
     CHECK(driver->get_tracking());
     CHECK(driver->get_is_pulse_guiding());
     CHECK_FALSE(driver->get_slewing());
+
+    // The Alt/Az guard (#1377) reads the same value, so an Alt/Az slew is refused for Tracking while the mount
+    // reports guiding, under its own name, with nothing sent.
+    try {
+        driver->slew_to_alt_az_async(30.0, 90.0);
+        FAIL("the Alt/Az slew was not refused while the mount reports guiding");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(std::string(e.what()) == "SlewToAltAzAsync is not allowed while Tracking is true");
+    }
+    CHECK(mount.count(":MS1#") == 0);
 
     // Each status digit on its own, through a fresh ":GLS" read.
     const auto tracking_with_status = [&](int status) {
