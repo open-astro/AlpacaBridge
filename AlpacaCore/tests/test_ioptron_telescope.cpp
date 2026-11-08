@@ -361,9 +361,9 @@ TEST_CASE("iOptron Telescope Driver - all four equatorial slews are refused whil
     driver->set_connected(false);
 }
 
-// :GLS reports a GOTO (2), guiding (3) or a meridian flip (4) in place of tracking, and the Tracking getter
-// reads them as off: a slew then is still a slew with Tracking on, so the guard must accept it. A commanded
-// Tracking=false and a stopped mount at home (7) are refused.
+// :GLS reports a GOTO (2) in place of tracking, and the Tracking getter reads it as off: a slew then is still a
+// slew with Tracking on, so the guard must accept it. Guiding (3) and a meridian flip (4) read as on since #2186
+// and are not refused either. A commanded Tracking=false and a stopped mount at home (7) are refused.
 TEST_CASE("iOptron Telescope Driver - a slew while the mount reports motion is not refused for Tracking",
           "[ioptron][telescope][unit][fake][tracking-guard]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
@@ -392,13 +392,13 @@ TEST_CASE("iOptron Telescope Driver - a slew while the mount reports motion is n
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(13.0, 25.0));  // retarget of the GOTO in flight
     CHECK(wait_for_gotos(2) == 2);
 
-    // Guiding (3) and a meridian flip (4) read as off too, and are not refused either.
+    // Guiding (3) and a meridian flip (4) read as Tracking on (issue #2186), and are not refused either.
     int gotos = 2;
     for (const int status : {3, 4}) {
         INFO("system status " << status);
         mount.set_system_status(status);
         clock.advance(std::chrono::seconds(2));  // past the status TTL
-        REQUIRE_FALSE(driver->get_tracking());
+        REQUIRE(driver->get_tracking());
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(13.0, 25.0));
         ++gotos;
         CHECK(wait_for_gotos(gotos) == gotos);
@@ -416,6 +416,61 @@ TEST_CASE("iOptron Telescope Driver - a slew while the mount reports motion is n
                          alpacacore::AlpacaError::InvalidOperation);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     CHECK(mount.count(":MS1#") == gotos);
+    driver->set_connected(false);
+}
+
+// Issue #2186: the HAE29C reports system status 3 (auto-guiding) for the whole of a pulse, and 4 while it flips the
+// meridian. Both are tracking with a correction on top (ASCOM: a pulse guide is a correction to sidereal tracking,
+// and IsPulseGuiding reports the pulse itself), so Tracking must not read off during them; a client watching
+// Tracking saw eleven false "tracking lost" faults in 50 minutes of guiding. A GOTO (2) and a stopped mount (0, 7)
+// still read as off.
+TEST_CASE("iOptron Telescope Driver - Tracking stays true while the mount reports guiding or a meridian flip",
+          "[ioptron][telescope][unit][fake][pulseguide][tracking-guard]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_pulse_reports_guiding(true);
+    alpacacore::test::FakeTaskClock clock;
+    // With a site, so the Alt/Az refusal below is the Tracking one, not the missing-site one (decision 0019).
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
+        0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
+    REQUIRE(driver->get_tracking());
+
+    // A 3 s pulse: the firmware reports guiding from the ":Z" command on, and the next status read sees it.
+    driver->pulse_guide(0, 3000);
+    REQUIRE(driver->get_is_pulse_guiding());
+    clock.advance(std::chrono::seconds(2));  // past the status TTL, inside the pulse
+    CHECK(mount.count(":Z") == 1);           // the one pulse command, whichever axis letter the direction maps to
+    CHECK(driver->get_tracking());
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+
+    // The Alt/Az guard (#1377) reads the same value, so an Alt/Az slew is refused for Tracking while the mount
+    // reports guiding, under its own name, with nothing sent.
+    try {
+        driver->slew_to_alt_az_async(30.0, 90.0);
+        FAIL("the Alt/Az slew was not refused while the mount reports guiding");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(std::string(e.what()) == "SlewToAltAzAsync is not allowed while Tracking is true");
+    }
+    CHECK(mount.count(":MS1#") == 0);
+
+    // Each status digit on its own, through a fresh ":GLS" read.
+    const auto tracking_with_status = [&](int status) {
+        INFO("system status " << status);
+        mount.set_system_status(status);
+        clock.advance(std::chrono::seconds(2));  // past the status TTL
+        return driver->get_tracking();
+    };
+    CHECK(tracking_with_status(4));
+    CHECK(tracking_with_status(3));
+    CHECK(tracking_with_status(5));
+    CHECK(tracking_with_status(1));
+    CHECK_FALSE(tracking_with_status(2));
+    CHECK_FALSE(tracking_with_status(0));
+    CHECK_FALSE(tracking_with_status(7));
     driver->set_connected(false);
 }
 

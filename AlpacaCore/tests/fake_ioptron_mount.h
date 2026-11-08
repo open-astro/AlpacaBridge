@@ -73,6 +73,11 @@ public:
     /// GOTO then lands at once and ":ST"/":Q" change no status, as before.
     void set_goto_tracks_off(bool on) { goto_tracks_off_.store(on); }
 
+    /// Issue #2186, HAE29C firmware: a ":Z" pulse-guide command makes the ":GLS" system status read 3 (auto-guiding)
+    /// in place of 1 for the whole of the pulse. The fake has no pulse timer, so the status stays 3 until a test sets
+    /// another with set_system_status(). Off by default: a pulse then changes no status, as before.
+    void set_pulse_reports_guiding(bool on) { pulse_reports_guiding_.store(on); }
+
     /// Where the ":GEP" read says the mount points, until a GOTO or a trim pulse moves it.
     void set_position(double ra_hours, double dec_degrees) {
         ra_units_.store(std::llround(ra_hours * 15.0 * 3600.0 * 100.0));
@@ -250,6 +255,9 @@ private:
             }
             return "1";
         }
+        if (pulse_reports_guiding_.load() && cmd.rfind(":Z", 0) == 0) {
+            system_status_.store(3);  // auto-guiding, for the whole of the pulse (issue #2186)
+        }
         if (cmd.rfind(":ZQ", 0) == 0 || cmd.rfind(":ZS", 0) == 0) {
             // A pulse-guide trim closes the residual exactly.
             ra_units_.store(pending_ra_);
@@ -284,6 +292,7 @@ private:
     std::atomic<bool> reject_goto_{false};
     std::atomic<bool> fail_reads_{false};
     std::atomic<bool> goto_tracks_off_{false};
+    std::atomic<bool> pulse_reports_guiding_{false};
     FakeMountServer server_;
 };
 
