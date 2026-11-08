@@ -893,7 +893,7 @@ private:
     mutable std::mutex mutex_;
     FlatPanelConnectionConfig config_;
     bool cover_ack_pending_ = false;  // the last cover command timed out; its ack may still arrive
-    int cover_timeout_ms_ = 0;  // test seam: a nonzero reply wait for the cover command in flight
+    int cover_timeout_ms_ = 0;        // test seam: a nonzero reply wait for the cover command in flight
     bool connected_ = false;
     std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect
     // The loss reason for get_link_fault(); its own mutex, never held across an exchange, so a getter cannot wait on
