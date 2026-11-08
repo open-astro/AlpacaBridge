@@ -617,6 +617,7 @@ public:
             {
                 std::lock_guard<std::mutex> lock(failure_mutex_);
                 cover_failure_.reset();
+                cover_no_reply_ = false;
                 calibrator_failure_.reset();
             }
             // Seed calibrator state from a live read (cover state is never
@@ -804,6 +805,10 @@ public:
             // not Unknown (decision 0009 rule 3).
             ensure_connected();
             ALPACA_LOG_WARN("Gemini", "Flat panel v2 cover status read failed: " + std::string(e.what()));
+            std::lock_guard<std::mutex> lock(failure_mutex_);
+            if (cover_no_reply_) {
+                return CoverState::Error;  // the last command got no reply and the cover cannot be read back
+            }
         }
         return CoverState::Unknown;
     }
@@ -946,15 +951,22 @@ private:
         {
             std::lock_guard<std::mutex> failure_lock(failure_mutex_);
             cover_failure_.reset();  // a new start clears the previous failure
+            cover_no_reply_ = false;
         }
         cover_halted_.store(false);
         cover_in_flight_.store(true);
         try {
             cover_op_.start([this, fn](util::OperationContext& ctx) {
                 std::optional<std::string> failure;
+                bool no_reply = false;
                 if (wait_for_calibrator_idle(ctx)) {  // see start_calibrator_task() fast path
                     try {
                         fn();
+                    } catch (const FlatPanelReplyTimeout& e) {
+                        // No reply is not a failed move: the cover may have travelled. WARN, record no failure;
+                        // CoverState reads the live >S# instead (issue #2181).
+                        no_reply = true;
+                        ALPACA_LOG_WARN("Gemini", "Flat panel v2 cover command failed: " + std::string(e.what()));
                     } catch (const std::exception& e) {
                         failure = e.what();
                     } catch (...) {
@@ -968,11 +980,12 @@ private:
                 // the first idle CoverState read after the move goes to the
                 // wire instead of returning the stale pre-move state.
                 invalidate_cover_status_cache();
-                if (failure) {
+                if (failure || no_reply) {
                     // Recorded BEFORE in-flight clears: CoverState goes
                     // Moving -> Error with no live read in between.
                     std::lock_guard<std::mutex> failure_lock(failure_mutex_);
                     cover_failure_ = std::move(failure);
+                    cover_no_reply_ = no_reply;
                 }
                 cover_in_flight_.store(false);
             });
@@ -1217,6 +1230,7 @@ private:
     // body returned, which is after the in-flight flags clear.
     mutable std::mutex failure_mutex_;
     std::optional<std::string> cover_failure_;
+    bool cover_no_reply_ = false;  // the last cover command got no reply (guarded by failure_mutex_)
     std::optional<std::string> calibrator_failure_;
 
     std::mutex calibrator_task_mutex_;  // serializes submissions, so queue order is start order

@@ -300,6 +300,122 @@ TEST_CASE("Gemini Flat Panel Slots - a cover body that fails reports Error until
     CHECK(driver->get_cover_state() == CoverState::Closed);
 }
 
+// A cover command whose reply never arrives is not a failed move: the cover may have travelled (issue #2181).
+struct ShortCoverTimeout {
+    ShortCoverTimeout() {
+        alpacacore::vendor::gemini::set_gemini_flatpanel_cover_timeout_for_testing(milliseconds(150));
+    }
+    ~ShortCoverTimeout() { alpacacore::vendor::gemini::set_gemini_flatpanel_cover_timeout_for_testing({}); }
+};
+
+// Wait out the 150 ms cover timeout without reading CoverState (a read would fill the status cache).
+void wait_for_missing_reply(const FakeGeminiFlatPanel& panel) {
+    REQUIRE(slot_wait_until([&] { return panel.count(">O#") == 1; }, milliseconds(3000)));
+    std::this_thread::sleep_for(milliseconds(350));
+}
+
+// The first CoverState read once the body is done, with no settle sleep before it.
+CoverState first_settled_cover_state(alpacacore::CoverCalibratorDriver& driver) {
+    CoverState state = CoverState::Moving;
+    REQUIRE(slot_wait_until(
+        [&] {
+            state = driver.get_cover_state();
+            return state != CoverState::Moving;
+        },
+        milliseconds(3000)));
+    return state;
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a cover reply that never arrives reports the live CoverState, not Error",
+          "[gemini][flatpanel][unit][fake]") {
+    ShortCoverTimeout short_timeout;
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">O#", milliseconds(400));  // the cover moves, the ack comes after the read timeout
+    auto driver = connect_slot_pro(panel);
+
+    driver->open_cover();
+    // The late "*O405#" lands while this first >S# is in flight; the wrapper drops it and reads the status reply.
+    CHECK(first_settled_cover_state(*driver) == CoverState::Open);
+    CHECK(driver->get_connected());  // a missing reply is not a link loss (decision 0009)
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a close whose reply never arrives reports Closed",
+          "[gemini][flatpanel][unit][fake]") {
+    ShortCoverTimeout short_timeout;
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_slot_pro(panel);
+    driver->open_cover();
+    REQUIRE(slot_wait_until([&] { return panel.cover() == 2 && !driver->get_cover_moving(); }, milliseconds(3000)));
+
+    panel.set_silent(">C#");
+    driver->close_cover();
+    CHECK(first_settled_cover_state(*driver) == CoverState::Closed);
+}
+
+TEST_CASE("Gemini Flat Panel Slots - after a missing cover reply a TimedOut status is Error",
+          "[gemini][flatpanel][unit][fake]") {
+    ShortCoverTimeout short_timeout;
+    FakeGeminiFlatPanel panel;
+    panel.set_silent(">O#");
+    auto driver = connect_slot_pro(panel);
+
+    driver->open_cover();
+    panel.set_reply_override(">S#", "*S0M0L3C0D76C405O#");  // the panel reports TimedOut
+    CHECK(first_settled_cover_state(*driver) == CoverState::Error);
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a late cover ack after a silent open does not disturb the next replies",
+          "[gemini][flatpanel][unit][fake]") {
+    ShortCoverTimeout short_timeout;
+    FakeGeminiFlatPanel panel;
+    panel.set_silent(">O#");
+    auto driver = connect_slot_pro(panel);
+
+    driver->open_cover();
+    REQUIRE(slot_wait_until([&] { return !driver->get_cover_moving(); }, milliseconds(3000)));
+    panel.push_unsolicited("*O405#");
+    CHECK(driver->get_cover_state() == CoverState::Open);
+    driver->calibrator_on(10);
+    REQUIRE(
+        slot_wait_until([&] { return driver->get_calibrator_state() == CalibratorState::Ready; }, milliseconds(3000)));
+    CHECK(panel.light_on());
+}
+
+TEST_CASE("Gemini Flat Panel Slots - after a missing cover reply a failed status read is Error until the next start",
+          "[gemini][flatpanel][unit][fake]") {
+    ShortCoverTimeout short_timeout;
+    FakeGeminiFlatPanel panel;
+    panel.set_silent(">O#");
+    auto driver = connect_slot_pro(panel);
+
+    driver->open_cover();
+    wait_for_missing_reply(panel);
+    panel.set_reply_override(">S#", "*Z#");  // unparsable status
+    CHECK(driver->get_cover_state() == CoverState::Error);
+
+    // The next start clears the record: the same bad status read is Unknown again.
+    driver->close_cover();
+    REQUIRE(
+        slot_wait_until([&] { return panel.count(">C#") == 1 && !driver->get_cover_moving(); }, milliseconds(3000)));
+    CHECK(driver->get_cover_state() == CoverState::Unknown);
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a reconnect clears the missing cover reply record",
+          "[gemini][flatpanel][unit][fake]") {
+    ShortCoverTimeout short_timeout;
+    FakeGeminiFlatPanel panel;
+    panel.set_silent(">O#");
+    auto driver = connect_slot_pro(panel);
+
+    driver->open_cover();
+    wait_for_missing_reply(panel);
+    driver->set_connected(false);
+    panel.set_reply_override(">S#", "*Z#");  // unparsable status; the connect seed read fails too, so nothing is cached
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_cover_state() == CoverState::Unknown);
+}
+
 TEST_CASE("Gemini Flat Panel Slots - a calibrator body that fails reports Error until the next calibrator command",
           "[gemini][flatpanel][unit][fake]") {
     FakeGeminiFlatPanel panel;
