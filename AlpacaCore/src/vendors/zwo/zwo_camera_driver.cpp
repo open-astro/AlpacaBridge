@@ -1242,8 +1242,9 @@ private:
     // Issue #2187: a retry starts only when it is expected to end within this of the exposure's own end, measured
     // from the first trigger. PHD2 drops a camera whose frame is not ready 15 s past the exposure; 10 s leaves the
     // download and the client's poll inside that. A 1 s guide exposure keeps both retries (each attempt ~2.2 s on
-    // the rig); a 5 s one keeps one; at the rig's failure latency a 10 s or longer exposure is reported failed at
-    // its first ASI_EXP_FAILED (a failure early in a long exposure can still earn one retry).
+    // the rig); a 5 s one keeps one. Since a retry counts at least one full exposure, a first failure reported more
+    // than ~10 s after the trigger is never retried, whatever the exposure length, so a 10 s or longer exposure is
+    // retried only when its failure comes within its first ~10 s.
     static constexpr std::chrono::seconds kRetryBudget{10};
     // The status poll's step (Player One's readiness step) and the session's default margin (Player One's grace,
     // the SVBONY margin); each start passes kExposureRetries x duration + this (decision 0020 rule 4).

@@ -375,7 +375,8 @@ std::string kept_failure(const alpacacore::CameraDriver& camera) {
 
 // Issue #2187: a retry is one more full exposure, and PHD2 drops a camera whose frame is not ready 15 s past the
 // exposure (24 drops of an ASI120MM Mini in one night). A retry starts only when it is expected to end within 10 s
-// of the exposure's own end, the expectation being the length of the attempt that just failed. A 4 s exposure whose
+// of the exposure's own end, the expectation being the longer of the attempt that just failed and one full
+// exposure. A 4 s exposure whose
 // failures come 6 s after each trigger: the first retry would end at ~12.3 s, inside 4 + 10 s, and runs; the second
 // would end at ~18.6 s and is not started, so the client hears of the failure at ~12.4 s instead of ~18.7 s.
 TEST_CASE("ZWO fake SDK - a retry that would run past the client's exposure wait is not started",
@@ -430,6 +431,38 @@ TEST_CASE("ZWO fake SDK - a short exposure whose retries fit the client's wait k
     const std::string message = kept_failure(*camera);
     CHECK(message.find("camera exposure failed after SDK retries") != std::string::npos);
     CHECK(message.find("client's exposure wait") == std::string::npos);
+}
+
+// Issue #2187: a retry is at least one full exposure, however early the failure came. A 30 s exposure whose failure
+// arrives 15 s after the trigger: a retry would end at ~45.3 s, past 30 + 10 s, so none starts, where the failed
+// attempt's own length (15 s) alone would have allowed one ending ~20 s past the client's wait. A failure 5 s after
+// the trigger still earns a retry (~35.3 s).
+TEST_CASE("ZWO fake SDK - a retry of a long exposure counts a full exposure however early the failure came",
+          "[zwo][camera][unit][capture-session][retry-budget]") {
+    FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    clock.advance(std::chrono::seconds(1));
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    connect_camera(*camera);
+    sdk.auto_complete_exposure = false;
+
+    SECTION("a failure 15 s into a 30 s exposure is kept at once") {
+        camera->start_exposure(30.0, true);
+        REQUIRE(sdk.wait_for_call_count("start_exposure", 1, std::chrono::seconds(2)));
+        fail_exposure_after(sdk, clock, std::chrono::seconds(15));
+        REQUIRE(alpacacore::test::wait_exposure_end(*camera, clock));
+        CHECK(sdk.call_count("start_exposure") == 1);  // no retry
+        CHECK(kept_failure(*camera).find("a retry would run past the client's exposure wait") != std::string::npos);
+    }
+
+    SECTION("a failure 5 s into a 30 s exposure still earns one retry") {
+        camera->start_exposure(30.0, true);
+        REQUIRE(sdk.wait_for_call_count("start_exposure", 1, std::chrono::seconds(2)));
+        fail_exposure_after(sdk, clock, std::chrono::seconds(5));
+        REQUIRE(sdk.wait_for_call_count("start_exposure", 2, std::chrono::seconds(5)));  // the retry runs
+        CHECK(camera->get_camera_state() == alpacacore::CameraState::Exposing);
+        camera->abort_exposure();
+    }
 }
 
 TEST_CASE("ZWO fake SDK - exhausted retries never publish candidate metadata", "[zwo][camera][unit][last-exposure]") {
