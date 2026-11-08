@@ -440,7 +440,7 @@ TEST_CASE("iOptron Telescope Driver - Tracking stays true while the mount report
     driver->pulse_guide(0, 3000);
     REQUIRE(driver->get_is_pulse_guiding());
     clock.advance(std::chrono::seconds(2));  // past the status TTL, inside the pulse
-    CHECK(mount.count(":Z") == 1);  // the one pulse command, whichever axis letter the direction maps to
+    CHECK(mount.count(":Z") == 1);           // the one pulse command, whichever axis letter the direction maps to
     CHECK(driver->get_tracking());
     CHECK(driver->get_is_pulse_guiding());
     CHECK_FALSE(driver->get_slewing());
