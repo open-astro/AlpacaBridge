@@ -111,6 +111,12 @@ public:
         }
     }
 
+    /// Apply any command starting with `prefix` but send no reply (a lost ack); pair with push_unsolicited().
+    void set_silent(const std::string& prefix) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        silent_.push_back(prefix);
+    }
+
     bool light_on() const { return light_on_.load(); }
     int brightness() const { return brightness_.load(); }
     int cover() const { return cover_.load(); }  // 1 = closed, 2 = open (FlatPanelCoverState)
@@ -216,6 +222,14 @@ private:
         } else if (cmd == ">C#") {
             cover_.store(1);
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& prefix : silent_) {
+                if (cmd.rfind(prefix, 0) == 0) {
+                    return;
+                }
+            }
+        }
         pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
@@ -227,6 +241,7 @@ private:
     std::vector<std::string> commands_;
     std::vector<std::pair<std::string, std::chrono::milliseconds>> delays_;
     std::map<std::string, std::string> overrides_;
+    std::vector<std::string> silent_;
 
     std::atomic<bool> light_on_{false};
     std::atomic<int> brightness_{0};

@@ -617,9 +617,15 @@ public:
         const int saved_timeout = config_.serial_timeout_s;
         config_.serial_timeout_s = kCoverMoveTimeoutS;
         cover_timeout_ms_ = g_cover_timeout_override_ms.load();
+        cover_ack_pending_ = false;
         std::string resp;
         try {
             resp = send_command_locked(cmd);
+        } catch (const FlatPanelReplyTimeout&) {
+            config_.serial_timeout_s = saved_timeout;
+            cover_timeout_ms_ = 0;
+            cover_ack_pending_ = true;  // the ack may still arrive; see send_command_locked()
+            throw;
         } catch (...) {
             config_.serial_timeout_s = saved_timeout;
             cover_timeout_ms_ = 0;
@@ -872,11 +878,21 @@ private:
         if (config_.model != FlatPanelModel::Pro) {
             std::this_thread::sleep_for(std::chrono::milliseconds(kCommandDelayMs));
         }
-        return read_response();
+        std::string response = read_response();
+        // After a cover command timed out, its ack can land while the next command is in flight (the flush above
+        // cannot see it). A cover ack is never the reply to another command: drop it once and read that reply.
+        if (cover_ack_pending_ && cmd != ">O#" && cmd != ">C#" && response.size() >= 2 && response[0] == '*' &&
+            (response[1] == 'O' || response[1] == 'C')) {
+            ALPACA_LOG_TRACE("Gemini", "Flat panel late cover ack dropped: " + response);
+            cover_ack_pending_ = false;
+            return read_response();
+        }
+        return response;
     }
 
     mutable std::mutex mutex_;
     FlatPanelConnectionConfig config_;
+    bool cover_ack_pending_ = false;  // the last cover command timed out; its ack may still arrive
     int cover_timeout_ms_ = 0;  // test seam: a nonzero reply wait for the cover command in flight
     bool connected_ = false;
     std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect

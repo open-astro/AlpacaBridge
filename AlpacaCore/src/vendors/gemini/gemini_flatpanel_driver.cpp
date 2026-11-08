@@ -617,6 +617,7 @@ public:
             {
                 std::lock_guard<std::mutex> lock(failure_mutex_);
                 cover_failure_.reset();
+                cover_no_reply_ = false;
                 calibrator_failure_.reset();
             }
             // Seed calibrator state from a live read (cover state is never
