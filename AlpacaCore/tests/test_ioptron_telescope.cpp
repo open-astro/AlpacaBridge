@@ -361,9 +361,9 @@ TEST_CASE("iOptron Telescope Driver - all four equatorial slews are refused whil
     driver->set_connected(false);
 }
 
-// :GLS reports a GOTO (2), guiding (3) or a meridian flip (4) in place of tracking, and the Tracking getter
-// reads them as off: a slew then is still a slew with Tracking on, so the guard must accept it. A commanded
-// Tracking=false and a stopped mount at home (7) are refused.
+// :GLS reports a GOTO (2) in place of tracking, and the Tracking getter reads it as off: a slew then is still a
+// slew with Tracking on, so the guard must accept it. Guiding (3) and a meridian flip (4) read as on since #2186
+// and are not refused either. A commanded Tracking=false and a stopped mount at home (7) are refused.
 TEST_CASE("iOptron Telescope Driver - a slew while the mount reports motion is not refused for Tracking",
           "[ioptron][telescope][unit][fake][tracking-guard]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
