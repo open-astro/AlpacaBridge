@@ -376,8 +376,8 @@ TEST_CASE("Gemini Flat Panel Slots - a late cover ack after a silent open does n
     panel.push_unsolicited("*O405#");
     CHECK(driver->get_cover_state() == CoverState::Open);
     driver->calibrator_on(10);
-    REQUIRE(slot_wait_until([&] { return driver->get_calibrator_state() == CalibratorState::Ready; },
-                            milliseconds(3000)));
+    REQUIRE(
+        slot_wait_until([&] { return driver->get_calibrator_state() == CalibratorState::Ready; }, milliseconds(3000)));
     CHECK(panel.light_on());
 }
 
