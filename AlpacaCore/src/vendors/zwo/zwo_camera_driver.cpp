@@ -939,8 +939,9 @@ private:
             // Issue #2187: a retry is one more full exposure, and a guide client waits for the frame for the exposure
             // plus a fixed grace before it drops the camera (PHD2: 15 s). A retry starts only when it can be expected
             // to end within kRetryBudget of the exposure's own end, the expectation being the length of the attempt
-            // that just failed (the ASI120MM Mini reports ASI_EXP_FAILED 1.9-2.3 s after the trigger of a 1 s
-            // exposure); otherwise the failure is kept at once, so the client hears of it and retakes its frame.
+            // that just failed, or a full exposure when the failure came earlier (the ASI120MM Mini reports
+            // ASI_EXP_FAILED 1.9-2.3 s after the trigger of a 1 s exposure); otherwise the failure is kept at once,
+            // so the client hears of it and retakes its frame.
             const auto retry_ends_by = first_trigger + std::chrono::microseconds(request.exposure_us) + kRetryBudget;
             auto attempt_started = first_trigger;
             int retries_left = kExposureRetries;
@@ -966,9 +967,13 @@ private:
                                                     " retries; reporting failure to the client");
                         throw AlpacaException("camera exposure failed after SDK retries", AlpacaError::DriverException);
                     }
+                    // A retry is at least a full exposure, and takes as long as the attempt that just failed when
+                    // the failure came late (the SDK reports it after the exposure's end on the rig).
                     const auto failed_at = clock_.now();
                     const auto attempt_took = failed_at - attempt_started;
-                    if (failed_at + kExposureRetryInterval + attempt_took > retry_ends_by) {
+                    const auto retry_length = std::max<util::TaskClock::clock::duration>(
+                        attempt_took, std::chrono::microseconds(request.exposure_us));
+                    if (failed_at + kExposureRetryInterval + retry_length > retry_ends_by) {
                         const auto took_ms =
                             std::chrono::duration_cast<std::chrono::milliseconds>(attempt_took).count();
                         ALPACA_LOG_ERROR("ZWO",
@@ -1237,7 +1242,8 @@ private:
     // Issue #2187: a retry starts only when it is expected to end within this of the exposure's own end, measured
     // from the first trigger. PHD2 drops a camera whose frame is not ready 15 s past the exposure; 10 s leaves the
     // download and the client's poll inside that. A 1 s guide exposure keeps both retries (each attempt ~2.2 s on
-    // the rig); a 5 s one keeps one; a 10 s or longer exposure is reported failed at its first ASI_EXP_FAILED.
+    // the rig); a 5 s one keeps one; at the rig's failure latency a 10 s or longer exposure is reported failed at
+    // its first ASI_EXP_FAILED (a failure early in a long exposure can still earn one retry).
     static constexpr std::chrono::seconds kRetryBudget{10};
     // The status poll's step (Player One's readiness step) and the session's default margin (Player One's grace,
     // the SVBONY margin); each start passes kExposureRetries x duration + this (decision 0020 rule 4).
