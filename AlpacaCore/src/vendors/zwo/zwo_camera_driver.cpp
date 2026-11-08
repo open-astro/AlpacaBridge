@@ -932,9 +932,17 @@ private:
             if (!settle_after_usb2_download(c, request)) {
                 return;
             }
+            const auto first_trigger = clock_.now();
             if (!trigger_exposure(c, request, false)) {
                 return;
             }
+            // Issue #2187: a retry is one more full exposure, and a guide client waits for the frame for the exposure
+            // plus a fixed grace before it drops the camera (PHD2: 15 s). A retry starts only when it can be expected
+            // to end within kRetryBudget of the exposure's own end, the expectation being the length of the attempt
+            // that just failed (the ASI120MM Mini reports ASI_EXP_FAILED 1.9-2.3 s after the trigger of a 1 s
+            // exposure); otherwise the failure is kept at once, so the client hears of it and retakes its frame.
+            const auto retry_ends_by = first_trigger + std::chrono::microseconds(request.exposure_us) + kRetryBudget;
+            auto attempt_started = first_trigger;
             int retries_left = kExposureRetries;
             std::optional<util::TaskClock::clock::time_point> last_retry;
             for (;;) {
@@ -958,6 +966,20 @@ private:
                                                     " retries; reporting failure to the client");
                         throw AlpacaException("camera exposure failed after SDK retries", AlpacaError::DriverException);
                     }
+                    const auto failed_at = clock_.now();
+                    const auto attempt_took = failed_at - attempt_started;
+                    if (failed_at + kExposureRetryInterval + attempt_took > retry_ends_by) {
+                        const auto took_ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(attempt_took).count();
+                        ALPACA_LOG_ERROR("ZWO",
+                                         "exposure failed (transient SDK/USB error); a retry would not end within " +
+                                             std::to_string(kRetryBudget.count()) +
+                                             " s of the exposure's end (this attempt took " + std::to_string(took_ms) +
+                                             " ms); reporting failure to the client");
+                        throw AlpacaException(
+                            "camera exposure failed; a retry would run past the client's exposure wait",
+                            AlpacaError::DriverException);
+                    }
                     if (last_retry.has_value()) {
                         const auto since = clock_.now() - *last_retry;
                         if (since < kExposureRetryInterval && !c.wait_for(kExposureRetryInterval - since)) {
@@ -971,6 +993,7 @@ private:
                                                std::to_string(retries_left) + " retries left");
                     bool retried = false;
                     try {
+                        attempt_started = clock_.now();
                         retried = trigger_exposure(c, request, true);
                     } catch (const AlpacaException& e) {
                         if (e.error_code() == AlpacaError::NotConnected) throw;
@@ -1211,6 +1234,11 @@ private:
     // kNoDownload. Written by the body, read by the next body; reset by a connect and a disconnect.
     mutable std::atomic<std::int64_t> last_download_ns_{kNoDownload};
     static constexpr std::chrono::milliseconds kExposureRetryInterval{250};
+    // Issue #2187: a retry starts only when it is expected to end within this of the exposure's own end, measured
+    // from the first trigger. PHD2 drops a camera whose frame is not ready 15 s past the exposure; 10 s leaves the
+    // download and the client's poll inside that. A 1 s guide exposure keeps both retries (each attempt ~2.2 s on
+    // the rig); a 5 s one keeps one; a 10 s or longer exposure is reported failed at its first ASI_EXP_FAILED.
+    static constexpr std::chrono::seconds kRetryBudget{10};
     // The status poll's step (Player One's readiness step) and the session's default margin (Player One's grace,
     // the SVBONY margin); each start passes kExposureRetries x duration + this (decision 0020 rule 4).
     static constexpr std::chrono::milliseconds kStatusPollInterval{50};
