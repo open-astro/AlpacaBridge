@@ -846,6 +846,10 @@ private:
             case util::ReadOutcome::LinkDead:
                 fail_link_locked("Serial link lost (errno " + std::to_string(r.err) + ")");
             default:
+                // A non-zero err is a read error, not a silent panel: it stays a failure.
+                if (r.err != 0) {
+                    throw AlpacaException("Read failed: " + util::errno_string(r.err), AlpacaError::DriverException);
+                }
                 throw FlatPanelReplyTimeout();
         }
 #endif
