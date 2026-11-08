@@ -280,6 +280,14 @@ GeminiFlatPanelScanHooks& scan_hooks() {
 
 void set_gemini_flatpanel_scan_hooks_for_testing(GeminiFlatPanelScanHooks hooks) { scan_hooks() = std::move(hooks); }
 
+namespace {
+std::atomic<int> g_cover_timeout_override_ms{0};
+}  // namespace
+
+void set_gemini_flatpanel_cover_timeout_for_testing(std::chrono::milliseconds timeout) {
+    g_cover_timeout_override_ms.store(static_cast<int>(timeout.count()));
+}
+
 bool probe_gemini_flatpanel_port(const std::string& port_path) {
     if (const auto& on_probe = scan_hooks().on_probe) on_probe(port_path);
     return probe_port(port_path);
@@ -603,6 +611,28 @@ public:
         return status;
     }
 
+    void cover_command(const char* cmd, const char* exact, const char* what) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        const int saved_timeout = config_.serial_timeout_s;
+        config_.serial_timeout_s = kCoverMoveTimeoutS;
+        cover_timeout_ms_ = g_cover_timeout_override_ms.load();
+        std::string resp;
+        try {
+            resp = send_command_locked(cmd);
+        } catch (...) {
+            config_.serial_timeout_s = saved_timeout;
+            cover_timeout_ms_ = 0;
+            throw;
+        }
+        config_.serial_timeout_s = saved_timeout;
+        cover_timeout_ms_ = 0;
+        if (!is_cover_reply_ok(resp, exact)) {
+            throw AlpacaException(std::string("Unexpected ") + what + " cover reply: " + resp,
+                                  AlpacaError::DriverException);
+        }
+    }
+
     // Rev2 firmware replies with the exact completion string; Pro firmware
     // acks with variants ("*O", "*O#", "*OOpened#" per INDI), so only the
     // "*<letter>" prefix is required there.
@@ -613,41 +643,9 @@ public:
         return resp == exact;
     }
 
-    void open_cover() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected_locked();
-        int saved_timeout = config_.serial_timeout_s;
-        config_.serial_timeout_s = kCoverMoveTimeoutS;
-        std::string resp;
-        try {
-            resp = send_command_locked(">O#");
-        } catch (...) {
-            config_.serial_timeout_s = saved_timeout;
-            throw;
-        }
-        config_.serial_timeout_s = saved_timeout;
-        if (!is_cover_reply_ok(resp, "*OOpened#")) {
-            throw AlpacaException("Unexpected open cover reply: " + resp, AlpacaError::DriverException);
-        }
-    }
+    void open_cover() { cover_command(">O#", "*OOpened#", "open"); }
 
-    void close_cover() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected_locked();
-        int saved_timeout = config_.serial_timeout_s;
-        config_.serial_timeout_s = kCoverMoveTimeoutS;
-        std::string resp;
-        try {
-            resp = send_command_locked(">C#");
-        } catch (...) {
-            config_.serial_timeout_s = saved_timeout;
-            throw;
-        }
-        config_.serial_timeout_s = saved_timeout;
-        if (!is_cover_reply_ok(resp, "*CClosed#")) {
-            throw AlpacaException("Unexpected close cover reply: " + resp, AlpacaError::DriverException);
-        }
-    }
+    void close_cover() { cover_command(">C#", "*CClosed#", "close"); }
 
 private:
     void ensure_connected_locked() const {
@@ -797,7 +795,7 @@ private:
     }
 
     std::string read_response() {
-        const int timeout_ms = config_.serial_timeout_s * 1000;
+        const int timeout_ms = cover_timeout_ms_ > 0 ? cover_timeout_ms_ : config_.serial_timeout_s * 1000;
         std::string response;
 #ifdef _WIN32
         response.reserve(kMaxResponseLen);
@@ -808,7 +806,7 @@ private:
             auto elapsed =
                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
             if (elapsed > timeout_ms) {
-                throw AlpacaException("Read timeout", AlpacaError::DriverException);
+                throw FlatPanelReplyTimeout();
             }
 
             DWORD bytes_read = 0;
@@ -842,7 +840,7 @@ private:
             case util::ReadOutcome::LinkDead:
                 fail_link_locked("Serial link lost (errno " + std::to_string(r.err) + ")");
             default:
-                throw AlpacaException("Read timeout", AlpacaError::DriverException);
+                throw FlatPanelReplyTimeout();
         }
 #endif
 
@@ -879,6 +877,7 @@ private:
 
     mutable std::mutex mutex_;
     FlatPanelConnectionConfig config_;
+    int cover_timeout_ms_ = 0;  // test seam: a nonzero reply wait for the cover command in flight
     bool connected_ = false;
     std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect
     // The loss reason for get_link_fault(); its own mutex, never held across an exchange, so a getter cannot wait on
