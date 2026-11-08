@@ -1839,7 +1839,11 @@ MountStatus iOptronProtocolWrapper::get_status() {
     
     status.system_status = system_status;
     status.tracking_rate = tracking_rate_digit;
-    status.is_tracking = (system_status == 1 || system_status == 5);
+    // 1 and 5 are tracking (PEC off / on). 3 (auto-guiding) and 4 (meridian flipping) are tracking too: a guide
+    // pulse is a correction on top of sidereal tracking, which the mount resumes when the pulse or the flip ends
+    // (issue #2186: the HAE29C reports 3 for the whole of a pulse, and a client that polled Tracking then saw it off).
+    // IsPulseGuiding reports the pulse itself. 0, 2, 6 and 7 are not tracking.
+    status.is_tracking = (system_status == 1 || system_status == 3 || system_status == 4 || system_status == 5);
     status.is_slewing = (system_status == 2);
     status.is_parked = (system_status == 6);
     status.is_at_home = (system_status == 7);
