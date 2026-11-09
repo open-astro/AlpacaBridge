@@ -27,8 +27,9 @@ on the hand-rolled shapes:
                            `x->fd()` or `serial_fd_`); reads and writes go
                            through util::tty_read()/tty_write_all() (decision
                            0017 rule 9, issue #1440). Sky-Watcher and the
-                           Celestron CGX keep poll()-bounded loops behind
-                           their test seams and are allowed this rule only.
+                           Celestron CGX keep poll()-bounded loops, each
+                           exercised through its pty fake, and are allowed
+                           this rule only.
                            Sockets and non-tty fds are not matched.
   * tcdrain(            -- an unbounded drain: a USB bridge whose endpoint
                            stops taking data never empties its queue and
@@ -67,7 +68,7 @@ ALLOWLIST: dict[str, dict[str, str]] = {
         RAW_IO: "poll()-bounded loops on the non-blocking fd, behind serial_read_/serial_write_ test seams (decision 0017 rule 9)",
     },
     "AlpacaCore/src/vendors/celestron/celestron_cgx_protocol_wrapper.cpp": {
-        RAW_IO: "poll()-bounded loops on the non-blocking fd, behind test seams (decision 0017 rule 9)",
+        RAW_IO: "poll()-bounded loops on the non-blocking fd, exercised through the pty fake (decision 0017 rule 9)",
     },
 }
 
@@ -121,6 +122,11 @@ def scan_text(text: str, allowed: frozenset[str] = frozenset()) -> list[tuple[in
     return [(line, matched, reason) for rule_id, line, matched, reason in scan_rules(text) if rule_id not in allowed]
 
 
+# A local that copies a link's fd (`int fd = link_.fd();`, `= serial_fd_;`); a
+# raw read()/write() on it is a raw read on the link (#2080).
+COPIED_FD_RE = re.compile(r"\b(\w+)\s*=\s*(?:(?:[\w:]+(?:\(\))?(?:\.|->))*fd\(\)|serial_fd_)\s*;")
+
+
 def scan_rules(text: str) -> list[tuple[str, int, str, str]]:
     """(rule id, line, matched text, reason) for every forbidden shape."""
     code = strip_comments(text)
@@ -129,6 +135,17 @@ def scan_rules(text: str) -> list[tuple[str, int, str, str]]:
         for m in pattern.finditer(code):
             line = code.count("\n", 0, m.start()) + 1
             findings.append((rule_id, line, m.group(0), reason))
+    # A copied fd counts from the copy to the end of its top-level function (the
+    # next line that is a bare `}`), so a same-named socket fd elsewhere in the
+    # file is not taken for it.
+    for m in COPIED_FD_RE.finditer(code):
+        end = code.find("\n}", m.end())
+        region = code[m.end():end if end >= 0 else len(code)]
+        raw = re.compile(r"(?<![\w.>:])(?:::)?(?:read|write)\s*\(\s*%s\s*," % re.escape(m.group(1)))
+        for use in raw.finditer(region):
+            line = code.count("\n", 0, m.end() + use.start()) + 1
+            findings.append((RAW_IO, line, use.group(0),
+                             "raw read()/write() on a copy of a link's fd; use util::tty_read()/util::tty_write_all()"))
     return sorted(findings, key=lambda f: (f[1], f[2]))
 
 
@@ -214,6 +231,12 @@ def self_test() -> int:
         ("tcdrain spaced", "::tcdrain (fd);", 1),
         ("bounded drain ok", "if (!util::tty_drain_bounded(fd, kDrainTimeoutMs)) return {};", 0),
         ("tcdrain in comment", "// a bare tcdrain(fd) parked the connect", 0),
+        # A copied fd is still the link's fd (#2080).
+        ("copied fd read", "int fd = link_.fd();\nn = ::read(fd, buf, 1);", 1),
+        ("copied fd arrow write", "const int fd = link_->fd();\nwrite(fd, p, n);", 1),
+        ("copied serial_fd_ read", "int fd = serial_fd_;\nr = read(fd, &ch, 1);", 1),
+        ("copied socket fd ok", "int fd = ::socket(AF_INET, SOCK_STREAM, 0);\nread(fd, &ch, 1);", 0),
+        ("copied fd through tty_read ok", "int fd = link_.fd();\nutil::tty_read(fd, &ch, 1, 500);", 0),
     ]
     failures = 0
     for label, text, expected in cases:
