@@ -1834,6 +1834,7 @@ public:
                 if (pulse_seq_[ai] == my_seq) {
                     pulse_axis_active_[ai] = false;
                     pulse_axis_in_motion_[ai] = false;
+                    pulse_hold_[ai].clear();  // decision 0022: the window ends with its operation
                 }
             };
             // The pulse owns RA until it lets go here, and set_site_latitude()
@@ -2266,6 +2267,7 @@ public:
             if (pulse_seq_[ai] == my_seq) {
                 pulse_axis_active_[ai] = false;
                 pulse_axis_in_motion_[ai] = false;
+                pulse_hold_[ai].clear();
             }
             throw;
         }
@@ -6309,14 +6311,15 @@ private:
             StateLock gate(lock_gate_);
             check_request_locked();
         }
-        if (!body) {
-            slew_.cancel_all_and_join();
-        }
         // A stale pulse timer firing mid-goto corrupts the slew.
         stop_pulse_ops();
         StateLock lock(lock_gate_);
         check_request_locked();
         if (!body) {
+            // Decision 0006 rule 3: supersede, never join. The claim bumps the
+            // slot generation, so a running body sees Superseded under the lock
+            // before it touches an axis.
+            claim_slew_slot_locked();
             return lock;
         }
         const bool displaced = claim_slew_slot_locked();
@@ -6358,6 +6361,15 @@ public:
     /// refuse a slew body's thread. Call before the first slew.
     void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         slew_.set_spawn_for_testing(std::move(spawn));
+    }
+
+    void set_pulse_spawn_for_testing(int axis, std::function<std::thread(std::function<void()>)> spawn) {
+        pulse_ops_[axis - 1].set_spawn_for_testing(std::move(spawn));
+    }
+
+    bool pulse_hold_active_for_testing(int axis) const {
+        StateLock lock(lock_gate_);
+        return pulse_hold_[axis - 1].active(clock_.now());
     }
 
     void set_status_poll_paused_for_testing(bool paused) { status_poll_paused_for_testing_.store(paused); }
@@ -6863,6 +6875,18 @@ void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_disconnect_before_close_hook_for_testing(std::move(hook));
     }
+}
+
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, int axis,
+                                 std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_pulse_spawn_for_testing(axis, std::move(spawn));
+    }
+}
+
+bool pulse_hold_active_for_testing(TelescopeDriver& driver, int axis) {
+    auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver);
+    return sw != nullptr && sw->pulse_hold_active_for_testing(axis);
 }
 
 void set_duty_before_exit_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
