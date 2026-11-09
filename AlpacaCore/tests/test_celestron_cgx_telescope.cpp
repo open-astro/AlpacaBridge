@@ -470,8 +470,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - modern identity is read-only and
 TEST_CASE("Celestron CGX USB Telescope Driver - modern identity rejects malformed motor models",
           "[celestron][cgx][telescope]") {
     for (const auto axis : {0x10, 0x11}) {
-        for (const auto& model :
-             std::vector<std::vector<std::uint8_t>>{{}, {0x17}, {0x17, 0x88, 0}}) {
+        for (const auto& model : std::vector<std::vector<std::uint8_t>>{{}, {0x17}, {0x17, 0x88, 0}}) {
             alpacacore::test::FakeCelestronCgxMount mount;
             REQUIRE(mount.ok());
             mount.set_motor_identity(0x10, {7, 17, 0, 25}, {0x17, 0x88});

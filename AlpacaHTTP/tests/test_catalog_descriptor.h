@@ -143,6 +143,9 @@ inline catalog::Factory make_factory() {
 // ("peers=<N>", N = the stored entries it was shown, itself included when stored)
 // and erases `ratio`; with `enabled` it registers with a warning. No `create`:
 // the stub is only reachable through bind.
+// The hook the last bind was handed, for a test to call as a connect would.
+inline std::function<void(const catalog::DeviceConfig&)> last_learned_at_connect;
+
 inline catalog::Factory make_bind_factory() {
     catalog::Factory factory;
     factory.key = kKey;
@@ -155,6 +158,7 @@ inline catalog::Factory make_bind_factory() {
             }
         }
         result.driver = std::unique_ptr<alpacacore::AlpacaDriver>(new StubFocuser(n, stub_name(c)));
+        last_learned_at_connect = context.learned_at_connect;
         result.learned.set(kHost.key, "peers=" + std::to_string(context.peers.size()));
         result.erased.emplace_back(kRatio.key);
         if (c.get(kEnabled)) result.warnings.emplace_back("zzz focuser " + std::to_string(n) + " is enabled");

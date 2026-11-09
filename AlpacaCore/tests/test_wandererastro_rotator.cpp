@@ -29,9 +29,9 @@
 #include <thread>
 
 #include "catch2_compat.h"
-#include "pty_responder.h"
 #include "driver_rig.h"
 #include "fake_pty_write.h"
+#include "pty_responder.h"
 #include "rotator_sync_offset_test_dir.h"
 
 namespace {

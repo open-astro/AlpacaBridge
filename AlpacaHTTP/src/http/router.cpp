@@ -1161,6 +1161,7 @@ void set_bad_request_text(Response& response, const std::string& message);
 Router::Router() : Router(CatalogExtension{}) {}
 
 Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_machine_hostname()) {
+    learned_sink_->router = this;
     alpacacore::catalog::register_builtin_schemas(catalog_);
     alpacacore::catalog::register_builtin_factories(catalog_);
     if (extend_catalog) {
@@ -1169,7 +1170,39 @@ Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_
     set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "", "");
     load_persisted_devices();
 }
-Router::~Router() { cancel_delayed_callback(); }
+Router::~Router() {
+    cancel_delayed_callback();
+    std::lock_guard<std::mutex> lock(learned_sink_->mutex);
+    learned_sink_->router = nullptr;
+}
+
+void Router::store_learned_config(const nlohmann::json& entry, const nlohmann::json& learned,
+                                  const std::string& unique_id) {
+    const auto wanted = persisted_key(entry);
+    if (!wanted.has_value()) return;
+    bool stored = false;
+    {
+        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+        for (auto& saved : persisted_devices_) {
+            const auto key = persisted_key(saved);
+            if (!key.has_value() || key->vendor != wanted->vendor || key->device_type != wanted->device_type ||
+                key->device_number != wanted->device_number) {
+                continue;
+            }
+            if (!unique_id.empty() && stored_unique_id(saved) != unique_id) break;  // the number now names another
+            for (const auto& [field, value] : learned.items()) {
+                if (value.is_null()) {
+                    saved.erase(field);
+                } else {
+                    saved[field] = value;
+                }
+            }
+            stored = true;
+            break;
+        }
+    }
+    if (stored) save_persisted_devices();
+}
 
 void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
     const auto interval = motion_watchdog_interval();
@@ -6383,10 +6416,21 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                     }
                 }
             }
-            auto bound = catalog_.bind(key, result.config, device_number,
-                                       {source == ConfigSource::Api ? alpacacore::catalog::Source::Api
-                                                                    : alpacacore::catalog::Source::Persisted,
-                                        peers});
+            // Decision 0018: the configured device's stored ID is its UniqueID.
+            std::string unique_id = stored_unique_id(config);
+            const bool new_unique_id = unique_id.empty();
+            if (new_unique_id) unique_id = alpacacore::util::generate_unique_id();
+            auto bound = catalog_.bind(
+                key, result.config, device_number,
+                {source == ConfigSource::Api ? alpacacore::catalog::Source::Api
+                                             : alpacacore::catalog::Source::Persisted,
+                 peers,
+                 [sink = learned_sink_, entry = config, unique_id](const alpacacore::catalog::DeviceConfig& learned) {
+                     std::lock_guard<std::mutex> lock(sink->mutex);
+                     if (sink->router != nullptr) {
+                         sink->router->store_learned_config(entry, catalog_json::json_from_config(learned), unique_id);
+                     }
+                 }});
             if (bound.rejection) {
                 error_message = *bound.rejection;
                 return false;
@@ -6400,12 +6444,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                     (*learned_config)[field] = nullptr;
                 }
             }
-            // Decision 0018: the configured device's stored ID is its UniqueID.
-            std::string unique_id = stored_unique_id(config);
-            if (unique_id.empty()) {
-                unique_id = alpacacore::util::generate_unique_id();
-                if (learned_config != nullptr) (*learned_config)["uniqueId"] = unique_id;
-            }
+            if (new_unique_id && learned_config != nullptr) (*learned_config)["uniqueId"] = unique_id;
             bound.driver->assign_unique_id(unique_id);
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(bound.driver)))) {
                 util::log_info("Registered " + vendor_label(*view) + " " + device_type_str);
@@ -6766,34 +6805,7 @@ void Router::load_persisted_devices() {
                 // #914: what the registration learned about the device (a ZWO
                 // camera's serial and model name) goes back into the
                 // stored entry, so the next start binds by it.
-                const auto learned_key = persisted_key(entry);
-                bool stored = false;
-                if (learned_key.has_value()) {
-                    const PersistedKey& wanted = *learned_key;
-                    std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-                    for (auto& saved : persisted_devices_) {
-                        const auto key = persisted_key(saved);
-                        if (!key.has_value()) {
-                            continue;
-                        }
-                        const PersistedKey& have = *key;
-                        if (have.vendor == wanted.vendor && have.device_type == wanted.device_type &&
-                            have.device_number == wanted.device_number) {
-                            for (const auto& [field, value] : learned_config.items()) {
-                                if (value.is_null()) {
-                                    saved.erase(field);
-                                } else {
-                                    saved[field] = value;
-                                }
-                            }
-                            stored = true;
-                            break;
-                        }
-                    }
-                }
-                if (stored) {
-                    save_persisted_devices();
-                }
+                store_learned_config(entry, learned_config, std::string());
             }
         } catch (const std::exception& e) {
             util::log_error("Failed to load persisted device: " + std::string(e.what()));

@@ -13,11 +13,10 @@
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/zwo/zwo_mount_identity.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
-
-#include <alpacacore/util/logging.h>
 
 #include <algorithm>
 #include <atomic>
@@ -186,8 +185,7 @@ struct IdentityRig {
 };
 }  // namespace
 
-TEST_CASE("ZWO mount identity connects every listed model on TCP and serial",
-          "[zwo][telescope][identity][issue1523]") {
+TEST_CASE("ZWO mount identity connects every listed model on TCP and serial", "[zwo][telescope][identity][issue1523]") {
     IdentityRig rig;
     REQUIRE(rig.server.ok());
     const bool serial = GENERATE(false, true);
@@ -219,8 +217,7 @@ TEST_CASE("ZWO mount identity connects every listed model on TCP and serial",
     }
 }
 
-TEST_CASE("ZWO mount identity rejects empty, error and unterminated replies",
-          "[zwo][telescope][identity][issue1523]") {
+TEST_CASE("ZWO mount identity rejects empty, error and unterminated replies", "[zwo][telescope][identity][issue1523]") {
     IdentityRig rig;
     REQUIRE(rig.server.ok());
     for (const auto& reply : {"#", " \t\r\n#", "e1#", "AM5", ""}) {
@@ -879,7 +876,8 @@ TEST_CASE("ZWO device with a valid identity but no valid serial is refused and s
 
 // #2204: Auto must not stop at a device that answers :GVP# but cannot prove it is a ZWO mount.
 // Falsified by: zwo_mount_protocol_wrapper.cpp probe_serial_mount() and probe_network_mount() skipping the :GMA# query.
-TEST_CASE("ZWO discovery moves past a candidate with no valid serial (#2204)", "[zwo][telescope][identity][discovery]") {
+TEST_CASE("ZWO discovery moves past a candidate with no valid serial (#2204)",
+          "[zwo][telescope][identity][discovery]") {
     IdentityRig foreign;
     IdentityRig mount;
     REQUIRE(foreign.server.ok());

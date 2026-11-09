@@ -151,7 +151,7 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
 // so the next start binds by it. The UniqueID is not the camera's: the router
 // gives every configured device a stored ID (decision 0018).
 BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int device_number,
-                       const BindContext& context) {
+                       const BindContext& context, const std::shared_ptr<vendor::zwo::ZwoConnectClaims>& claims) {
     BindResult result;
     const auto selector = [&](const Field<std::int64_t>& field) { return static_cast<int>(config.get(field)); };
     const int camera_id = selector(kZwoCamId);
@@ -192,54 +192,26 @@ BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int
         cleared_duplicate_serial = true;
     }
 
-    // A camera that is not plugged in yet still registers with the identity it was
-    // configured with; connect reports why it is absent. Known limit: an entry with
-    // only an index/id hint learns whatever serial sits at that hint. With two saved
-    // cameras and only one plugged in, the first entry can learn the other body's serial.
-    std::string learned_serial = configured_serial;
-    std::string learned_name = configured_name;
-    // #1969: an entry that learns neither binds by its hint alone, so say why and what was there.
-    std::optional<std::string> unbound;
-    try {
-        const auto enumerated = sdk.enumerate_identified_cameras(vendor::zwo::trim_zwo_name(configured_name));
-        const auto resolved = vendor::zwo::resolve_zwo_camera(binding.identity, enumerated, binding.claimed_serials);
-        if (resolved.camera.has_value()) {
-            const auto& found = resolved.camera.value();
-            binding.identity.camera_id = found.camera_id;
-            binding.identity.camera_index = found.index;
-            if (learned_serial.empty()) learned_serial = found.serial;
-            if (learned_name.empty()) learned_name = vendor::zwo::trim_zwo_name(found.name);
-        } else if (learned_serial.empty() && learned_name.empty()) {
-            unbound = vendor::zwo::describe_unbound_zwo_camera(binding.identity, resolved.message, &enumerated);
-        }
-    } catch (const std::exception& e) {
-        ALPACA_LOG_WARN("ZWO", std::string("ZWO camera enumeration failed: ") + e.what());
-        if (learned_serial.empty() && learned_name.empty()) {
-            unbound = vendor::zwo::describe_unbound_zwo_camera(
-                binding.identity, std::string("the enumeration failed: ") + e.what(), nullptr);
-        }
-    }
-    if (unbound) {
-        // Decision 0007 rule 9: a configuredevice call is client-triggered, so INFO; a stored entry WARNs.
-        const std::string line = "Camera #" + std::to_string(device_number) + ": " + *unbound;
-        if (context.source == Source::Api) {
-            ALPACA_LOG_INFO("ZWO", line);
-        } else {
-            ALPACA_LOG_WARN("ZWO", line);
-        }
-        result.warnings.push_back(*unbound);
-    }
-    binding.identity.serial = learned_serial;
-    binding.identity.camera_name = learned_name;
+    // Persist the clear for this entry, so the entry processed after it no longer sees a duplicate and keeps the
+    // serial.
+    if (cleared_duplicate_serial) result.learned.set(kZwoCamSerial.key, std::string());
 
-    if (configured_serial.empty() && !learned_serial.empty()) {
-        result.learned.set(kZwoCamSerial.key, learned_serial);
-    } else if (cleared_duplicate_serial) {
-        // Persist the clear for this entry, so the entry processed after it no longer
-        // sees a duplicate and keeps the serial.
-        result.learned.set(kZwoCamSerial.key, std::string());
+    // #2074: registration reads no hardware. The first connect learns the serial and model name, and stores them.
+    std::set<int> other_numbers;
+    for (const PeerEntry& peer : context.peers) {
+        if (peer.device_number != device_number) other_numbers.insert(peer.device_number);
     }
-    if (configured_name.empty() && !learned_name.empty()) result.learned.set(kZwoCamName.key, learned_name);
+    claims->retain(other_numbers);
+    binding.connect_claims = claims;
+    if (context.learned_at_connect) {
+        binding.on_identity_learned = [store = context.learned_at_connect](const std::string& serial,
+                                                                           const std::string& model_name) {
+            DeviceConfig learned;
+            if (!serial.empty()) learned.set(kZwoCamSerial.key, serial);
+            if (!model_name.empty()) learned.set(kZwoCamName.key, model_name);
+            store(learned);
+        };
+    }
 
     result.driver = vendor::zwo::create_zwo_camera_bound(device_number, binding, sdk);
     return result;
@@ -250,12 +222,13 @@ BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int
 void register_zwo_camera_factory(DeviceCatalog& catalog, vendor::zwo::ZWOSDK& sdk) {
     Factory camera;
     camera.key = DeviceKey{"zwo", DeviceType::Camera};
-    camera.bind = [&sdk](const DeviceConfig& config, int device_number, const BindContext& context) {
-        return bind_camera(sdk, config, device_number, context);
+    camera.bind = [&sdk, claims = std::make_shared<vendor::zwo::ZwoConnectClaims>()](
+                      const DeviceConfig& config, int device_number, const BindContext& context) {
+        return bind_camera(sdk, config, device_number, context, claims);
     };
     catalog.add(std::move(camera));
-    // The web UI's camera picker (#1970): the same enumeration bind runs, which
-    // opens each camera through the shared open table to read its serial.
+    // The web UI's camera picker (#1970): an explicit client action, which opens
+    // each camera through the shared open table to read its serial.
     catalog.add_camera_lister("zwo", [&sdk] {
         std::vector<AttachedCamera> cameras;
         for (const auto& found : sdk.enumerate_identified_cameras()) {

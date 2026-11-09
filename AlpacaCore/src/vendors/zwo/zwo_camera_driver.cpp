@@ -343,6 +343,8 @@ public:
             first_temperature_read_pending_.store(true);
             session_.open();
             link_.publish_open();
+            if (lock.owns_lock()) lock.unlock();
+            report_identity_learned(opened.serial, info.name);
             return;
         }
 
@@ -1204,6 +1206,8 @@ private:
     mutable util::LinkLostStamp link_lost_at_;
     // Under transition_mutex_: the serial every Connect binds once one is known (in memory, not persisted).
     std::string bound_serial_;
+    std::string reported_serial_;  // connect path only, under transition_mutex_
+    std::string reported_name_;    // connect path only, under transition_mutex_
     // True while set_connected(true) runs its SDK handshake with mutex_ released.
     std::atomic<bool> connect_in_flight_{false};
     // True from connect until the first CCDTemperature read of the connection (#722).
@@ -1620,6 +1624,23 @@ private:
         dev_.set_start_pos(active_camera_id, applied_x, applied_y);
     }
 
+    // Runs with mutex_ released: the sink writes the stored entry. A failed save never fails the connect.
+    void report_identity_learned(const std::string& serial, const std::string& reported_name) {
+        if (serial.empty()) return;
+        if (binding_.connect_claims) binding_.connect_claims->claim(device_number_, serial);
+        const std::string name = trim_zwo_name(reported_name);
+        const bool new_serial = binding_.identity.serial.empty() && serial != reported_serial_;
+        const bool new_name = binding_.identity.camera_name.empty() && !name.empty() && name != reported_name_;
+        if ((!new_serial && !new_name) || !binding_.on_identity_learned) return;
+        try {
+            binding_.on_identity_learned(new_serial ? serial : std::string(), new_name ? name : std::string());
+            reported_serial_ = serial;
+            reported_name_ = name;
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "Could not store the learned camera identity: " + std::string(e.what()));
+        }
+    }
+
     // Touches no driver state, so it runs with mutex_ released.
     int resolve_camera_id() {
         std::vector<ZwoUnreadableSlot> unreadable;
@@ -1629,10 +1650,15 @@ private:
         if (identity.serial.empty() && !bound_serial_.empty()) {
             identity.serial = bound_serial_;
         }
-        const auto result = resolve_zwo_camera(identity, found, binding_.claimed_serials);
+        std::set<std::string> claimed = binding_.claimed_serials;
+        if (binding_.connect_claims) claimed.merge(binding_.connect_claims->others(device_number_));
+        const auto result = resolve_zwo_camera(identity, found, claimed);
         if (!result.camera.has_value()) {
             // The camera this entry means may be the slot the SDK could not read: say so.
             std::string message = result.message;
+            if (identity.serial.empty() && trim_zwo_name(identity.camera_name).empty()) {
+                message = describe_unbound_zwo_camera(identity, message, &found);
+            }
             const std::string hint = describe_unreadable_zwo_slots(unreadable);
             if (!hint.empty()) {
                 message += ". " + hint;

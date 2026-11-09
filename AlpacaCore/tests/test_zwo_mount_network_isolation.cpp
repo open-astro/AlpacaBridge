@@ -91,7 +91,8 @@ struct ProbeWaitLog {
 TEST_CASE("ZWO mount network - concurrent cold connects retain distinct endpoints",
           "[zwo][network][isolation][issue1524]") {
     FakeMountServer first([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
-    FakeMountServer second([](const std::string& chunk) { return mount_reply(chunk, "AM5N"); }, INADDR_LOOPBACK + 1);  // 127.0.0.2
+    FakeMountServer second([](const std::string& chunk) { return mount_reply(chunk, "AM5N"); },
+                           INADDR_LOOPBACK + 1);  // 127.0.0.2
     REQUIRE(first.ok());
     REQUIRE(second.ok());
     const ConnectionInfo infos[] = {network_info("127.0.0.1", first.port()), network_info("127.0.0.2", second.port())};
@@ -131,7 +132,8 @@ TEST_CASE("ZWO mount network - concurrent cold connects retain distinct endpoint
 TEST_CASE("ZWO mount network - invalid hostname cleanup preserves a sibling and permits retry",
           "[zwo][network][isolation][issue1524]") {
     FakeMountServer first([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
-    FakeMountServer second([](const std::string& chunk) { return mount_reply(chunk, "AM5N"); }, INADDR_LOOPBACK + 1);  // 127.0.0.2
+    FakeMountServer second([](const std::string& chunk) { return mount_reply(chunk, "AM5N"); },
+                           INADDR_LOOPBACK + 1);  // 127.0.0.2
     REQUIRE(first.ok());
     REQUIRE(second.ok());
     ZWOMountProtocolWrapper sibling;
@@ -204,7 +206,8 @@ TEST_CASE("ZWO mount Auto - held-only failure releases only the closing owner's 
 
 TEST_CASE("ZWO mount Auto - failed discovery probes release endpoint reservations", "[zwo][network][auto][issue1536]") {
     std::atomic<bool> answer{false};
-    FakeMountServer server([&](const std::string& chunk) { return answer.load() ? mount_reply(chunk, "AM5") : std::string(); });
+    FakeMountServer server(
+        [&](const std::string& chunk) { return answer.load() ? mount_reply(chunk, "AM5") : std::string(); });
     REQUIRE(server.ok());
     CHECK(enumerate_zwo_mounts(candidates(server), 50).empty());
     answer.store(true);

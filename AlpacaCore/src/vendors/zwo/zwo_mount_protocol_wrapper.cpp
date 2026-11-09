@@ -528,21 +528,21 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
     const auto query = [&](const std::string& command) -> std::optional<std::string> {
         if (!util::tty_write_all(fd, command)) return std::nullopt;
 
-    // This read is reached via enumerate_zwo_mounts() called from
-    // Impl::connect(Auto), which deliberately holds mutex_ across the
-    // whole auto-detect probe sequence (see that function's doc comment)
-    // so a concurrent connect can't race it. The read's deadline bounds the
-    // probe. IdleGap keeps the old rule: 100 ms of silence after the first
-    // byte ends the read, and only a '#' seen before that counts as a reply.
-    util::ReadSpec spec;
-    spec.stop = util::ReadSpec::Stop::IdleGap;
-    spec.idle_gap = std::chrono::milliseconds(100);
-    spec.skip.clear();
-    // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
-    spec.max_len = 4096;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-    const auto reply = util::read_until(fd, spec, deadline);
+        // This read is reached via enumerate_zwo_mounts() called from
+        // Impl::connect(Auto), which deliberately holds mutex_ across the
+        // whole auto-detect probe sequence (see that function's doc comment)
+        // so a concurrent connect can't race it. The read's deadline bounds the
+        // probe. IdleGap keeps the old rule: 100 ms of silence after the first
+        // byte ends the read, and only a '#' seen before that counts as a reply.
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::IdleGap;
+        spec.idle_gap = std::chrono::milliseconds(100);
+        spec.skip.clear();
+        // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
+        spec.max_len = 4096;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+        const auto reply = util::read_until(fd, spec, deadline);
         const std::size_t hash = reply.bytes.find('#');
         if (hash == std::string::npos) return std::nullopt;
         return trim_copy(reply.bytes.substr(0, hash));
@@ -610,30 +610,30 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
 
     const auto query = [&](const std::string& cmd) -> std::optional<std::string> {
-    if (!util::send_all(sock, cmd.c_str(), cmd.size(), MSG_NOSIGNAL)) {
-        return std::nullopt;
-    }
+        if (!util::send_all(sock, cmd.c_str(), cmd.size(), MSG_NOSIGNAL)) {
+            return std::nullopt;
+        }
 
-    std::string response;
-    bool terminated = false;
-    const auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
-           timeout_ms) {
-        char ch = '\0';
-        const ssize_t n = ::recv(sock, &ch, 1, 0);
-        if (n == 1) {
-            if (ch == '#') {
-                terminated = true;
+        std::string response;
+        bool terminated = false;
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
+               timeout_ms) {
+            char ch = '\0';
+            const ssize_t n = ::recv(sock, &ch, 1, 0);
+            if (n == 1) {
+                if (ch == '#') {
+                    terminated = true;
+                    break;
+                }
+                response.push_back(ch);
+            } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
                 break;
             }
-            response.push_back(ch);
-        } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-            break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    if (!terminated) return std::nullopt;
-    return trim_copy(std::move(response));
+        if (!terminated) return std::nullopt;
+        return trim_copy(std::move(response));
     };
     return identify_mount(query);
 #endif

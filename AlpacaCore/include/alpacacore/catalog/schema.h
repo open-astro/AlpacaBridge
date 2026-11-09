@@ -185,6 +185,8 @@ struct PeerEntry {
 struct BindContext {
     Source source;
     std::span<const PeerEntry> peers;
+    // Stores config keys learned later, at a connect (the ZWO camera's serial and model name, #2074). May be unset.
+    std::function<void(const DeviceConfig&)> learned_at_connect = nullptr;
 };
 
 // The outcome of Factory::bind. A `rejection` means no device: the router

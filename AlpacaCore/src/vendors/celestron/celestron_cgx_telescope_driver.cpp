@@ -792,9 +792,9 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
                 }
                 if (model.payload != std::vector<std::uint8_t>{0x17, 0x88}) {
                     unknown_motor = true;
-                    ALPACA_LOG_WARN("Celestron CGX", "Motor reports unlisted model bytes " +
-                                                         std::to_string(model.payload[0]) + " " +
-                                                         std::to_string(model.payload[1]) + "; connected, motion refused");
+                    ALPACA_LOG_WARN("Celestron CGX",
+                                    "Motor reports unlisted model bytes " + std::to_string(model.payload[0]) + " " +
+                                        std::to_string(model.payload[1]) + "; connected, motion refused");
                 }
             }
             unknown_motor_model_.store(unknown_motor);
