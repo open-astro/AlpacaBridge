@@ -147,6 +147,15 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
 /// factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam: replaces the thread factory of one axis's (1 RA, 2 Dec) pulse slot,
+/// so a case can make a pulse dispatch fail. Call only while no pulse is in flight.
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, int axis,
+                                 std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seam: whether the ownership window armed by the axis's last pulse is
+/// still open (1 RA, 2 Dec), read without the IsPulseGuiding guard.
+bool pulse_hold_active_for_testing(TelescopeDriver& driver, int axis);
+
 /// Test seam: while paused the driver's status poll (decision 0010) wakes and
 /// samples nothing, so a case can age the snapshot's frame on the task clock
 /// without the board going quiet. `driver` must come from the factories above;

@@ -34,8 +34,10 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <string_view>
+#include <system_error>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -6074,5 +6076,78 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA) during the pulse rate check is not ov
     CHECK(mount.axis_running(1));
     driver->move_axis(0, 0.0);
     driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// Decision 0022 rule 2: the ownership window ends with the operation that armed
+// it. pulse_hold_ is read only behind pulse_axis_active_, so the seam reads the
+// window itself.
+TEST_CASE("SkyWatcher async - a pulse whose dispatch fails leaves no armed hold window (#2066)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    alpacacore::vendor::skywatcher::set_pulse_spawn_for_testing(
+        *driver, 2, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+    REQUIRE_THROWS(driver->pulse_guide(0, 1500));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(alpacacore::vendor::skywatcher::pulse_hold_active_for_testing(*driver, 2));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - AbortSlew during a pulse leaves no armed hold window (#2066)", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    driver->pulse_guide(0, 8000);
+    REQUIRE(alpacacore::vendor::skywatcher::pulse_hold_active_for_testing(*driver, 2));
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(alpacacore::vendor::skywatcher::pulse_hold_active_for_testing(*driver, 2));
+    driver->set_connected(false);
+}
+
+// Decision 0006 rule 3: a synchronous goto supersedes the slew body in flight,
+// it does not join it. The body's thread is held back, so a join would stall
+// the goto until the release.
+TEST_CASE("SkyWatcher async - a synchronous goto supersedes a running slew body without joining it (#2066)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::promise<void> finished;
+    alpacacore::vendor::skywatcher::set_slew_spawn_for_testing(
+        *driver, [released, &finished](std::function<void()> body) {
+            return std::thread([released, &finished, body = std::move(body)] {
+                released.wait();
+                body();
+                finished.set_value();
+            });
+        });
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 40.0);  // body held back
+
+    std::thread slewer([&] {
+        try {
+            driver->slew_to_coordinates(std::fmod(lst - 1.0 + 24.0, 24.0), 30.0);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch) cancelled by the abort below
+        }
+    });
+    // The goto dispatched while the first body is still parked.
+    const bool dispatched = wait_until([&] { return mount.axis_running(2); }, 5000);
+    const bool joined = finished.get_future().wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+    release.set_value();
+    CHECK(dispatched);
+    CHECK_FALSE(joined);
+    driver->abort_slew();
+    slewer.join();
+    alpacacore::vendor::skywatcher::set_slew_spawn_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }
