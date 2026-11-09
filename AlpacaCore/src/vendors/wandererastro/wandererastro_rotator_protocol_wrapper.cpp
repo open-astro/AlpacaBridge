@@ -114,6 +114,9 @@ std::optional<std::string> read_section(int fd, int timeout_ms, std::string& car
     return std::nullopt;
 }
 
+constexpr const char* kMoveFaultPositionNote =
+    " Position is the last confirmed angle until the next move, Halt, Sync or reconnect";
+
 // One 'A'-terminated field of the identity handshake, CR/LF skipped, within
 // timeout_ms. A field of MAX_TOKEN_LEN + 1 bytes without its 'A' is Overflow:
 // garbage, dropped and read past. Returns std::nullopt on timeout or hangup.
@@ -373,6 +376,12 @@ public:
                                       std::to_string(kRotatorMiniMinFirmware) + "; please upgrade the firmware",
                                   AlpacaError::NotConnected);
         }
+        if (handshake->firmware < kRotatorMiniLatestFirmware) {
+            ALPACA_LOG_WARN("WandererAstro", "WandererRotator firmware " + std::to_string(handshake->firmware) +
+                                                 " is older than the latest release " +
+                                                 std::to_string(kRotatorMiniLatestFirmware) +
+                                                 "; WandererAstro's Firmware Upgrade Tool updates it");
+        }
 
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -454,6 +463,7 @@ public:
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
             state_.completion_missing = false;
+            state_.move_fault.clear();
         }
 
         const int steps = static_cast<int>(delta_degrees * kRotatorMiniStepsPerDegree);
@@ -485,6 +495,7 @@ public:
     void clear_completion_missing() {
         std::lock_guard<std::mutex> state_lock(state_mutex_);
         state_.completion_missing = false;
+        state_.move_fault.clear();
     }
 
     void halt() {
@@ -494,6 +505,7 @@ public:
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
             state_.completion_missing = false;
+            state_.move_fault.clear();
             if (!state_.moving) {
                 return;  // nothing in flight — ASCOM Halt when idle is a no-op
             }
@@ -612,6 +624,7 @@ private:
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(expected_ms * 2 + 5000);
 
         std::optional<std::string> last_token;
+        std::string move_fault;
         std::string carry;  // partial-token bytes preserved across poll windows
         while (monitor_running_.load() && std::chrono::steady_clock::now() < deadline) {
             int fd;
@@ -626,6 +639,19 @@ private:
             // monitor_running_ is re-checked about once a second, so
             // disconnect()'s join returns promptly (#1202).
             auto token = read_section(fd, 600, carry);
+            // Firmware 20261025 answers a refused move with a bare "NP\n" or "LIMIT\n" line
+            // (INDI wanderer_rotator_base.cpp); it has no 'A', so it stays in carry.
+            const std::string& reply = token.has_value() ? *token : carry;
+            if (reply.rfind("NP", 0) == 0) {
+                move_fault = "WandererRotator reported no motor power (NP); check the DC power supply." +
+                             std::string(kMoveFaultPositionNote);
+                break;
+            }
+            if (reply.rfind("LIMIT", 0) == 0) {
+                move_fault = "WandererRotator refused the move: position limit reached (LIMIT)." +
+                             std::string(kMoveFaultPositionNote);
+                break;
+            }
             if (token.has_value() && !token->empty()) {
                 ALPACA_LOG_TRACE("WandererAstro", "Rotator move report token: " + *token);
                 try {
@@ -643,7 +669,10 @@ private:
         }
 
         std::lock_guard<std::mutex> state_lock(state_mutex_);
-        if (last_token.has_value()) {
+        if (!move_fault.empty()) {
+            state_.move_fault = move_fault;
+            ALPACA_LOG_WARN("WandererAstro", move_fault);
+        } else if (last_token.has_value()) {
             // Completion-report semantics differ by firmware generation
             // (verified on real Mini V2 hardware, ConformU 2026-07-23):
             //   - V1 (INDI convention): ABSOLUTE accumulated angle as a bare

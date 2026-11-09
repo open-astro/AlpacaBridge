@@ -26,6 +26,9 @@ inline constexpr int kRotatorMiniStepsPerDegree = 1142;
 /// Minimum firmware (YYYYMMDD) the Mini protocol implemented here requires.
 inline constexpr int kRotatorMiniMinFirmware = 20240226;
 
+/// Newest firmware (YYYYMMDD) INDI knows of; older firmware still works and only draws a warning.
+inline constexpr int kRotatorMiniLatestFirmware = 20261025;
+
 /**
  * @brief Connection configuration for the WandererRotator Mini.
  *
@@ -70,6 +73,10 @@ struct RotatorState {
     // classic cause is missing DC power). mechanical_angle then stays at the
     // move start. Cleared by the next move, Halt, Sync or reconnect.
     bool completion_missing = false;
+    // The firmware refused the last move (NP or LIMIT reply): the text IsMoving
+    // throws, empty when none. mechanical_angle stays at the move start. Cleared
+    // like completion_missing.
+    std::string move_fault;
 };
 
 /**
@@ -144,7 +151,7 @@ public:
     /** @brief Halt an in-flight move. Command "Stop". No-op when idle. */
     void halt();
 
-    /// Clear the completion_missing fault (the driver's Sync does this).
+    /// Clear the completion_missing and move_fault faults (the driver's Sync does this).
     void clear_completion_missing();
 
     /** @brief Set hardware direction reversal. Commands "1700001"/"1700000". */

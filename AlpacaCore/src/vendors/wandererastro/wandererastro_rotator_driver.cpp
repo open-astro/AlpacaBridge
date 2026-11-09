@@ -217,6 +217,9 @@ public:
     bool get_is_moving() const override {
         ensure_connected();
         const RotatorState state = protocol_.get_state();
+        if (!state.move_fault.empty()) {
+            throw AlpacaException(state.move_fault, AlpacaError::DriverException);
+        }
         if (state.completion_missing) {
             // The move ended with no completion report; Position is the move
             // start, so neither "moving" nor "arrived" is true. Say so.
