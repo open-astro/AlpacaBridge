@@ -6088,10 +6088,9 @@ TEST_CASE("SkyWatcher async - a pulse whose dispatch fails leaves no armed hold 
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
     driver->set_tracking(true);
-    alpacacore::vendor::skywatcher::set_pulse_spawn_for_testing(
-        *driver, 2, [](std::function<void()>) -> std::thread {
-            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
-        });
+    alpacacore::vendor::skywatcher::set_pulse_spawn_for_testing(*driver, 2, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
     REQUIRE_THROWS(driver->pulse_guide(0, 1500));
     CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK_FALSE(alpacacore::vendor::skywatcher::pulse_hold_active_for_testing(*driver, 2));
