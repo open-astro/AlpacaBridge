@@ -185,8 +185,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   fixed in 4.5.1; see `SUPPORTED-DRIVERS.md`'s General Notes). Confirmed on
   this exact rig, same driver build, only ConformU swapped for 4.5.1 (PR
   #462): `CameraState` 0.187s→0.015s, `CameraXSize` 0.168s→0.005s,
-  `SensorType` 0.172s→0.004s. The 4.5.1 side is the committed report at
-  `AlpacaCore/conformu/ZWO/ASI/ASI533MC Pro/Linux-arm64.txt`; the 4.5.0
+  `SensorType` 0.172s→0.004s. The 4.5.1 side is the report PR #462 committed at
+  `AlpacaCore/conformu/ZWO/ASI/ASI533MC Pro/Linux-arm64.txt` (merge `8bd5f157e`;
+  a later run has replaced that file, so read it from git history); the 4.5.0
   before-numbers exist only in PR #462's discussion. The mount's identical three-member signature is
   presumed the same cause, not independently re-confirmed on a Pi 3B. No
   Pi 5 needed — install 4.5.1 and re-run.
