@@ -511,6 +511,23 @@ TEST_CASE("Celestron CGX USB Telescope Driver - an unknown motor connects generi
     }
 }
 
+// #2204: a stop needs no axis scaling, so an unknown motor must still honour AbortSlew and Unpark.
+// Falsified by: celestron_cgx_telescope_driver.cpp start_stop_operation() calling require_known_motor_model().
+TEST_CASE("Celestron CGX USB Telescope Driver - an unknown motor still accepts AbortSlew and Unpark (#2204)",
+          "[celestron][cgx][telescope]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_motor_identity(0x10, {7, 17, 0, 25}, {0x17, 0x89});
+    mount.set_motor_identity(0x11, {7, 17, 0, 25}, {0x17, 0x88});
+    auto config = test_info();
+    config.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_NOTHROW(driver->abort_slew());
+    CHECK_NOTHROW(driver->unpark());
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - version lengths and mixed formats are refused",
           "[celestron][cgx][telescope]") {
     for (const auto axis : {0x10, 0x11}) {

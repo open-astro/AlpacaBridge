@@ -6802,9 +6802,8 @@ void Router::load_persisted_devices() {
                 util::log_warning("Skipping persisted device: " +
                                   util::escape_for_log(error_message, error_message.size()));
             } else if (!learned_config.empty()) {
-                // #914: what the registration learned about the device (a ZWO
-                // camera's serial and model name) goes back into the
-                // stored entry, so the next start binds by it.
+                // What the registration returned for the entry (a new UniqueID, a
+                // cleared duplicate ZWO serial) goes back into the stored entry.
                 store_learned_config(entry, learned_config, std::string());
             }
         } catch (const std::exception& e) {

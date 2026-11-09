@@ -146,9 +146,9 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
 // enumeration order, says which camera it is. `context.peers` are the stored
 // camera entries, this one's own included; the serials the others hold are
 // claimed (a serial-less entry skips them), and a serial another entry holds is
-// refused from the API and cleared, to be relearned, in a stored entry. What
-// registration learns (serial, model name) is returned for the entry to store,
-// so the next start binds by it. The UniqueID is not the camera's: the router
+// refused from the API and cleared, to be relearned, in a stored entry. The
+// first connect learns the serial and model name and stores them through
+// BindContext::learned_at_connect, so the next start binds by them. The UniqueID is not the camera's: the router
 // gives every configured device a stored ID (decision 0018).
 BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int device_number,
                        const BindContext& context, const std::shared_ptr<vendor::zwo::ZwoConnectClaims>& claims) {

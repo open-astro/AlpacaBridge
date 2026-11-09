@@ -1747,7 +1747,6 @@ void CelestronCgxTelescopeDriver::abort_slew() { start_stop_operation(false); }
 
 void CelestronCgxTelescopeDriver::start_stop_operation(bool unpark) {
     require_connected();
-    require_known_motor_model();
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
     require_connected();
     if (disconnecting_) throw AlpacaException("Celestron CGX is disconnecting", AlpacaError::InvalidOperation);
