@@ -12,14 +12,14 @@ STAGING   := $(CURDIR)/debian/alpacabridge
 ifneq ($(DEB_HOST_ARCH),arm64)
   $(error AlpacaBridge supports arm64 only; DEB_HOST_ARCH=$(DEB_HOST_ARCH) is not supported)
 endif
-QHY_SDK_DIR        := $(CURDIR)/AlpacaCore/external/QHY/sdk_linux_arm64_26.07.28
+QHY_SDK_DIR        := $(CURDIR)/AlpacaCore/external/QHY/sdk_linux_arm64
 ZWO_EAF_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/armv8
 ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8
 SVBONY_LIB_DIR     := $(CURDIR)/AlpacaCore/external/SVBONY/lib/armv8
-TOUPTEK_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260519/linux/arm64/glibc
-ALTAIR_LIB_DIR     := $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk.20260531/linux/arm64/glibc
-PLAYERONE_LIB_DIR  := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64
-PLAYERONE_PW_LIB_DIR := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64
+TOUPTEK_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk/linux/arm64/glibc
+ALTAIR_LIB_DIR     := $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk/linux/arm64/glibc
+PLAYERONE_LIB_DIR  := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux/lib/arm64
+PLAYERONE_PW_LIB_DIR := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux/lib/arm64
 
 # Cross-compilation flags (no-op when building natively)
 CMAKE_CROSS_FLAGS :=
@@ -131,16 +131,16 @@ override_dh_auto_install:
 	  $(CURDIR)/AlpacaCore/external/SVBONY/90-ckusb.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
-	  $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260519/linux/udev/99-toupcam.rules \
+	  $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk/linux/udev/99-toupcam.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	# 99-altaircam.rules also grants ToupTek's 0547/04b4 ids, duplicating
 	# 99-toupcam.rules. Keep both: each vendor's rule is installed on its own
 	# and neither is expected to cover the other.
 	install -m 644 \
-	  $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk.20260531/linux/udev/99-altaircam.rules \
+	  $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk/linux/udev/99-altaircam.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
-	  $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/udev/99-player_one_astronomy.rules \
+	  $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux/udev/99-player_one_astronomy.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	# ASIAIR Plus (RK3568): /dev/pwm-gpio-misc is created root-only by ZWO's
 	# pwm_gpio.ko; this rule opens it to the gpio group (postinst guarantees

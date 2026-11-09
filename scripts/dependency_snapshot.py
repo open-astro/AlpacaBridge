@@ -683,6 +683,24 @@ def build_spdx(root: Path, deb: dict[str, str], file_name: str, sha256: str,
                               for a, t, b in rels]}
 
 
+def check_vendored_version(root: Path, e: dict) -> list[str]:
+    """Compare 'version' with what the vendored files state: folder names no longer carry it."""
+    src = e.get("version_from")
+    if not src:
+        return []
+    path = root / e["path"] / src["file"]
+    if not path.is_file():
+        return [f"{TABLE}: {e['name']}: version_from file {src['file']} does not exist under {e['path']}"]
+    m = re.search(src["pattern"], path.read_text(encoding="utf-8", errors="replace"))
+    if not m:
+        return [f"{TABLE}: {e['name']}: version_from pattern {src['pattern']!r} matches nothing in {src['file']}"]
+    found = ".".join(m.groups())
+    numbers = lambda v: [int(n) for n in re.findall(r"\d+", v)]
+    if numbers(found) != numbers(e["version"]):
+        return [f"{TABLE}: {e['name']}: 'version' is {e['version']} but {src['file']} states {found}: update 'version'"]
+    return []
+
+
 def check_drift(root: Path) -> list[str]:
     table = json.loads((root / TABLE).read_text(encoding="utf-8"))
     sdks = [e["path"] for e in table["sdks"]]
@@ -695,6 +713,7 @@ def check_drift(root: Path) -> list[str]:
     for e in table["sdks"]:
         if not (root / e["path"]).is_dir():
             continue
+        errors += check_vendored_version(root, e)
         if not e.get("sha256"):
             errors.append(f"{TABLE}: {e['path']} has no sha256 pin: run python3 scripts/dependency_snapshot.py --pin")
         elif e["sha256"] != tree_digest(root, e["path"]):
@@ -1243,6 +1262,27 @@ def self_test() -> int:
         assert len(check_drift(r)) == 1, "a retargeted symlink changes the digest"
         (r / EXTERNAL / "A/sdk-1/lib/liba.so").unlink()
         (r / EXTERNAL / "A/sdk-1/lib/liba.so").symlink_to("liba.so.1.0")
+        # version_from: 'version' must equal what the vendored files state, zero padding aside.
+        (r / EXTERNAL / "A/sdk-1/config.h").write_text("#define V 1\n#define W 02\n")
+        t = json.loads((r / TABLE).read_text())
+        original = json.dumps(t)
+        t["sdks"][0].update(version="01.2", version_from={"file": "config.h", "pattern": r"V (\d+)\s+#define W (\d+)"})
+        (r / TABLE).write_text(json.dumps(t))
+        assert check_drift(r) == [], check_drift(r)
+        t["sdks"][0]["version"] = "1.3"
+        (r / TABLE).write_text(json.dumps(t))
+        errs = check_drift(r)
+        assert len(errs) == 1 and "1.3" in errs[0] and "1.02" in errs[0] and "config.h" in errs[0], errs
+        t["sdks"][0]["version_from"]["pattern"] = "absent (x)"
+        (r / TABLE).write_text(json.dumps(t))
+        errs = check_drift(r)
+        assert len(errs) == 1 and "absent" in errs[0], errs
+        t["sdks"][0]["version_from"]["file"] = "gone.h"
+        (r / TABLE).write_text(json.dumps(t))
+        errs = check_drift(r)
+        assert len(errs) == 1 and "gone.h" in errs[0], errs
+        (r / TABLE).write_text(original)
+        (r / EXTERNAL / "A/sdk-1/config.h").unlink()
         payload = {"usr/lib/alpacabridge/liba.so.1.0": file_digests(lib),
                    "usr/lib/firmware/qhy/qhy.hex": file_digests(fw)}
         installed = {"cmake": "3.31.6-2", "libfoo": "1.2-3", "libc6": "2.41-12"}
