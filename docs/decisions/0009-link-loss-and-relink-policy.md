@@ -24,8 +24,8 @@ A driver's link can fail in two ways a client cannot tell apart from `Connected`
 | SynScan | `K`+byte echo | No: any handset speaking the protocol passes | planned follow-up |
 | Celestron | NexStar version/model queries | No identity check found in the wrapper | planned follow-up |
 | OnStep | `:GVP#` identity string | Rejects a non-OnStep device only | planned follow-up |
-| iOptron | `:MountInfo#` / `:DeviceInfo#` model | Rejects a code naming another product, not a second unit of the same one | planned follow-up |
-| Gemini | `>H#` identity string | Rejects a reply naming a different Gemini product, not a second unit | planned follow-up |
+| iOptron | `:MountInfo#` / `:DeviceInfo#` model | Mount: no, any four-digit code passes. iEAF, iEFW, iFR: a code naming another product is refused, a second unit of one model passes | planned follow-up |
+| Gemini | `>H#` identity string (hub, flat panels) | Hub: a reply naming another Gemini product is refused. Flat panel: any `*H` reply passes and a mismatch only warns. Neither rejects a second unit | planned follow-up |
 | QHY | JSON version handshake (Q-Focuser), slot-count check (CFW3) | No per-unit identity | planned follow-up |
 | ZWO AM | Fresh hash-terminated non-error `:GVP#` reply and normalized twelve-hex `:GMA#` serial | Yes: refuses a different mount serial until the driver is recreated ([ZWO](../../.github/instructions/zwo.instructions.md)) | done (#1581) |
 
