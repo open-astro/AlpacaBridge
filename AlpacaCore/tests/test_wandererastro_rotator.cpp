@@ -264,8 +264,8 @@ TEST_CASE("WandererAstro Rotator Driver - No completion report keeps Position an
 // carry until the 5 s budget ends, and IsMoving reports the check-DC-power text.
 TEST_CASE("WandererAstro Rotator Driver - NP and LIMIT replies end the move with a named fault",
           "[wandererastro][rotator][unit]") {
-    const auto [reply, cause, warns] = GENERATE(
-        table<std::string, std::string, bool>({{"NP\n", "motor power", true}, {"LIMIT\n", "limit", false}}));
+    const auto [reply, cause, warns] =
+        GENERATE(table<std::string, std::string, bool>({{"NP\n", "motor power", true}, {"LIMIT\n", "limit", false}}));
     std::atomic<bool> warned{false};
     const auto previous_sink = alpacacore::logging::get_log_sink();
     alpacacore::logging::set_log_sink([&warned, cause = cause](auto level, auto, auto message) {
@@ -273,8 +273,7 @@ TEST_CASE("WandererAstro Rotator Driver - NP and LIMIT replies end the move with
             warned = true;
         }
     });
-    const std::shared_ptr<void> restore_sink(nullptr,
-                                             [&](void*) { alpacacore::logging::set_log_sink(previous_sink); });
+    const std::shared_ptr<void> restore_sink(nullptr, [&](void*) { alpacacore::logging::set_log_sink(previous_sink); });
     SilentMotorRotator fake(reply);
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
     driver->set_connected(true);
