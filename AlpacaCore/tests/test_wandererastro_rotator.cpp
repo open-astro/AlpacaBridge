@@ -80,7 +80,8 @@ private:
                     const std::string reply = "WandererRotatorMiniA20250101A0A0A0A";
                     alpacacore::test::pty_write_bounded(pty_.master_fd(), reply.data(), reply.size(), stop_);
                 } else if (!move_reply_.empty()) {
-                    alpacacore::test::pty_write_bounded(pty_.master_fd(), move_reply_.data(), move_reply_.size(), stop_);
+                    alpacacore::test::pty_write_bounded(pty_.master_fd(), move_reply_.data(), move_reply_.size(),
+                                                        stop_);
                 }  // otherwise any move command: no reply
             }
         }
@@ -259,7 +260,8 @@ TEST_CASE("WandererAstro Rotator Driver - No completion report keeps Position an
 // carry until the 5 s budget ends, and IsMoving reports the check-DC-power text.
 TEST_CASE("WandererAstro Rotator Driver - NP and LIMIT replies end the move with a named fault",
           "[wandererastro][rotator][unit]") {
-    const auto [reply, cause] = GENERATE(table<std::string, std::string>({{"NP\n", "motor power"}, {"LIMIT\n", "limit"}}));
+    const auto [reply, cause] =
+        GENERATE(table<std::string, std::string>({{"NP\n", "motor power"}, {"LIMIT\n", "limit"}}));
     SilentMotorRotator fake(reply);
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
     driver->set_connected(true);
