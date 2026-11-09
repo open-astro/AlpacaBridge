@@ -333,6 +333,23 @@ TEST_CASE("ZWO EAF focuser - staleness losses race connects and reads behind Loc
             }
         });
 
+    // One undisturbed loss first: under CPU starvation the storm below can end before one session gets three failing
+    // reads plus an aged read, so the loss coverage check must not depend on the storm (#2099).
+    const auto read_position = [&] {
+        try {
+            static_cast<void>(static_cast<alpacacore::FocuserDriver&>(*driver).get_position());
+        } catch (const alpacacore::AlpacaException&) {  // the failing fake read: expected
+        }
+    };
+    for (int i = 0; i < 3; ++i) {
+        read_position();
+        clock.advance(std::chrono::milliseconds(150));  // past the status cache's age, so each read refills
+    }
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    read_position();
+    REQUIRE(losses.load() == 1);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
     std::atomic<bool> stop_clock{false};
     std::thread ager([&] {
         while (!stop_clock.load()) {
