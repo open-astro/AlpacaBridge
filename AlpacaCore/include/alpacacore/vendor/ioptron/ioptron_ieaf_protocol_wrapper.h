@@ -48,6 +48,9 @@ struct IeafDeviceInfo {
  */
 bool is_ieaf_model(std::int32_t model);
 
+/// True when the code names another iOptron product. An unlisted code is not refused (#2204).
+bool ieaf_refuses_model(std::int32_t model);
+
 /**
  * @brief One :FI# status snapshot.
  *

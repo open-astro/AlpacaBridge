@@ -49,9 +49,11 @@ struct IfrDeviceInfo {
     std::string rotator_firmware;  // "260324"
 };
 
-/// True for the iFR's :DeviceInfo# model code (5). The iEAF driver accepts 2 and 3 only, so the two drivers
-/// never claim each other's units.
+/// True for the iFR's :DeviceInfo# model code (5).
 bool is_ifr_model(std::int32_t model);
+
+/// True when the code names a unit this driver cannot drive. An unlisted code is not refused (#2204).
+bool ifr_refuses_model(std::int32_t model);
 
 /// :FI# -> "%7d%1d%5d%1d#": position (signed), moving, temperature (Kelvin x 100), direction flag.
 struct IfrFocuserStatus {

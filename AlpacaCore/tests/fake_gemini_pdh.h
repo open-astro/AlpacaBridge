@@ -105,6 +105,11 @@ public:
     void set_stream_interval(std::chrono::milliseconds interval) {
         stream_ms_.store(static_cast<int>(interval.count()));
     }
+    /// The reply to ">H#"; the Advanced 3's by default.
+    void set_handshake(std::string reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        handshake_ = std::move(reply);
+    }
     /// Muted: commands are still recorded but nothing is ever sent back
     /// (a hung MCU / broken RX line). Writes keep succeeding at the fd level.
     void set_muted(bool muted) { muted_.store(muted); }
@@ -170,6 +175,11 @@ public:
     }
 
 private:
+    std::string handshake() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return handshake_;
+    }
+    std::string handshake_ = "*HGeminiPowerBoxPlusAdv3#";
     void run() {
         std::string pending;
         char buf[64];
@@ -261,7 +271,7 @@ private:
         if (cmd == ">H#") {
             if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
-            send("*HGeminiPowerBoxPlusAdv3#");
+            send(handshake());
             return;
         }
         if (cmd == ">V#") {

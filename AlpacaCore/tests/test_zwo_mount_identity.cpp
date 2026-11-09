@@ -17,6 +17,8 @@
 #include <alpacacore/vendor/zwo/zwo_mount_identity.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
+#include <alpacacore/util/logging.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -184,7 +186,7 @@ struct IdentityRig {
 };
 }  // namespace
 
-TEST_CASE("ZWO mount identity accepts only supported models on TCP and serial",
+TEST_CASE("ZWO mount identity connects every listed model on TCP and serial",
           "[zwo][telescope][identity][issue1523]") {
     IdentityRig rig;
     REQUIRE(rig.server.ok());
@@ -195,7 +197,7 @@ TEST_CASE("ZWO mount identity accepts only supported models on TCP and serial",
         info.type = ConnectionType::Serial;
         info.port_path = tty.slave_path();
     }
-    for (const auto& model : {"AM3", "AM5", "AM5N", "AM7"}) {
+    for (const auto& model : {"AM3", "AM3N", "AM5", "AM5N", "AM7"}) {
         for (const bool whitespace : {false, true}) {
             CAPTURE(serial, model, whitespace);
             rig.set_identity(whitespace ? " \t\r\n" + std::string(model) + " \t\r\n#" : std::string(model) + "#");
@@ -207,6 +209,7 @@ TEST_CASE("ZWO mount identity accepts only supported models on TCP and serial",
             auto driver = create_zwo_telescope_with_site(0, info, 30.0, -100.0, 20.0, false, rig.clock);
             driver->set_connected(true);
             CHECK(driver->get_connected());
+            CHECK(driver->get_name() == "ZWO " + std::string(model));
             CHECK(driver->get_right_ascension() == 12.0);
             // Reuse this fake serial stream only after its initial poll has finished replying.
             REQUIRE(rig.clock.wait_for_waiters(1, 5s));
@@ -216,12 +219,11 @@ TEST_CASE("ZWO mount identity accepts only supported models on TCP and serial",
     }
 }
 
-TEST_CASE("ZWO mount identity rejects malformed foreign and incomplete replies",
+TEST_CASE("ZWO mount identity rejects empty, error and unterminated replies",
           "[zwo][telescope][identity][issue1523]") {
     IdentityRig rig;
     REQUIRE(rig.server.ok());
-    for (const auto& reply : {"#", " \t\r\n#", "0#", "1#", "e1#", "ERROR#", "OnStep#", "iOptron#", "NOTAM5#",
-                              "AM5garbage#", "AM#", "AM4#", "AM50#", "AM5 N#", "AM\r5#", "AM\n5#", "am5#", "AM5", ""}) {
+    for (const auto& reply : {"#", " \t\r\n#", "e1#", "AM5", ""}) {
         CAPTURE(reply);
         rig.set_identity(reply);
         ZWOMountProtocolWrapper protocol;
@@ -236,6 +238,7 @@ TEST_CASE("ZWO refused identity quotes the reply with control bytes replaced",
     IdentityRig rig;
     REQUIRE(rig.server.ok());
     rig.set_identity("OnStep\x01\x1b[31mX#");
+    rig.set_serial("not-a-serial#");
     rig.make_driver(rig.info());
     try {
         rig.driver->set_connected(true);
@@ -263,6 +266,7 @@ TEST_CASE("ZWO refused identity leaves no writes and permits corrected endpoint 
     }
     auto driver = create_zwo_telescope_with_site(0, info, 30.0, -100.0, 20.0, true, rig.clock);
     rig.set_identity("OnStep#");
+    rig.set_serial("not-a-serial#");
     if (asynchronous) {
         driver->connect();
         REQUIRE(eventually([&] { return !driver->get_connecting(); }));
@@ -273,11 +277,11 @@ TEST_CASE("ZWO refused identity leaves no writes and permits corrected endpoint 
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_device_state().empty());
     const auto commands = rig.received();
-    REQUIRE(commands.size() == 1);
-    CHECK(commands.front() == ":GVP#");
+    CHECK(commands == std::vector<std::string>{":GVP#", ":GMA#"});
     if (serial) CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
 
     rig.set_identity("AM5N#");
+    rig.set_serial("012345ABCDEF#");
     if (asynchronous) {
         driver->connect();
         REQUIRE(eventually([&] { return !driver->get_connecting(); }));
@@ -295,7 +299,7 @@ TEST_CASE("ZWO blocked identity keeps operational calls offline and configuratio
     auto info = rig.info();
     info.response_timeout_ms = 5000;
     rig.make_driver(info, true);
-    rig.set_identity("OnStep#");
+    rig.set_identity("e1#");
     rig.hold_probe.store(true);
     rig.driver->connect();
     ReleaseProbe release{rig.probe};
@@ -386,7 +390,7 @@ TEST_CASE("ZWO lost link reprobes identity but redundant Connected true does not
     rig.driver->set_connected(true);
     REQUIRE(rig.driver->get_connected());
     REQUIRE(rig.probes() == 1);
-    rig.set_identity("OnStep#");
+    rig.set_identity("e1#");
     rig.driver->set_connected(true);
     CHECK(rig.driver->get_connected());
     CHECK(rig.probes() == 1);
@@ -642,7 +646,7 @@ TEST_CASE("ZWO mount serial identity requires a fresh normalized twelve-hex repl
     }
 }
 
-TEST_CASE("ZWO discovery probes accept supported terminated models on serial and TCP",
+TEST_CASE("ZWO discovery probes accept terminated models with a valid serial on serial and TCP",
           "[zwo][telescope][identity][discovery][issue1581]") {
     const bool serial = GENERATE(false, true);
     IdentityRig rig;
@@ -654,7 +658,7 @@ TEST_CASE("ZWO discovery probes accept supported terminated models on serial and
                             rig.server.port(),
                             "",
                             "synthetic mount"};
-    for (const auto* model : {"AM3", "AM5", "AM5N", "AM7"}) {
+    for (const auto* model : {"AM3", "AM3N", "AM5", "AM5N", "AM7", "AM9"}) {
         for (const bool whitespace : {false, true}) {
             CAPTURE(serial, model, whitespace);
             rig.set_identity(whitespace ? " \t\r\n" + std::string(model) + " \t\r\n#" : std::string(model) + "#");
@@ -669,7 +673,12 @@ TEST_CASE("ZWO discovery probes accept supported terminated models on serial and
             if (serial) CHECK_FALSE(util::is_serial_port_in_use(tty.slave_path()));
         }
     }
-    CHECK(rig.received() == std::vector<std::string>(8, ":GVP#"));
+    std::vector<std::string> expected;
+    for (int i = 0; i < 12; ++i) {
+        expected.push_back(":GVP#");
+        expected.push_back(":GMA#");
+    }
+    CHECK(rig.received() == expected);
 }
 
 TEST_CASE("ZWO discovery probes reject malformed and unterminated models and permit retry",
@@ -684,7 +693,7 @@ TEST_CASE("ZWO discovery probes reject malformed and unterminated models and per
                             rig.server.port(),
                             "",
                             "synthetic mount"};
-    for (const auto* reply : {"AM5", "", "#", "OnStep#", "0#", "e1#", "AM5garbage#", "AM50#", "am5#"}) {
+    for (const auto* reply : {"AM5", "", "#", "e1#"}) {
         CAPTURE(serial, reply);
         rig.set_identity(reply);
         const auto start = std::chrono::steady_clock::now();
@@ -813,3 +822,75 @@ TEST_CASE("ZWO identity I/O fence rejects an older admitted call on an unverifie
 }
 
 #endif  // !_WIN32
+
+// #2204: Decision 0017 rule 8 still refuses the wrong device, but through :GMA#, not a model list.
+// Falsified by: zwo_mount_protocol_wrapper.cpp get_mount_info() refusing a model that is_zwo_mount_model() omits.
+TEST_CASE("ZWO unlisted model connects as ZWO Mount and logs the model it reported (#2204)",
+          "[zwo][telescope][identity]") {
+    const bool serial = GENERATE(false, true);
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    test::PtyResponder tty([&](const std::string& chunk) { return rig.respond(chunk); });
+    auto info = rig.info();
+    if (serial) {
+        info.type = ConnectionType::Serial;
+        info.port_path = tty.slave_path();
+    }
+    std::vector<std::string> warnings;
+    const auto previous_sink = logging::get_log_sink();
+    logging::set_log_sink([&](logging::LogLevel level, std::string_view component, std::string_view message) {
+        if (level == logging::LogLevel::Warn && component == "ZWO") warnings.emplace_back(message);
+    });
+    rig.set_identity("AM9#");
+    rig.make_driver(info);
+    rig.driver->set_connected(true);
+    logging::set_log_sink(previous_sink);
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.driver->get_name() == "ZWO Mount");
+    CHECK(std::any_of(warnings.begin(), warnings.end(),
+                      [](const std::string& line) { return line.find("AM9") != std::string::npos; }));
+}
+
+// #2204: with the model list gone, the serial check is what keeps a foreign device from being driven.
+// Falsified by: zwo_telescope_driver.cpp connect sequence skipping get_mount_serial_number().
+TEST_CASE("ZWO device with a valid identity but no valid serial is refused and sees no write (#2204)",
+          "[zwo][telescope][identity]") {
+    const bool serial = GENERATE(false, true);
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    test::PtyResponder tty([&](const std::string& chunk) { return rig.respond(chunk); });
+    auto info = rig.info();
+    if (serial) {
+        info.type = ConnectionType::Serial;
+        info.port_path = tty.slave_path();
+    }
+    rig.set_identity("AM9#");
+    rig.set_serial("000#");
+    rig.make_driver(info, true);
+    try {
+        rig.driver->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const AlpacaException& error) {
+        CHECK(std::string(error.what()).find("'AM9'") != std::string::npos);
+    }
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(rig.received() == std::vector<std::string>{":GVP#", ":GMA#"});
+}
+
+// #2204: Auto must not stop at a device that answers :GVP# but cannot prove it is a ZWO mount.
+// Falsified by: zwo_mount_protocol_wrapper.cpp probe_serial_mount() and probe_network_mount() skipping the :GMA# query.
+TEST_CASE("ZWO discovery moves past a candidate with no valid serial (#2204)", "[zwo][telescope][identity][discovery]") {
+    IdentityRig foreign;
+    IdentityRig mount;
+    REQUIRE(foreign.server.ok());
+    REQUIRE(mount.server.ok());
+    foreign.set_identity("OnStep#");
+    foreign.set_serial("0#");
+    mount.set_identity("AM3N#");
+    const ZWODeviceInfo first{ConnectionType::Network, "", "127.0.0.1", foreign.server.port(), "", "foreign"};
+    const ZWODeviceInfo second{ConnectionType::Network, "", "127.0.0.1", mount.server.port(), "", "mount"};
+    const auto found = enumerate_zwo_mounts({first, second}, 750);
+    REQUIRE(found.size() == 1);
+    CHECK(found.front().model_name == "AM3N");
+    CHECK(found.front().label == "mount");
+}

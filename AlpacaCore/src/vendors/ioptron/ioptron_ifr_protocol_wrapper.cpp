@@ -128,6 +128,11 @@ bool is_ifr_model(std::int32_t model) {
     return model == 5;
 }
 
+bool ifr_refuses_model(std::int32_t model) {
+    // A focuser with no rotator half (2, 3, 4) or an iEFW wheel (98, 99): this driver needs both halves.
+    return (model >= 2 && model <= 4) || model == 98 || model == 99;
+}
+
 bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info) {
 #ifndef _WIN32
     // The probe claim waits out another scan's probe of this port (the mount, iEAF and iEFW scans match the same
@@ -152,7 +157,7 @@ bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info) {
         auto reply = util::read_until(
             fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(kHandshakeReadTimeoutMs));
         IfrDeviceInfo parsed;
-        if (parse_device_info(reply.bytes, parsed) && is_ifr_model(parsed.model)) {
+        if (parse_device_info(reply.bytes, parsed) && !ifr_refuses_model(parsed.model)) {
             info = parsed;
             return true;
         }
@@ -294,11 +299,15 @@ public:
                                       std::to_string(kHandshakeRetries) + " attempts)",
                                   AlpacaError::NotConnected);
         }
-        if (!is_ifr_model(info.model)) {
+        if (ifr_refuses_model(info.model)) {
             throw AlpacaException("The device on " + port + " reported model code " + std::to_string(info.model) +
-                                      ", not an iOptron iFR (expected 5). An iEAF or iAFS focuser is configured "
+                                      ", not an iOptron iFR. An iEAF or iAFS focuser is configured "
                                       "under the iOptron vendor instead.",
                                   AlpacaError::NotConnected);
+        }
+        if (!is_ifr_model(info.model)) {
+            ALPACA_LOG_WARN("iOptron", "iFR reports an unlisted model code " + std::to_string(info.model) +
+                                           "; connecting under a generic name with the configured travel, unvalidated");
         }
         // Firmware for the web UI. A unit that does not answer :FW1# still works; a hangup does not.
         try {

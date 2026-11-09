@@ -77,12 +77,15 @@ struct RotatorState {
  *
  * Scans /dev/serial/by-id/ for CH340/CH341 USB-serial adapters (vendor 1a86),
  * probes each with the handshake command ("1500001") and accepts ports whose
- * reply token starts with "WandererRotatorMini" (covers the V2 token). Falls
+ * reply token starts with "WandererRotator" (any version of the product). Falls
  * back to /dev/ttyUSB0..9 if /dev/serial/by-id is absent.
  *
  * @return Vector of detected WandererRotator ports
  */
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports();
+
+/// Test seam: probes exactly these paths instead of scanning the host.
+std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports(const std::vector<std::string>& candidate_paths);
 
 /**
  * @brief Protocol wrapper for the WandererRotator Mini (V1/V2).

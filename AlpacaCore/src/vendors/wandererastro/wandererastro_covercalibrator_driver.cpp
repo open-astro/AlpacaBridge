@@ -72,7 +72,9 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "WandererAstro WandererCover V4"; }
+    std::string get_name() const override {
+        return unlisted_model_.load() ? "WandererAstro Cover Calibrator" : "WandererAstro WandererCover V4";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
@@ -167,7 +169,11 @@ public:
                     "WandererCover: portPath is required when connectionType is 'serial' (or use 'auto').",
                     AlpacaError::NotConnected);
             }
-            protocol_.connect(effective);
+            const std::string model = protocol_.connect(effective);
+            unlisted_model_.store(model.rfind("WandererCoverV4", 0) != 0);
+            if (unlisted_model_.load()) {
+                ALPACA_LOG_WARN("WandererAstro", "Cover reports an unlisted model '" + model + "'; unvalidated");
+            }
             // Seed the calibrator state from the first streamed frame so the
             // initial CalibratorState/Brightness reflect reality if the panel
             // was already lit from a previous session. If seeding throws, undo
@@ -457,6 +463,7 @@ private:
 
     int device_number_;
     ConnectionConfig config_;
+    std::atomic<bool> unlisted_model_{false};
     std::atomic<bool> connected_;
     WandererProtocolWrapper protocol_;
 

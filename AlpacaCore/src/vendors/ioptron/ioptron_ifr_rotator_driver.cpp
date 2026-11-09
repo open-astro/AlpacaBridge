@@ -95,7 +95,9 @@ public:
     }
 
     int get_device_number() const override { return device_number_; }
-    std::string get_name() const override { return std::string("iOptron ") + model_.label + " Rotator"; }
+    std::string get_name() const override {
+        return unlisted_model_.load() ? "iOptron Rotator" : std::string("iOptron ") + model_.label + " Rotator";
+    }
     DeviceType get_device_type() const override { return DeviceType::Rotator; }
     std::string fallback_unique_id() const override { return "IOPTRON_IFR_ROTATOR_" + std::to_string(device_number_); }
     std::string get_description() const override {
@@ -147,6 +149,7 @@ public:
         }
         teardown_locked();
         std::shared_ptr<IfrLink> link = session_.open();
+        unlisted_model_.store(!is_ifr_model(link->info().model));
         try {
             const IfrRotatorStatus status = link->rotator_status();
             if (status.size_tenths != model_.size_tenths) {
@@ -434,6 +437,7 @@ private:
 
     util::TaskClock& clock_;
     const int device_number_;
+    std::atomic<bool> unlisted_model_{false};
     const IfrModel model_;
     detail::IfrSessionHolder session_;
     std::atomic<bool> connected_{false};

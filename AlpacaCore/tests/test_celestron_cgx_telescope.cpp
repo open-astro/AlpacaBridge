@@ -467,11 +467,11 @@ TEST_CASE("Celestron CGX USB Telescope Driver - modern identity is read-only and
     }
 }
 
-TEST_CASE("Celestron CGX USB Telescope Driver - modern identity rejects malformed and non-CGX motors",
+TEST_CASE("Celestron CGX USB Telescope Driver - modern identity rejects malformed motor models",
           "[celestron][cgx][telescope]") {
     for (const auto axis : {0x10, 0x11}) {
         for (const auto& model :
-             std::vector<std::vector<std::uint8_t>>{{}, {0x17}, {0x17, 0x89}, {0x14, 0x85}, {0x17, 0x88, 0}}) {
+             std::vector<std::vector<std::uint8_t>>{{}, {0x17}, {0x17, 0x88, 0}}) {
             alpacacore::test::FakeCelestronCgxMount mount;
             REQUIRE(mount.ok());
             mount.set_motor_identity(0x10, {7, 17, 0, 25}, {0x17, 0x88});
@@ -484,6 +484,31 @@ TEST_CASE("Celestron CGX USB Telescope Driver - modern identity rejects malforme
             CHECK_FALSE(driver->get_connected());
             CHECK_FALSE(driver->get_device_firmware());
         }
+    }
+}
+
+// #2204: encoder scaling is the CGX's, so an unknown motor is added but never driven with CGX constants.
+// Falsified by: celestron_cgx_telescope_driver.cpp connect refusing a two-byte motor model other than 0x1788.
+TEST_CASE("Celestron CGX USB Telescope Driver - an unknown motor connects generically and refuses motion (#2204)",
+          "[celestron][cgx][telescope]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_motor_identity(0x10, {7, 17, 0, 25}, {0x17, 0x89});
+    mount.set_motor_identity(0x11, {7, 17, 0, 25}, {0x17, 0x88});
+    auto config = test_info();
+    config.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, config);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_name() == "Celestron Telescope");
+    for (const std::function<void()>& motion : std::vector<std::function<void()>>{
+             [&] { driver->find_home(); },
+             [&] { driver->park(); },
+             [&] { driver->pulse_guide(0, 100); },
+             [&] { driver->slew_to_coordinates_async(1.0, 1.0); },
+             [&] { driver->set_tracking(true); },
+         }) {
+        require_alpaca_error(motion, alpacacore::AlpacaError::InvalidOperation);
     }
 }
 

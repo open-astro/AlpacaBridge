@@ -60,7 +60,9 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "WandererAstro WandererRotator Mini"; }
+    std::string get_name() const override {
+        return unlisted_model_.load() ? "WandererAstro Rotator" : "WandererAstro WandererRotator Mini";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Rotator; }
 
@@ -159,7 +161,11 @@ public:
                     "WandererAstro rotator: portPath is required when connectionType is 'serial' (or use 'auto').",
                     AlpacaError::NotConnected);
             }
-            protocol_.connect(effective);
+            const std::string model = protocol_.connect(effective);
+            unlisted_model_.store(model.rfind("WandererRotatorMini", 0) != 0);
+            if (unlisted_model_.load()) {
+                ALPACA_LOG_WARN("WandererAstro", "Rotator reports an unlisted model '" + model + "'; unvalidated");
+            }
             {
                 // The Sync offset persists across reconnects and restarts (IRotatorV4).
                 // Keyed by the stored ID (decision 0018). The offset saved under
@@ -351,6 +357,7 @@ private:
 
     int device_number_;
     RotatorConnectionConfig config_;
+    std::atomic<bool> unlisted_model_{false};
     std::atomic<bool> connected_;
     WandererRotatorProtocolWrapper protocol_;
 

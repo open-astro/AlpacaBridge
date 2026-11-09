@@ -44,6 +44,9 @@ struct IefwDeviceInfo {
 /** @brief True when a :DeviceInfo# model code belongs to an iEFW (98 or 99). */
 bool is_iefw_model(std::int32_t model);
 
+/// True when the code names another iOptron product. An unlisted code is not refused (#2204).
+bool iefw_refuses_model(std::int32_t model);
+
 /** @brief Slot count for an iEFW model code: 99 -> 5, 98 -> 8, else 0. */
 std::int32_t iefw_slot_count(std::int32_t model);
 

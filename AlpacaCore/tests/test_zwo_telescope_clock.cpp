@@ -761,7 +761,7 @@ TEST_CASE("ZWO telescope clock - a silent :Gps with tracking off never reads as 
 // stillness; elsewhere, a Park the mount says it has not done fails, and both completion properties keep the error.
 TEST_CASE("ZWO telescope clock - a Park the mount ignores fails instead of inferring park (#2097)",
           "[zwo][telescope][unit][clock][park]") {
-    const std::string model = GENERATE("AM3", "AM5", "AM7");
+    const std::string model = GENERATE("AM3", "AM3N", "AM5", "AM7", "AM9");  // #2204: AM3N and unlisted models too
     const std::string reply = GENERATE("0", "1");  // not parked, or a stale in-progress
     Rig rig(model);
     rig.connect();
@@ -863,7 +863,9 @@ TEST_CASE("ZWO telescope clock - an AM5 Park that moved and stopped still infers
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
-TEST_CASE("ZWO telescope clock - Unpark reports Slewing for the 2 s forced window and not after",
+// #2178: an AM5 does not move on Unpark, and ConformU reads Slewing 1.8 s after it.
+// Falsified by: zwo_telescope_driver.cpp unpark() arming the Slewing window after ":Spu#".
+TEST_CASE("ZWO telescope clock - Slewing is false within one poll of an Unpark that starts no motion (#2178)",
           "[zwo][telescope][unit][clock]") {
     Rig rig;
     rig.mount.set_park_state(2);
@@ -871,11 +873,26 @@ TEST_CASE("ZWO telescope clock - Unpark reports Slewing for the 2 s forced windo
     rig.advance(250ms);
     REQUIRE(rig.driver->get_at_park());
     rig.driver->unpark();
-    for (int i = 0; i < 7; ++i) rig.advance(250ms);  // 1.75 s since the command
-    CHECK(rig.driver->get_slewing());
-    CHECK_FALSE(rig.driver->get_at_park());
-    for (int i = 0; i < 2; ++i) rig.advance(250ms);  // 2.25 s
+    rig.advance(250ms);
     CHECK_FALSE(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
+// #2178: dropping the window must not hide a mount that really moves during Unpark.
+// Falsified by: zwo_telescope_driver.cpp get_slewing() no longer reading the polled ":GU#" moving status.
+TEST_CASE("ZWO telescope clock - Slewing is true after Unpark when the mount reports motion (#2178)",
+          "[zwo][telescope][unit][clock]") {
+    Rig rig;
+    rig.mount.set_park_state(2);
+    rig.connect();
+    rig.advance(250ms);
+    REQUIRE(rig.driver->get_at_park());
+    rig.driver->unpark();
+    rig.mount.override_reply(":Gps", "0");
+    rig.mount.override_reply(":GU", "nGM040001895");
+    rig.advance(250ms);
+    rig.advance(250ms);
+    CHECK(rig.driver->get_slewing());
 }
 
 // Operation slot, pulse family: the body waits a pulse step as one clock wait that a cancel wakes, not as 100 ms

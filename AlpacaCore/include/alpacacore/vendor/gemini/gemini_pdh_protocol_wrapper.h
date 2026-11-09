@@ -285,6 +285,9 @@ public:
      */
     std::optional<std::string> get_firmware() const;
 
+    /// True after a connect to a hub whose identity is not the Advanced 3 (#2204).
+    bool is_unlisted_model() const;
+
     /**
      * @brief Switch an output on or off (">O<n>#" / ">C<n>#").
      * @param channel Wire channel 1-11 (1 = DC1, 2-5 = DC2-DC5, 6-11 = USB A-F)

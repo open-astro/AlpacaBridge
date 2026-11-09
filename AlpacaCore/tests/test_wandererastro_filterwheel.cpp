@@ -364,3 +364,16 @@ TEST_CASE("WandererAstro FilterWheel Driver - Link fault restores retuned line s
                          std::chrono::milliseconds(2000)));
     driver->set_connected(false);
 }
+
+// #2204: PIN (the WSFW prefix already accepts other versions; this keeps it accepting them under the generic name).
+// Falsified by: wandererastro_filterwheel_protocol_wrapper.cpp token_is_model() matching only known wheels.
+TEST_CASE("WandererAstro Filter Wheel - another SFW version connects under a generic name (#2204)",
+          "[wandererastro][filterwheel][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer wheel("WSFW999A20260124A3ABCDEFGHIA0A0A0A0A0A0A0A0A1A\n",
+                                               std::chrono::milliseconds(50));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == "WandererAstro Filter Wheel");
+    driver->set_connected(false);
+}

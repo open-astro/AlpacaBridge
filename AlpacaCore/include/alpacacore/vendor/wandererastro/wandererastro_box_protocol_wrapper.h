@@ -74,6 +74,7 @@ struct BoxPortInfo {
  */
 struct BoxState {
     bool valid = false;        // true once a full frame has been parsed
+    std::string model;         // identity token; set on the connect and probe frames only
     int firmware_version = 0;  // YYYYMMDD
 
     // Environment sensors (raw units from the frame).

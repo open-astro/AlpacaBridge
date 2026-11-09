@@ -70,7 +70,9 @@ public:
     // fixed at construction. The slot count comes from the wheel's
     // :DeviceInfo# model code at connect (99 = 5 slots, 98 = 8 slots,
     // confirmed on an iEFW-15); a mismatch with the selected model is logged.
-    std::string get_name() const override { return "iOptron " + model_name_; }
+    std::string get_name() const override {
+        return unlisted_model_.load() ? "iOptron Filter Wheel" : "iOptron " + model_name_;
+    }
 
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
@@ -433,7 +435,10 @@ private:
 
     // Caller holds io_mutex_ (the reads are wheel exchanges); the state publishes under mutex_.
     void publish_connect_state(const IefwDeviceInfo& info) {
-        const std::int32_t slots = iefw_slot_count(info.model);
+        // An unlisted wheel reports no slot count, so the configured model gives it (#2204).
+        const std::int32_t reported_slots = iefw_slot_count(info.model);
+        const std::int32_t slots = reported_slots > 0 ? reported_slots : (model_name_ == "iEFW-18" ? 8 : 5);
+        unlisted_model_.store(!is_iefw_model(info.model));
         if (iefw_model_name(info.model) != model_name_) {
             ALPACA_LOG_WARN("iOptron", "Configured model " + model_name_ + " but the wheel reports " +
                                            iefw_model_name(info.model) + " (model code " + std::to_string(info.model) +
@@ -580,6 +585,7 @@ private:
     // Everything below is guarded by mutex_.
     mutable std::mutex mutex_;
     std::int32_t slot_count_ = 0;   // from the handshake model code at connect
+    std::atomic<bool> unlisted_model_{false};
     const std::string model_name_;  // "iEFW-15" / "iEFW-18" from config; fixed after construction
     std::string firmware_;          // web-UI only; set at connect, cleared by the next Connect/Disconnect
     std::vector<std::string> filter_names_;
