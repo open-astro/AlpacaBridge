@@ -22,6 +22,7 @@
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -30,6 +31,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
@@ -493,6 +495,84 @@ TEST_CASE("ZWO an older Sync sends no last-resort :CM once a newer GOTO is accep
     require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
 }
 
+// #2093: a PulseGuide accepted while an older Sync waits out an "e4" reply is a newer motion command, as a GOTO is:
+// the Sync sends nothing after the pulse's ":Mg" (no ":Q" that would stop the pulse, no retried sync).
+// Falsified by: zwo_telescope_driver.cpp pulse_guide() without the ++slew_error_epoch_ in its queue section.
+TEST_CASE("ZWO an older Sync never stops a newer PulseGuide (#2093)", "[zwo][telescope][unit][clock][sync-fence]") {
+    const bool last_resort = GENERATE(false, true);  // the pulse lands in the 200 ms settle, or the 300 ms one
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its first ":Q" and waits out the 200 ms settle
+    if (last_resort) {
+        rig.advance(200ms);
+        REQUIRE(rig.mount.wait_for_count(":SMMC", 2, kReal));
+        rig.wait_for_blocked_caller();  // Sync sent its last-resort ":Q" and waits out the 300 ms settle
+    }
+    rig.driver->pulse_guide(0, 1000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    const auto before = rig.mount.commands();
+    const auto pulse_at = static_cast<std::size_t>(
+        std::find_if(before.begin(), before.end(), [](const std::string& c) { return c.rfind(":Mg", 0) == 0; }) -
+        before.begin());
+    rig.advance_until([&] { return ready(sync); }, 100ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    const auto sent = rig.mount.commands();
+    for (std::size_t i = pulse_at + 1; i < sent.size(); ++i) {
+        INFO("after the pulse: " << sent[i]);
+        CHECK(sent[i] != ":Q");
+        CHECK(sent[i].rfind(":SMMC", 0) != 0);
+        CHECK(sent[i] != ":CM");
+        CHECK(sent[i] != ":Sr06:00:00");
+    }
+    require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
+// #2093: a PulseGuide held before it queues (after its checks) while a Sync passes its reset and reads its epoch. The
+// pulse then queues and moves the epoch, so the Sync, settling after an "e4", sends nothing after the pulse's ":Mg".
+// Falsified by: zwo_telescope_driver.cpp moving the epoch bump out of pulse_guide()'s queue section to before the
+// "PulseGuideQueue" seam (the Sync reads the moved epoch as its own and stops the pulse).
+TEST_CASE("ZWO a Sync whose reset runs before a PulseGuide queues never stops that pulse (#2093)",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    std::promise<void> entered;
+    std::promise<void> go;
+    auto go_future = go.get_future().share();
+    std::atomic<bool> armed{true};
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == "PulseGuideQueue" && armed.exchange(false)) {
+            entered.set_value();
+            (void)go_future.wait_for(kReal);
+        }
+    });
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto pulse = std::async(std::launch::async, [&] { rig.driver->pulse_guide(0, 1000); });
+    REQUIRE(entered.get_future().wait_for(kReal) == std::future_status::ready);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync passed its reset, sent its first ":Q" and waits out the 200 ms settle
+    go.set_value();
+    REQUIRE_NOTHROW(pulse.get());
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    const auto before = rig.mount.commands();
+    const auto pulse_at = static_cast<std::size_t>(
+        std::find_if(before.begin(), before.end(), [](const std::string& c) { return c.rfind(":Mg", 0) == 0; }) -
+        before.begin());
+    rig.advance_until([&] { return ready(sync); }, 100ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    const auto sent = rig.mount.commands();
+    for (std::size_t i = pulse_at + 1; i < sent.size(); ++i) {
+        INFO("after the pulse: " << sent[i]);
+        CHECK(sent[i] != ":Q");
+        CHECK(sent[i].rfind(":SMMC", 0) != 0);
+        CHECK(sent[i] != ":CM");
+    }
+    require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
 // open-astro#1925: an older Sync settling on "e4" must not stop a newer MoveAxis jog, FindHome, Park or Unpark. The
 // initiator seam holds each one right after its wire command, where the old code had not yet moved the Sync epoch;
 // the Sync's settle timer runs meanwhile, so its ownership check lands in that window. It must throw, with the
@@ -752,15 +832,17 @@ TEST_CASE("ZWO telescope clock - Park publishes completion only when the forced 
 
 TEST_CASE("ZWO telescope clock - inferred Park completion waits for the forced slew window",
           "[zwo][telescope][unit][clock]") {
-    // "e1" is the AM5N's answer to the unsupported query. Park stops tracking first (#2097); a silent ":Gps#" would
-    // leave the next ":GU#" truncated to its first byte by the owed-reply fence, 'n' with tracking off.
-    const auto reply = GENERATE("0", "1", "x", "e1");
+    // "e1" is the AM5N's answer to the unsupported query; "" is a mount that never answers it. Park stops tracking
+    // first (#2097), so a silent ":Gps#" runs with tracking off (#2103). It goes silent after Park's own status read:
+    // with this rig's 500 ms timeout, a ":GU#" inside a silent ":Gps#"'s owed window times out.
+    const std::string reply = GENERATE("0", "1", "x", "e1", "");
     Rig rig;
     rig.connect();
     rig.mount.set_slew_duration(0ms);
-    rig.mount.override_reply(":Gps", reply);  // unavailable completion indication, stationary mount
+    if (!reply.empty()) rig.mount.override_reply(":Gps", reply);  // unavailable completion indication, stationary
     rig.advance(250ms);
     rig.driver->park();
+    if (reply.empty()) rig.mount.go_silent(":Gps");
     for (int i = 0; i < 7; ++i) rig.advance(250ms);  // 1.75 s since the command
     CHECK_FALSE(rig.driver->get_at_park());
     CHECK(rig.driver->get_slewing());  // the park command is still active
@@ -771,6 +853,28 @@ TEST_CASE("ZWO telescope clock - inferred Park completion waits for the forced s
     for (int i = 0; i < 13; ++i) rig.advance(250ms);  // 5.5 s
     CHECK(rig.driver->get_at_park());
     CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// #2103: a ":Gps#" that never answers leaves a reply owed; the owed-reply fence then spends the next ":GU#"'s whole
+// timeout. With tracking off its first byte is 'n' (moving), which must not be read as the status.
+TEST_CASE("ZWO telescope clock - a silent :Gps with tracking off never reads as slewing (#2103)",
+          "[zwo][telescope][unit][clock]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->set_tracking(false);
+    rig.mount.go_silent(":Gps");
+    rig.advance(250ms);
+    const int gps_before = rig.mount.count(":Gps");
+    for (int i = 0; i < 12; ++i) {  // 3 s
+        rig.advance(250ms);
+        CHECK_FALSE(rig.driver->get_slewing());
+        CHECK(rig.driver->get_link_fault().empty());
+    }
+    CHECK(rig.mount.count(":Gps") >= gps_before + 2);
+    const auto sent = rig.mount.commands();
+    const auto gps = std::find(sent.begin(), sent.end(), ":Gps");
+    REQUIRE(gps != sent.end());
+    CHECK(std::find(gps, sent.end(), ":GU") != sent.end());  // a status query followed the silent one
 }
 
 // #2097: an AM5 on firmware 1.8.8 ignores ":hP#": no motion, ":Gps#" stays 0. Only the AM5N infers a park from
@@ -850,13 +954,14 @@ TEST_CASE("ZWO telescope clock - Park stops tracking before :hP so a tracking AM
 // #2097 keeps the stillness inference where nothing else can tell: a mount that does not answer ":Gps#".
 TEST_CASE("ZWO telescope clock - an AM5 without a usable :Gps still infers park from stillness",
           "[zwo][telescope][unit][clock][park]") {
-    const std::string reply = GENERATE("x", "e1");
+    const std::string reply = GENERATE("x", "e1", "");  // "": never answers (#2103), from after Park's status read
     Rig rig("AM5");
     rig.connect();
     rig.mount.set_slew_duration(0ms);
-    rig.mount.override_reply(":Gps", reply);
+    if (!reply.empty()) rig.mount.override_reply(":Gps", reply);
     rig.advance(250ms);
     rig.driver->park();
+    if (reply.empty()) rig.mount.go_silent(":Gps");
     for (int i = 0; i < 22; ++i) rig.advance(250ms);  // 5.5 s
     CHECK(rig.driver->get_at_park());
     CHECK_FALSE(rig.driver->get_slewing());
@@ -945,6 +1050,77 @@ TEST_CASE("ZWO telescope clock - a pulse after a reconnect reaches the mount",
     const int pulses = rig.mount.count(":Mg");
     rig.driver->pulse_guide(2, 500);
     CHECK(rig.mount.wait_for_count(":Mg", pulses + 1, kReal));
+}
+
+// #2095: a redundant Connected=true drops the queued pulses but leaves the running drain in charge, so the next
+// PulseGuide queues behind the step in flight instead of sending its ":Mg" over it. IsPulseGuiding covers the
+// running pulse and B's wait behind it.
+// Falsified by: zwo_telescope_driver.cpp reset_session_state_for_connect() clearing pulse_drain_active_ on the
+// redundant path too, so the next pulse starts a new drain that supersedes the running one; or zeroing
+// pulse_guiding_end_ and pulse_queue_end_ there while the drain is kept, so IsPulseGuiding reads false while A runs.
+TEST_CASE("ZWO telescope clock - a redundant connect never overlaps the running pulse (#2095)",
+          "[zwo][telescope][unit][clock][operation-slot]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 6000);  // A: two 3000 ms steps
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    rig.wait_for_blocked_caller();    // the drain waits out A's first step
+    rig.driver->pulse_guide(2, 500);  // C: queued behind A
+    auto& redundant = rig.call([&] { rig.driver->set_connected(true); });
+    for (int i = 0; i < 200 && redundant.wait_for(10ms) != std::future_status::ready; ++i) rig.advance(10ms);
+    REQUIRE(redundant.wait_for(0ms) == std::future_status::ready);
+    redundant.get();
+    CHECK(rig.driver->get_is_pulse_guiding());               // A still runs
+    rig.driver->pulse_guide(1, 1000);                        // B
+    CHECK_FALSE(rig.mount.wait_for_count(":Mg", 2, 200ms));  // B waits for A's step
+    bool guiding_until_b = true;
+    rig.advance_until(
+        [&] {
+            const bool guiding = rig.driver->get_is_pulse_guiding();
+            if (!guiding && rig.mount.count(":Mgs") == 0) guiding_until_b = false;
+            return rig.mount.count(":Mg") >= 3;
+        },
+        100ms, 10s);
+    CHECK(guiding_until_b);  // never false before B's ":Mg"
+
+    std::vector<std::string> pulses;
+    for (const auto& command : rig.mount.commands()) {
+        if (command.rfind(":Mg", 0) == 0) pulses.push_back(command);
+    }
+    CHECK(pulses == std::vector<std::string>{":Mgn3000", ":Mgn3000", ":Mgs1000"});  // C was dropped, B came last
+}
+
+// open-astro#2165: a client write or MoveAxis stop issued while the telemetry poll owns the link (its ":GR" held in
+// flight) reaches the wire right after that exchange, not after the rest of the poll cycle (":GD", ":GZ", ...).
+// Falsified by: zwo_mount_protocol_wrapper.cpp lock_exchange() taking mutex_ for a background exchange without
+// waiting for the client exchanges already waiting, so the poll thread re-locks it first for every remaining query.
+TEST_CASE("ZWO telescope clock - a client command waits for at most one poll exchange (#2165)",
+          "[zwo][telescope][unit][clock]") {
+    const bool stop = GENERATE(false, true);  // a guide-rate write, or a MoveAxis stop
+    const std::string expected = stop ? ":Qe" : ":Rg";
+    Rig rig;
+    rig.connect();
+    if (stop) rig.driver->move_axis(0, 1.0);  // a jog to stop
+    rig.mount.hold_reply(":GR");
+    rig.clock.advance(250ms);  // the poll starts a cycle: ":GU", then its ":GR" is held
+    REQUIRE(rig.mount.wait_until_held(kReal));
+    const int poll_queries = static_cast<int>(rig.mount.commands().size());
+    auto& client = rig.call([&] {
+        if (stop) {
+            rig.driver->move_axis(0, 0.0);
+        } else {
+            rig.driver->set_guide_rate_right_ascension(0.002089);  // 0.5x sidereal
+        }
+    });
+    // Real time for the client to reach the I/O lock behind the held exchange (a rendezvous, not a driver timer).
+    CHECK_FALSE(ready(client, 200ms));
+    rig.mount.release();
+    REQUIRE(ready(client, kReal));
+    client.get();
+    const auto sent = rig.mount.commands();
+    REQUIRE(static_cast<int>(sent.size()) > poll_queries);
+    INFO("first command after the held :GR: " << sent[static_cast<std::size_t>(poll_queries)]);
+    CHECK(sent[static_cast<std::size_t>(poll_queries)].rfind(expected, 0) == 0);
 }
 
 #endif  // !_WIN32

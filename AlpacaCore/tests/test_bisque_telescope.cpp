@@ -264,11 +264,8 @@ TEST_CASE("Bisque Telescope Driver - Unsupported actions", "[bisque][telescope][
 }
 
 TEST_CASE("Bisque Telescope Driver - Target Range Validation", "[bisque][telescope][unit]") {
-    alpacacore::vendor::bisque::ConnectionInfo conn;
-    conn.host = "localhost";
-    conn.tcp_port = 3040;
-
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+    ConnectedFakeBisque mount;  // a valid target write needs a connection (#2102)
+    auto& driver = mount.driver;
 
     // Target not yet set
     REQUIRE_THROWS(driver->get_target_right_ascension());
@@ -432,7 +429,8 @@ TEST_CASE("Bisque Telescope Driver - the two target properties are independent",
     require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
 
-    driver->set_target_right_ascension(7.25);
+    // Disconnected, the write refuses too (#2102).
+    require_alpaca_error([&]() { driver->set_target_right_ascension(7.25); }, alpacacore::AlpacaError::NotConnected);
 
     // Disconnected, SlewToTarget, SlewToTargetAsync and SyncToTarget answer NotConnected before the unset
     // target (#2075); the half-set refusal is pinned on a connected driver below.
@@ -511,16 +509,22 @@ TEST_CASE("Bisque Telescope Driver - non-finite input is rejected", "[bisque][te
     // Bisque's guide-rate setter has no range check at all, so infinity gets
     // through as well as NaN.
     SECTION("GuideRateRightAscension") {
-        const auto before = driver->get_guide_rate();
-        require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
-        require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
-        CHECK(driver->get_guide_rate().ra == before.ra);
+        ConnectedFakeBisque mount;  // GuideRate reads need a connection (#2102)
+        const auto before = mount.driver->get_guide_rate();
+        require_alpaca_error([&]() { mount.driver->set_guide_rate({nan, 0.004}); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { mount.driver->set_guide_rate({inf, 0.004}); },
+                             alpacacore::AlpacaError::InvalidValue);
+        CHECK(mount.driver->get_guide_rate().ra == before.ra);
     }
     SECTION("GuideRateDeclination") {
-        const auto before = driver->get_guide_rate();
-        require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
-        require_alpaca_error([&]() { driver->set_guide_rate({0.004, -inf}); }, alpacacore::AlpacaError::InvalidValue);
-        CHECK(driver->get_guide_rate().dec == before.dec);
+        ConnectedFakeBisque mount;
+        const auto before = mount.driver->get_guide_rate();
+        require_alpaca_error([&]() { mount.driver->set_guide_rate({0.004, nan}); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { mount.driver->set_guide_rate({0.004, -inf}); },
+                             alpacacore::AlpacaError::InvalidValue);
+        CHECK(mount.driver->get_guide_rate().dec == before.dec);
     }
 }
 
@@ -1141,10 +1145,8 @@ TEST_CASE("Bisque PulseGuide - a short pulse keeps the configured response timeo
 
 TEST_CASE("Bisque Telescope Driver - out-of-range guide rates are InvalidValue and leave the rate unchanged (#775)",
           "[bisque][telescope][unit][guiderate]") {
-    alpacacore::vendor::bisque::ConnectionInfo conn;
-    conn.host = "localhost";
-    conn.tcp_port = 3040;
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+    ConnectedFakeBisque mount;  // GuideRate reads need a connection (#2102)
+    auto& driver = mount.driver;
 
     constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
     const auto before = driver->get_guide_rate();

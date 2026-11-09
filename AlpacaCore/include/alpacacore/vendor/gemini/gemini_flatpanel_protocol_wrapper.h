@@ -12,6 +12,9 @@
 
 #pragma once
 
+#include <alpacacore/util/error_handling.h>
+
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -130,6 +133,16 @@ struct GeminiFlatPanelScanHooks {
     std::function<std::vector<GeminiFlatPanelPortInfo>()> enumerate;
 };
 void set_gemini_flatpanel_scan_hooks_for_testing(GeminiFlatPanelScanHooks hooks);
+
+/// Test seam: shorten the open/close cover reply wait (30 s in production). Zero restores it.
+void set_gemini_flatpanel_cover_timeout_for_testing(std::chrono::milliseconds timeout);
+
+/// No reply arrived inside the read timeout. The driver tells this apart from a refusal or a malformed reply by
+/// type (a cover command that got no reply may still have moved the cover).
+class FlatPanelReplyTimeout : public AlpacaException {
+public:
+    FlatPanelReplyTimeout() : AlpacaException("Read timeout", AlpacaError::DriverException) {}
+};
 
 /**
  * @brief Check whether a probe reply matches the flat panel's >H# handshake.

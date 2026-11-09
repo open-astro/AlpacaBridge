@@ -82,8 +82,9 @@ ITelescopeV4 raises `InvalidOperation` for `SlewToCoordinates`, `SlewToCoordinat
 driver). The check runs after argument validation (`InvalidValue`) and the parked check, and before the driver cancels
 or sends anything, so a refused slew leaves a park, goto or pulse guide in flight running. Read Tracking the way the
 driver's own `Tracking` getter does, a commanded `Tracking=false` still in flight included, with two exceptions that do
-not count as off: a motion state the getter cannot tell apart from Tracking off (iOptron `:GLS` reports a GOTO,
-guiding or a meridian flip in place of tracking, so its guard refuses only a stopped mount), and a retarget of the
+not count as off: a motion state the getter cannot tell apart from Tracking off (iOptron `:GLS` reports a GOTO in
+place of tracking, so its guard refuses only a stopped mount; guiding and a meridian flip read as Tracking true there
+since #2186), and a retarget of the
 driver's own slew still in flight (ZWO `:GU`, Bisque `IsTracking`: nothing says what they report during a GOTO).
 Syncs and Alt/Az slews are exempt. A driver test of an equatorial slew turns Tracking on first; do not leave it off
 and assert only that the slew threw. An Alt/Az slew test in a driver that refuses Alt/Az slews while Tracking is true
@@ -114,7 +115,7 @@ A camera's "no image yet" answer (`ImageArray` before any exposure, or while one
 - `SiteElevation` throws `InvalidOperation` until the device config or a client sets it, never 0 m ([decision 0019](../../docs/decisions/0019-connect-without-site.md)).
 - `DestinationSideOfPier` throws `InvalidValue` for RA outside [0, 24) or Dec outside [-90, 90], before the connection check.
 - RA, Dec and site range checks, local sidereal time, the hour and degree wraps, the shortest RA delta and the destination pier-side rule go through `util/pointing.h` (`validate_ra`, `validate_dec`, `validate_ra_dec`, `validate_latitude`, `validate_longitude`, `local_sidereal_hours`, `wrap_hour_angle`, `pier_side_for_hour_angle`, and for a German mount whose controller keeps its side past the meridian `gem_destination_pier_side` and `gem_pier_side_reaches` with the `GemPierModel`/`GemPierLimits`/`GemPointing` inputs, #2179); a telescope driver never defines its own validator, sidereal-time, hour-angle-wrap or pier-side function, so the `InvalidValue` text is the same on every mount. Inline RA wraps and hand-written shortest-RA-delta code inside larger expressions (Celestron NexStar, iOptron, SynScan, ZWO) are not converted yet. Exceptions: CGX `cgx_local_sidereal_time_hours` builds on `gmst_degrees` and adds its own equation of equinoxes; CGX derives its pier side as the `CgxPointingSide` enum from the hour angle, not as an int; Bisque keeps a `detail::validate_ra_dec` forwarder to `util::validate_ra_dec` until its test call is removed.
-- A `UTCDate` read the mount clock cannot answer throws `InvalidOperation` until a supported successful time write establishes it; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Internal pointing fallbacks never initialize public UTCDate. Sky-Watcher's direct host-clock backend follows [decision 0001](../../docs/decisions/0001-skywatcher-pointing-clock.md). Bisque samples the remote TheSkyX computer clock only in UseComputerClock mode (see [vendor notes](bisque.instructions.md)).
+- A `UTCDate` read the mount clock cannot answer throws `InvalidOperation` until a supported successful time write establishes it; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Internal pointing fallbacks never initialize public UTCDate. Sky-Watcher's direct host-clock backend and the Celestron CGX direct USB backend (#2166), whose controllers store no time, follow [decision 0001](../../docs/decisions/0001-skywatcher-pointing-clock.md) instead: `UTCDate` reads the host clock that `SiderealTime` and pointing use. Bisque samples the remote TheSkyX computer clock only in UseComputerClock mode (see [vendor notes](bisque.instructions.md)).
 
 ### A failed async operation body keeps its error (all drivers)
 

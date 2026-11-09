@@ -18,6 +18,8 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/last_exposure.h>
+#include <alpacacore/util/logging.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/response.h>
 #include <alpacahttp/util/error_mapping.h>
@@ -25,10 +27,12 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "../src/http/device_call.h"
 #include "test_assert.h"
@@ -355,6 +359,47 @@ void case_url_decode_invalid_and_trailing_escapes() {
     EXPECT(f4.form_field("N").value_or("<none>") == "a ");
 }
 
+// A LastExposure getter read before any image is an ICameraV4 InvalidOperation the client asked for: HTTP 200, 0x40B,
+// logged at DEBUG, never ERROR (issue #2182).
+// Falsified by: util::LastExposure::require_valid() throwing a plain AlpacaException instead of asked_too_early().
+void case_run_last_exposure_early_read_logs_debug() {
+    // case: LastExposure early read is logged at DEBUG (#2182)
+    namespace logging = alpacacore::logging;
+    struct Restore {
+        logging::LogLevel level = logging::get_log_level();
+        logging::LogSink sink = logging::get_log_sink();
+        ~Restore() {
+            logging::set_log_sink(sink);
+            logging::set_log_level(level);
+        }
+    } restore;
+    std::vector<logging::LogLevel> levels;
+    logging::set_log_level(logging::LogLevel::Debug);
+    logging::set_log_sink([&](logging::LogLevel level, std::string_view, std::string_view message) {
+        if (message.find("No image has been successfully acquired yet") != std::string_view::npos) {
+            levels.push_back(level);
+        }
+    });
+    const alpacacore::util::LastExposure fresh;
+    auto request = make("GET", "/x?ClientTransactionID=5");
+    DeviceCall call(*request, kServerTx);
+    for (int getter = 0; getter < 2; ++getter) {
+        levels.clear();
+        const auto response = call.run("camera method", [&]() -> Response {
+            if (getter == 0) {
+                (void)fresh.duration();
+            } else {
+                (void)fresh.start_time();
+            }
+            return call.ok_void();
+        });
+        EXPECT(response.status_code() == 200);
+        EXPECT(envelope(response).value("ErrorNumber", 0) == 0x40B);
+        EXPECT(levels.size() == 1);
+        EXPECT(levels.empty() || levels.front() == logging::LogLevel::Debug);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -371,6 +416,7 @@ int main() {
     case_run_invalid_value_stays_200();
     case_run_alpaca_exception_mapped_with_both_ids();
     case_run_std_exception_is_driver_error();
+    case_run_last_exposure_early_read_logs_debug();
     case_exception_to_error_code_ignores_text();
     case_ok_envelope();
     case_success_head();

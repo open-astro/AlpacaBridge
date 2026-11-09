@@ -302,6 +302,19 @@ datagrams before each send so replies cannot get off-by-one.
   that is served. A test that rendezvouses with a task on a `FakeTaskClock` counts the poll as
   one waiter that is always parked (`kPollerWaiter`), or pauses it with
   `set_status_poll_paused_for_testing()`.
+- **Stops go out on a faulted link; starts do not** (open-astro#2068, [decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md)).
+  While the fault latch is set (`Connected` true), `AbortSlew`, `MoveAxis(axis, 0)` and `Tracking=false` skip the
+  `check_writable_locked()` refusal (`check_stop_allowed_locked()` keeps only the `NotConnected` check, so a lost link still
+  sends nothing) and send their stop frames best effort. A reply that comes clears the latch as for any exchange and the
+  call succeeds; a stop whose reply fails ends the call with the fault `DriverException`, sent but unconfirmed.
+  `AbortSlew` tries both axes' `:L`; before them it cancels the MoveAxis stop bodies, bumps `motion_generation_` and cancels
+  the rate verify, and when a stop fails it leaves its commanded-state and tracking flags untouched. Its tracking restore is
+  a start: skipped while faulted, and after an acked `:L` clears the latch the position read-back before the gate
+  (`invalidate_position_cache_locked()`, eager) runs the board-restart check, so a restarted board is latched and sent
+  no `:G`/`:I`/`:J`. Every start (non-zero `MoveAxis`, slews, `Tracking=true`, `PulseGuide`, Park, FindHome, the duty
+  burst start) stays refused with the fault text and sends nothing. `run_limit_guard()` keeps a failed stop owed (not on
+  `NotConnected`) and resends it on each later guard tick (a tick with a sample too) while that axis or tracking still runs, until a
+  stop is acked or the link is lost. Tests: `[stop-while-faulted]` in `test_skywatcher_link_loss.cpp`.
 - **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
   #1530). Order: `transition_mutex_` (`set_connected()` against `set_connected()`; no getter takes it) -> `duty_transition_mutex_` (`start_duty_worker()` against `stop_duty_worker()`, held across the duty join; no slot body takes it) -> `io_mutex_`
   (the operation lock) -> `mutex_` (the state lock, a leaf) -> the protocol wrapper's own lock. Every member that
@@ -343,6 +356,12 @@ datagrams before each send so replies cannot get off-by-one.
   axis reaps only that axis's pulse (PulseGuide #620, MoveAxis #630; a no-op
   `MoveAxis(axis, 0)` reaps none) and sync stops both axes before `:E`.
   Gate before reaping: a refused slew, MoveAxis or sync cancels nothing.
+- **A pulse's or a MoveAxis's stop-wait owns only its own axis (#1706, #2067).** A command on the other
+  axis alone (a start or a stop, `bump_motion_generation_locked()`) carries that wait's generation along
+  (`pulse_owner_gen_`/`pulse_wait_gen_`, armed by `start_speed_motion_locked(..., axis_owner=true)`) instead
+  of superseding it; a command that owns both axes (goto, Park, sync, abort, home, reconnect) and a newer
+  same-axis command still supersede it. Test: `SkyWatcher async - a pulse on the other axis does not
+  supersede a MoveAxis stop-wait (#2067)`.
 - **AbortSlew must cancel the async slew body** (`slew_.cancel()`; the slot joins
   it when the next body starts or on disconnect) or the landing refinement
   re-slews after the abort. A cancelled body (AbortSlew, Unpark, disconnect)
@@ -536,7 +555,7 @@ below was one of them.
 - **A retry loop whose supersession test compares against a generation captured before the loop
   can only ever run once.** Review of the branch above: the rate check's second sample was
   unreachable, because the attempt-0 recovery is itself a motion command (its own
-  `++motion_generation_`, and `start_speed_motion_locked()` bumps it again), so attempt 1's first
+  generation bump, `bump_motion_generation_locked(kAxisRa)`, and `start_speed_motion_locked()` bumps it again), so attempt 1's first
   re-lock read the check's OWN restart as another command's supersession and returned. The
   "restart did not correct it" WARN could never be emitted, and a restart that also latched wrong
   ran at the wrong rate in silence -- the exact failure the check exists to surface. Fixed by

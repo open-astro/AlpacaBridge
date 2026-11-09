@@ -41,7 +41,9 @@ void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(
 
 /// Test-only: called with the initiator's name ("Park", "FindHome", "MoveAxis", "AbortSlew", "Unpark") after its GOTO
 /// fence and before its first wire command, and with "<name> sent" ("Park sent", "FindHome sent", "MoveAxis sent" for
-/// a jog, "Unpark sent") right after that command (call before connecting).
+/// a jog, "Unpark sent") right after that command; with "PulseGuideQueue" after a PulseGuide's checks and before it
+/// queues its pulse, and with "PulseGuide" after it decided to start the pulse drain and before it starts it (call
+/// before connecting).
 void set_initiator_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
 
 std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,

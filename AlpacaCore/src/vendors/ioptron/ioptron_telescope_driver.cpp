@@ -2398,11 +2398,12 @@ private:
         }
     }
 
-    // Not get_tracking_locked(): :GLS reports slewing (2), guiding (3) and a
-    // meridian flip (4) instead of tracking, so the getter reads them as off,
-    // and refusing there would refuse a retarget of a GOTO in flight. Off is a
-    // commanded Tracking=false still in its read-back window, or a stopped
-    // mount (0, or 7 at home); parked (6) is refused before this runs.
+    // Not get_tracking_locked(): :GLS reports slewing (2) instead of tracking,
+    // so the getter reads a GOTO as off, and refusing there would refuse a
+    // retarget of a GOTO in flight (guiding (3) and a meridian flip (4) read
+    // as on since #2186). Off is a commanded Tracking=false still in its
+    // read-back window, or a stopped mount (0, or 7 at home); parked (6) is
+    // refused before this runs.
     bool tracking_off_for_slew_locked() const {
         if (tracking_override_until_ > clock_.now() && status_cache_valid_) {
             return !cached_status_.is_tracking;

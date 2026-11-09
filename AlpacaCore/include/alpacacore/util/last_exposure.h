@@ -51,7 +51,7 @@ public:
 private:
     void require_valid() const {
         if (!valid_) {
-            throw AlpacaException("No image has been successfully acquired yet", AlpacaError::InvalidOperation);
+            throw AlpacaException::asked_too_early("No image has been successfully acquired yet");
         }
     }
 

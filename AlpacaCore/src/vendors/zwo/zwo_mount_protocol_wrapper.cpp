@@ -54,6 +54,12 @@ namespace alpacacore::vendor::zwo {
 
 namespace {
 
+// open-astro#2165: set on the driver's telemetry poll thread by ZWOMountProtocolWrapper::BackgroundIoScope.
+thread_local bool t_background_io = false;
+// A background exchange waits at most this long for client exchanges to drain, so a steady stream of client
+// commands delays the poll by a bounded time instead of starving it.
+constexpr auto kBackgroundYieldBound = std::chrono::milliseconds(1000);
+
 constexpr auto kReadPollDelay = std::chrono::milliseconds(10);
 constexpr int kIdleBreakMs = 100;
 constexpr auto kReadSlice = std::chrono::milliseconds(100);
@@ -838,7 +844,11 @@ public:
     }
 
     bool link_lost() const { return link_lost_.load(); }
-    void cancel_pending_io() { closing_.store(true); }
+    void cancel_pending_io() {
+        closing_.store(true);
+        std::lock_guard<std::mutex> yield(yield_mutex_);
+        yield_cv_.notify_all();
+    }
 
     void try_disconnect() {
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
@@ -870,7 +880,7 @@ public:
     std::string send_command(const std::string& command,
                              bool require_hash_terminator,
                              int timeout_ms_override) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        const auto lock = lock_exchange();
         if (!connected_ || closing_.load()) {
             throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
         }
@@ -925,7 +935,7 @@ public:
     }
 
     void send_command_blind(const std::string& command) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        const auto lock = lock_exchange();
         if (!connected_ || closing_.load()) {
             throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
         }
@@ -965,6 +975,29 @@ public:
     }
 
 private:
+    // open-astro#2165: the I/O lock for one exchange. std::mutex is not fair: the poll thread re-locks it for its
+    // next query before a waiting client wakes, so a client write or stop could wait out a whole poll cycle (2-3.5 s
+    // on a slow Wi-Fi link). A client exchange counts itself while it waits; a background (poll) exchange first
+    // waits until none is waiting (bounded by kBackgroundYieldBound, or the link closing), then takes the lock. A
+    // client that arrives after that check waits for the one background exchange in flight.
+    std::unique_lock<std::mutex> lock_exchange() {
+        if (t_background_io) {
+            {
+                std::unique_lock<std::mutex> yield(yield_mutex_);
+                yield_cv_.wait_for(yield, kBackgroundYieldBound,
+                                   [&] { return foreground_waiting_.load() == 0 || closing_.load(); });
+            }
+            return std::unique_lock<std::mutex>(mutex_);
+        }
+        foreground_waiting_.fetch_add(1);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (foreground_waiting_.fetch_sub(1) == 1) {
+            std::lock_guard<std::mutex> yield(yield_mutex_);
+            yield_cv_.notify_all();
+        }
+        return lock;
+    }
+
     // Waits for the reply a timed-out query still owes, then lets the line go quiet, so the next exchange starts
     // on a clean line (issue #1527). Bounded: it ends at the earlier of kOwedReplyBoundMs after the timeout and
     // `cap` (the exchange's own timeout, so a short best-effort query is never slower than its timeout), or
@@ -1428,7 +1461,9 @@ private:
             reply_owed_ = true;
             owed_until_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(kOwedReplyBoundMs);
         }
-        if (!require_hash_terminator) return finish();
+        // A timed-out query's partial bytes are not its reply: with no time left after the owed-reply fence, the one
+        // late byte is the reply's first byte (#2103). The rest is owed, so the next fence settles it.
+        if (!require_hash_terminator) return reply_expected ? std::string{} : finish();
         throw AlpacaException("Timeout waiting for ZWO mount response", AlpacaError::DriverException);
     }
 
@@ -1464,6 +1499,11 @@ private:
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
     bool reply_owed_ = false;  // a query timed out with no reply; guarded by mutex_
+    // open-astro#2165 (lock_exchange()): client exchanges waiting for mutex_, and the background poll's wait on them.
+    // yield_mutex_ is a leaf, never held while taking mutex_.
+    std::atomic<int> foreground_waiting_{0};
+    std::mutex yield_mutex_;
+    std::condition_variable yield_cv_;
     std::chrono::steady_clock::time_point owed_until_{};
 
 #ifdef _WIN32
@@ -1483,6 +1523,9 @@ ZWOMountProtocolWrapper::ZWOMountProtocolWrapper(bool require_identity,
     : pimpl_(std::make_unique<Impl>(require_identity, std::move(discovery_candidates))) {}
 
 ZWOMountProtocolWrapper::~ZWOMountProtocolWrapper() = default;
+
+ZWOMountProtocolWrapper::BackgroundIoScope::BackgroundIoScope() { t_background_io = true; }
+ZWOMountProtocolWrapper::BackgroundIoScope::~BackgroundIoScope() { t_background_io = false; }
 
 bool ZWOMountProtocolWrapper::link_lost() const { return pimpl_->link_lost(); }
 void ZWOMountProtocolWrapper::cancel_pending_io() { pimpl_->cancel_pending_io(); }

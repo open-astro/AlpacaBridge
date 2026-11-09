@@ -111,8 +111,9 @@ passes: a failure fails the run and publishes nothing, and the previous nightly 
 2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file, builds the arm64
    `.deb` in a Debian trixie container and attaches it and its `alpacabridge-dbgsym` debug-symbols
    package, each with a `.sha256` (job `deb`, which runs for every tag, stable or beta). The `.deb`
-   is also published to the apt `beta` component (outside this repository). When the repository
-   variable `PRUNE_SUPERSEDED_RELEASES` is `true`, a last job (`prune`) then deletes the GitHub
+   is also published to the apt `beta` component: job `apt` dispatches the release in the
+   apt repository a minute or two after the tag, and a poll there is the fallback. When the repository
+   variable `PRUNE_SUPERSEDED_RELEASES` is `true`, job `prune` also deletes the GitHub
    Releases this tag supersedes: beta N removes the releases of `beta.1` to `beta.(N-1)`, and the
    stable `vX.Y.Z` removes every `vX.Y.Z-beta.*` release (`scripts/release_prune.py`). Tags are
    never deleted, and stable releases, `nightly-build` and the betas of another X.Y.Z are not

@@ -50,6 +50,7 @@ struct FakeSynScanState {
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
     std::atomic<bool> goto_stopped{false};
+    std::atomic<bool> fail_tracking_write{false};  // 'T' gets no answer (timeout) while set
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -73,7 +74,7 @@ struct FakeSynScanState {
 alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
-        if (chunk[0] == 'P' || chunk[0] == 'M') {
+        if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'T') {
             st->record(chunk);
         }
         switch (chunk[0]) {
@@ -98,6 +99,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 st->goto_stopped.store(true);
                 return "#";
             case 'T':  // tracking mode write
+                return st->fail_tracking_write.load() ? "" : "#";
             case 'P':  // passthrough
                 return "#";
             case 'm':
@@ -242,6 +244,55 @@ TEST_CASE("SynScan slot - a refused pulse timer start stops the axis and clears 
     CHECK(rig.st->command_count('P') >= passthrough_before + 2);  // the rate command, then the stop
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
     CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE("SynScan slot - a refused goto-over-goto start restores tracking after the stop",
+          "[synscan][telescope][async][slot]") {
+    Rig rig;
+    rig.driver->set_tracking(true);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    const int tracking_before = rig.st->command_count('T');
+
+    refuse_slot_threads(*rig.driver);
+    CHECK_THROWS_AS(rig.driver->slew_to_coordinates_async(6.5, 25.0), alpacacore::AlpacaException);
+
+    CHECK(rig.st->command_count('T') > tracking_before);  // the stop ended tracking; it is sent again
+    CHECK(rig.driver->get_tracking());
+}
+
+TEST_CASE("SynScan slot - a refused RA pulse timer start restores tracking after the stop",
+          "[synscan][telescope][async][slot]") {
+    Rig rig;
+    rig.driver->set_tracking(true);
+    const int tracking_before = rig.st->command_count('T');
+
+    alpacacore::vendor::synscan::set_pulse_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK_THROWS_AS(rig.driver->pulse_guide(2, 2000), alpacacore::AlpacaException);
+
+    CHECK(rig.st->command_count('T') > tracking_before);
+    CHECK(rig.driver->get_tracking());
+}
+
+TEST_CASE("SynScan slot - a refused start whose tracking restore lands clears the unconfirmed flag",
+          "[synscan][telescope][async][slot]") {
+    Rig rig;
+    rig.driver->set_tracking(true);
+    alpacacore::vendor::synscan::set_pulse_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    rig.st->fail_tracking_write.store(true);
+    CHECK_THROWS_AS(rig.driver->pulse_guide(2, 200), alpacacore::AlpacaException);
+    CHECK_FALSE(rig.driver->get_tracking());  // the restore failed: the mount may not be tracking
+
+    rig.st->fail_tracking_write.store(false);
+    const int tracking_before = rig.st->command_count('T');
+    CHECK_THROWS_AS(rig.driver->pulse_guide(2, 200), alpacacore::AlpacaException);
+    CHECK(rig.st->command_count('T') > tracking_before);
+    CHECK(rig.driver->get_tracking());  // the restore landed: the flag clears and the mode is written through
 }
 
 #endif  // _WIN32
