@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/util/rotator_sync_offset_store.h>
 #include <alpacacore/util/unique_id.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
@@ -24,6 +25,7 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -37,10 +39,13 @@ namespace {
 using alpacacore::test::require_alpaca_error;
 
 // Plays a WandererRotator Mini with no DC power: it answers the "1500001"
-// handshake and then stays silent for every move (MCU alive, motor dead).
+// handshake and then stays silent for every move (MCU alive, motor dead). With
+// @p move_reply it answers a move with those bytes instead (firmware 20261025's
+// "NP\n" and "LIMIT\n" lines, as INDI's wanderer_rotator_base.cpp reads them).
 class SilentMotorRotator {
 public:
-    SilentMotorRotator() : pty_("SilentMotorRotator") {
+    explicit SilentMotorRotator(std::string move_reply = {})
+        : pty_("SilentMotorRotator"), move_reply_(std::move(move_reply)) {
         th_ = std::thread([this] { run(); });
     }
     ~SilentMotorRotator() {
@@ -76,11 +81,15 @@ private:
                 if (cmd == "1500001") {
                     const std::string reply = "WandererRotatorMiniA20250101A0A0A0A";
                     alpacacore::test::pty_write_bounded(pty_.master_fd(), reply.data(), reply.size(), stop_);
-                }  // any move command: no reply
+                } else if (!move_reply_.empty()) {
+                    alpacacore::test::pty_write_bounded(pty_.master_fd(), move_reply_.data(), move_reply_.size(),
+                                                        stop_);
+                }  // otherwise any move command: no reply
             }
         }
     }
     alpacacore::test::PtyPair pty_;
+    std::string move_reply_;
     std::thread th_;
     std::atomic<bool> stop_{false};
 };
@@ -244,6 +253,52 @@ TEST_CASE("WandererAstro Rotator Driver - No completion report keeps Position an
     CHECK(std::abs(driver->get_position() - start) < 1e-9);
 
     // Halt acknowledges the fault.
+    driver->halt();
+    CHECK_FALSE(driver->get_is_moving());
+    driver->set_connected(false);
+}
+
+// A LIMIT refusal is logged below WARNING because a client's move can cause it (decision 0007
+// rule 9); NP is a hardware fault and stays a warning.
+// Falsified by: monitor_move ignoring the NP/LIMIT check leaves the bytes in
+// carry until the 5 s budget ends, and IsMoving reports the check-DC-power text.
+TEST_CASE("WandererAstro Rotator Driver - NP and LIMIT replies end the move with a named fault",
+          "[wandererastro][rotator][unit]") {
+    const auto [reply, cause, warns] =
+        GENERATE(table<std::string, std::string, bool>({{"NP\n", "motor power", true}, {"LIMIT\n", "limit", false}}));
+    std::atomic<bool> warned{false};
+    const auto previous_sink = alpacacore::logging::get_log_sink();
+    alpacacore::logging::set_log_sink([&warned, cause = cause](auto level, auto, auto message) {
+        if (level >= alpacacore::logging::LogLevel::Warn && message.find(cause) != std::string_view::npos) {
+            warned = true;
+        }
+    });
+    const std::shared_ptr<void> restore_sink(nullptr, [&](void*) { alpacacore::logging::set_log_sink(previous_sink); });
+    SilentMotorRotator fake(reply);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
+    driver->set_connected(true);
+    const double start = driver->get_position();
+
+    const auto began = std::chrono::steady_clock::now();
+    driver->move_absolute(0.001);
+    std::string fault;
+    while (fault.empty() && std::chrono::steady_clock::now() - began < std::chrono::seconds(4)) {
+        try {
+            (void)driver->get_is_moving();
+        } catch (const alpacacore::AlpacaException& e) {
+            REQUIRE(e.error_code() == alpacacore::AlpacaError::DriverException);
+            fault = e.what();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    // Inside 4 s, so before the 5 s no-report budget could have run out.
+    INFO(fault);
+    REQUIRE(fault.find(cause) != std::string::npos);
+    CHECK(std::abs(driver->get_position() - start) < 1e-9);
+    CHECK(warned.load() == warns);
+
+    // The fault stays on the operation until it is acknowledged.
+    require_alpaca_error([&]() { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::DriverException);
     driver->halt();
     CHECK_FALSE(driver->get_is_moving());
     driver->set_connected(false);

@@ -94,7 +94,7 @@ author must do. Read the docstring before changing a gate.
   Tier 3 faults a fake after a camera, telescope, focuser, rotator or filter wheel operation has started
   and requires that failure after start is never a clean completion; every such tier-2 host needs a
   tier-3 recipe with a `recover`, which a guard case checks.
-- **Duplication** (`scripts/check_duplication.py`, the `duplication` job): PMD CPD 7.7.0 over the
+- **Duplication** (`scripts/check_duplication.py`, the `duplication` job): PMD CPD 7.29.0 over the
   authored C++ trees fails when the duplicated-line share is above `MAX_DUPLICATED_LINE_SHARE`. A line
   covered by several duplications counts once. A PR that removes duplication lowers the constant;
   never raise it. The pre-flight gate skips with `[SKIP] duplication (no java)` and never installs a JRE.
