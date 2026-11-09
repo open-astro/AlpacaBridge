@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/util/rotator_sync_offset_store.h>
 #include <alpacacore/util/unique_id.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
@@ -24,6 +25,7 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -256,12 +258,23 @@ TEST_CASE("WandererAstro Rotator Driver - No completion report keeps Position an
     driver->set_connected(false);
 }
 
+// A LIMIT refusal is logged below WARNING because a client's move can cause it (decision 0007
+// rule 9); NP is a hardware fault and stays a warning.
 // Falsified by: monitor_move ignoring the NP/LIMIT check leaves the bytes in
 // carry until the 5 s budget ends, and IsMoving reports the check-DC-power text.
 TEST_CASE("WandererAstro Rotator Driver - NP and LIMIT replies end the move with a named fault",
           "[wandererastro][rotator][unit]") {
-    const auto [reply, cause] =
-        GENERATE(table<std::string, std::string>({{"NP\n", "motor power"}, {"LIMIT\n", "limit"}}));
+    const auto [reply, cause, warns] = GENERATE(
+        table<std::string, std::string, bool>({{"NP\n", "motor power", true}, {"LIMIT\n", "limit", false}}));
+    std::atomic<bool> warned{false};
+    const auto previous_sink = alpacacore::logging::get_log_sink();
+    alpacacore::logging::set_log_sink([&warned, cause = cause](auto level, auto, auto message) {
+        if (level >= alpacacore::logging::LogLevel::Warn && message.find(cause) != std::string_view::npos) {
+            warned = true;
+        }
+    });
+    const std::shared_ptr<void> restore_sink(nullptr,
+                                             [&](void*) { alpacacore::logging::set_log_sink(previous_sink); });
     SilentMotorRotator fake(reply);
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
     driver->set_connected(true);
@@ -283,6 +296,7 @@ TEST_CASE("WandererAstro Rotator Driver - NP and LIMIT replies end the move with
     INFO(fault);
     REQUIRE(fault.find(cause) != std::string::npos);
     CHECK(std::abs(driver->get_position() - start) < 1e-9);
+    CHECK(warned.load() == warns);
 
     // The fault stays on the operation until it is acknowledged.
     require_alpaca_error([&]() { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::DriverException);

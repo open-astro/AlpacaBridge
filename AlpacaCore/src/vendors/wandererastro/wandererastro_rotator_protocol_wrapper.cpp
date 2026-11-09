@@ -377,7 +377,7 @@ public:
                                   AlpacaError::NotConnected);
         }
         if (handshake->firmware < kRotatorMiniLatestFirmware) {
-            ALPACA_LOG_WARN("WandererAstro", "WandererRotator firmware " + std::to_string(handshake->firmware) +
+            ALPACA_LOG_INFO("WandererAstro", "WandererRotator firmware " + std::to_string(handshake->firmware) +
                                                  " is older than the latest release " +
                                                  std::to_string(kRotatorMiniLatestFirmware) +
                                                  "; WandererAstro's Firmware Upgrade Tool updates it");
@@ -645,11 +645,13 @@ private:
             if (reply.rfind("NP", 0) == 0) {
                 move_fault = "WandererRotator reported no motor power (NP); check the DC power supply." +
                              std::string(kMoveFaultPositionNote);
+                ALPACA_LOG_WARN("WandererAstro", move_fault);
                 break;
             }
             if (reply.rfind("LIMIT", 0) == 0) {
                 move_fault = "WandererRotator refused the move: position limit reached (LIMIT)." +
                              std::string(kMoveFaultPositionNote);
+                ALPACA_LOG_INFO("WandererAstro", move_fault);  // a client's target can cause this (0007 rule 9)
                 break;
             }
             if (token.has_value() && !token->empty()) {
@@ -671,7 +673,6 @@ private:
         std::lock_guard<std::mutex> state_lock(state_mutex_);
         if (!move_fault.empty()) {
             state_.move_fault = move_fault;
-            ALPACA_LOG_WARN("WandererAstro", move_fault);
         } else if (last_token.has_value()) {
             // Completion-report semantics differ by firmware generation
             // (verified on real Mini V2 hardware, ConformU 2026-07-23):

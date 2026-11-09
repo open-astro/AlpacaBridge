@@ -5,7 +5,7 @@
 - **INDI review baselines advanced** (tooling), issues #2198 and #2197: the AM5 and OnStep driver changes add no protocol the AlpacaBridge drivers depend on.
 
 ### Fixed
-- **WandererRotator: a move refused by the firmware ends at once with a named fault** (AlpacaCore), issue #1960: a bare `NP` or `LIMIT` reply now makes `IsMoving` report no motor power or a position limit instead of waiting out the budget and blaming a missing completion report. Firmware older than 20261025 draws a warning at connect.
+- **WandererRotator: a move refused by the firmware ends at once with a named fault** (AlpacaCore), issue #1960: a bare `NP` or `LIMIT` reply now makes `IsMoving` report no motor power or a position limit instead of waiting out the budget and blaming a missing completion report. Firmware older than 20261025 is noted in the log at connect.
 
 ### Added (tests)
 - **WandererRotator NP and LIMIT replies** (issue #1960): one test case over both replies.
