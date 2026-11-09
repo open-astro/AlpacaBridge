@@ -59,6 +59,18 @@ inline void require_error_code(const std::function<void()>& fn, int expected_cod
 inline void require_last_exposure_unset(const CameraDriver& camera) {
     require_error_code([&] { (void)camera.get_last_exposure_duration(); }, AlpacaError::InvalidOperation);
     require_error_code([&] { (void)camera.get_last_exposure_start_time(); }, AlpacaError::InvalidOperation);
+    // The router logs an asked-too-early answer at DEBUG, not ERROR (issue #2182).
+    for (const bool start_time : {false, true}) {
+        try {
+            if (start_time) {
+                (void)camera.get_last_exposure_start_time();
+            } else {
+                (void)camera.get_last_exposure_duration();
+            }
+        } catch (const AlpacaException& ex) {
+            CHECK(ex.is_asked_too_early());
+        }
+    }
 }
 
 // CameraState is not Exposing: the GET path raises InvalidOperation and DeviceState omits the member.

@@ -605,7 +605,7 @@ private:
 
     double last_exposure_duration_locked() const {
         if (!last_exposure_duration_) {
-            throw AlpacaException("No image has been successfully acquired yet", AlpacaError::InvalidOperation);
+            throw AlpacaException::asked_too_early("No image has been successfully acquired yet");
         }
         return *last_exposure_duration_;
     }
