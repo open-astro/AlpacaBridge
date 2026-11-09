@@ -24,6 +24,7 @@
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_playerone_sdk.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -107,10 +108,10 @@ TEST_CASE("Player One Switch Driver - Unsupported actions", "[playerone][switch]
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
 
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->command_bool("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->command_string("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("Player One Switch Driver - Invalid Switch ID", "[playerone][switch][unit]") {
@@ -342,14 +343,16 @@ struct FakeThermalSdk final : alpacacore::vendor::playerone::PlayerOneThermalSdk
     }
 };
 
-void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
+// Past the driver's 100 ms status TTL on the fake clock.
+void advance_past_status_ttl(alpacacore::test::FakeTaskClock& clock) { clock.advance(std::chrono::milliseconds(150)); }
 
 }  // namespace
 
 TEST_CASE("Player One Switch Driver - DeviceState reads the camera once per status frame",
           "[playerone][switch][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeThermalSdk sdk;
-    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
@@ -364,7 +367,7 @@ TEST_CASE("Player One Switch Driver - DeviceState reads the camera once per stat
     CHECK_FALSE(state.empty());
     CHECK(sdk.reads == after_values);
 
-    wait_past_status_ttl();
+    advance_past_status_ttl(clock);
     (void)driver->get_device_state();
     CHECK(sdk.reads == after_values + 2);
 }
@@ -402,15 +405,17 @@ TEST_CASE("Player One Switch Driver - a write and a reconnect drop the cached fr
 }
 
 TEST_CASE("Player One Switch Driver - a dead link is not served from the cache", "[playerone][switch][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
     FakeThermalSdk sdk;
-    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk, clock);
     driver->set_connected(true);
     CHECK(driver->get_switch_value(0) == 40.0);
 
     sdk.fail_reads = true;
-    wait_past_status_ttl();
+    advance_past_status_ttl(clock);
     for (int i = 0; i < 3; ++i) {
-        CHECK_THROWS_AS(driver->get_switch_value(0), alpacacore::AlpacaException);
+        // Two raw SDK failures, then the latch: all DriverException.
+        require_alpaca_error([&] { (void)driver->get_switch_value(0); }, alpacacore::AlpacaError::DriverException);
     }
     // Latched: the error names the compromised link, and the old frame is gone.
     try {
@@ -438,7 +443,7 @@ TEST_CASE("Player One Switch Driver - no-I/O getters do not wait behind the conn
     CHECK_FALSE(driver->get_unique_id().empty());
     CHECK(driver->get_max_switch() == 2);
     CHECK_FALSE(driver->get_connected());
-    CHECK_THROWS_AS(driver->get_switch_name(5), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_switch_name(5); }, alpacacore::AlpacaError::InvalidValue);
     CHECK(Clock::now() - start < std::chrono::milliseconds(20));
 
     connect.join();

@@ -1156,6 +1156,7 @@ public:
             );
         }
         site_elevation_m_ = elevation;
+        ++site_elevation_write_generation_;  // the background clock sync must not publish over this write
     }
     
     double get_site_latitude() const override {
@@ -1175,6 +1176,7 @@ public:
         protocol.set_hemisphere(latitude >= 0.0);
         site_latitude_cached_ = latitude;
         hemisphere_north_ = (latitude >= 0.0);
+        ++site_latitude_write_generation_;  // the background clock sync must not publish over this write
         site_info_valid_ = true;
         last_site_info_fetch_ = clock_.now();
     }
@@ -1194,6 +1196,7 @@ public:
         const Wire protocol = wire();
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
+        ++site_longitude_write_generation_;  // the background clock sync must not publish over this write
         site_info_valid_ = true;
         last_site_info_fetch_ = clock_.now();
     }
@@ -1287,7 +1290,8 @@ public:
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
         // goto failed.
-        const DriverMotion motion = slew_in_progress_ ? DriverMotion::Goto : driver_motion_;
+        // A GOTO a status refresh already saw stopped is finished (issue #2063), not driver motion.
+        const DriverMotion motion = (slew_in_progress_ && !goto_seen_stopped_) ? DriverMotion::Goto : driver_motion_;
         supersede_slew_dispatch_locked();
         clear_slew_hold_locked();  // MoveAxis starts no GOTO: Slewing follows the axis flags and the mount
         // open-astro#843: :qR#/:qD# stop arrow motion only ("other slewing and tracking are not affected",
@@ -1356,7 +1360,8 @@ public:
                     // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
                     // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
                     // dispatching and no Park/FindHome still moving (driver_motion_).
-                    return !(pulse_window_open() && !slew_in_progress_ && driver_motion_ == DriverMotion::None);
+                    return !(pulse_window_open() && (!slew_in_progress_ || goto_seen_stopped_) &&
+                             driver_motion_ == DriverMotion::None);
                 }
                 // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
                 // compensating sidereal motion during its final ~1 s approach, so
@@ -1368,6 +1373,10 @@ public:
                 // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
                 // on this firmware and Dec pulse polarity flips with pier side.
                 // Slewing stays true while a trim pulse runs.
+                // Issue #2063: the client's pulse takes over from the trim of a GOTO the mount already finished.
+                if (pulse_window_open() && goto_seen_stopped_) {
+                    return false;
+                }
                 if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
                     // The trim reads the position itself. Under the state lock alone (the slew hold closed
                     // between the freshness check and the read of `now` above) the refused exchange would be
@@ -1414,6 +1423,7 @@ public:
                                                            " ms, final-approach firmware quirk)");
                             send_with_slew_hold_locked(std::chrono::milliseconds(duration_ms + 500),
                                                        [&] { protocol.pulse_guide(direction, duration_ms); });
+                            goto_seen_stopped_ = false;  // the trim pulse is part of the GOTO: Slewing stays true
                             status_cache_valid_ = false;
                             position_cache_valid_ = false;
                             return true;
@@ -1531,6 +1541,7 @@ public:
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         protocol.set_utc_time(utc);
         utc_offset_.set(utc, clock_.now());
+        ++utc_write_generation_;  // the background clock sync must not publish over this write
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("iOptron", client_minus_host, client_disagreement_warned_);
@@ -1706,6 +1717,11 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         ensure_not_parked_fast_locked("PulseGuide");
+        // Issue #2063: a GOTO nobody polled is still flagged here. Ask the mount before the pulse starts, while its
+        // status is still the GOTO's: the pulse itself makes the firmware report slewing.
+        if (slew_in_progress_ && !goto_seen_stopped_ && !slew_hold_.active(clock_.now())) {
+            refresh_status_cache_locked(/*force=*/true);
+        }
 
         const Wire protocol = wire();
         int calibrated_direction = direction;
@@ -1937,6 +1953,7 @@ public:
             supersede_slew_dispatch_locked();
             generation = slew_operation_generation_;
             slew_in_progress_ = true;
+            goto_seen_stopped_ = false;
             // Same reason as prepare_slew_state_locked(): Slewing must read
             // true from the moment this initiator returns, not from when the
             // dispatch body gets the mutex.
@@ -2406,6 +2423,7 @@ private:
         target_ra_set_ = true;
         target_dec_set_ = true;
         slew_in_progress_ = true;
+        goto_seen_stopped_ = false;
         slew_target_ra_hours_ = phys_ra;
         slew_target_dec_degrees_ = phys_dec;
         slew_refine_count_ = 0;
@@ -2474,6 +2492,7 @@ private:
             // Decision 0022 rule 2: re-armed before the :MS1# goes out, so the window runs from the GOTO itself
             // and not from an initiator whose body waited for mutex_.
             slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
+            goto_seen_stopped_ = false;  // a stop seen while the body waited predates this GOTO
             accepted = protocol.slew_to_ra_dec();
             if (!accepted) {
                 accepted = protocol.slew_to_ra_dec_cw_up();
@@ -2648,12 +2667,19 @@ private:
         if (reached_home || (!cached_status_.is_slewing && !slew_hold_.active(now))) {
             driver_motion_ = DriverMotion::None;
         }
+        // Issue #2063: a status that shows the mount stopped past the dispatch window ends the GOTO for the
+        // PulseGuide mask and MoveAxis even if no client reads Slewing. slew_in_progress_ stays for get_slewing(),
+        // which still runs the settle trim and clears it.
+        if (!cached_status_.is_slewing && !slew_hold_.active(now)) {
+            goto_seen_stopped_ = true;
+        }
     }
 
     // See park(): once an :MP1# park has physically arrived, some firmware
     // (HAE29C) stays wedged in "slewing" until tracking is explicitly turned
     // off. Runs after every fresh status fetch; best-effort — a failure here
-    // just retries on the next refresh.
+    // just retries on the next refresh. Known limit: while the finalizer keeps failing the mount stays
+    // "slewing", so driver_motion_ stays Park until Unpark or AbortSlew (conservative: Slewing stays true).
     void finalize_wedged_park_locked() const {
         if (!park_finalize_pending_) {
             return;
@@ -3011,6 +3037,8 @@ private:
         std::optional<double> lat, lon;
         std::optional<int> elev;
         bool do_clock_sync = false;
+        // Client write generations seen with our own write (start snapshot, then the successful send).
+        uint64_t lat_generation = 0, lon_generation = 0, elev_generation = 0;
         {
             StateLock lock(lock_gate_, StateLock::Mode::State);
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
@@ -3020,6 +3048,9 @@ private:
             lon = pending_site_longitude_;
             elev = pending_site_elevation_;
             do_clock_sync = sync_time_on_connect_;
+            lat_generation = site_latitude_write_generation_;
+            lon_generation = site_longitude_write_generation_;
+            elev_generation = site_elevation_write_generation_;
         }
 
         // Each command takes the operation lock and the state lock for itself, like a client's command, and
@@ -3032,20 +3063,35 @@ private:
 
         if (lat.has_value()) {
             double latitude = lat.value();
-            retry_mount_command("site latitude", [&]() { exchange([&] { protocol.set_latitude(latitude); }); }, &ctx);
+            retry_mount_command(
+                "site latitude",
+                [&]() {
+                    exchange([&] {
+                        protocol.set_latitude(latitude);
+                        lat_generation = site_latitude_write_generation_;
+                    });
+                },
+                &ctx);
             retry_mount_command(
                 "hemisphere", [&]() { exchange([&] { protocol.set_hemisphere(latitude >= 0.0); }); }, &ctx);
         }
         if (lon.has_value()) {
             double longitude = lon.value();
             retry_mount_command(
-                "site longitude", [&]() { exchange([&] { protocol.set_longitude(longitude); }); }, &ctx);
+                "site longitude",
+                [&]() {
+                    exchange([&] {
+                        protocol.set_longitude(longitude);
+                        lon_generation = site_longitude_write_generation_;
+                    });
+                },
+                &ctx);
         }
 
         util::UtcOffset synced_time;
+        uint64_t synced_generation = 0;
         if (do_clock_sync) {
             auto tz_info = compute_local_timezone_info();
-            auto now_utc = std::chrono::system_clock::now();
             retry_mount_command(
                 "timezone offset", [&]() { exchange([&] { protocol.set_timezone_offset(tz_info.offset_minutes); }); },
                 &ctx);
@@ -3055,31 +3101,37 @@ private:
                 "UTC clock",
                 [&]() {
                     exchange([&] {
+                        if (clock_sync_utc_hook_) clock_sync_utc_hook_(false);
+                        // Fresh host time for each send attempt: a retry must not send the first attempt's time.
+                        const auto now_utc = std::chrono::system_clock::now();
                         const auto sent_at = clock_.now();
                         protocol.set_utc_time(now_utc);
                         synced_time.set(now_utc, sent_at);
+                        synced_generation = utc_write_generation_;
                     });
                 },
                 &ctx);
         }
+        if (clock_sync_utc_hook_) clock_sync_utc_hook_(true);
 
         {
             StateLock lock(lock_gate_, StateLock::Mode::State);
             if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                 return;
             }
-            if (lat.has_value()) {
+            // A client site write after our own send is later on the wire, so it keeps its value.
+            if (lat.has_value() && lat_generation == site_latitude_write_generation_) {
                 site_latitude_cached_ = lat.value();
                 hemisphere_north_ = (lat.value() >= 0.0);
                 site_info_valid_ = true;
                 last_site_info_fetch_ = clock_.now();
             }
-            if (lon.has_value()) {
+            if (lon.has_value() && lon_generation == site_longitude_write_generation_) {
                 site_longitude_cached_ = lon.value();
                 site_info_valid_ = true;
                 last_site_info_fetch_ = clock_.now();
             }
-            if (elev.has_value()) {
+            if (elev.has_value() && elev_generation == site_elevation_write_generation_) {
                 site_elevation_m_ = elev.value();
             }
             if (do_clock_sync) {
@@ -3087,7 +3139,8 @@ private:
                 timezone_offset_minutes_ = tz_info.offset_minutes;
                 timezone_offset_valid_ = true;
                 dst_observed_ = tz_info.dst_active;
-                if (synced_time.valid()) utc_offset_ = synced_time;
+                // A client UTCDate write after our :SUT is later on the wire, so it keeps the anchor.
+                if (synced_time.valid() && synced_generation == utc_write_generation_) utc_offset_ = synced_time;
             }
         }
     }
@@ -3174,6 +3227,7 @@ public:
         slew_.set_spawn_for_testing(std::move(spawn));
     }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
+    void set_clock_sync_utc_hook_for_testing(std::function<void(bool)> hook) { clock_sync_utc_hook_ = std::move(hook); }
     void start_clock_sync_for_testing() { start_clock_sync(); }
     std::optional<std::string> clock_sync_failure_for_testing() const { return clock_sync_.last_failure(); }
 
@@ -3393,6 +3447,9 @@ private:
 
     mutable util::UtcOffset utc_offset_;
     mutable bool slew_in_progress_ = false;
+    // Under mutex_: a fresh status showed the mount stopped while slew_in_progress_ was still set (nobody read
+    // Slewing). Reset by every GOTO initiator, by dispatch_slew_command_locked() and by a settle trim dispatch.
+    mutable bool goto_seen_stopped_ = false;
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those), or
     // from a GOTO whose dispatch a MoveAxis superseded: keeps get_slewing() true when a PulseGuide
     // arrives mid-motion. Set by park()/find_home() and move_axis(), cleared by
@@ -3438,6 +3495,14 @@ private:
     std::mutex clock_sync_reap_mutex_;
     // Test seam, set before connect: runs on the clock-sync body after its start delay.
     std::function<void()> clock_sync_test_hook_;
+    // Test hook: called with false before each :SUT send attempt (operation lock held), true after the sends.
+    std::function<void(bool)> clock_sync_utc_hook_;
+    // Bumped by every client UTCDate write (under the operation lock); the clock sync compares it at publication.
+    uint64_t utc_write_generation_ = 0;
+    // Bumped by each client site write (under mutex_), compared like utc_write_generation_; one per field.
+    uint64_t site_latitude_write_generation_ = 0;
+    uint64_t site_longitude_write_generation_ = 0;
+    uint64_t site_elevation_write_generation_ = 0;
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
@@ -3630,6 +3695,12 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_clock_sync_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_clock_sync_utc_hook_for_testing(TelescopeDriver& driver, std::function<void(bool)> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_clock_sync_utc_hook_for_testing(std::move(hook));
     }
 }
 

@@ -12,7 +12,10 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -101,7 +104,9 @@ std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms = 25000);
  */
 class Cfw3ProtocolWrapper {
 public:
-    Cfw3ProtocolWrapper();
+    /// The link-loss stamp (decision 0005 rule 6) reads @p clock; tests pass a FakeTaskClock.
+    /// Read timeouts and the move deadline stay on steady_clock.
+    explicit Cfw3ProtocolWrapper(util::TaskClock& clock = util::default_task_clock());
     ~Cfw3ProtocolWrapper();
 
     Cfw3ProtocolWrapper(const Cfw3ProtocolWrapper&) = delete;
@@ -130,6 +135,12 @@ public:
      * NotConnected until a new connect(). Lock-free.
      */
     bool link_alive() const noexcept;
+
+    /** @brief Why the link was lost (one text); empty until a loss, cleared by connect() and disconnect(). */
+    std::string link_fault() const;
+
+    /** @brief When the link was lost (stamped once per outage), read and cleared; nullopt after a clean disconnect. */
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
 
     /** @brief "NOW" -> current slot, 0-based. */
     int get_position();

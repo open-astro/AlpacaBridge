@@ -16,8 +16,10 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
 
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace alpacacore::vendor::qhy {
@@ -74,5 +76,8 @@ std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int devi
 
 /// Test seam: runs hook inside get_position(), after its connection check and before it takes the state lock.
 void set_position_read_gap_hook_for_testing(FilterWheelDriver& driver, std::function<void()> hook);
+
+/// Test seam: reads and clears the loss stamp (decision 0009 point 3); nullopt when no loss was stamped.
+std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at_for_testing(FilterWheelDriver& driver);
 
 }  // namespace alpacacore::vendor::qhy

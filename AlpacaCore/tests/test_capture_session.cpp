@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
@@ -46,6 +47,7 @@ using alpacacore::AlpacaException;
 using alpacacore::CameraState;
 using alpacacore::ImageArray;
 using alpacacore::test::FakeTaskClock;
+using alpacacore::test::require_alpaca_error;
 using alpacacore::util::CaptureControl;
 using alpacacore::util::CaptureSession;
 using alpacacore::util::StopReason;
@@ -1078,8 +1080,9 @@ TEST_CASE("CaptureSession - a refused body thread rolls the start back and the n
         CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
     }
     SECTION("bad_alloc") {
+        // The slot reports an allocation failure as DriverException, like EAGAIN (#2084).
         h.session->set_spawn_for_testing([](std::function<void()>) -> std::thread { throw std::bad_alloc(); });
-        CHECK_THROWS_AS(h.session->start(1.0, polling_body(p)), std::bad_alloc);
+        CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
     }
     CHECK_FALSE(h.session->busy());
     CHECK(h.session->image_ready());  // the earlier frame, not Exposing
@@ -1326,7 +1329,8 @@ TEST_CASE("CaptureSession - begin_stop marks the body that owns the exposure, re
     auto u = std::make_shared<Probe>();
     h.session->start(10.0, polling_body(u));
     REQUIRE(eventually([&] { return u->entered.load(); }));
-    CHECK_THROWS_AS(h.session->start(1.0, instant_body(std::make_shared<Probe>(), 8)), AlpacaException);
+    require_alpaca_error([&] { h.session->start(1.0, instant_body(std::make_shared<Probe>(), 8)); },
+                         AlpacaError::InvalidOperation);
     const std::uint64_t fourth = h.session->begin_stop();
     CHECK(fourth != 0);
     CHECK(fourth != second);

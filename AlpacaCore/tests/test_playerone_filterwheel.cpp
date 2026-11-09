@@ -494,7 +494,7 @@ TEST_CASE("Player One PW Filter Wheel Driver - a failed set_position invalidates
     const int before = fake.call_count("get_position");
 
     fake.fail_next("goto_position");
-    CHECK_THROWS_AS(driver->set_position(3), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_position(3); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_position() == 0);
     CHECK(fake.call_count("get_position") == before + 1);
     driver->set_connected(false);
@@ -531,7 +531,7 @@ TEST_CASE("Player One PW Filter Wheel Driver - a failed connect leaves the pre-c
     alpacacore::test::FakePlayerOnePWSDK fake;
     auto driver = create_playerone_filterwheel(0, 0, fake);
     fake.fail_next("open_wheel");
-    REQUIRE_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_name() == "Player One Phoenix Wheel");
     CHECK_NOTHROW(driver->set_names({"A", "B", "C"}));

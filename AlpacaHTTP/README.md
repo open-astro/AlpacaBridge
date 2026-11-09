@@ -37,7 +37,6 @@ cmake --build . --clean-first --parallel
 ### Build Options
 
 - `ALPACAHTTP_BUILD_TESTS`: Enable test suite (default: ON)
-- `ALPACAHTTP_ENABLE_DISCOVERY`: Enable Alpaca Discovery (default: ON)
 
 ## Configuration
 

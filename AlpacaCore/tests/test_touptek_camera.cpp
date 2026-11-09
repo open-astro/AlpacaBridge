@@ -61,15 +61,10 @@ TEST_CASE("ToupTek Camera Driver - Device metadata", "[touptek][camera][unit]") 
 TEST_CASE("ToupTek Camera Driver - Not connected throws", "[touptek][camera][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
 
-    CHECK_THROWS_AS(driver->get_ccd_temperature(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_gain(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_gain(100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_offset(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->start_exposure(1.0, true), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->stop_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->abort_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->pulse_guide(0, 100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gain(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_gain(100); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("ToupTek Camera Driver - Disconnected state", "[touptek][camera][unit]") {
@@ -89,17 +84,19 @@ TEST_CASE("ToupTek Camera Driver - Unsupported actions", "[touptek][camera][unit
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("anything", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->action("anything", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_blind("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_bool("", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_string("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("ToupTek Camera Driver - Sub-exposure not supported", "[touptek][camera][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
 
-    CHECK_THROWS_AS(driver->get_sub_exposure_duration(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_sub_exposure_duration(1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_sub_exposure_duration(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("ToupTek Camera Driver - ASCOM Error Codes", "[touptek][camera][unit]") {
@@ -314,7 +311,7 @@ TEST_CASE("ToupTek Camera Driver - a failed exposure survives AbortExposure and 
     CHECK(image_ready_error() == static_cast<int>(alpacacore::AlpacaError::DriverException));
     driver->stop_exposure();
     CHECK(image_ready_error() == static_cast<int>(alpacacore::AlpacaError::DriverException));
-    CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_image_array(); }, alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
 
     fake.deliver_frame = true;

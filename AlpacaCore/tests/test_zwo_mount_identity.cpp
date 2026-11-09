@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 #include "pty_responder.h"
@@ -37,6 +38,7 @@ namespace {
 using namespace std::chrono_literals;
 using namespace alpacacore;
 using namespace alpacacore::vendor::zwo;
+using alpacacore::test::require_alpaca_error;
 
 bool eventually(const std::function<bool()>& predicate) {
     const auto deadline = std::chrono::steady_clock::now() + 5s;
@@ -226,7 +228,7 @@ TEST_CASE("ZWO mount identity rejects malformed foreign and incomplete replies",
         rig.set_identity(reply);
         ZWOMountProtocolWrapper protocol;
         REQUIRE(protocol.connect(rig.info()));
-        CHECK_THROWS_AS(protocol.get_mount_info(), AlpacaException);
+        require_alpaca_error([&] { (void)protocol.get_mount_info(); }, AlpacaError::DriverException);
         protocol.disconnect();
     }
 }
@@ -268,7 +270,7 @@ TEST_CASE("ZWO refused identity leaves no writes and permits corrected endpoint 
         REQUIRE(eventually([&] { return !driver->get_connecting(); }));
         CHECK_FALSE(driver->get_last_connect_error().empty());
     } else {
-        CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+        require_alpaca_error([&] { driver->set_connected(true); }, AlpacaError::DriverException);
     }
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_device_state().empty());
@@ -396,7 +398,7 @@ TEST_CASE("ZWO lost link reprobes identity but redundant Connected true does not
     rig.tick();
     REQUIRE(eventually([&] { return !rig.driver->get_connected(); }));
     const auto before = rig.received().size();
-    CHECK_THROWS_AS(rig.driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { rig.driver->set_connected(true); }, AlpacaError::DriverException);
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.probes() == 2);
     const auto after = rig.received();
@@ -638,7 +640,7 @@ TEST_CASE("ZWO mount serial identity requires a fresh normalized twelve-hex repl
                               "01234 5ABCDE#", "012345\rABCDEF#", "012345\nABCDEF#", "012345ABCDEF", ""}) {
         CAPTURE(reply);
         rig.set_serial(reply);
-        CHECK_THROWS_AS(protocol.get_mount_serial_number(), AlpacaException);
+        require_alpaca_error([&] { (void)protocol.get_mount_serial_number(); }, AlpacaError::DriverException);
     }
 }
 
@@ -710,7 +712,7 @@ TEST_CASE("ZWO unavailable serial identity refuses before writes and permits ret
         REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
         CHECK_FALSE(rig.driver->get_last_connect_error().empty());
     } else {
-        CHECK_THROWS_AS(rig.driver->set_connected(true), AlpacaException);
+        require_alpaca_error([&] { rig.driver->set_connected(true); }, AlpacaError::DriverException);
     }
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.driver->get_device_state().empty());
@@ -751,7 +753,7 @@ TEST_CASE("ZWO duplicate mount identity refuses before configuration and permits
     automatic.claim("012345ABCDEF", true, 7);
     rig.make_driver(rig.info(), true);
     rig.set_serial("012345abcdef#");
-    CHECK_THROWS_AS(rig.driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { rig.driver->set_connected(true); }, AlpacaError::DriverException);
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.received() == std::vector<std::string>{":GVP#", ":GMA#"});
     automatic.reset();
@@ -766,7 +768,7 @@ TEST_CASE("ZWO mount identity claims release on disconnect loss and destruction"
     rig.make_driver(rig.info());
     rig.driver->set_connected(true);
     MountIdentityClaim automatic;
-    CHECK_THROWS_AS(automatic.claim("012345ABCDEF", true, 9), AlpacaException);
+    require_alpaca_error([&] { automatic.claim("012345ABCDEF", true, 9); }, AlpacaError::DriverException);
     SECTION("disconnect") { rig.driver->set_connected(false); }
     SECTION("transport loss") {
         REQUIRE(rig.server.drop_connections());
@@ -786,9 +788,9 @@ TEST_CASE("ZWO identity I/O fence rejects an older admitted call on an unverifie
     for (int session = 0; session < 2; ++session) {
         CAPTURE(session);
         const auto before = rig.received();
-        CHECK_THROWS_AS(protocol.send_command(":Sguard"), AlpacaException);
-        CHECK_THROWS_AS(protocol.send_command(":GVP#:Sguard#"), AlpacaException);
-        CHECK_THROWS_AS(protocol.send_command_blind(":Q"), AlpacaException);
+        require_alpaca_error([&] { (void)protocol.send_command(":Sguard"); }, AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)protocol.send_command(":GVP#:Sguard#"); }, AlpacaError::NotConnected);
+        require_alpaca_error([&] { protocol.send_command_blind(":Q"); }, AlpacaError::NotConnected);
         CHECK(rig.received() == before);
         CHECK(protocol.get_mount_info() == "AM5N");
         CHECK(protocol.get_mount_serial_number() == "012345ABCDEF");

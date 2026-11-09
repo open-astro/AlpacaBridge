@@ -214,15 +214,16 @@ int main(int argc, char* argv[]) {
     }
 
     // A loop that ended with g_running still true was ended by the server
-    // itself (a restart whose listener could not re-bind, a failed start).
+    // itself (a first bind that failed, a restart whose listener could not
+    // re-bind, a failed start).
     // Nobody asked for this, so exit 1: systemd's Restart=on-failure respawns
     // the service, where a 0 would have left it down for good (#713).
     const bool stop_requested = !g_running;
     int exit_status = 0;
     if (!stop_requested) {
         alpacahttp::util::log_error(
-            "HTTP server stopped without a shutdown request (restart could not re-bind the listener, or the "
-            "listener failed); exiting with status 1 so systemd restarts the service");
+            "HTTP server stopped without a shutdown request (the first bind failed, a restart could not re-bind "
+            "the listener, or the listener failed); exiting with status 1 so systemd restarts the service");
         exit_status = 1;
     }
 

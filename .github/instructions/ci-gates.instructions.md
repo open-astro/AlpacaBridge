@@ -45,7 +45,7 @@ Each gate script's docstring (for timeouts and the nightly job, the workflow fil
 authoritative description of what it enforces; the bullets below hold only what an
 author must do. Read the docstring before changing a gate.
 
-- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF, in a `debian:trixie` container, the distribution AlpacaBridge ships for), `build-vendors-shard` (vendors ON, instrumented for gcov, three shards; each runs every third test through `CTEST_SHARD` in `run_all_tests.sh` and uploads its raw coverage JSON), `build-vendors` (the required check and the review bot's wait name it: passes only when all three shards passed, and merges their coverage into per-component and combined line coverage in the job summary; in the merge queue the shards collect no coverage and this job only checks them), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, run as one Catch2 shard per core in parallel processes, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `static-checks` (one step per gate, each run even after an earlier one fails: `.github/scripts/check-unicode.py`, `scripts/check_docs_drift.py` and the scripts' self-tests, `scripts/check_connect_error_hook.py`, `scripts/check_serial_port_ownership.py`, `scripts/check_layering.py`, `scripts/check_stress_registration.py`, `scripts/check_contract_sweep.py`, `scripts/check_conformu_reports.py` on a PR only, ShellCheck, the `ci_preflight.sh` and `scripts/test_host_setup.sh` self-tests, and `node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- CI (`.github/workflows/ci.yml`) runs on every PR and in the merge queue, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF, in a `debian:trixie` container, the distribution AlpacaBridge ships for), `build-vendors-shard` (vendors ON, instrumented for gcov, three shards; each runs every third test through `CTEST_SHARD` in `run_all_tests.sh` and uploads its raw coverage JSON), `build-vendors` (the required check and the review bot's wait name it: passes only when all three shards passed, and merges their coverage into per-component and combined line coverage in the job summary; in the merge queue the shards collect no coverage and this job only checks them), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, run as one Catch2 shard per core in parallel processes, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `static-checks` (one step per gate, each run even after an earlier one fails: `.github/scripts/check-unicode.py`, `scripts/check_docs_drift.py` and the scripts' self-tests, `scripts/check_connect_error_hook.py`, `scripts/check_serial_port_ownership.py`, `scripts/check_layering.py`, `scripts/check_stress_registration.py`, `scripts/check_contract_sweep.py`, `scripts/check_conformu_reports.py` on a PR only, ShellCheck, the `ci_preflight.sh` and `scripts/test_host_setup.sh` self-tests, and `node --check` and `node --test`), `cppcheck` (changed files), `zizmor` (workflow audit), and `duplication` (PMD CPD duplicated-line ratchet; not a required check yet).
 - **Merge queue** (`main` only): a PR into `main` lands through GitHub's merge queue, which runs
   `ci.yml` on the queued merge commit (`merge_group`) and merges only when the required checks
   pass on it. So a branch never has to be brought up to date with `main` before it merges: never
@@ -58,7 +58,7 @@ author must do. Read the docstring before changing a gate.
   `$GITHUB_BASE_REF`, which a `merge_group` run does not set, so they stay `pull_request` only; a
   job skipped by its `if:` still satisfies a required check. Keep `cancel-in-progress` off for
   `merge_group`, so a run the queue waits on is never cancelled.
-- **PR body gates** (`.github/workflows/pr-body.yml`, not required checks): `falsified-by`
+- **PR body gates** (`.github/workflows/pr-body.yml`, required checks on `main`; every job skips on `merge_group`, because the body was judged on the PR): `falsified-by`
   (`scripts/check_falsified_by.py`, pre-flight gate 2b2) needs a `## Falsified by` line for
   every test case the PR adds or renames (see the [testing rules](testing.instructions.md#new-test-cases-name-their-falsifying-mutation));
   `pr-template` (`scripts/check_pr_template.py`, gate 2b3) needs every `## ` section of
@@ -68,8 +68,8 @@ author must do. Read the docstring before changing a gate.
   `decision-records` (`scripts/check_adr_scope.py`) needs the `## Decision records` section to name
   every record in `docs/decisions/` the PR changes.
   `gh pr create --body` and agents skip GitHub's template fill-in, so write every section.
-- **Decision-record authorization** (`.github/workflows/decision-records.yml`, the `adr-authorization`
-  commit status): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <sha>`
+- **Decision-record authorization** (`.github/workflows/decision-records.yml`, the required `adr-authorization`
+  commit status; `adr-merge-queue.yml` reports that context on the queued merge commit, and never runs on a PR, so a job can't satisfy the check there): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <sha>`
   comment, which holds until a push changes one of the PR's record files; `scripts/check_adr_authorization.py` runs from the default branch, never from the PR. The
   review bot gets the in-scope rules from the default branch's `scripts/check_adr_scope.py --list`, run
   over the base branch's records; when a base with records gives no list, the review does not run. The
@@ -94,8 +94,12 @@ author must do. Read the docstring before changing a gate.
   Tier 3 faults a fake after a camera, telescope, focuser, rotator or filter wheel operation has started
   and requires that failure after start is never a clean completion; every such tier-2 host needs a
   tier-3 recipe with a `recover`, which a guard case checks.
+- **Duplication** (`scripts/check_duplication.py`, the `duplication` job): PMD CPD 7.7.0 over the
+  authored C++ trees fails when the duplicated-line share is above `MAX_DUPLICATED_LINE_SHARE`. A line
+  covered by several duplications counts once. A PR that removes duplication lowers the constant;
+  never raise it. The pre-flight gate skips with `[SKIP] duplication (no java)` and never installs a JRE.
 - **Docs drift** (`scripts/check_docs_drift.py`, a step of the `static-checks` job): its docstring lists all
-  checks. The ones authors trip: bump the `zizmor` version and sha256 in `ci.yml` and
+  checks. The ones authors trip: bump the `zizmor` and the PMD versions and sha256s in `ci.yml` and
   `ci_preflight.sh` together; keep the cppcheck `--suppress` lists identical; give each new CI job id
   a description in parentheses in the roster bullet above; a new `SUPPORTED-DRIVERS.md` vendor
   heading needs its README brand item, the recounted brand word and a

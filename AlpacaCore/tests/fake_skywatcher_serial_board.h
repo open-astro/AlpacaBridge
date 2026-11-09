@@ -390,8 +390,10 @@ private:
                 if (const int latency_ms = latency_ms_.load(); latency_ms > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
                 }
-                pty_write_bounded(pty_.master_fd(), reply, stop_);
+                // Count before the send, as the UDP fake does (#1186, #1755): a client that has
+                // its reply already sees it counted.
                 served_.fetch_add(1);
+                pty_write_bounded(pty_.master_fd(), reply, stop_);
                 std::string straggler;
                 int straggler_ms = 0;
                 {

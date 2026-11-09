@@ -39,6 +39,7 @@ namespace {
 // is still served. The cadence, the #237 fault latch (kFaultThreshold failed
 // polls in a row) and the link-loss rule live in util::PolledState.
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
+constexpr int kConnectProbeTimeoutS = 1;  // per-exchange timeout of the connect-time first poll (#2064)
 constexpr int kFaultThreshold = 3;
 // A failed temperature read can cost the whole serial timeout while holding the
 // wrapper, which Move and Halt would queue behind; ask again after this.
@@ -236,7 +237,12 @@ public:
             state_.reset();
             temperature_retry_at_.reset();
             poll_cancelled_.store(false);
+            // A port that goes silent after the handshake costs one short timeout per exchange, not the
+            // full serial timeout: Connect stays inside the 5 s Connecting budget and a Disconnect waits
+            // behind at most two short exchanges (#2064). Normal polls keep the full timeout.
+            protocol_.set_exchange_timeout_s(kConnectProbeTimeoutS);
             const bool started = state_.start();
+            protocol_.set_exchange_timeout_s(0);
             const bool lost = !protocol_.link_alive();
             if (!started) {
                 state_.stop_and_join();

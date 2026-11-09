@@ -29,6 +29,7 @@
 #include <exception>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -147,10 +148,10 @@ TEST_CASE("OnStep Telescope Driver - Unsupported actions", "[onstep][telescope][
 
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->command_bool("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep Telescope Driver - Device-specific behavior", "[onstep][telescope][unit]") {
@@ -1423,7 +1424,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis stop that cannot be sent still e
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
     REQUIRE(fake.server.drop_connections());
-    CHECK_THROWS_AS(driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::DriverException);
     fake.advance(std::chrono::seconds(14));  // two intervals: no tick may run
     CHECK(resend_warns.count() == 0);
     driver->set_connected(false);
@@ -1445,7 +1446,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent ends its axi
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
     REQUIRE(fake.server.drop_connections());
-    CHECK_THROWS_AS(driver->move_axis(0, -1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->move_axis(0, -1.0); }, alpacacore::AlpacaError::DriverException);
     fake.advance(std::chrono::seconds(14));  // two intervals: no tick may run
     CHECK(resend_warns.count() == 0);
     driver->set_connected(false);
@@ -1467,7 +1468,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent leaves the o
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
     REQUIRE(fake.server.drop_connections());
-    CHECK_THROWS_AS(driver->move_axis(1, 1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->move_axis(1, 1.0); }, alpacacore::AlpacaError::DriverException);
     fake.resend_tick();  // axis 0 is due again
     CHECK(skipped.count() >= 1);
     driver->set_connected(false);
@@ -1589,6 +1590,122 @@ TEST_CASE("OnStep protocol wrapper - :GU# pier side is T/W/o and not the mount-t
     auto tracking_east = status_for("NpET180");
     CHECK(tracking_east.side_of_pier == 0);
     CHECK(tracking_east.is_tracking);
+}
+
+// Falsified by: is_gem reading anything but the uppercase mount-type letter 'E' (#2179).
+TEST_CASE("OnStep protocol wrapper - :GU# mount type E is a German mount", "[onstep][telescope][unit][pierside]") {
+    auto reply = std::make_shared<std::string>();
+    auto reply_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([reply, reply_mutex](const std::string& chunk) {
+        if (chunk.rfind(":GU", 0) == 0) {
+            std::lock_guard<std::mutex> lock(*reply_mutex);
+            return *reply;
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(conn));
+    struct DisconnectOnExit {
+        alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
+        ~DisconnectOnExit() { w.disconnect(); }
+    } disconnect_on_exit{wrapper};
+    const auto is_gem = [&](const std::string& raw) {
+        {
+            std::lock_guard<std::mutex> lock(*reply_mutex);
+            *reply = raw + "#";
+        }
+        return wrapper.get_status().is_gem;
+    };
+
+    CHECK(is_gem("nNpEW180"));
+    CHECK(is_gem("NpET1:0"));
+    CHECK(is_gem("nNPHEo180"));
+    CHECK_FALSE(is_gem("nNpKo180"));  // fork
+    CHECK_FALSE(is_gem("nNpAo180"));  // alt-az
+    CHECK_FALSE(is_gem("nNpLo180"));  // alt-alt
+    CHECK_FALSE(is_gem("Np180"));     // no type sent
+}
+
+// The settings reads are strict: a reply that does not parse is unknown, never a guess (#2179).
+// Falsified by: a parser that takes a prefix ("60x"), an empty reply, or a "<n> N" with another suffix.
+TEST_CASE("OnStep protocol wrapper - the pier-side settings parse strictly", "[onstep][telescope][unit][pierside]") {
+    auto replies = std::make_shared<std::map<std::string, std::string>>();
+    auto reply_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([replies, reply_mutex](const std::string& chunk) {
+        std::lock_guard<std::mutex> lock(*reply_mutex);
+        const auto found = replies->find(chunk.substr(0, 6));
+        return found == replies->end() ? std::string("0#") : found->second;
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(conn));
+    struct DisconnectOnExit {
+        alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
+        ~DisconnectOnExit() { w.disconnect(); }
+    } disconnect_on_exit{wrapper};
+    const auto answer = [&](const std::string& command, const std::string& reply) {
+        std::lock_guard<std::mutex> lock(*reply_mutex);
+        (*replies)[command] = reply;
+    };
+
+    for (const char letter : {'E', 'W', 'B', 'A'}) {
+        answer(":GX96#", std::string(1, letter) + "#");
+        CHECK(wrapper.get_preferred_pier_side() == letter);
+    }
+    for (const char* bad : {"X#", "BB#", "#", "b#", "0#"}) {
+        answer(":GX96#", bad);
+        CHECK_FALSE(wrapper.get_preferred_pier_side().has_value());
+    }
+
+    for (const char* on : {"0#", "1#", "2#"}) {
+        answer(":GX94#", on);
+        CHECK(wrapper.get_pier_flips_enabled() == true);
+    }
+    for (const char* off : {"0 N#", "1 N#", "2 N#"}) {
+        answer(":GX94#", off);
+        CHECK(wrapper.get_pier_flips_enabled() == false);
+    }
+    for (const char* bad : {"3#", "2 X#", "2N#", "2  N#", "#", "x#", "12#"}) {
+        answer(":GX94#", bad);
+        CHECK_FALSE(wrapper.get_pier_flips_enabled().has_value());
+    }
+
+    for (const auto& [reply, expected] : std::vector<std::pair<const char*, int>>{
+             {"60#", 60}, {"0#", 0}, {"-15#", -15}, {"+10#", 10}, {"180#", 180}, {"-180#", -180}}) {
+        answer(":GXE9#", reply);
+        answer(":GXEA#", reply);
+        answer(":GXEe#", reply);
+        answer(":GXEw#", reply);
+        CHECK(wrapper.get_meridian_limit_minutes(true) == expected);
+        CHECK(wrapper.get_meridian_limit_minutes(false) == expected);
+        CHECK(wrapper.get_axis1_limit_degrees(false) == expected);
+        CHECK(wrapper.get_axis1_limit_degrees(true) == expected);
+    }
+    for (const char* bad : {"#", "60x#", "x60#", "6 0#", "-#", "1.5#", "1234567#"}) {
+        answer(":GXE9#", bad);
+        answer(":GXEw#", bad);
+        CHECK_FALSE(wrapper.get_meridian_limit_minutes(true).has_value());
+        CHECK_FALSE(wrapper.get_axis1_limit_degrees(true).has_value());
+    }
+
+    // The flip GOTO reads a bare digit, like :MS#.
+    answer(":MNe#", "0");
+    CHECK(wrapper.goto_current_position_on_side('e') == "0");
+    answer(":MNw#", "6");
+    CHECK(wrapper.goto_current_position_on_side('w') == "6");
+    answer(":MNe#", "");  // no reply: empty, which the driver treats as refused
+    CHECK(wrapper.goto_current_position_on_side('e').empty());
 }
 
 TEST_CASE("OnStep protocol wrapper - a long reply costs no time per character", "[onstep][telescope][unit]") {
@@ -2282,7 +2399,8 @@ TEST_CASE("OnStep Telescope Driver - a GOTO stopped by Park is not resumed as a 
         mount->refuse_code = 12;  // CE_NO_PARK_POSITION_SET, once the GOTO is stopped
         mount->tracking = false;  // the stopped GOTO left tracking off
     }
-    CHECK_THROWS_AS(on_clock(*mount, *driver, [&] { driver->park(); }), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { on_clock(*mount, *driver, [&] { driver->park(); }); },
+                         alpacacore::AlpacaError::InvalidOperation);
     CHECK(mount->first(":Q#") < mount->first(":hP#"));
     REQUIRE_NOTHROW(driver->abort_slew());  // drops the kept refusal
     CHECK_FALSE(driver->get_slewing());     // inside the 2 s slew grace: the stop cleared it
@@ -2478,8 +2596,10 @@ TEST_CASE("OnStep Telescope Driver - a no-op Park or FindHome drops an earlier b
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     start_move(*driver, *mount, 0, 1.0);  // so the park runs in the body
     mount->refuse_code = 21;              // the body's try is refused: hardware fault
-    CHECK_THROWS_AS(on_clock(*mount, *driver, [&] { driver->park(); }), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_slewing(), alpacacore::AlpacaException);  // the kept refusal
+    require_alpaca_error([&]() { on_clock(*mount, *driver, [&] { driver->park(); }); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { (void)driver->get_slewing(); },
+                         alpacacore::AlpacaError::InvalidOperation);  // the kept refusal
 
     SECTION("the mount was parked meanwhile, then Park") {
         {
@@ -2958,8 +3078,8 @@ TEST_CASE("OnStep Telescope Driver - a FindHome refusal met in the background is
     start_move(*driver, *mount, 1, 1.0);
     const auto waits_before = mount->clock.wait_count();
     REQUIRE_NOTHROW(driver->find_home());
-    CHECK_THROWS_AS(settle(*mount, *driver, waits_before), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_at_home(), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { settle(*mount, *driver, waits_before); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { (void)driver->get_at_home(); }, alpacacore::AlpacaError::InvalidOperation);
     CHECK_NOTHROW(driver->get_at_park());
     driver->set_connected(false);
 }

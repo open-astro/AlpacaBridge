@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <mutex>
@@ -75,6 +76,9 @@ static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must under
 constexpr auto kPulseGuideSettle = std::chrono::milliseconds(50);
 constexpr auto kPulseMeasureBound = 2 * kStatusPollPeriod;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
+// The pier-side settings (#2179) are read at connect and again every kPierSettingsEvery-th regular tick, so a
+// preference changed from a handset is followed (a pulse-end tick never lands on it).
+constexpr int kPierSettingsEvery = 10;
 // Decision 0022: Slewing reads true for this long after a GOTO goes out (slew_hold_), so a getter reads true before
 // any :GU# is sampled. Landing never reads the window: it is a :GU# that shows no GOTO, and it clears the window.
 // A stale reading cannot end the slew: a reading and the :MS# share the operation lock, and the dispatch
@@ -204,6 +208,44 @@ struct PolledFrame {
     std::uint64_t sample_seq = 0;
 };
 
+// OnStepX's pier-side settings (#2179), read from the mount: the preferred side letter (E, W, B or A), whether the
+// meridian flips are on, the meridian limits in minutes past the meridian and the RA-axis limits in degrees.
+struct PierSettings {
+    char preference = 'B';
+    bool flips_enabled = true;
+    int east_limit_minutes = 0;
+    int west_limit_minutes = 0;
+    int axis1_min_degrees = 0;
+    int axis1_max_degrees = 0;
+
+    bool operator==(const PierSettings&) const = default;
+
+    util::GemPierPreference model_preference() const {
+        switch (preference) {
+            case 'E':
+                return util::GemPierPreference::East;
+            case 'W':
+                return util::GemPierPreference::West;
+            case 'A':
+                return util::GemPierPreference::Auto;
+            default:
+                return util::GemPierPreference::Best;
+        }
+    }
+
+    util::GemPierLimits model_limits() const {
+        return util::GemPierLimits{east_limit_minutes / 60.0, west_limit_minutes / 60.0,
+                                   static_cast<double>(axis1_min_degrees), static_cast<double>(axis1_max_degrees)};
+    }
+
+    std::string describe() const {
+        return std::string("preferred side ") + preference + (flips_enabled ? ", flips on" : ", flips off") +
+               ", meridian limits " + std::to_string(east_limit_minutes) + "/" + std::to_string(west_limit_minutes) +
+               " min east/west, RA axis " + std::to_string(axis1_min_degrees) + ".." +
+               std::to_string(axis1_max_degrees) + " deg";
+    }
+};
+
 bool same_status(const MountStatus& a, const MountStatus& b) {
     return a.raw_status == b.raw_status && a.is_tracking == b.is_tracking && a.is_slewing == b.is_slewing &&
            a.is_parked == b.is_parked && a.is_at_home == b.is_at_home && a.is_guide_active == b.is_guide_active &&
@@ -280,6 +322,18 @@ private:
         std::optional<int> get_mount_coords_mode() const {
             return call([](auto& p) { return p.get_mount_coords_mode(); });
         }
+        std::optional<char> get_preferred_pier_side() const {
+            return call([](auto& p) { return p.get_preferred_pier_side(); });
+        }
+        std::optional<bool> get_pier_flips_enabled() const {
+            return call([](auto& p) { return p.get_pier_flips_enabled(); });
+        }
+        std::optional<int> get_meridian_limit_minutes(bool east) const {
+            return call([&](auto& p) { return p.get_meridian_limit_minutes(east); });
+        }
+        std::optional<int> get_axis1_limit_degrees(bool maximum) const {
+            return call([&](auto& p) { return p.get_axis1_limit_degrees(maximum); });
+        }
         Position get_position() const {
             return call([](auto& p) { return p.get_position(); });
         }
@@ -297,6 +351,9 @@ private:
         }
         void set_target_dec(double dec_degrees) const {
             call([&](auto& p) { p.set_target_dec(dec_degrees); });
+        }
+        std::string goto_current_position_on_side(char side) const {
+            return call([&](auto& p) { return p.goto_current_position_on_side(side); });
         }
         std::string slew_to_target() const {
             return call([](auto& p) { return p.slew_to_target(); });
@@ -633,13 +690,23 @@ public:
             // OnStepX applies refraction to the RA/Dec it reports unless it was
             // built for observed-place coordinates; :GXEE# says which (#1216).
             refraction_from_firmware_.reset();
-            if (is_onstepx_version(firmware_version)) {
+            pier_settings_.reset();
+            onstepx_ = is_onstepx_version(firmware_version);
+            if (onstepx_) {
                 try {
                     if (const auto mode = protocol.get_mount_coords_mode()) {
                         refraction_from_firmware_ = (*mode != 0);
                     }
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                     // Unknown: DoesRefraction keeps the settable local flag.
+                }
+                // The pier-side settings (#2179): a mount that does not answer them leaves them unknown, which
+                // never fails the connect; SideOfPier then follows the mount's letter and DestinationSideOfPier
+                // the hour-angle rule.
+                try {
+                    refresh_pier_settings_locked(/*at_connect=*/true);
+                } catch (const std::exception& ex) {
+                    ALPACA_LOG_WARN("OnStep", std::string("Pier-side settings unknown: ") + ex.what());
                 }
             }
 
@@ -870,7 +937,13 @@ public:
     bool get_can_set_right_ascension_rate() const override { return false; }
     bool get_can_set_guide_rates() const override { return false; }
     bool get_can_set_park() const override { return true; }
-    bool get_can_set_pier_side() const override { return false; }
+    // True only on OnStepX, on a German mount, with the meridian flips on and a preferred-side letter read from
+    // the mount (#2179): the flip is :MNe#/:MNw#, and its reach check needs the settings. Answers from the
+    // driver's state, no I/O; false while disconnected.
+    bool get_can_set_pier_side() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        return can_set_pier_side_locked();
+    }
     bool get_can_set_tracking() const override { return true; }
     bool get_can_slew_alt_az() const override { return true; }
     bool get_can_slew_alt_az_async() const override { return true; }
@@ -974,23 +1047,22 @@ public:
     int get_side_of_pier() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
-        // Always compute from hour angle — same convention as the project's
-        // other GEM drivers (SynScan/iOptron/Celestron), and the only source
-        // that satisfies ASCOM's SideOfPier contract (a pointing state
-        // defined purely by hour-angle sign). :GU#'s E/W flag (see
-        // .github/instructions/onstep.instructions.md) was tried as the primary source instead,
-        // but ConformU proved it reports the mount's PHYSICAL pier
-        // orientation — which only changes on an actual mechanical meridian
-        // flip — not the ASCOM pointing state: "Reported SideofPier at HA
-        // -9, +9: EE" (constant) instead of the required "WE" (flips with
-        // HA sign), confirmed against real hardware. Do not reintroduce a
-        // firmware-flag-preferred branch here without re-validating against
-        // ConformU's SideofPier/DestinationSideofPier checks.
-        //
-        // The RA is the polled frame's (decision 0010): the hour-angle SIGN this needs tolerates the poll's
-        // second of staleness, and the getter never reaches the mount (an earlier live :GRa#/:GDe# here cost
-        // ConformU's 0.1 s FAST target, #1242). The site the connect or the poll read; without one this refuses,
-        // as the site getters do (#1893).
+        // The mount's own side: the pier-side letter of :GU# ('T' east, 'W' west), from the polled frame (decision
+        // 0010), so the getter never reaches the mount. OnStepX keeps the side it is on past the meridian, up to
+        // its meridian limit, while its preferred side is Best (the default; "BEST stays on current side if
+        // possible", Goto.cpp), so the hour-angle sign says the wrong side there and a client skips its meridian
+        // flip (#2179). The old reason for computing it from the hour angle, ConformU reading "EE" at HA -9 and
+        // +9, was the #1217 misparse: 'E' is the mount-type letter (GEM), not the pier side, and is not read as one.
+        // Only on an OnStepX German mount, the firmware and mount type checked on the rig; a fork or alt-az mount
+        // and OnStep 4.x keep the hour-angle rule.
+        const PolledFrame frame = served_frame_locked();
+        if (onstepx_ && frame.status_known && frame.status.is_gem &&
+            (frame.status.side_of_pier == 0 || frame.status.side_of_pier == 1)) {
+            return frame.status.side_of_pier;
+        }
+        // 'o' (parked or at home: no side), firmware that sends no letter, or a mount outside the gate above: the
+        // hour-angle rule, whose sign
+        // tolerates the frame's second of RA staleness. Without a site this refuses, as the site getters do (#1893).
         const double ra = served_position_locked().ra_hours;
         throw_if_site_unknown_locked("SideOfPier");
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
@@ -998,10 +1070,58 @@ public:
         return util::pier_side_for_hour_angle(hour_angle);
     }
 
+    // The flip (#2179): :MNe#/:MNw# is OnStepX's own GOTO to the current RA/Dec on the east or west side of the
+    // pier. It writes nothing to the mount's settings and does not retarget. At home OnStepX's setTarget
+    // overrides the requested side with the target's hour angle, so a flip while the mount reports no side is
+    // refused here. The call returns once the GOTO is accepted; Slewing reads true until it ends (the ASCOM
+    // async rule).
     void set_side_of_pier(int side) override {
-        (void)side;
-        check_connected_lock_free();
-        throw AlpacaException("Pier side is not settable", AlpacaError::PropertyNotImplemented);
+        if (side != 0 && side != 1) {  // before the connection check
+            throw AlpacaException("SideOfPier must be 0 (east) or 1 (west)", AlpacaError::InvalidValue);
+        }
+        StateLock lock(lock_gate_);
+        check_connected();
+        if (!can_set_pier_side_locked()) {
+            throw AlpacaException("Pier side is not settable", AlpacaError::PropertyNotImplemented);
+        }
+        const char* const who = "SideOfPier";
+        check_not_parked_locked(who);
+        refuse_while_faulted_locked(who);
+        if (!tracking_as_served_locked()) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+        }
+        refuse_while_goto_running_locked(who);  // reads :GU# now
+        const int current = frame_status_locked().side_of_pier;
+        if (current == -1) {
+            throw AlpacaException(std::string(who) + " cannot be set while the mount reports no pier side (at home)",
+                                  AlpacaError::InvalidOperation);
+        }
+        if (current == side) {
+            return;  // already there: nothing to send
+        }
+        const Position position = wire().get_position();
+        ensure_site_info_cached_locked();
+        throw_if_site_unknown_locked(who);
+        if (!pier_settings_) {
+            throw AlpacaException("Pier side is not settable", AlpacaError::PropertyNotImplemented);
+        }
+        const PierSettings settings = *pier_settings_;
+        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
+        const double hour_angle = util::shortest_ra_delta_hours(lst, position.ra_hours);
+        if (!util::gem_pier_side_reaches(settings.model_limits(), side, hour_angle)) {
+            char reason[200];
+            std::snprintf(reason, sizeof(reason),
+                          "the %s side cannot reach the current position (hour angle %+.2f h; RA-axis and "
+                          "meridian limits: %d min east, %d min west; RA axis %d to %d degrees)",
+                          side == 0 ? "east" : "west", hour_angle, settings.east_limit_minutes,
+                          settings.west_limit_minutes, settings.axis1_min_degrees, settings.axis1_max_degrees);
+            throw AlpacaException(std::string(who) + " cannot be set: " + reason, AlpacaError::InvalidOperation);
+        }
+        // The flip does not retarget: the targets stay as the client set them.
+        const char letter = side == 0 ? 'e' : 'w';
+        dispatch_goto_locked(
+            who, side == 0 ? ":MNe#" : ":MNw#", [](const Wire&) {},
+            [letter](const Wire& protocol) { return protocol.goto_current_position_on_side(letter); });
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
@@ -1013,6 +1133,11 @@ public:
         throw_if_site_unknown_locked("DestinationSideOfPier");
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
+        // The side the firmware would pick, from its settings and the current side (#2179). Anything unknown, or a
+        // target no side reaches (the firmware would refuse the GOTO), falls back to the hour-angle rule.
+        if (const auto modelled = modelled_destination_side_locked(lst, hour_angle, dec)) {
+            return *modelled;
+        }
         return util::pier_side_for_hour_angle(hour_angle);
     }
 
@@ -1763,6 +1888,7 @@ public:
     // One tick on the calling thread, paused or not (`full`: Alt/Az and the site retry too). False when the
     // connection is gone or lost.
     bool poll_status_now_for_testing(bool full) { return poll_status_once(nullptr, full ? 0 : 1); }
+    bool poll_status_tick_for_testing(int tick) { return poll_status_once(nullptr, tick); }
 
     // False once the poll body is cancelled (the slot hands it to the joiner), while it may still be sampling.
     bool status_poll_running_for_testing() const { return status_poll_.running(); }
@@ -2360,6 +2486,95 @@ private:
         }
     }
 
+    // CanSetPierSide: OnStepX, a German mount, the meridian flips on and a read preferred side (#2179). Caller holds
+    // mutex_.
+    bool can_set_pier_side_locked() const {
+        if (!published_connected_.load() || !onstepx_ || !pier_settings_ || !pier_settings_->flips_enabled) {
+            return false;
+        }
+        const auto reading = snapshot_.read();
+        return reading && reading->value.status_known && reading->value.status.is_gem;
+    }
+
+    // The side OnStepX would pick for a GOTO to (hour_angle, dec) from the polled frame and the settings read from the
+    // mount, or nullopt when any of them is unknown or no side reaches the target. Caller holds mutex_; no I/O.
+    std::optional<int> modelled_destination_side_locked(double lst_hours, double target_hour_angle,
+                                                        double target_dec) const {
+        if (!pier_settings_) {
+            return std::nullopt;
+        }
+        const auto reading = snapshot_.read();
+        if (!reading || !reading->value.status_known || !reading->value.equatorial_known ||
+            !reading->value.status.is_gem) {
+            return std::nullopt;
+        }
+        const PolledFrame& frame = reading->value;
+        const util::GemPierModel model{pier_settings_->model_preference(), pier_settings_->flips_enabled,
+                                       pier_settings_->model_limits(), site_latitude_cached_ < 0.0};
+        const util::GemPointing current{frame.status.side_of_pier, frame.status.is_at_home,
+                                        util::shortest_ra_delta_hours(lst_hours, frame.ra_hours), frame.dec_degrees};
+        const int side = util::gem_destination_pier_side(model, current, target_hour_angle, target_dec);
+        if (side != 0 && side != 1) {
+            return std::nullopt;
+        }
+        return side;
+    }
+
+    // The six pier-side reads (#2179), :GX96# first: a reply that is not a preferred-side letter ends the read, so
+    // a firmware or fake that does not know the commands costs one exchange. Returns the settings, or nullopt with
+    // `why` set. A read that gets no reply throws. Caller holds the operation lock.
+    std::optional<PierSettings> read_pier_settings_locked(std::string& why) const {
+        const Wire protocol = wire();
+        PierSettings settings;
+        const auto letter = protocol.get_preferred_pier_side();
+        if (!letter) {
+            why = ":GX96# did not answer E, W, B or A";
+            return std::nullopt;
+        }
+        settings.preference = *letter;
+        const auto flips = protocol.get_pier_flips_enabled();
+        const auto east = protocol.get_meridian_limit_minutes(true);
+        const auto west = protocol.get_meridian_limit_minutes(false);
+        const auto axis_min = protocol.get_axis1_limit_degrees(false);
+        const auto axis_max = protocol.get_axis1_limit_degrees(true);
+        if (!flips) {
+            why = ":GX94# did not answer \"<n>\" or \"<n> N\"";
+            return std::nullopt;
+        }
+        if (!east || !west) {
+            why = ":GXE9#/:GXEA# did not answer a whole number of minutes";
+            return std::nullopt;
+        }
+        if (!axis_min || !axis_max) {
+            why = ":GXEe#/:GXEw# did not answer a whole number of degrees";
+            return std::nullopt;
+        }
+        settings.flips_enabled = *flips;
+        settings.east_limit_minutes = *east;
+        settings.west_limit_minutes = *west;
+        settings.axis1_min_degrees = *axis_min;
+        settings.axis1_max_degrees = *axis_max;
+        return settings;
+    }
+
+    // Reads the settings into pier_settings_. At connect a failed or unparseable read leaves them unknown; later
+    // (the poll) it keeps the previous ones, and a changed value is logged. A throw is the caller's to judge (a
+    // lost link matters; anything else is "unknown"). Caller holds the operation lock.
+    void refresh_pier_settings_locked(bool at_connect) {
+        std::string why;
+        const auto read = read_pier_settings_locked(why);
+        if (!read) {
+            if (at_connect) {
+                ALPACA_LOG_INFO("OnStep", "Pier-side settings unknown: " + why);
+            }
+            return;
+        }
+        if (!pier_settings_ || !(*pier_settings_ == *read)) {
+            ALPACA_LOG_INFO("OnStep", "Pier-side settings: " + read->describe());
+        }
+        pier_settings_ = read;
+    }
+
     // The per-session state a disconnect or a lost link leaves behind.
     void reset_session_state_locked() {
         supersede_park_or_home_locked();
@@ -2367,6 +2582,8 @@ private:
         link_health_.reset();
         set_link_fault_text("");
         refraction_from_firmware_.reset();
+        pier_settings_.reset();
+        onstepx_ = false;
         {
             std::lock_guard<std::mutex> fwlock(firmware_mutex_);
             firmware_cache_.clear();
@@ -2487,17 +2704,19 @@ private:
     }
 
     // The :MS# refusal digit (OnStepX Goto.command.cpp) as the error the client sees (#1379).
-    static AlpacaException slew_refused(const char* who, const std::string& reply) {
-        return digit_refused(who, RefusedCommand::Goto, reply.empty() ? '?' : reply[0], reply);
+    // `command`: the GOTO command that was refused (:MS#, or :MNe#/:MNw# for the SideOfPier flip; same digits).
+    static AlpacaException slew_refused(const char* who, const std::string& reply, const char* command = ":MS#") {
+        return digit_refused(who, RefusedCommand::Goto, reply.empty() ? '?' : reply[0], reply, command);
     }
 
     // The :MS# digits, also behind the E of a :CM# refusal (OnStep Command.ino).
     enum class RefusedCommand : std::uint8_t { Goto, Sync };  // :MS# and :CM#
 
-    static AlpacaException digit_refused(const char* who, RefusedCommand refused, char code, const std::string& reply) {
+    static AlpacaException digit_refused(const char* who, RefusedCommand refused, char code, const std::string& reply,
+                                         const char* goto_command = ":MS#") {
         const bool is_goto = refused == RefusedCommand::Goto;
         const char* what = is_goto ? "GOTO" : "sync";
-        const char* command = is_goto ? ":MS#" : ":CM#";
+        const char* command = is_goto ? goto_command : ":CM#";
         const char* why = "an unknown reason";
         switch (code) {
             case '1':
@@ -2604,33 +2823,48 @@ private:
         alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_, lst, ra_out, dec_out);
     }
 
-    void start_slew_locked(double ra, double dec, const char* context, TargetWrites targets) {
-        util::validate_ra_dec(ra, dec, context);
+    // The GOTO dispatch shared by the coordinate slews (:MS#) and the SideOfPier flip (:MNe#/:MNw#): refuses a
+    // fault or a running GOTO, supersedes a park or home, runs `prepare` (the :Sr/:Sd target writes), arms the
+    // slew hold, and sends `send`, the GOTO command named `command`. A reply other than '0' clears the hold and
+    // raises the mount's refusal digit (#1379). Caller holds the operation lock.
+    template <typename Prepare, typename Send>
+    void dispatch_goto_locked(const char* context, const char* command, Prepare&& prepare, Send&& send) {
         refuse_while_faulted_locked(context);
         refuse_while_goto_running_locked(context);  // before anything is cancelled or sent (#1379)
         supersede_park_or_home_locked();            // a newer motion command wins (#1430)
         const Wire protocol = wire();
-        protocol.set_target_ra(ra);
-        protocol.set_target_dec(dec);
-        // Decision 0022 rule 2: armed before the :MS# goes out, cleared when it does not start the GOTO.
+        prepare(protocol);
+        // Decision 0022 rule 2: armed before the GOTO goes out, cleared when it does not start.
         slew_hold_.arm(clock_.now(), kSlewForceGrace);
         std::string reply;
         try {
-            reply = protocol.slew_to_target();
+            reply = send(protocol);
         } catch (...) {
             slew_hold_.clear();
             throw;
         }
         if (reply.empty() || reply[0] != '0') {
             slew_hold_.clear();
-            throw slew_refused(context, reply);
+            throw slew_refused(context, reply, command);
         }
-        store_target_locked(ra, dec, targets);
         clear_manual_motion_locked();
         tracking_before_slew_ = frame_status_locked().is_tracking;
-        // Write-through (decision 0010): Slewing reads true past the grace until a poll sampled after the :MS#
+        // Write-through (decision 0010): Slewing reads true past the grace until a poll sampled after the GOTO
         // says otherwise; a tick that sampled before it is dropped.
         write_status_locked([](MountStatus& status) { status.is_slewing = true; });
+    }
+
+    void start_slew_locked(double ra, double dec, const char* context, TargetWrites targets) {
+        util::validate_ra_dec(ra, dec, context);
+        // The targets are written after the refusals and the supersede, before the hold is armed and the :MS#.
+        dispatch_goto_locked(
+            context, ":MS#",
+            [&](const Wire& protocol) {
+                protocol.set_target_ra(ra);
+                protocol.set_target_dec(dec);
+            },
+            [](const Wire& protocol) { return protocol.slew_to_target(); });
+        store_target_locked(ra, dec, targets);
     }
 
     // Slewing as the getter serves it, from the polled frame (decision 0010); the synchronous slew's wait reads
@@ -3108,6 +3342,17 @@ private:
                     return false;
                 }
             }
+            // The pier-side settings follow a change made at a handset (#2179). Any failure but a lost link keeps
+            // the previous ones.
+            if (onstepx_ && tick > 0 && tick % kPierSettingsEvery == 0) {
+                try {
+                    refresh_pier_settings_locked(/*at_connect=*/false);
+                } catch (const std::exception& ex) {
+                    if (is_link_lost(ex)) {
+                        return false;
+                    }
+                }
+            }
         }
         run_status_poll_after_sample_hook();
         StateLock lock(lock_gate_, StateLock::Mode::State);
@@ -3430,6 +3675,10 @@ private:
     bool does_refraction_ = false;
     // From :GXEE# at connect on OnStepX; empty when unknown or disconnected.
     std::optional<bool> refraction_from_firmware_;
+    // OnStepX's pier-side settings, read at connect and by the poll (#2179); nullopt while unknown. `onstepx_` is
+    // whether :GVN# numbered the firmware 10 or later. Both under mutex_, cleared with the session state.
+    std::optional<PierSettings> pier_settings_;
+    bool onstepx_ = false;
     int slew_settle_time_seconds_ = 0;
 
     std::optional<double> pending_site_latitude_;
@@ -3590,6 +3839,11 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
 bool poll_status_now_for_testing(TelescopeDriver& driver, bool full) {
     auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver);
     return onstep != nullptr && onstep->poll_status_now_for_testing(full);
+}
+
+bool poll_status_tick_for_testing(TelescopeDriver& driver, int tick) {
+    auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver);
+    return onstep != nullptr && onstep->poll_status_tick_for_testing(tick);
 }
 
 bool status_poll_running_for_testing(const TelescopeDriver& driver) {

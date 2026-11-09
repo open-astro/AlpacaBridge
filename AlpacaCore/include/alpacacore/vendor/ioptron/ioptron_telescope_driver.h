@@ -110,6 +110,9 @@ void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void
 /// Call with no driver lock held. A driver not from the factories above is ignored.
 void start_clock_sync_for_testing(TelescopeDriver& driver);
 
+/// Test hook: called with false before each ":SUT" send attempt of the clock sync, true once its sends are done.
+void set_clock_sync_utc_hook_for_testing(TelescopeDriver& driver, std::function<void(bool)> hook);
+
 /// Test seam: the kept failure of the clock-sync slot, until its next start.
 std::optional<std::string> clock_sync_failure_for_testing(const TelescopeDriver& driver);
 

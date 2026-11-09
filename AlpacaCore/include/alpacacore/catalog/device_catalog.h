@@ -50,6 +50,8 @@ public:
     // Every key with a schema, in insertion order. available means "a factory is
     // registered for this key", so a build with a vendor off still names it.
     std::vector<DescriptorView> describe() const;
+    // The view of one key, or nullopt when the key has no schema.
+    std::optional<DescriptorView> describe(const DeviceKey& key) const;
 
     // Every key with a factory, in insertion order, schema or not: a factory whose
     // schema was never added is unreachable, and describe() cannot show it.

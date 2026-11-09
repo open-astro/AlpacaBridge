@@ -18,9 +18,11 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
+using alpacacore::test::require_alpaca_error;
 using alpacacore::vendor::zwo::MountIdentityClaim;
 
 namespace {
@@ -35,12 +37,12 @@ TEST_CASE("ZWO mount identity claim refuses duplicates involving Auto", "[zwo][i
             MountIdentityClaim second;
             first.claim(serial_a, first_auto, 41);
             if (first_auto || second_auto) {
-                CHECK_THROWS_AS(second.claim(serial_a, second_auto, 42), AlpacaException);
+                require_alpaca_error([&] { second.claim(serial_a, second_auto, 42); }, AlpacaError::DriverException);
             } else {
                 CHECK_NOTHROW(second.claim(serial_a, second_auto, 42));
                 MountIdentityClaim automatic;
                 first.reset();
-                CHECK_THROWS_AS(automatic.claim(serial_a, true, 43), AlpacaException);
+                require_alpaca_error([&] { automatic.claim(serial_a, true, 43); }, AlpacaError::DriverException);
             }
         }
     }
@@ -63,7 +65,7 @@ TEST_CASE("ZWO mount identity claim reset releases only its owner", "[zwo][ident
     const_first.reset();
     const_first.reset();
     CHECK_NOTHROW(next.claim(serial_a, true, 43));
-    CHECK_THROWS_AS(first.claim(serial_b, true, 41), AlpacaException);
+    require_alpaca_error([&] { first.claim(serial_b, true, 41); }, AlpacaError::DriverException);
 }
 
 TEST_CASE("ZWO mount identity claim destruction releases reservation", "[zwo][identity][issue1523]") {
@@ -82,9 +84,9 @@ TEST_CASE("ZWO mount identity claim replaces itself atomically", "[zwo][identity
     CHECK_NOTHROW(first.claim(serial_a, true, 41));
     CHECK_NOTHROW(first.claim(serial_b, true, 41));
     CHECK_NOTHROW(second.claim(serial_a, true, 42));
-    CHECK_THROWS_AS(first.claim(serial_a, true, 41), AlpacaException);
+    require_alpaca_error([&] { first.claim(serial_a, true, 41); }, AlpacaError::DriverException);
     MountIdentityClaim third;
-    CHECK_THROWS_AS(third.claim(serial_b, true, 43), AlpacaException);
+    require_alpaca_error([&] { third.claim(serial_b, true, 43); }, AlpacaError::DriverException);
 }
 
 TEST_CASE("ZWO mount identity claim refusal names holder without serial", "[zwo][identity][issue1523]") {

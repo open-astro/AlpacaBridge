@@ -36,6 +36,8 @@
 #                  node --check / node --test
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
+#   duplication    PMD CPD duplicated-line ratchet over the authored C++ trees
+#                  (scripts/check_duplication.py), not a required check yet
 #
 # Where each job runs: every job runs on a pull_request push except
 # sanitizers-tsan and package-deb, which skip a PR into main: main's merge queue
@@ -1151,6 +1153,12 @@ jobs:
           python3 scripts/check_adr_authorization.py --self-test
           python3 scripts/check_adr_scope.py --self-test
 
+      - name: Docs drift - Run the scripts/tests unit tests
+        if: ${{ !cancelled() }}
+        # scripts/tests/ holds unittest cases (the QHY USB recovery probe's)
+        # that nothing else runs (#1741).
+        run: python3 -I -m unittest discover -s scripts/tests
+
       - name: Docs drift - Check docs/config for self-inconsistency
         if: ${{ !cancelled() }}
         # Catches drift between the repo's own docs and its actual config
@@ -1544,3 +1552,41 @@ jobs:
         # Offline audit: deterministic, no token/network. Audits the workflow
         # files for security issues (injection, over-broad permissions, etc.).
         run: zizmor --offline .github/workflows/
+
+  duplication:
+    name: duplication (PMD CPD ratchet)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad  # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install PMD
+        # Checksum-verified before it runs. scripts/ci_preflight.sh mirrors this
+        # install (PMD_VER / PMD_SHA256); docs-drift check 2 keeps the pins equal.
+        run: |
+          set -euo pipefail
+          ver=7.7.0
+          sha256=be8bf68f6c1d66984bd9645a93e631b78a1c2f42f5f0f8719082fead67553940
+          curl -fsSL "https://github.com/pmd/pmd/releases/download/pmd_releases%2F${ver}/pmd-dist-${ver}-bin.zip" \
+            -o /tmp/pmd.zip
+          echo "${sha256}  /tmp/pmd.zip" | sha256sum --check --strict -
+          unzip -q /tmp/pmd.zip -d /tmp
+          /tmp/pmd-bin-${ver}/bin/pmd --version
+
+      - name: Self-test the duplication check
+        run: python3 scripts/check_duplication.py --self-test
+
+      - name: Check the duplicated-line share
+        run: python3 scripts/check_duplication.py --pmd /tmp/pmd-bin-7.7.0/bin/pmd

@@ -48,9 +48,11 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 
 using namespace alpacacore;
 using namespace alpacacore::catalog;
+using alpacacore::test::require_alpaca_error;
 
 namespace {
 
@@ -827,7 +829,7 @@ TEST_CASE("Builtin catalog - the WeeWX fetch parses a body at the 1 MiB cap and 
         big.set("weewxUrl", over_cap.url());
         auto refused = catalog.create(kWeeWxKey, big, 8);
         REQUIRE(refused != nullptr);
-        CHECK_THROWS_AS(refused->set_connected(true), AlpacaException);
+        require_alpaca_error([&] { refused->set_connected(true); }, AlpacaError::DriverException);
         CHECK_FALSE(refused->get_connected());
     }
 }
@@ -846,7 +848,7 @@ TEST_CASE("Builtin catalog - the WeeWX factory passes weewxUrl and timeoutMs thr
     // The connect reaches this endpoint (the URL) and gives up after about
     // 300 ms (the timeout); the 5000 ms default would still be waiting.
     const auto start = std::chrono::steady_clock::now();
-    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, AlpacaError::DriverException);
     const auto elapsed = std::chrono::steady_clock::now() - start;
     // serve() counts after its own poll() wakes, which a starved runner can
     // schedule after the client has already given up.
@@ -2371,7 +2373,7 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the QHY devices av
     // #508 item 1: built anyway so a saved entry stays registered; its connect refuses (the wheel's
     // own test pins the text).
     CHECK(catalog.create(kQhyWheelKey, no_port, 9) != nullptr);
-    CHECK_THROWS_AS(catalog.create(kQhyCameraKey, DeviceConfig{}, 10), AlpacaException);
+    require_alpaca_error([&] { (void)catalog.create(kQhyCameraKey, DeviceConfig{}, 10); }, AlpacaError::InvalidValue);
 #endif
 }
 
@@ -2627,15 +2629,9 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the ToupTek device
     REQUIRE(thermal_driver != nullptr);
     CHECK(thermal_driver->get_device_type() == DeviceType::Switch);
 
-    CHECK_THROWS_AS(catalog.create(
-                        kTouptekSwitchKey,
-                        [] {
-                            DeviceConfig bad;
-                            bad.set("switchType", std::string{"Thermal"});
-                            return bad;
-                        }(),
-                        7),
-                    AlpacaException);
+    DeviceConfig bad_thermal;
+    bad_thermal.set("switchType", std::string{"Thermal"});
+    require_alpaca_error([&] { (void)catalog.create(kTouptekSwitchKey, bad_thermal, 7); }, AlpacaError::InvalidValue);
 #ifdef ALPACACORE_TOUPTEK_STELLAVITA
     auto powerbox = catalog.create(kTouptekSwitchKey, DeviceConfig{}, 8);  // the default is stellavita
     REQUIRE(powerbox != nullptr);
@@ -2876,11 +2872,11 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the Gemini devices
     hub_no_port.set("connectionType", std::string{"serial"});
     auto hub_unported = catalog.create(kGeminiSwitchKey, hub_no_port, 10);
     REQUIRE(hub_unported != nullptr);
-    CHECK_THROWS_AS(hub_unported->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { hub_unported->set_connected(true); }, AlpacaError::NotConnected);
     CHECK_FALSE(hub_unported->get_connected());
     DeviceConfig hub_bad_type;
     hub_bad_type.set("switchType", std::string{"not-a-backend"});
-    CHECK_THROWS_AS(catalog.create(kGeminiSwitchKey, hub_bad_type, 11), AlpacaException);
+    require_alpaca_error([&] { (void)catalog.create(kGeminiSwitchKey, hub_bad_type, 11); }, AlpacaError::InvalidValue);
 #endif
 }
 
@@ -3044,7 +3040,7 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the WandererAstro 
         no_port.set("connectionType", std::string{"serial"});
         auto unported = catalog.create(key, no_port, 5);
         REQUIRE(unported != nullptr);
-        CHECK_THROWS_AS(unported->set_connected(true), AlpacaException);
+        require_alpaca_error([&] { unported->set_connected(true); }, AlpacaError::NotConnected);
         CHECK_FALSE(unported->get_connected());
     }
 
@@ -3056,7 +3052,7 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the WandererAstro 
 
     DeviceConfig bad_type;
     bad_type.set("switchType", std::string{"not-a-backend"});
-    CHECK_THROWS_AS(catalog.create(kWandererBoxKey, bad_type, 7), AlpacaException);
+    require_alpaca_error([&] { (void)catalog.create(kWandererBoxKey, bad_type, 7); }, AlpacaError::InvalidValue);
 #endif
 }
 
@@ -3313,7 +3309,7 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the ZWO devices av
 
     DeviceConfig bad_type;
     bad_type.set("switchType", std::string{"not-a-backend"});
-    CHECK_THROWS_AS(catalog.create(kZwoSwitchKey, bad_type, 9), AlpacaException);
+    require_alpaca_error([&] { (void)catalog.create(kZwoSwitchKey, bad_type, 9); }, AlpacaError::InvalidValue);
 #endif
 }
 
@@ -3765,7 +3761,8 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the iOptron device
     // The factory refuses what normalize refuses: a serial wheel with no port.
     DeviceConfig wheel_no_port;
     wheel_no_port.set("connectionType", std::string{"serial"});
-    CHECK_THROWS_AS(catalog.create(kIoptronFilterWheelKey, wheel_no_port, 8), AlpacaException);
+    require_alpaca_error([&] { (void)catalog.create(kIoptronFilterWheelKey, wheel_no_port, 8); },
+                         AlpacaError::InvalidValue);
 
     // The switch is registered whether or not libgpiod was found.
     DeviceConfig sw;

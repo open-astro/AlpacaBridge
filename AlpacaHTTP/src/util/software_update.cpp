@@ -309,10 +309,10 @@ std::string SystemSoftwareUpdateBackend::fetch_url(const std::string& url, std::
     curl_easy_setopt(curl.handle, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl.handle, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl.handle, CURLOPT_MAXREDIRS, 5L);
-    // The URLs are operator-configured, but a redirect must never reach a
-    // scheme other than http(s) (file://, ftp://, ...).
-    curl_easy_setopt(curl.handle, CURLOPT_PROTOCOLS_STR, "http,https");
-    curl_easy_setopt(curl.handle, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+    // https only, redirects included: an on-path attacker must not be able to
+    // forge the Packages index or release notes shown in the UI (#1741).
+    curl_easy_setopt(curl.handle, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl.handle, CURLOPT_REDIR_PROTOCOLS_STR, "https");
     curl_easy_setopt(curl.handle, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout.count()));
     curl_easy_setopt(curl.handle, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
     // Multi-threaded process: never let libcurl install signal handlers for

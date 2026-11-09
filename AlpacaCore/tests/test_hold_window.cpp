@@ -41,6 +41,19 @@ TEST_CASE("HoldWindow - active strictly before the deadline", "[util][hold-windo
     CHECK_FALSE(window.active(t0 + 9s));
 }
 
+// open-astro#1834: until() gives the deadline itself, for a wait that sleeps exactly to it and a staleness base.
+// Falsified by: AlpacaCore/include/alpacacore/util/hold_window.h until(): returning mono::max() instead of until_.
+TEST_CASE("HoldWindow - until() is the armed deadline, min() when fresh or cleared", "[util][hold-window]") {
+    FakeTaskClock clock;
+    HoldWindow window;
+    CHECK(window.until() == HoldWindow::mono::min());
+    const auto t0 = clock.now();
+    window.arm(t0, 8s);
+    CHECK(window.until() == t0 + 8s);
+    window.clear();
+    CHECK(window.until() == HoldWindow::mono::min());
+}
+
 TEST_CASE("HoldWindow - clear closes the window at once", "[util][hold-window]") {
     FakeTaskClock clock;
     HoldWindow window;

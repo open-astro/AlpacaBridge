@@ -227,6 +227,8 @@ if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_focuser_deferred_connect.cpp)
     # Getters served from a util::StateSnapshot (open-astro#1229).
     list(APPEND TEST_SOURCES test_gemini_focuser_snapshot.cpp)
+    # The connect-time first poll stays inside the 5 s Connecting budget (issue #2064).
+    list(APPEND TEST_SOURCES test_gemini_focuser_connect_budget.cpp)
     # Serial-port ownership through util::SerialLink (issue #1202).
     list(APPEND TEST_SOURCES test_gemini_serial_ownership.cpp)
 endif()
@@ -295,6 +297,9 @@ if(TARGET alpacacore_touptek)
     # it always builds with the ToupTek target.
     list(APPEND TEST_SOURCES test_touptek_thermal_switch.cpp)
     list(APPEND TEST_SOURCES test_touptek_fake_sdk.cpp)
+    # The shared ToupcamFamilySDK<Api> wrapper (ToupTek and Altair) over a fake
+    # Api traits struct, below the seam the other tests fake (issue #2088).
+    list(APPEND TEST_SOURCES test_toupcam_family_sdk.cpp)
     # Concurrency stress over the fake SDK seam (issue #101); run under the
     # sanitizers-tsan CI job to turn latent data races into hard failures.
     list(APPEND TEST_SOURCES test_touptek_concurrency_stress.cpp)

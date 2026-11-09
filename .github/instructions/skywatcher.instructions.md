@@ -680,8 +680,9 @@ against its checklist, 2026-09-06:
   #458: the branch is now `k * side`, and `k = s * eps` does consult the hemisphere on a
   board with a measured sense; the side label is still the sign of HA alone, so the
   flip contract below is unchanged.)
-  So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
-  OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
+  So the reported side already follows the hour-angle sign in both hemispheres by construction
+  (the OnStep driver now reports its mount's own side instead, because OnStepX keeps its side
+  past the meridian, #2179), and
   a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
   the "pierEast" branch is the true physical east side below the equator, because there is no
   internal contradiction to expose (whichever side the code calls pierEast, it consistently

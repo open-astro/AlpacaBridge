@@ -802,20 +802,21 @@ def find_ungated_registration_files():
                                                registrations)
 
 
-def missing_message(vendor, dtype, paths):
+def missing_message(vendor, dtype, paths, script_path=__file__):
     """The rule-1 finding for an uncovered (vendor, device type) pair.
 
     A function rather than an inline format so the self-test can pin its
     wording: the message must point at /driver-build Step 7b and must never
     offer ALLOWLIST as an alternative (that list is empty: every driver that
-    predated the gate is now registered).
+    predated the gate is now registered). The script is named repo-relative, so
+    a checkout path never lands in the message (#1755).
     """
     return (
         "MISSING: %s/%s has no [stress] TEST_CASE: %s. Register it in "
         "AlpacaCore/tests/test_%s_concurrency_stress.cpp (/driver-build Step 7b: build "
         "the seam, then the registration). ALLOWLIST in %s is empty (every pair is "
         "registered) and must not grow."
-        % (vendor, dtype, ", ".join(paths), vendor, __file__)
+        % (vendor, dtype, ", ".join(paths), vendor, "scripts/" + os.path.basename(script_path))
     )
 
 
@@ -930,6 +931,12 @@ def self_test():
     check("MISSING message never offers ALLOWLIST as an alternative",
           missing.index("Register it in") < missing.index("ALLOWLIST")
           and "add" not in after.lower().replace("predate", ""))
+    # A checkout path containing "add" (/home/u/1add73d25a67/...) must not trip
+    # the check above: the message names the script repo-relative (#1755).
+    in_add_dir = missing_message("fakevendor", "camera", ["x_driver.cpp"],
+                                 script_path="/home/u/1add73d25a67/scripts/check_stress_registration.py")
+    check("MISSING message names the script repo-relative, whatever the checkout path",
+          "add" not in in_add_dir.split("ALLOWLIST", 1)[1].lower().replace("predate", ""))
 
     # A DeviceType:: mention earlier in the file (a comment, here) must not
     # be picked up ahead of the actual override.

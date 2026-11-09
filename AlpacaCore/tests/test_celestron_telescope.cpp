@@ -159,26 +159,21 @@ TEST_CASE("Celestron Telescope Driver - Disconnected Behavior", "[celestron][tel
     REQUIRE_FALSE(driver->get_connected());
 
     // Position queries require connection
-    CHECK_THROWS_AS(driver->get_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_declination(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_altitude(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_azimuth(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
 
     // Tracking requires connection
-    CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
     // NotConnected precedes the unset-target error (#2075)
     require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
 
     // Park requires connection
-    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
-
-    // Action and command methods
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
+    // Action and command methods: the "Unsupported actions" case below pins them.
 }
 
 TEST_CASE("Celestron Telescope Driver - Unsupported actions", "[celestron][telescope][unit]") {
@@ -190,10 +185,11 @@ TEST_CASE("Celestron Telescope Driver - Unsupported actions", "[celestron][teles
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    // Raw commands pass through to the mount, so a disconnected driver refuses them.
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->command_bool("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Celestron Telescope Driver - Target Range Validation", "[celestron][telescope][unit]") {
@@ -521,17 +517,31 @@ std::optional<std::string> pulse_mount_idle_reply(const std::string& command) {
     return std::nullopt;
 }
 
-std::unique_ptr<alpacacore::TelescopeDriver> connect_pulse_guide_mount(alpacacore::test::FakeMountServer& server) {
+std::unique_ptr<alpacacore::TelescopeDriver> connect_pulse_guide_mount(
+    alpacacore::test::FakeMountServer& server,
+    alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock()) {
     alpacacore::vendor::celestron::ConnectionInfo conn;
     conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 500;  // see the UTCDate case above
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, conn, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     // The canned reply answers the AUX-bus probe, so an autoguider port is found.
     REQUIRE(driver->get_can_pulse_guide());
     return driver;
+}
+
+// Advances `clock` by `span` in `step`s, letting each woken pulse body register its next wait first, so a chunk
+// fires at its own virtual time (decision 0005 rule 2: no wall-clock waits in an adopted driver's tests, #2088).
+void step_clock(alpacacore::test::FakeTaskClock& clock, std::chrono::milliseconds span,
+                std::chrono::milliseconds step = std::chrono::milliseconds(50)) {
+    for (auto done = std::chrono::milliseconds(0); done < span; done += step) {
+        clock.advance(std::min(step, span - done));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
 }
 
 }  // namespace
@@ -545,21 +555,38 @@ TEST_CASE("Celestron Telescope Driver - a Dec pulse does not cut the chunk chain
         return std::string("00000000,00000000#");
     });
     REQUIRE(server.ok());
-    auto driver = connect_pulse_guide_mount(server);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = connect_pulse_guide_mount(server, clock);
     // The canned mount cannot answer the status poll, and three failed polls latch a fault IsPulseGuiding refuses;
     // this case is about the pulse timers, so the poll stays off.
     alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
-    const auto t0 = std::chrono::steady_clock::now();
-    driver->pulse_guide(2, 5000);  // East, RA: 255 cs now, 245 cs chained at ~2.55 s
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // The paused poll body may still be inside its first tick and not yet parked. Count it before the pulses, or its
+    // later parking is taken for a pulse body and the Dec chain starts its wait after the clock has moved on.
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    const std::size_t idle_waiters = clock.waiter_count();
+    driver->pulse_guide(2, 5000);  // East, RA: 255 cs now, 245 cs chained at 2.55 s
+    REQUIRE(clock.wait_for_waiters(idle_waiters + 1, std::chrono::seconds(5)));
+    step_clock(clock, std::chrono::milliseconds(300));
     driver->pulse_guide(0, 3000);  // North, Dec: 255 cs now, 45 cs chained
-    std::this_thread::sleep_until(t0 + std::chrono::milliseconds(4600));
+    REQUIRE(clock.wait_for_waiters(idle_waiters + 2, std::chrono::seconds(5)));
+    step_clock(clock, std::chrono::milliseconds(4300));  // t0 + 4.6 s
 
-    // The RA pulse runs until t0 + 5.0 s, plus the 1 s completion delay.
+    // The chain body returns once it sends a chunk, but the fake server logs that chunk later, on its own thread: wait
+    // for the log (a fake-server event, not a driver timer). A cut chain never sends its second chunk and fails here.
+    const auto log_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((log->guide_chunks_cs('\x10').size() < 2 || log->guide_chunks_cs('\x11').size() < 2) &&
+           std::chrono::steady_clock::now() < log_deadline) {
+        std::this_thread::yield();
+    }
     CHECK(driver->get_is_pulse_guiding());
     CHECK(log->guide_chunks_cs('\x10') == std::vector<int>{255, 245});
     CHECK(log->guide_chunks_cs('\x11') == std::vector<int>{255, 45});
+    // The RA pulse runs until t0 + 5.0 s, plus the 1 s completion delay: exact to the tick.
+    step_clock(clock, std::chrono::milliseconds(1399));
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(std::chrono::milliseconds(1));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
     driver->set_connected(false);
 }
 
@@ -570,19 +597,21 @@ TEST_CASE("Celestron Telescope Driver - a short Dec pulse does not end IsPulseGu
         return std::string("00000000,00000000#");
     });
     REQUIRE(server.ok());
-    auto driver = connect_pulse_guide_mount(server);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = connect_pulse_guide_mount(server, clock);
     // The canned mount cannot answer the status poll, and three failed polls latch a fault IsPulseGuiding refuses;
     // this case is about the pulse timers, so the poll stays off.
     alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
-    const auto t0 = std::chrono::steady_clock::now();
     driver->pulse_guide(2, 2000);  // East, RA, 2.0 s (one chunk)
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    driver->pulse_guide(0, 200);  // North, Dec, 0.2 s: ends (with the delay) at ~1.3 s
-    std::this_thread::sleep_until(t0 + std::chrono::milliseconds(1800));
+    step_clock(clock, std::chrono::milliseconds(100));
+    driver->pulse_guide(0, 200);  // North, Dec, 0.2 s: ends (with the delay) at t0 + 1.3 s
+    step_clock(clock, std::chrono::milliseconds(1700));
     CHECK(driver->get_is_pulse_guiding());  // RA guides until t0 + 2.0 s + 1 s delay
 
-    std::this_thread::sleep_until(t0 + std::chrono::milliseconds(3300));
+    step_clock(clock, std::chrono::milliseconds(1199));  // t0 + 2.999 s
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(std::chrono::milliseconds(1));  // t0 + 3.0 s: exact to the tick
     CHECK_FALSE(driver->get_is_pulse_guiding());  // both axes ended
     driver->set_connected(false);
 }
@@ -1072,7 +1101,8 @@ TEST_CASE("Celestron Telescope Driver - a refused PulseGuide chain start stops t
         std::lock_guard<std::mutex> lock(*commands_mutex);
         commands->clear();
     }
-    CHECK_THROWS_AS(driver->pulse_guide(2, 5000), alpacacore::AlpacaException);  // 5 s needs a chained chunk
+    // 5 s needs a chained chunk; the refused thread reaches the caller as DriverException.
+    require_alpaca_error([&] { driver->pulse_guide(2, 5000); }, alpacacore::AlpacaError::DriverException);
 
     const auto sent = [&](const std::string& prefix) {
         std::lock_guard<std::mutex> lock(*commands_mutex);
@@ -1212,7 +1242,7 @@ TEST_CASE("Celestron snapshot - a site written during the poll's location read i
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     cel::set_status_poll_paused_for_testing(*driver, true);
-    CHECK_THROWS_AS(driver->get_site_latitude(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_site_latitude(); }, alpacacore::AlpacaError::ValueNotSet);
 
     st->w_fail = false;
     st->w_delay_ms = 200;

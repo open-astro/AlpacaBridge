@@ -85,10 +85,12 @@ TEST_CASE("QHY Filter Wheel Driver - Unsupported actions", "[qhy][filterwheel][u
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_bool("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("QHY Filter Wheel Driver - Names and focus offsets configurable while disconnected",
@@ -384,7 +386,7 @@ TEST_CASE("QHY Filter Wheel Driver - A failed move leaves Position on live reads
     const int before = driver->get_position();
 
     fake.throw_from.insert("move_cfw");
-    CHECK_THROWS_AS(driver->set_position(3), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_position(3); }, alpacacore::AlpacaError::DriverException);
     fake.throw_from.clear();
 
     for (int i = 0; i < 5; ++i) {
