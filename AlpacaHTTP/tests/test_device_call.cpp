@@ -363,6 +363,7 @@ void case_url_decode_invalid_and_trailing_escapes() {
 // logged at DEBUG, never ERROR (issue #2182).
 // Falsified by: util::LastExposure::require_valid() throwing a plain AlpacaException instead of asked_too_early().
 void case_run_last_exposure_early_read_logs_debug() {
+    // case: LastExposure early read is logged at DEBUG (#2182)
     namespace logging = alpacacore::logging;
     struct Restore {
         logging::LogLevel level = logging::get_log_level();
