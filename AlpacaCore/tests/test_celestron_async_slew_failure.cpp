@@ -630,7 +630,8 @@ TEST_CASE("Celestron async - motor-controller completion-poll failure persists t
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    // One GOTO per axis: muting after the first would fail the dispatch, not the completion poll.
+    REQUIRE(wait_until([&] { return st->goto_count.load() >= 2; }, 5000));
     st->mute.store(true);  // The motor controllers stop answering MC_SLEW_DONE.
 
     std::string message;
