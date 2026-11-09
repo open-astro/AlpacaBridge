@@ -80,8 +80,8 @@ concurrency:
 # build-vendors-shard, sanitizers-tsan and clang-tidy jobs consume these,
 # so a version bump can't skew them (tarball + README in AlpacaCore/external/libgpiod/).
 env:
-  LIBGPIOD_VER: "2.2.4"
-  LIBGPIOD_SHA256: "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592"
+  LIBGPIOD_VER: "2.3.2"
+  LIBGPIOD_SHA256: "dc48fb87cd72019745acb201599caf559556b5d913844df0ed011067d19e9a6b"
 
 permissions:
   contents: read
@@ -235,6 +235,7 @@ jobs:
             build-essential \
             cmake \
             ccache \
+            meson \
             g++ \
             catch2 \
             pkg-config \
@@ -289,9 +290,9 @@ jobs:
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
           (
             cd /tmp/libgpiod
-            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-            make -j"$(nproc)"
-            make install DESTDIR="${stage}"
+            meson setup build --prefix=/usr/local --libdir=lib -Dauto_features=disabled
+            meson compile -C build
+            meson install -C build --no-rebuild --destdir "${stage}"
           )
           scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
@@ -612,6 +613,7 @@ jobs:
             build-essential \
             cmake \
             ccache \
+            meson \
             g++ \
             catch2 \
             pkg-config \
@@ -665,9 +667,9 @@ jobs:
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
           (
             cd /tmp/libgpiod
-            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-            make -j"$(nproc)"
-            make install DESTDIR="${stage}"
+            meson setup build --prefix=/usr/local --libdir=lib -Dauto_features=disabled
+            meson compile -C build
+            meson install -C build --no-rebuild --destdir "${stage}"
           )
           scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
@@ -897,6 +899,7 @@ jobs:
             build-essential \
             cmake \
             ccache \
+            meson \
             g++ \
             clang-tidy \
             pkg-config \
@@ -950,9 +953,9 @@ jobs:
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
           (
             cd /tmp/libgpiod
-            ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-            make -j"$(nproc)"
-            make install DESTDIR="${stage}"
+            meson setup build --prefix=/usr/local --libdir=lib -Dauto_features=disabled
+            meson compile -C build
+            meson install -C build --no-rebuild --destdir "${stage}"
           )
           scripts/build_bundled_gphoto.sh --destdir "${stage}" --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
@@ -1533,8 +1536,8 @@ jobs:
         # mirrors this install (ZIZMOR_VER / ZIZMOR_SHA256) — update both.
         run: |
           set -euo pipefail
-          ver=1.31.1
-          sha256=37eebbd5762a44f262d94875431b14a6d2402991e90a685113ea97b8b41be833
+          ver=1.32.0
+          sha256=cb152b207f815116d7fa1c1ee4614f61578803351395052908095e79adfd9fd0
           curl -fsSL "https://github.com/zizmorcore/zizmor/releases/download/v${ver}/zizmor-aarch64-unknown-linux-gnu.tar.gz" \
             -o /tmp/zizmor.tgz
           echo "${sha256}  /tmp/zizmor.tgz" | sha256sum --check --strict -
@@ -1577,8 +1580,8 @@ jobs:
         # install (PMD_VER / PMD_SHA256); docs-drift check 2 keeps the pins equal.
         run: |
           set -euo pipefail
-          ver=7.7.0
-          sha256=be8bf68f6c1d66984bd9645a93e631b78a1c2f42f5f0f8719082fead67553940
+          ver=7.29.0
+          sha256=d27177c185b837fa57f097e482d1253468aa035379c5eb2671fa0a279109b179
           curl -fsSL "https://github.com/pmd/pmd/releases/download/pmd_releases%2F${ver}/pmd-dist-${ver}-bin.zip" \
             -o /tmp/pmd.zip
           echo "${sha256}  /tmp/pmd.zip" | sha256sum --check --strict -
@@ -1589,4 +1592,4 @@ jobs:
         run: python3 scripts/check_duplication.py --self-test
 
       - name: Check the duplicated-line share
-        run: python3 scripts/check_duplication.py --pmd /tmp/pmd-bin-7.7.0/bin/pmd
+        run: python3 scripts/check_duplication.py --pmd /tmp/pmd-bin-7.29.0/bin/pmd

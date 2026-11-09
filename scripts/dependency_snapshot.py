@@ -69,7 +69,7 @@ CI_TOOL_STEPS = (("Build cppcheck 2.17.x from source", "pkg:github/danmar/cppche
 WORKFLOW_TOOL_STEPS = {".github/workflows/osv-scan.yml": (("Install OSV-Scanner",
                                                           "pkg:github/google/osv-scanner@v{ver}"),)}
 # Unpinned tools ci.yml installs from the runner's apt (Ubuntu 24.04, not trixie).
-CI_APT_TOOLS = ("catch2", "clang-format", "clang-tidy", "gcovr", "nodejs", "shellcheck")
+CI_APT_TOOLS = ("catch2", "clang-format", "clang-tidy", "gcovr", "meson", "nodejs", "shellcheck")
 CI_APT_QUALIFIERS = "arch=arm64&distro=ubuntu-24.04"
 # ConformU validates every driver on the rig; no workflow installs it. /conformu installs a
 # maintainer beta (no GitHub release yet) from the project's tools/ mirror and names the build
@@ -816,7 +816,7 @@ def self_test() -> int:
     ci = ("jobs:\n  a:\n    steps:\n      - name: Install deps\n        run: |\n"
           "          sudo apt-get install -y \\\n            catch2 \\\n            gcovr  \\\n            cmake\n"
           "          sudo apt-get install -y --no-install-recommends clang-format\n"
-          "          sudo apt-get install -y clang-tidy shellcheck nodejs\n"
+          "          sudo apt-get install -y clang-tidy meson shellcheck nodejs\n"
           "          echo nodejs-is-not-a-package-here\n"
           "      - name: Build cppcheck 2.17.x from source\n        run: |\n"
           "          ver=2.17.1\n          sha256=00\n"

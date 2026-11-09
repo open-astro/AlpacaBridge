@@ -173,8 +173,8 @@ clang_format_pair() {
 
 # Pinned PMD release for the duplication gate (keep PMD_VER / PMD_SHA256 in sync
 # with the `duplication` job in .github/workflows/ci.yml; docs-drift check 2).
-PMD_VER="7.7.0"
-PMD_SHA256="be8bf68f6c1d66984bd9645a93e631b78a1c2f42f5f0f8719082fead67553940"
+PMD_VER="7.29.0"
+PMD_SHA256="d27177c185b837fa57f097e482d1253468aa035379c5eb2671fa0a279109b179"
 
 # ensure_pmd: prints the path of the pinned PMD launcher, downloading the
 # checksum-verified release into the cache once. Never installs a JRE.
@@ -209,8 +209,8 @@ ensure_pmd() {
 
 # Pinned zizmor release (keep in sync with .github/workflows/ci.yml). GitHub
 # release assets are immutable, so the hash is stable for a given version.
-ZIZMOR_VER="1.31.1"
-ZIZMOR_SHA256="37eebbd5762a44f262d94875431b14a6d2402991e90a685113ea97b8b41be833"
+ZIZMOR_VER="1.32.0"
+ZIZMOR_SHA256="cb152b207f815116d7fa1c1ee4614f61578803351395052908095e79adfd9fd0"
 
 # ensure_zizmor: prints a usable zizmor binary path on stdout and returns 0, or
 # returns non-zero if unavailable. zizmor is not packaged in apt, so (mirroring
