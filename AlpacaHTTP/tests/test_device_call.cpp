@@ -26,8 +26,8 @@
 
 #include <cstdint>
 #include <iostream>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
