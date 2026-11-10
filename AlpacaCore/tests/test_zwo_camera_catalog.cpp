@@ -290,6 +290,23 @@ TEST_CASE("ZWO camera catalog - a serial learned at connect is claimed from entr
     second.driver->set_connected(false);
 }
 
+// #2074: without a stored name, every connect of the entry would open every camera to read serials.
+// Falsified by: zwo_camera_driver.cpp report_identity_learned() returning before the name on an empty serial.
+TEST_CASE("ZWO camera catalog - a camera with no serial still stores its model name (#2074)",
+          "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    rig.sdk.set_units({{3, ""}});
+    std::optional<DeviceConfig> stored;
+    const auto store = [&](const DeviceConfig& config) { stored = config; };
+    const BindResult result = rig.catalog.bind(kCameraKey, camera_config(0), 3, BindContext{Source::Api, {}, store});
+    REQUIRE(result.driver != nullptr);
+    result.driver->set_connected(true);
+    REQUIRE(stored.has_value());
+    CHECK(stored->find_value("serialNumber") == nullptr);
+    CHECK(std::get<std::string>(*stored->find_value("cameraName")) == std::string(kFakeName));
+    result.driver->set_connected(false);
+}
+
 // #2074: a removed entry must not keep its learned serial away from the entries bound after it.
 // Falsified by: zwo_catalog.cpp bind_camera() not calling claims->retain().
 TEST_CASE("ZWO camera catalog - a removed entry stops claiming the serial it learned (#2074)",

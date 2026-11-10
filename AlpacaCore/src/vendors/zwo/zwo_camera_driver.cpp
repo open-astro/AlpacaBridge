@@ -1626,10 +1626,10 @@ private:
 
     // Runs with mutex_ released: the sink writes the stored entry. A failed save never fails the connect.
     void report_identity_learned(const std::string& serial, const std::string& reported_name) {
-        if (serial.empty()) return;
-        if (binding_.connect_claims) binding_.connect_claims->claim(device_number_, serial);
+        // A camera with no serial still stores its name, so later connects open only that model.
+        if (!serial.empty() && binding_.connect_claims) binding_.connect_claims->claim(device_number_, serial);
         const std::string name = trim_zwo_name(reported_name);
-        const bool new_serial = binding_.identity.serial.empty() && serial != reported_serial_;
+        const bool new_serial = !serial.empty() && binding_.identity.serial.empty() && serial != reported_serial_;
         const bool new_name = binding_.identity.camera_name.empty() && !name.empty() && name != reported_name_;
         if ((!new_serial && !new_name) || !binding_.on_identity_learned) return;
         try {
