@@ -148,31 +148,51 @@ TEST_CASE("ZWO camera catalog - registers a bind-only factory", "[catalog][zwo][
         if (view.key == kCameraKey) available = view.available;
     }
     CHECK(available);
-    // Registration enumerates the SDK, so there is no hardware-free create.
+    // The factory is bind-only: its stored peers and connect hook have no place in create().
     CHECK_THROWS_AS(rig.catalog.create(kCameraKey, camera_config(), 1), std::runtime_error);
 }
 
-TEST_CASE("ZWO camera catalog - learns the serial and model name from the camera it binds",
+// #2074: Falsified by: zwo_camera_driver.cpp set_connected() not calling report_identity_learned().
+TEST_CASE("ZWO camera catalog - a connect learns the serial and model name, and a second start binds by them (#2074)",
           "[catalog][zwo][camera][unit]") {
     Rig rig;
-    const BindResult result = bind(rig, camera_config(0), 3, Source::Api, {});
+    std::optional<DeviceConfig> stored;
+    const auto store = [&](const DeviceConfig& config) { stored = config; };
+    const BindResult result = rig.catalog.bind(kCameraKey, camera_config(0), 3, BindContext{Source::Api, {}, store});
     REQUIRE(result.driver != nullptr);
     CHECK(result.driver->get_device_type() == DeviceType::Camera);
     CHECK(result.driver->get_device_number() == 3);
     CHECK_FALSE(result.rejection.has_value());
-    CHECK(learned(result, "serialNumber") == std::string(kFakeSerial));
-    CHECK(learned(result, "cameraName") == std::string(kFakeName));
+    CHECK(result.learned.entries().empty());
     // The UniqueID is the router's stored ID (decision 0018): bind never learns one.
-    CHECK_FALSE(learned(result, "uniqueId").has_value());
-    CHECK(rig.sdk.call_count("enumerate_identified_cameras") == 1);
+    result.driver->set_connected(true);
+    REQUIRE(stored.has_value());
+    CHECK(std::get<std::string>(*stored->find_value("serialNumber")) == std::string(kFakeSerial));
+    CHECK(std::get<std::string>(*stored->find_value("cameraName")) == std::string(kFakeName));
+    CHECK(stored->find_value("uniqueId") == nullptr);
+    result.driver->set_connected(false);
 
-    // Nothing is learned that the entry already holds.
+    // The second start binds by what the first stored, and reports nothing new.
+    stored.reset();
     DeviceConfig known = camera_config(0);
     known.set("serialNumber", std::string(kFakeSerial));
     known.set("cameraName", std::string(kFakeName));
-    const BindResult again = bind(rig, known, 3, Source::Persisted, {});
+    const BindResult again = rig.catalog.bind(kCameraKey, known, 3, BindContext{Source::Persisted, {}, store});
     REQUIRE(again.driver != nullptr);
     CHECK(again.learned.entries().empty());
+    again.driver->set_connected(true);
+    CHECK_FALSE(stored.has_value());
+    again.driver->set_connected(false);
+}
+
+// #2074: opening every matching camera at registration could open one a guider on this host holds.
+// Falsified by: zwo_catalog.cpp bind_camera() calling sdk.enumerate_identified_cameras().
+TEST_CASE("ZWO camera catalog - registration opens no camera (#2074)", "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    const BindResult result = bind(rig, camera_config(0), 3, Source::Api, {});
+    REQUIRE(result.driver != nullptr);
+    CHECK(rig.sdk.call_count("enumerate_identified_cameras") == 0);
+    CHECK(rig.sdk.holders(rig.sdk.camera.camera_id) == 0);
 }
 
 TEST_CASE("ZWO camera catalog - registers a serial-less camera without learning a UniqueID",
@@ -222,24 +242,15 @@ TEST_CASE("ZWO camera catalog - refuses a serial another entry holds", "[catalog
     CHECK_FALSE(blank.rejection.has_value());
 }
 
-TEST_CASE("ZWO camera catalog - a stored duplicate is cleared and relearned", "[catalog][zwo][camera][unit]") {
+TEST_CASE("ZWO camera catalog - a stored duplicate is cleared", "[catalog][zwo][camera][unit]") {
     Rig rig;
-    // The stored serial duplicates another entry's: it is dropped, and the camera the
-    // index hint names (FakeZWOSDK's, with its own serial) is relearned in its place.
+    // The stored serial duplicates another entry's: it is dropped, and the clear is handed back as
+    // an empty serial, so the entry processed after it keeps the serial.
     DeviceConfig config = camera_config(0);
     config.set("serialNumber", std::string(kOtherSerial));
-    const BindResult relearned = bind(rig, config, 9, Source::Persisted, {peer(8, std::string(kOtherSerial))});
-    REQUIRE(relearned.driver != nullptr);
-    CHECK_FALSE(relearned.rejection.has_value());
-    CHECK(learned(relearned, "serialNumber") == std::string(kFakeSerial));
-
-    // Nothing to relearn (the model named does not match what is plugged in): the clear is
-    // handed back as an empty serial, so the entry processed after it keeps the serial.
-    DeviceConfig absent = camera_config(0);
-    absent.set("serialNumber", std::string(kOtherSerial));
-    absent.set("cameraName", "ZWO Not Plugged In");
-    const BindResult cleared = bind(rig, absent, 9, Source::Persisted, {peer(8, std::string(kOtherSerial))});
+    const BindResult cleared = bind(rig, config, 9, Source::Persisted, {peer(8, std::string(kOtherSerial))});
     REQUIRE(cleared.driver != nullptr);
+    CHECK_FALSE(cleared.rejection.has_value());
     CHECK(learned(cleared, "serialNumber") == std::string());
 }
 
@@ -252,12 +263,70 @@ TEST_CASE("ZWO camera catalog - a serial-less entry skips the serials other entr
     by_name.set("cameraName", std::string(kFakeName));
     const BindResult skipped = bind(rig, by_name, 6, Source::Persisted, {peer(5, std::string(kFakeSerial))});
     REQUIRE(skipped.driver != nullptr);
-    CHECK_FALSE(learned(skipped, "serialNumber").has_value());
-    CHECK_FALSE(learned(skipped, "uniqueId").has_value());  // the router stored ID (decision 0018)
+    CHECK_THROWS_AS(skipped.driver->set_connected(true), AlpacaException);
 
-    // Without the claim the same entry binds the camera and learns its serial.
+    // Without the claim the same entry binds the camera.
     const BindResult taken = bind(rig, by_name, 6, Source::Persisted, {});
-    CHECK(learned(taken, "serialNumber") == std::string(kFakeSerial));
+    taken.driver->set_connected(true);
+    CHECK(taken.driver->get_connected());
+    taken.driver->set_connected(false);
+}
+
+// #2074: an entry bound before another learned its serial still must not take that camera.
+// Falsified by: zwo_camera_driver.cpp resolve_camera_id() using only binding_.claimed_serials.
+TEST_CASE("ZWO camera catalog - a serial learned at connect is claimed from entries already bound (#2074)",
+          "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    rig.sdk.set_units({{3, "1111222233334444"}, {5, "5555666677778888"}});
+    DeviceConfig by_name;
+    by_name.set("cameraName", std::string(kFakeName));
+    const BindResult first = bind(rig, by_name, 1, Source::Persisted, {});
+    const BindResult second = bind(rig, by_name, 2, Source::Persisted, {});
+    first.driver->set_connected(true);
+    second.driver->set_connected(true);
+    CHECK(rig.sdk.holders(3) == 1);
+    CHECK(rig.sdk.holders(5) == 1);
+    first.driver->set_connected(false);
+    second.driver->set_connected(false);
+}
+
+// #2074: without a stored name, every connect of the entry would open every camera to read serials.
+// Falsified by: zwo_camera_driver.cpp report_identity_learned() returning before the name on an empty serial.
+TEST_CASE("ZWO camera catalog - a camera with no serial still stores its model name (#2074)",
+          "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    rig.sdk.set_units({{3, ""}});
+    std::optional<DeviceConfig> stored;
+    const auto store = [&](const DeviceConfig& config) { stored = config; };
+    const BindResult result = rig.catalog.bind(kCameraKey, camera_config(0), 3, BindContext{Source::Api, {}, store});
+    REQUIRE(result.driver != nullptr);
+    result.driver->set_connected(true);
+    REQUIRE(stored.has_value());
+    CHECK(stored->find_value("serialNumber") == nullptr);
+    CHECK(std::get<std::string>(*stored->find_value("cameraName")) == std::string(kFakeName));
+    result.driver->set_connected(false);
+}
+
+// #2074: a removed entry must not keep its learned serial away from the entries bound after it.
+// Falsified by: zwo_catalog.cpp bind_camera() not calling claims->retain().
+TEST_CASE("ZWO camera catalog - a removed entry stops claiming the serial it learned (#2074)",
+          "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    DeviceConfig by_name;
+    by_name.set("cameraName", std::string(kFakeName));
+    const BindResult first = bind(rig, by_name, 0, Source::Persisted, {});
+    first.driver->set_connected(true);
+    first.driver->set_connected(false);
+
+    // Entry 0 is still stored, so its serial stays claimed.
+    const BindResult kept = bind(rig, by_name, 1, Source::Persisted, {peer(0, std::nullopt)});
+    CHECK_THROWS_AS(kept.driver->set_connected(true), AlpacaException);
+
+    // Entry 0 is gone: the next bind frees the camera.
+    const BindResult freed = bind(rig, by_name, 1, Source::Persisted, {});
+    freed.driver->set_connected(true);
+    CHECK(freed.driver->get_connected());
+    freed.driver->set_connected(false);
 }
 
 TEST_CASE("ZWO camera catalog - a saved serial binds that body whatever cameraIndex says",
@@ -271,14 +340,16 @@ TEST_CASE("ZWO camera catalog - a saved serial binds that body whatever cameraIn
     REQUIRE(result.driver != nullptr);
     CHECK(result.warnings.empty());
     CHECK_FALSE(learned(result, "serialNumber").has_value());
-    CHECK(learned(result, "cameraName") == std::string(kFakeName));
+    CHECK_FALSE(learned(result, "cameraName").has_value());
     result.driver->set_connected(true);
     CHECK(rig.sdk.holders(5) == 1);
     CHECK(rig.sdk.holders(3) == 0);
     result.driver->set_connected(false);
 }
 
-TEST_CASE("ZWO camera catalog - an index hint that matches no camera warns with what is attached",
+// #1969, moved to connect by #2074: registration no longer reads the cameras.
+// Falsified by: zwo_camera_driver.cpp resolve_camera_id() not calling describe_unbound_zwo_camera().
+TEST_CASE("ZWO camera catalog - an index hint that matches no camera says what is attached at connect (#2074)",
           "[catalog][zwo][camera][unit]") {
     // #1969: three cameras added one at a time, each alone at slot 0, while the form sent index 2.
     Rig rig;
@@ -286,50 +357,14 @@ TEST_CASE("ZWO camera catalog - an index hint that matches no camera warns with 
     const BindResult result = bind(rig, camera_config(2), 2, Source::Api, {});
     REQUIRE(result.driver != nullptr);
     CHECK_FALSE(result.rejection.has_value());
-    CHECK_FALSE(learned(result, "serialNumber").has_value());
-    CHECK_FALSE(learned(result, "cameraName").has_value());
-    REQUIRE(result.warnings.size() == 1);
-    CHECK(result.warnings[0] ==
-          "ZWO camera registered without a serial or model name: cameraIndex 2 matched no attached camera "
-          "(Camera index not found). The SDK enumerated slot 0 Fake ZWO Camera, serial 1111222233334444. Until it "
-          "learns one, a connect binds whichever camera the SDK then lists at cameraIndex 2. Edit the device and "
-          "pick its camera to bind it by serial.");
-
-    // An entry that found its camera, or that already holds a serial, has nothing to warn about.
-    CHECK(bind(rig, camera_config(0), 3, Source::Api, {}).warnings.empty());
-    DeviceConfig unplugged = camera_config(2);
-    unplugged.set("serialNumber", std::string("5555666677778888"));
-    CHECK(bind(rig, unplugged, 4, Source::Persisted, {}).warnings.empty());
-}
-
-TEST_CASE("ZWO camera catalog - the unbound line logs at INFO for an API call and WARN for a stored entry",
-          "[catalog][zwo][camera][unit]") {
-    // Decision 0007 rule 9: a configuredevice call is client-triggered, so it must not log at WARN.
-    Rig rig;
-    rig.sdk.set_units({{3, "1111222233334444"}});
-    LogCapture capture;
-    REQUIRE(bind(rig, camera_config(2), 2, Source::Api, {}).warnings.size() == 1);
-    REQUIRE(bind(rig, camera_config(2), 3, Source::Persisted, {}).warnings.size() == 1);
-    CHECK(capture.levels_of("Camera #2: ") == std::vector<logging::LogLevel>{logging::LogLevel::Info});
-    CHECK(capture.levels_of("Camera #3: ") == std::vector<logging::LogLevel>{logging::LogLevel::Warn});
-}
-
-TEST_CASE("ZWO camera catalog - a failed enumeration warns for an entry with no identity",
-          "[catalog][zwo][camera][unit]") {
-    Rig rig;
-    rig.sdk.before_call = [](const std::string& call) {
-        if (call == "enumerate_identified_cameras") throw AlpacaException("no usb", AlpacaError::DriverException);
-    };
-    const BindResult result = bind(rig, camera_config(1), 4, Source::Persisted, {});
-    REQUIRE(result.driver != nullptr);
-    REQUIRE(result.warnings.size() == 1);
-    CHECK(result.warnings[0].find("cameraIndex 1 matched no attached camera (the enumeration failed: no usb).") !=
-          std::string::npos);
-    CHECK(result.warnings[0].find("The SDK enumerated") == std::string::npos);
-
-    DeviceConfig named = camera_config(1);
-    named.set("cameraName", std::string(kFakeName));
-    CHECK(bind(rig, named, 5, Source::Persisted, {}).warnings.empty());
+    CHECK(result.warnings.empty());
+    try {
+        result.driver->set_connected(true);
+        FAIL("Expected the connect to be refused");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()).find("The SDK enumerated slot 0 Fake ZWO Camera, serial 1111222233334444") !=
+              std::string::npos);
+    }
 }
 
 TEST_CASE("ZWO camera catalog - lists the attached cameras for the web picker", "[catalog][zwo][camera][unit]") {

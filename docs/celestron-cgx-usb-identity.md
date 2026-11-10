@@ -29,7 +29,9 @@ The modern profile validates both motor model replies before publishing
 Connected. It sends only firmware and model GETs on a fresh Connect. It does not
 establish a home reference, initialize encoder labels, or qualify motion. The
 existing legacy two-byte/switch-probe profile is retained without any new hardware
-claim. Only model `0x1788` is verified here; do not guess a modern CGX-L ID.
+claim. Only model `0x1788` is verified here; do not guess a modern CGX-L ID. Since
+#2204 another two-byte model connects under a generic name, and the driver
+refuses motion on it, since the axis scaling and home positions are CGX constants.
 
 Regression coverage tests the version build's high byte, exact motor model on
 either axis, malformed lengths, mixed versions, and the read-only handshake.

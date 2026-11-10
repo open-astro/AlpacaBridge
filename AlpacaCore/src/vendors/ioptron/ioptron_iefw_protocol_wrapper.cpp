@@ -91,8 +91,13 @@ std::string iefw_model_name(std::int32_t model) {
     return "iEFW";
 }
 
+bool iefw_refuses_model(std::int32_t model) {
+    // The focuser family on the same protocol (INDI iafscaa.cpp).
+    return model >= 2 && model <= 5;
+}
+
 // Probe a serial port with the :DeviceInfo# handshake. Returns true (and
-// fills `info`) only if the reply parses and reports an iEFW model code.
+// fills `info`) only if the reply parses and its code names no other product.
 // Prolific PL2303 bridge like the focusers: no DTR-reset quirk on open.
 bool probe_iefw_port(const std::string& port_path, IefwDeviceInfo& info) {
 #ifndef _WIN32
@@ -130,7 +135,7 @@ bool probe_iefw_port(const std::string& port_path, IefwDeviceInfo& info) {
         if (reply.outcome == util::ReadOutcome::Terminator) resp.pop_back();
 
         IefwDeviceInfo parsed;
-        if (parse_device_info(resp, parsed) && is_iefw_model(parsed.model)) {
+        if (parse_device_info(resp, parsed) && !iefw_refuses_model(parsed.model)) {
             info = parsed;
             return true;
         }
@@ -296,11 +301,15 @@ public:
             throw AlpacaException("iEFW handshake failed after " + std::to_string(HANDSHAKE_RETRIES) + " attempts",
                                   AlpacaError::NotConnected);
         }
-        if (!is_iefw_model(info.model)) {
+        if (iefw_refuses_model(info.model)) {
             disconnect_locked();
             throw AlpacaException("Device on " + config_.serial_port + " reported model code " +
-                                      std::to_string(info.model) + ", not an iEFW (expected 98 or 99)",
+                                      std::to_string(info.model) + ", another iOptron product, not an iEFW",
                                   AlpacaError::NotConnected);
+        }
+        if (!is_iefw_model(info.model)) {
+            ALPACA_LOG_WARN("iOptron", "Filter wheel reports an unlisted model code " + std::to_string(info.model) +
+                                           "; connecting as iOptron Filter Wheel, unvalidated");
         }
 
         connected_ = true;

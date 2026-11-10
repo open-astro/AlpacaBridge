@@ -45,6 +45,11 @@ ConnectionInfo network_info(const std::string& host, int port) {
     return info;
 }
 
+// Discovery proves a mount with :GMA# as well as :GVP#.
+std::string mount_reply(const std::string& chunk, const std::string& model) {
+    return chunk.find(":GMA#") != std::string::npos ? "012345ABCDEF#" : model + "#";
+}
+
 std::vector<ZWODeviceInfo> candidates(const FakeMountServer& server, const std::string& host = "127.0.0.1") {
     return {{ConnectionType::Network, "", host, server.port(), "", "loopback"}};
 }
@@ -85,8 +90,9 @@ struct ProbeWaitLog {
 
 TEST_CASE("ZWO mount network - concurrent cold connects retain distinct endpoints",
           "[zwo][network][isolation][issue1524]") {
-    FakeMountServer first([](const std::string&) { return std::string("AM5#"); });
-    FakeMountServer second([](const std::string&) { return std::string("AM5N#"); }, INADDR_LOOPBACK + 1);  // 127.0.0.2
+    FakeMountServer first([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
+    FakeMountServer second([](const std::string& chunk) { return mount_reply(chunk, "AM5N"); },
+                           INADDR_LOOPBACK + 1);  // 127.0.0.2
     REQUIRE(first.ok());
     REQUIRE(second.ok());
     const ConnectionInfo infos[] = {network_info("127.0.0.1", first.port()), network_info("127.0.0.2", second.port())};
@@ -125,8 +131,9 @@ TEST_CASE("ZWO mount network - concurrent cold connects retain distinct endpoint
 
 TEST_CASE("ZWO mount network - invalid hostname cleanup preserves a sibling and permits retry",
           "[zwo][network][isolation][issue1524]") {
-    FakeMountServer first([](const std::string&) { return std::string("AM5#"); });
-    FakeMountServer second([](const std::string&) { return std::string("AM5N#"); }, INADDR_LOOPBACK + 1);  // 127.0.0.2
+    FakeMountServer first([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
+    FakeMountServer second([](const std::string& chunk) { return mount_reply(chunk, "AM5N"); },
+                           INADDR_LOOPBACK + 1);  // 127.0.0.2
     REQUIRE(first.ok());
     REQUIRE(second.ok());
     ZWOMountProtocolWrapper sibling;
@@ -150,8 +157,8 @@ TEST_CASE("ZWO mount network - invalid hostname cleanup preserves a sibling and 
 
 TEST_CASE("ZWO mount Auto - skips a held endpoint before probing and reaches a free port",
           "[zwo][network][auto][issue1536]") {
-    FakeMountServer held([](const std::string&) { return std::string("AM5#"); });
-    FakeMountServer free([](const std::string&) { return std::string("AM7#"); });
+    FakeMountServer held([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
+    FakeMountServer free([](const std::string& chunk) { return mount_reply(chunk, "AM7"); });
     REQUIRE(held.ok());
     REQUIRE(free.ok());
     ZWOMountProtocolWrapper owner;
@@ -171,7 +178,7 @@ TEST_CASE("ZWO mount Auto - skips a held endpoint before probing and reaches a f
 
 TEST_CASE("ZWO mount Auto - held-only failure releases only the closing owner's claim",
           "[zwo][network][auto][issue1536]") {
-    FakeMountServer server([](const std::string&) { return std::string("AM5#"); });
+    FakeMountServer server([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
     REQUIRE(server.ok());
     ZWOMountProtocolWrapper first, second;
     REQUIRE(first.connect(network_info("127.0.0.1", server.port())));
@@ -199,7 +206,8 @@ TEST_CASE("ZWO mount Auto - held-only failure releases only the closing owner's 
 
 TEST_CASE("ZWO mount Auto - failed discovery probes release endpoint reservations", "[zwo][network][auto][issue1536]") {
     std::atomic<bool> answer{false};
-    FakeMountServer server([&](const std::string&) { return answer.load() ? std::string("AM5#") : std::string(); });
+    FakeMountServer server(
+        [&](const std::string& chunk) { return answer.load() ? mount_reply(chunk, "AM5") : std::string(); });
     REQUIRE(server.ok());
     CHECK(enumerate_zwo_mounts(candidates(server), 50).empty());
     answer.store(true);
@@ -228,7 +236,7 @@ TEST_CASE("ZWO mount Auto - repeated empty and held-only refusals log at DEBUG",
         if (level >= LogLevel::Warn) ++warnings;
         if (level == LogLevel::Debug && message == "Auto-detect: no ZWO mount found on USB or WiFi") ++summaries;
     });
-    FakeMountServer server([](const std::string&) { return std::string("AM5#"); });
+    FakeMountServer server([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
     REQUIRE(server.ok());
     ZWOMountProtocolWrapper owner;
     REQUIRE(owner.connect(network_info("127.0.0.1", server.port())));
@@ -251,7 +259,7 @@ TEST_CASE("ZWO mount Auto - repeated empty and held-only refusals log at DEBUG",
 
 TEST_CASE("ZWO mount Auto - concurrent attempts cannot share an endpoint",
           "[zwo][network][auto][stress-guard][issue1536]") {
-    FakeMountServer server([](const std::string&) { return std::string("AM5#"); });
+    FakeMountServer server([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
     REQUIRE(server.ok());
     ZWOMountProtocolWrapper first(false, candidates(server)), second(false, candidates(server));
     std::barrier start(2);
@@ -281,7 +289,7 @@ TEST_CASE("ZWO mount network - refused socket releases its endpoint reservation"
     }
     ZWOMountProtocolWrapper refused;
     REQUIRE_FALSE(refused.connect(network_info("127.0.0.1", port)));
-    FakeMountServer replacement([](const std::string&) { return std::string("AM5#"); }, INADDR_LOOPBACK,
+    FakeMountServer replacement([](const std::string& chunk) { return mount_reply(chunk, "AM5"); }, INADDR_LOOPBACK,
                                 static_cast<std::uint16_t>(port));
     REQUIRE(replacement.ok());
     ZWOMountProtocolWrapper automatic(false, candidates(replacement));
@@ -290,17 +298,17 @@ TEST_CASE("ZWO mount network - refused socket releases its endpoint reservation"
 }
 
 TEST_CASE("ZWO mount Auto - rechecks ownership between discovery and final open", "[zwo][network][auto][issue1536]") {
-    FakeMountServer first([](const std::string&) { return std::string("AM5#"); });
+    FakeMountServer first([](const std::string& chunk) { return mount_reply(chunk, "AM5"); });
     std::promise<void> probing;
     std::promise<void> resume;
     auto released = resume.get_future().share();
     std::atomic<bool> block{true};
-    FakeMountServer second([&](const std::string&) {
+    FakeMountServer second([&](const std::string& chunk) {
         if (block.exchange(false)) {
             probing.set_value();
             released.wait();
         }
-        return std::string("AM7#");
+        return mount_reply(chunk, "AM7");
     });
     REQUIRE(first.ok());
     REQUIRE(second.ok());
@@ -326,12 +334,12 @@ TEST_CASE("ZWO mount Auto - deferred close keeps its endpoint reserved", "[zwo][
     std::promise<void> resume;
     auto released = resume.get_future().share();
     std::atomic<bool> block{true};
-    FakeMountServer server([&](const std::string&) {
+    FakeMountServer server([&](const std::string& chunk) {
         if (block.exchange(false)) {
             entered.set_value();
             released.wait();
         }
-        return std::string("AM5#");
+        return mount_reply(chunk, "AM5");
     });
     REQUIRE(server.ok());
     ZWOMountProtocolWrapper owner;
@@ -363,13 +371,13 @@ TEST_CASE("ZWO mount network - explicit connect waits for a discovery probe to r
     bool valid = true;
     SECTION("valid discovery") {}
     SECTION("invalid discovery") { valid = false; }
-    FakeMountServer server([&](const std::string&) {
+    FakeMountServer server([&](const std::string& chunk) {
         if (first.exchange(false)) {
             probing.set_value();
             released.wait();
-            if (!valid) return std::string("NotAMount#");
+            if (!valid) return std::string("e1#");
         }
-        return std::string("AM5#");
+        return mount_reply(chunk, "AM5");
     });
     REQUIRE(server.ok());
     auto probe = std::async(std::launch::async, [&] { return enumerate_zwo_mounts(candidates(server), 5000); });
@@ -406,12 +414,12 @@ TEST_CASE("ZWO mount network - cancelling a probe wait preserves ownership and p
     std::promise<void> probing, resume;
     auto released = resume.get_future().share();
     std::atomic<bool> first{true};
-    FakeMountServer server([&](const std::string&) {
+    FakeMountServer server([&](const std::string& chunk) {
         if (first.exchange(false)) {
             probing.set_value();
             released.wait();
         }
-        return std::string("AM5#");
+        return mount_reply(chunk, "AM5");
     });
     REQUIRE(server.ok());
     auto probe = std::async(std::launch::async, [&] { return enumerate_zwo_mounts(candidates(server), 5000); });
@@ -452,14 +460,14 @@ TEST_CASE("ZWO mount network - probe wait expires despite unrelated endpoint rel
     std::promise<void> probing, resume;
     auto released = resume.get_future().share();
     std::atomic<bool> first{true};
-    FakeMountServer server([&](const std::string&) {
+    FakeMountServer server([&](const std::string& chunk) {
         if (first.exchange(false)) {
             probing.set_value();
             released.wait();
         }
-        return std::string("AM5#");
+        return mount_reply(chunk, "AM5");
     });
-    FakeMountServer other([](const std::string&) { return std::string("AM7#"); }, INADDR_LOOPBACK + 1);
+    FakeMountServer other([](const std::string& chunk) { return mount_reply(chunk, "AM7"); }, INADDR_LOOPBACK + 1);
     REQUIRE(server.ok());
     REQUIRE(other.ok());
     auto probe = std::async(std::launch::async, [&] { return enumerate_zwo_mounts(candidates(server), 5000); });
@@ -514,12 +522,12 @@ TEST_CASE("ZWO mount network - waiting explicit entry refuses an Auto winner", "
     std::promise<void> probing, resume;
     auto released = resume.get_future().share();
     std::atomic<bool> first{true};
-    FakeMountServer server([&](const std::string&) {
+    FakeMountServer server([&](const std::string& chunk) {
         if (first.exchange(false)) {
             probing.set_value();
             released.wait();
         }
-        return std::string("AM5#");
+        return mount_reply(chunk, "AM5");
     });
     REQUIRE(server.ok());
     ZWOMountProtocolWrapper automatic(false, candidates(server)), explicit_link;
@@ -608,12 +616,12 @@ TEST_CASE("ZWO mount network - cancellation during Auto discovery prevents final
     std::promise<void> probing, resume;
     auto released = resume.get_future().share();
     std::atomic<bool> first{true};
-    FakeMountServer server([&](const std::string&) {
+    FakeMountServer server([&](const std::string& chunk) {
         if (first.exchange(false)) {
             probing.set_value();
             released.wait();
         }
-        return std::string("AM5#");
+        return mount_reply(chunk, "AM5");
     });
     REQUIRE(server.ok());
     ZWOMountProtocolWrapper automatic(false, candidates(server));

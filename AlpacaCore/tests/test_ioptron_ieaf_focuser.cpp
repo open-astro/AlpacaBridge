@@ -556,3 +556,25 @@ TEST_CASE("iEAF Link - the wrapper keeps the loss reason until the next connect 
     wrapper.disconnect();  // so does a disconnect
     CHECK(wrapper.link_fault().empty());
 }
+
+// #2204: a focuser speaking :DeviceInfo# connects whatever its code; only a code naming another product is refused.
+// Falsified by: ioptron_ieaf_protocol_wrapper.cpp connect() refusing a code is_ieaf_model() omits.
+TEST_CASE("iOptron iEAF - an unknown model code connects under a generic name (#2204)", "[ioptron][focuser][unit]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(7);
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == "iOptron Focuser");
+    driver->set_connected(false);
+}
+
+// Falsified by: ioptron_ieaf_protocol_wrapper.cpp ieaf_refuses_model() returning false for iFR and iEFW codes.
+TEST_CASE("iOptron iEAF - a code naming another iOptron product is refused (#2204)", "[ioptron][focuser][unit]") {
+    const int code = GENERATE(5, 98, 99);
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(code);
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+}

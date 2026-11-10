@@ -24,12 +24,15 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_pty_write.h"
+#include "pty_responder.h"
 #include "rotator_sync_offset_test_dir.h"
 
 namespace {
@@ -500,3 +503,94 @@ TEST_CASE("WandererAstro Rotator Protocol Wrapper - Connect fails at once when t
     CHECK(elapsed < std::chrono::milliseconds(2500));
     CHECK_FALSE(wrapper.is_connected());
 }
+
+#ifndef _WIN32
+// #2203: opening a CH340 resets the MCU, so the handshake written during its boot is lost and only the retry lands.
+// Falsified by: probe_rotator_port() handshaking with a shorter window than connect()'s serial_timeout_s.
+TEST_CASE("WandererRotator auto-detect finds a rotator that is silent through its boot after open (#2203)",
+          "[wandererastro][rotator][autodetect]") {
+    const auto opened = std::chrono::steady_clock::now();
+    alpacacore::test::PtyResponder tty([&](const std::string& chunk) -> std::string {
+        if (chunk.find("1500001") == std::string::npos) return "";
+        if (std::chrono::steady_clock::now() - opened < std::chrono::seconds(2)) return "";  // still booting
+        return "WandererRotatorMiniA20250101A0A0A0A";
+    });
+    const auto found = alpacacore::vendor::wandererastro::enumerate_wanderer_rotator_ports({tty.slave_path()});
+    REQUIRE(found.size() == 1);
+    CHECK(found.front().model == "WandererRotatorMini");
+}
+
+// #2203: the longer window must not turn a dead port into more traffic than the handshake and its one retry.
+// Falsified by: do_handshake() sending a third "1500001" after the retry window.
+TEST_CASE("WandererRotator auto-detect skips a port that never answers after only the handshake (#2203)",
+          "[wandererastro][rotator][autodetect]") {
+    std::mutex mutex;
+    std::string received;
+    alpacacore::test::PtyResponder tty([&](const std::string& chunk) -> std::string {
+        std::lock_guard<std::mutex> lock(mutex);
+        received += chunk;
+        return "";
+    });
+    CHECK(alpacacore::vendor::wandererastro::enumerate_wanderer_rotator_ports({tty.slave_path()}).empty());
+    std::lock_guard<std::mutex> lock(mutex);
+    CHECK(received == "15000011500001");
+}
+#endif
+
+#ifndef _WIN32
+// #2204: Falsified by: wandererastro_rotator_protocol_wrapper.cpp kRotatorModelPrefix naming only the Mini.
+TEST_CASE("WandererRotator - another rotator version connects under a generic name (#2204)",
+          "[wandererastro][rotator][unit]") {
+    alpacacore::test::PtyResponder tty([](const std::string& chunk) -> std::string {
+        return chunk.find("1500001") != std::string::npos ? "WandererRotatorProA20250101A0A0A0A" : "";
+    });
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, tty.slave_path());
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == "WandererAstro Rotator");
+    driver->set_connected(false);
+}
+
+// #2204: the step scale is the Mini's (a Lite differs), so another version is added but never moved with it.
+// Falsified by: wandererastro_rotator_driver.cpp require_known_model() not refusing an unlisted model.
+TEST_CASE("WandererRotator - another rotator version refuses every move (#2204)", "[wandererastro][rotator][unit]") {
+    std::mutex mutex;
+    std::vector<std::string> received;
+    alpacacore::test::PtyResponder tty([&](const std::string& chunk) -> std::string {
+        std::lock_guard<std::mutex> lock(mutex);
+        received.push_back(chunk);
+        return chunk.find("1500001") != std::string::npos ? "WandererRotatorLiteA20250101A0A0A0A" : "";
+    });
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, tty.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    std::size_t before = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        before = received.size();
+    }
+    namespace AlpacaError = alpacacore::AlpacaError;
+    require_alpaca_error([&] { driver->move(10.0); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->move_absolute(10.0); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->move_mechanical(10.0); }, AlpacaError::InvalidOperation);
+    CHECK_NOTHROW(driver->halt());  // a stop needs no step scale
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (std::size_t i = before; i < received.size(); ++i) {
+            CHECK(received[i].find("Stop") != std::string::npos);
+        }
+    }
+    driver->set_connected(false);
+}
+
+// #2204: Falsified by: wandererastro_rotator_protocol_wrapper.cpp connect() dropping the family prefix check.
+TEST_CASE("WandererRotator - a handshake from another product is refused (#2204)", "[wandererastro][rotator][unit]") {
+    alpacacore::test::PtyResponder tty([](const std::string& chunk) -> std::string {
+        return chunk.find("1500001") != std::string::npos ? "OtherDeviceA20250101A0A0A0A" : "";
+    });
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, tty.slave_path());
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+}
+#endif

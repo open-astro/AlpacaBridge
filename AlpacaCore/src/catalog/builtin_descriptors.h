@@ -68,8 +68,8 @@ void register_ioptron_factory(DeviceCatalog& catalog);
 void register_ioptron_icam_factory(DeviceCatalog& catalog);
 void register_zwo_schema(DeviceCatalog& catalog);
 void register_zwo_factory(DeviceCatalog& catalog);
-// The ZWO camera factory over `sdk`: its bind hook enumerates cameras through it
-// at registration. register_zwo_factory() passes the process-wide SDK; a test
+// The ZWO camera factory over `sdk`: the driver its bind hook creates reaches the
+// cameras through it at connect. register_zwo_factory() passes the process-wide SDK; a test
 // passes a fake (defined in zwo_catalog.cpp, so only with ALPACACORE_ENABLE_ZWO).
 void register_zwo_camera_factory(DeviceCatalog& catalog, vendor::zwo::ZWOSDK& sdk);
 // Camera listers for the thermal-switch camera picker (defined in

@@ -121,7 +121,7 @@ struct Rig {
     // The mount answers the command that starts with @p prefix with an error or an unparseable reply, or not.
     void fail(const std::string& prefix, bool on) {
         std::string reply = "bad";
-        if (prefix == ":GVP") reply = "OnStep";
+        if (prefix == ":GVP") reply = "e1";
         if (prefix == ":GU" || prefix == ":GA" || prefix == ":GZ") reply = "e1";
         mount.override_reply(prefix, reply, on ? -1 : 0);
     }

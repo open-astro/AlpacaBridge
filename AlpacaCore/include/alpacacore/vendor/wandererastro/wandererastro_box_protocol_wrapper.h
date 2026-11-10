@@ -74,6 +74,7 @@ struct BoxPortInfo {
  */
 struct BoxState {
     bool valid = false;        // true once a full frame has been parsed
+    std::string model;         // identity token; set on the connect and probe frames only
     int firmware_version = 0;  // YYYYMMDD
 
     // Environment sensors (raw units from the frame).
@@ -108,7 +109,7 @@ struct BoxState {
  *
  * Scans /dev/serial/by-id/ for CH340/CH341 USB-serial adapters (vendor 1a86)
  * and listens on each for the streamed status frame, accepting ports whose
- * identity token is exactly "ZXWBProV3". Falls back to /dev/ttyUSB0..9 if
+ * identity token starts with "ZXWBPro". Falls back to /dev/ttyUSB0..9 if
  * /dev/serial/by-id is absent. Fully passive — nothing is written to a
  * candidate port.
  *
@@ -123,7 +124,7 @@ std::vector<BoxPortInfo> enumerate_wandererbox_ports();
  * 8N1 (INDI wandererbox_pro_v3 reference):
  *   - the controller streams the 23-field 'A'-delimited status frame
  *     continuously; a background reader thread parses a rolling token stream
- *     that resynchronises on the "ZXWBProV3" identity token, so state reads
+ *     that resynchronises on the "ZXWBPro..." identity token, so state reads
  *     never block on serial I/O
  *   - commands are "\n"-terminated fire-and-forget ASCII numbers:
  *     DC3-4 "101"/"100", DC8-9 "201"/"200", DC10-11 "211"/"210",
@@ -145,7 +146,7 @@ public:
     /**
      * @brief Connect and wait for the first streamed status frame.
      * @param config Connection configuration
-     * @return The detected model token ("ZXWBProV3")
+     * @return The detected model token (for example "ZXWBProV3")
      */
     std::string connect(const BoxConnectionConfig& config);
 

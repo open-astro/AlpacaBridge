@@ -185,7 +185,7 @@ bool write_line(int fd, const std::string& cmd) {
 }
 
 // Probe a serial port with the hub's identity handshake. Returns true only
-// when the exact kPdhHandshakeReply comes back, so ports hosting the Gemini
+// when is_pdh_handshake_reply() accepts the reply, so ports hosting the Gemini
 // focuser or a flat panel (same CH340 adapter family) are rejected.
 bool probe_pdh_port(const std::string& port_path) {
     // The probe's claim lasts exactly as long as `link`: a connect or another
@@ -250,7 +250,12 @@ bool raw_port_looks_like_pdh_candidate(const std::string& port_path) {
 
 }  // namespace
 
-bool is_pdh_handshake_reply(const std::string& reply) { return strip_frame(reply) == kPdhHandshakeReply; }
+bool is_pdh_handshake_reply(const std::string& reply) {
+    const std::string frame = strip_frame(reply);
+    if (frame.rfind("*H", 0) != 0 || frame.size() == 2) return false;
+    // Named other products on the same CH340 adapters: a flat panel, or the PowerBox Plus V3 and its frame layout.
+    return frame.find("FlatPanel") == std::string::npos && frame.find("PowerBoxPlusV") == std::string::npos;
+}
 
 std::string format_pdh_firmware(int version) {
     if (version >= 100 && version <= 999) {
@@ -474,6 +479,10 @@ public:
                     const std::string reply = request(">H#", 'H', kRequestTimeoutMs);
                     if (is_pdh_handshake_reply(reply)) {
                         success = true;
+                        unlisted_model_.store(strip_frame(reply) != kPdhHandshakeReply);
+                        if (unlisted_model_.load()) {
+                            ALPACA_LOG_WARN("Gemini", "Power hub reports an unlisted model: " + reply);
+                        }
                     } else {
                         ALPACA_LOG_WARN("Gemini", "Power hub handshake attempt " + std::to_string(attempt + 1) +
                                                       " got an unexpected identity: " + reply);
@@ -555,6 +564,8 @@ public:
         std::lock_guard<std::mutex> lock(state_mutex_);
         return state_;
     }
+
+    bool is_unlisted_model() const { return unlisted_model_.load(); }
 
     std::optional<std::string> get_firmware() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -873,6 +884,7 @@ private:
     bool pending_active_ = false;
     std::optional<std::string> pending_reply_;
 
+    std::atomic<bool> unlisted_model_{false};
     std::atomic<bool> reader_running_{false};
     std::thread reader_thread_;
 
@@ -897,6 +909,8 @@ bool GeminiPdhProtocolWrapper::is_connected() const { return impl_->is_connected
 PdhState GeminiPdhProtocolWrapper::get_state() const { return impl_->get_state(); }
 
 std::optional<std::string> GeminiPdhProtocolWrapper::get_firmware() const { return impl_->get_firmware(); }
+
+bool GeminiPdhProtocolWrapper::is_unlisted_model() const { return impl_->is_unlisted_model(); }
 
 std::optional<std::string> GeminiPdhProtocolWrapper::link_fault() const { return impl_->link_fault(); }
 

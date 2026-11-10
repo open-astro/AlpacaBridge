@@ -161,7 +161,9 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "Gemini Power & Data Hubs Advanced 3"; }
+    std::string get_name() const override {
+        return protocol_.is_unlisted_model() ? "Gemini Switch" : "Gemini Power & Data Hubs Advanced 3";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 

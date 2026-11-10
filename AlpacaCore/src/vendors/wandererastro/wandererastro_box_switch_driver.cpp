@@ -145,7 +145,9 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "WandererAstro WandererBox Pro V3"; }
+    std::string get_name() const override {
+        return unlisted_model_.load() ? "WandererAstro Switch" : "WandererAstro WandererBox Pro V3";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
@@ -230,7 +232,11 @@ public:
                     "WandererBox: portPath is required when connectionType is 'serial' (or use 'auto').",
                     AlpacaError::NotConnected);
             }
-            protocol_.connect(effective);
+            const std::string model = protocol_.connect(effective);
+            unlisted_model_.store(model != kBoxProV3ModelToken);
+            if (unlisted_model_.load()) {
+                ALPACA_LOG_WARN("WandererAstro", "Box reports an unlisted model '" + model + "'; unvalidated");
+            }
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 for (auto& c : commanded_) {
@@ -515,6 +521,7 @@ private:
 
     int device_number_;
     BoxConnectionConfig config_;
+    std::atomic<bool> unlisted_model_{false};
     std::atomic<bool> connected_;
     WandererBoxProtocolWrapper protocol_;
 

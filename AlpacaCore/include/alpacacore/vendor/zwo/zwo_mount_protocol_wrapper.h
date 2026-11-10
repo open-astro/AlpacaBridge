@@ -29,7 +29,10 @@ enum class ConnectionType {
     Auto
 };
 
-// A ZWO mount discovered by enumerate_zwo_mounts(): AM3, AM5, AM5N or AM7,
+/// A model this driver can name. Display only (#2204): an unlisted model still connects, as "ZWO Mount".
+bool is_zwo_mount_model(std::string_view model);
+
+// A ZWO mount discovered by enumerate_zwo_mounts(): any model that answers :GVP# with a valid :GMA# serial,
 // verified by a hash-terminated :GVP reply on either transport.
 struct ZWODeviceInfo {
     ConnectionType type = ConnectionType::Serial;
@@ -153,7 +156,8 @@ public:
     };
 
     std::string get_mount_info();
-    std::string get_mount_serial_number();
+    /// Throws when the reply is not twelve hex characters, quoting @p identity_reply (the :GVP# answer) when given.
+    std::string get_mount_serial_number(std::string_view identity_reply = {});
     // Call only after fresh model/serial verification and the driver's identity claim.
     void finish_identity_check();
 

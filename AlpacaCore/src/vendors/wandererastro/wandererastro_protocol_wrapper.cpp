@@ -45,7 +45,8 @@ namespace alpacacore::vendor::wandererastro {
 
 namespace {
 
-constexpr char kModelPrefix[] = "WandererCoverV4";
+// Any version of the product whose status frame parses (#2204).
+constexpr char kModelPrefix[] = "WandererCover";
 
 // The cover streams its status line at ~1 Hz; this much silence means the
 // link is dead, not slow (issue #237).

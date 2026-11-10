@@ -346,3 +346,25 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Link fault restores retuned li
                            std::chrono::milliseconds(2000)));
     driver->set_connected(false);
 }
+
+// #2204: Falsified by: wandererastro_protocol_wrapper.cpp kModelPrefix naming only the V4 cover.
+TEST_CASE("WandererAstro CoverCalibrator Driver - another cover version connects under a generic name (#2204)",
+          "[wandererastro][covercalibrator][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer cover("WandererCoverV5A20240301A10.0A270.0A10.0A12.5A0A0A0\n",
+                                               std::chrono::milliseconds(50));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path());
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == "WandererAstro Cover Calibrator");
+    driver->set_connected(false);
+}
+
+// #2204: Falsified by: wandererastro_protocol_wrapper.cpp parse_status_line() dropping the family prefix check.
+TEST_CASE("WandererAstro CoverCalibrator Driver - a frame from another product is refused (#2204)",
+          "[wandererastro][covercalibrator][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer other("OtherDeviceA20240301A10.0A270.0A10.0A12.5A0A0A0\n",
+                                               std::chrono::milliseconds(50));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, other.slave_path());
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+}
