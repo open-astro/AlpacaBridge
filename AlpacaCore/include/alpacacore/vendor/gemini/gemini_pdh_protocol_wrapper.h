@@ -152,7 +152,8 @@ void set_gemini_pdh_scan_hooks_for_testing(GeminiPdhScanHooks hooks);
  * @brief Check whether a >H# reply identifies a Gemini power hub.
  *
  * Refuses an empty identity and one naming a flat panel or the PowerBox Plus V3
- * (line endings and the '#' terminator stripped); an unlisted hub passes. Exposed so the discrimination logic is unit-testable.
+ * (line endings and the '#' terminator stripped); an unlisted hub passes. Exposed so the discrimination logic is
+ * unit-testable.
  */
 bool is_pdh_handshake_reply(const std::string& reply);
 
