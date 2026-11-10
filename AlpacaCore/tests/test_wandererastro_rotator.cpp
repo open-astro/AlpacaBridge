@@ -27,6 +27,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
@@ -547,6 +548,39 @@ TEST_CASE("WandererRotator - another rotator version connects under a generic na
     driver->set_connected(true);
     CHECK(driver->get_connected());
     CHECK(driver->get_name() == "WandererAstro Rotator");
+    driver->set_connected(false);
+}
+
+// #2204: the step scale is the Mini's (a Lite differs), so another version is added but never moved with it.
+// Falsified by: wandererastro_rotator_driver.cpp require_known_model() not refusing an unlisted model.
+TEST_CASE("WandererRotator - another rotator version refuses every move (#2204)", "[wandererastro][rotator][unit]") {
+    std::mutex mutex;
+    std::vector<std::string> received;
+    alpacacore::test::PtyResponder tty([&](const std::string& chunk) -> std::string {
+        std::lock_guard<std::mutex> lock(mutex);
+        received.push_back(chunk);
+        return chunk.find("1500001") != std::string::npos ? "WandererRotatorLiteA20250101A0A0A0A" : "";
+    });
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, tty.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    std::size_t before = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        before = received.size();
+    }
+    namespace AlpacaError = alpacacore::AlpacaError;
+    require_alpaca_error([&] { driver->move(10.0); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->move_absolute(10.0); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->move_mechanical(10.0); }, AlpacaError::InvalidOperation);
+    CHECK_NOTHROW(driver->halt());  // a stop needs no step scale
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (std::size_t i = before; i < received.size(); ++i) {
+            CHECK(received[i].find("Stop") != std::string::npos);
+        }
+    }
     driver->set_connected(false);
 }
 
