@@ -135,6 +135,10 @@ author must do. Read the docstring before changing a gate.
   Release (a Release under 24 h old may still be missing), fails on any `not found` from `ldd`
   and, from 5.1 on (`--version` is not on `stable/5.0`), runs `alpacabridge --version`.
   `scheduled-failure.yml` watches it by workflow name.
+- **Closed threads are locked after 14 days** (`.github/workflows/lock-threads.yml`): every six hours
+  `dessant/lock-threads` locks issues and PRs closed with no activity for 14 days; threads closed from
+  2026-11-10 on get a comment pointing at a new issue, the older backlog is locked silently.
+  `scheduled-failure.yml` watches it by workflow name.
 - **libgpiod and the bundled libgphoto2 are cached** (`deps-gpiod-...` key in `ci.yml`): the jobs that need them (the all-vendors shards, `sanitizers-tsan`, `clang-tidy`) restore one staging tree keyed on the libgpiod pin and `scripts/build_bundled_gphoto.sh`, build both into it only on a miss, and copy it into `/`. Bumping either pin or the script changes the key. `nightly-build.yml` still builds them every run.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
   green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
