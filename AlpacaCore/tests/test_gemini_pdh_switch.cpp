@@ -203,6 +203,9 @@ TEST_CASE("Gemini PDH Protocol Wrapper - Handshake discrimination", "[gemini][sw
     CHECK_FALSE(is_pdh_handshake_reply("*HGeminiFlatPanelPro#"));
     // The previous-generation PowerBox Plus V3 has a different frame layout.
     CHECK_FALSE(is_pdh_handshake_reply("*HGeminiPowerBoxPlusV3#"));
+    // #2204: an unlisted power box answers the protocol; only a named other product is refused.
+    CHECK(is_pdh_handshake_reply("*HGeminiPowerBoxPlusAdv4#"));
+    CHECK_FALSE(is_pdh_handshake_reply("*H#"));
     CHECK_FALSE(is_pdh_handshake_reply(""));
     CHECK_FALSE(is_pdh_handshake_reply("#"));
 
@@ -780,4 +783,25 @@ TEST_CASE("Gemini PDH Switch Driver - Connected capability and range members on 
         require_alpaca_error([&]() { (void)driver->get_min_switch_value(id); }, alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&]() { (void)driver->get_switch_step(id); }, alpacacore::AlpacaError::InvalidValue);
     }
+}
+
+// #2204: Falsified by: gemini_pdh_protocol_wrapper.cpp is_pdh_handshake_reply() comparing to the one known reply.
+TEST_CASE("Gemini PDH Switch - an unlisted power box connects under a generic name (#2204)", "[gemini][switch][unit]") {
+    alpacacore::test::FakeGeminiPdh fake;
+    fake.set_handshake("*HGeminiPowerBoxPlusAdv4#");
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, fake.slave_path());
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == "Gemini Switch");
+    driver->set_connected(false);
+}
+
+// #2204: Falsified by: gemini_pdh_protocol_wrapper.cpp is_pdh_handshake_reply() accepting any "*H" frame.
+TEST_CASE("Gemini PDH Switch - a reply naming another product is refused (#2204)", "[gemini][switch][unit]") {
+    const std::string reply = GENERATE("*HGeminiFlatPanelLite#", "*HGeminiPowerBoxPlusV3#", "*H#");
+    alpacacore::test::FakeGeminiPdh fake;
+    fake.set_handshake(reply);
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, fake.slave_path());
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
 }

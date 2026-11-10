@@ -978,3 +978,29 @@ TEST_CASE("iEFW Link - a fault just under the staleness bound does not lose the 
     CHECK(alpacacore::util::is_serial_port_in_use(wheel.pts));
     CHECK(wheel.driver->get_link_fault().find("consecutive failures") != std::string::npos);
 }
+
+// #2204: an unknown wheel takes its slot count from the configured model.
+// Falsified by: ioptron_filterwheel_driver.cpp publish_connect_state() using iefw_slot_count(info.model) unchecked.
+TEST_CASE("iOptron iEFW - an unknown model code connects with the configured slot count (#2204)",
+          "[ioptron][filterwheel][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(97);
+    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path(), "iefw18", clock);
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == "iOptron Filter Wheel");
+    CHECK(driver->get_names().size() == 8);
+    driver->set_connected(false);
+}
+
+// Falsified by: ioptron_iefw_protocol_wrapper.cpp iefw_refuses_model() returning false for the focuser codes.
+TEST_CASE("iOptron iEFW - a code naming a focuser is refused (#2204)", "[ioptron][filterwheel][unit]") {
+    const int code = GENERATE(2, 3, 4, 5);
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(code);
+    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path(), "iefw15", clock);
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+}

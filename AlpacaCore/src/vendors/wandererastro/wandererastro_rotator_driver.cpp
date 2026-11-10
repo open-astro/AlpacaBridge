@@ -60,7 +60,9 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "WandererAstro WandererRotator Mini"; }
+    std::string get_name() const override {
+        return unlisted_model_.load() ? "WandererAstro Rotator" : "WandererAstro WandererRotator Mini";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Rotator; }
 
@@ -159,7 +161,12 @@ public:
                     "WandererAstro rotator: portPath is required when connectionType is 'serial' (or use 'auto').",
                     AlpacaError::NotConnected);
             }
-            protocol_.connect(effective);
+            const std::string model = protocol_.connect(effective);
+            unlisted_model_.store(model.rfind("WandererRotatorMini", 0) != 0);
+            if (unlisted_model_.load()) {
+                ALPACA_LOG_WARN("WandererAstro",
+                                "Rotator reports an unlisted model '" + model + "'; connected, motion refused");
+            }
             {
                 // The Sync offset persists across reconnects and restarts (IRotatorV4).
                 // Keyed by the stored ID (decision 0018). The offset saved under
@@ -265,10 +272,20 @@ public:
         protocol_.halt();
     }
 
+    // The step scale is the Mini's and a Lite differs (#2204): another version connects, but is not moved with it.
+    void require_known_model() const {
+        if (unlisted_model_.load()) {
+            throw AlpacaException(
+                "This rotator is not a WandererRotator Mini, so its step scale is unverified; motion is refused",
+                AlpacaError::InvalidOperation);
+        }
+    }
+
     void move(double position) override {
         // IRotator.Move: relative offset from the current Position.
         validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
+        require_known_model();
         const double current = get_position();
         start_move_to(normalize_angle(current + position));
     }
@@ -276,12 +293,14 @@ public:
     void move_absolute(double position) override {
         validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
+        require_known_model();
         start_move_to(normalize_angle(position));
     }
 
     void move_mechanical(double position) override {
         validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
+        require_known_model();
         const double mechanical_target = normalize_angle(position);
         const double mechanical_current = protocol_.get_state().mechanical_angle;
         protocol_.move_relative(shortest_delta(mechanical_current, mechanical_target));
@@ -354,6 +373,7 @@ private:
 
     int device_number_;
     RotatorConnectionConfig config_;
+    std::atomic<bool> unlisted_model_{false};
     std::atomic<bool> connected_;
     WandererRotatorProtocolWrapper protocol_;
 

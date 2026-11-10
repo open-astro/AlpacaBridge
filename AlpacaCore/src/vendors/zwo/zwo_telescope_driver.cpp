@@ -626,7 +626,7 @@ public:
                 // Verify identity before even offline-capable setters may write to the open link.
                 caches_ready_.store(false);
                 const std::string mount_info = protocol.get_mount_info();
-                const std::string mount_serial = protocol.get_mount_serial_number();
+                const std::string mount_serial = protocol.get_mount_serial_number(mount_info);
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (!verified_mount_serial_.empty() && verified_mount_serial_ != mount_serial) {
@@ -637,7 +637,7 @@ public:
                     }
                     mount_identity_.claim(mount_serial, connection_info_.type == ConnectionType::Auto, device_number_);
                     if (verified_mount_serial_.empty()) verified_mount_serial_ = mount_serial;
-                    mount_info_ = mount_info;
+                    mount_info_ = is_zwo_mount_model(mount_info) ? mount_info : std::string();
                 }
                 protocol.finish_identity_check();
                 const std::uint64_t client_writes_seen = utc_client_writes_copy();
@@ -2247,7 +2247,6 @@ public:
             // successful unpark.
             park_state_cached_ = false;
             park_state_at_ = clock_.now();
-            slew_hold_.arm(clock_.now(), std::chrono::seconds(2));
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that unparks after a failed GOTO must not be told the OLD
             // goto failed.

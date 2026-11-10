@@ -146,7 +146,9 @@ public:
     }
 
     int get_device_number() const override { return device_number_; }
-    std::string get_name() const override { return "Celestron CGX/CGX-L USB Telescope"; }
+    std::string get_name() const override {
+        return unknown_motor_model_.load() ? "Celestron Telescope" : "Celestron CGX/CGX-L USB Telescope";
+    }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
     std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
     std::string get_description() const override { return "Celestron CGX/CGX-L direct USB mount"; }
@@ -284,6 +286,13 @@ public:
     std::vector<int> get_tracking_rates() const override { return {0, 1, 2}; }
     std::chrono::system_clock::time_point get_utc_date() const override;
     void set_utc_date(std::chrono::system_clock::time_point utc) override;
+    void require_known_motor_model() const {
+        if (unknown_motor_model_.load()) {
+            throw AlpacaException(
+                "This mount's motors report an unknown model, so CGX axis scaling is unverified; motion is refused",
+                AlpacaError::InvalidOperation);
+        }
+    }
     void find_home() override;
     void park() override;
     void pulse_guide(int, int) override;
@@ -461,6 +470,7 @@ private:
     bool motion_transition_ = false;
     bool disconnecting_ = false;
     std::atomic<bool> connected_{false};
+    std::atomic<bool> unknown_motor_model_{false};
     mutable CelestronCgxProtocol protocol_;
     util::OperationGeneration motion_generation_;
     util::AsyncOperation motion_slot_;
@@ -771,14 +781,23 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
             // Raw AUX CGX 7.17.25 returns major/minor + a big-endian build.
             // MC_GET_MODEL identifies both motors as CGX (0x1788); a reply
             // from each assumed switch address is not a valid identity gate.
+            // Encoder scaling and home positions are the CGX's constants (#2204): an unknown motor is added, but
+            // require_known_motor_model() refuses to drive it with them.
+            bool unknown_motor = false;
             for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
                 const AuxFrame model = protocol_.exchange({0x00, static_cast<std::uint8_t>(axis), 0x05, {}},
                                                           std::chrono::milliseconds(500));
+                if (model.payload.size() != 2) {
+                    throw AlpacaException("Celestron CGX motor model reply is malformed", AlpacaError::DriverException);
+                }
                 if (model.payload != std::vector<std::uint8_t>{0x17, 0x88}) {
-                    throw AlpacaException("Celestron direct USB requires verified CGX motor model 0x1788 on both axes",
-                                          AlpacaError::DriverException);
+                    unknown_motor = true;
+                    ALPACA_LOG_WARN("Celestron CGX",
+                                    "Motor reports unlisted model bytes " + std::to_string(model.payload[0]) + " " +
+                                        std::to_string(model.payload[1]) + "; connected, motion refused");
                 }
             }
+            unknown_motor_model_.store(unknown_motor);
         } else {
             const auto query_home_switch = [this](std::uint8_t address) {
                 try {
@@ -1058,6 +1077,7 @@ bool CelestronCgxTelescopeDriver::get_tracking() const {
 }
 void CelestronCgxTelescopeDriver::set_tracking(bool tracking) {
     require_connected();
+    if (tracking) require_known_motor_model();
     MotionTransition transition(*this);
     std::unique_lock<std::mutex> lock(mutex_);
     set_tracking_locked(tracking, lock);
@@ -1491,6 +1511,7 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
         throw AlpacaException("PulseGuide direction or duration is out of range", AlpacaError::InvalidValue);
     }
     require_connected();
+    require_known_motor_model();
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
     require_connected();
     if (motion_transition_ || disconnecting_)
@@ -1900,6 +1921,7 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
 
 void CelestronCgxTelescopeDriver::start_home_operation(bool park_after) {
     require_connected();
+    require_known_motor_model();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         require_site_locked();  // FindHome fixes the mechanical hemisphere from the latitude.
@@ -2015,6 +2037,7 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
 void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
     validate_site_and_coordinates(ra, dec, "SlewToCoordinates");
     require_connected();
+    require_known_motor_model();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         require_site_locked();

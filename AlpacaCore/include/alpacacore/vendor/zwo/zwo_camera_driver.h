@@ -19,7 +19,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -71,10 +73,39 @@ std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int 
  * stored UniqueID a serial-less body reports; \p claimed_serials are the
  * serials other config entries bind, which a serial-less entry skips.
  */
+/// Serials learned at connect, per device number: an entry bound earlier cannot see them in its peers (#2074).
+class ZwoConnectClaims {
+public:
+    void claim(int device_number, const std::string& serial) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        serials_[device_number] = serial;
+    }
+    /// Forgets every entry not in @p device_numbers: a removed or rebinding entry no longer claims its camera.
+    void retain(const std::set<int>& device_numbers) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::erase_if(serials_, [&](const auto& entry) { return device_numbers.count(entry.first) == 0; });
+    }
+    std::set<std::string> others(int device_number) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::set<std::string> claimed;
+        for (const auto& [number, serial] : serials_) {
+            if (number != device_number) claimed.insert(serial);
+        }
+        return claimed;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::map<int, std::string> serials_;
+};
+
 struct ZwoCameraBinding {
     ZwoConfiguredIdentity identity;
     std::string unique_id;
     std::set<std::string> claimed_serials;
+    std::shared_ptr<ZwoConnectClaims> connect_claims;
+    /// Called after a connect with what the entry did not store; an empty argument was not learned.
+    std::function<void(const std::string& serial, const std::string& model_name)> on_identity_learned;
     // Setup policy, not identity: absent uses 40 clamped to the camera's capabilities.
     std::optional<std::int64_t> usb_bandwidth;
 };

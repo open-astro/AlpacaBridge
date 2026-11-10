@@ -469,6 +469,14 @@ private:
     // Guards persisted_devices_ and persisted_devices_loaded_. Never held
     // together with server_info_mutex_ or across driver-registry calls.
     mutable std::mutex persisted_devices_mutex_;
+    // A driver can outlive this Router in the device registry, so its connect-time store goes through this.
+    struct LearnedConfigSink {
+        std::mutex mutex;
+        Router* router = nullptr;
+    };
+    std::shared_ptr<LearnedConfigSink> learned_sink_ = std::make_shared<LearnedConfigSink>();
+    // Merges @p learned into the stored entry @p entry names, then saves. An empty @p unique_id matches any ID.
+    void store_learned_config(const nlohmann::json& entry, const nlohmann::json& learned, const std::string& unique_id);
     // Serialises the file write in save_persisted_devices(): request workers
     // reach it concurrently through persist_client_site() (#444), and two
     // truncate-and-write passes interleave into invalid JSON. Lock order:

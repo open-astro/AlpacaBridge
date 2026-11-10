@@ -52,6 +52,10 @@
 
 namespace alpacacore::vendor::zwo {
 
+bool is_zwo_mount_model(std::string_view model) {
+    return model == "AM3" || model == "AM3N" || model == "AM5" || model == "AM5N" || model == "AM7";
+}
+
 namespace {
 
 // open-astro#2165: set on the driver's telemetry poll thread by ZWOMountProtocolWrapper::BackgroundIoScope.
@@ -71,8 +75,10 @@ constexpr int kOwedReplyBoundMs = 600;
 // Once the owed reply's terminator has arrived, the fence waits this long for the line to go quiet.
 constexpr int kOwedReplyQuietMs = 30;
 
-bool is_zwo_mount_model(std::string_view model) {
-    return model == "AM3" || model == "AM5" || model == "AM5N" || model == "AM7";
+// The twelve hexadecimal characters ZWO ASCOM 6.5.37 GetMountSN validates from :GMA#.
+bool is_zwo_mount_serial(const std::string& reply) {
+    return reply.size() == 12 &&
+           std::all_of(reply.begin(), reply.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; });
 }
 
 // A device reply quoted in a connect refusal: control and non-ASCII bytes become '?', and it is cut at 48
@@ -490,6 +496,16 @@ bool zwo_mount_candidate_free(const std::string& port, const std::string& name, 
 void configure_mount_line(struct termios& tty, speed_t speed) { util::make_raw_8n1(tty, speed); }
 #endif
 
+// The model a probe reports, or "" when the endpoint is not a ZWO mount: any terminated, non-error :GVP# answer,
+// proven by a valid :GMA# serial (decision 0017 rule 8 refuses the wrong device; an unlisted model is not one, #2204).
+template <class Query>
+std::string identify_mount(const Query& query) {
+    const auto model = query(":GVP#");
+    if (!model || model->empty() || extract_mount_error_code(*model).has_value()) return "";
+    const auto serial = query(":GMA#");
+    return serial && is_zwo_mount_serial(*serial) ? sanitize_for_log(*model) : "";
+}
+
 std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
 #ifdef _WIN32
     (void)port_path;
@@ -508,32 +524,30 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
     }
     const int fd = link.fd();
 
-    if (!util::tty_write_all(fd, std::string(":GVP#"))) {
-        return "";
-    }
+    // One query: the trimmed reply up to its '#', or nothing when it never terminates.
+    const auto query = [&](const std::string& command) -> std::optional<std::string> {
+        if (!util::tty_write_all(fd, command)) return std::nullopt;
 
-    // This read is reached via enumerate_zwo_mounts() called from
-    // Impl::connect(Auto), which deliberately holds mutex_ across the
-    // whole auto-detect probe sequence (see that function's doc comment)
-    // so a concurrent connect can't race it. The read's deadline bounds the
-    // probe. IdleGap keeps the old rule: 100 ms of silence after the first
-    // byte ends the read, and only a '#' seen before that counts as a reply.
-    util::ReadSpec spec;
-    spec.stop = util::ReadSpec::Stop::IdleGap;
-    spec.idle_gap = std::chrono::milliseconds(100);
-    spec.skip.clear();
-    // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
-    spec.max_len = 4096;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-    const auto reply = util::read_until(fd, spec, deadline);
-    link.close();
-
-    const std::size_t hash = reply.bytes.find('#');
-    const bool terminated = hash != std::string::npos;
-    std::string response = reply.bytes.substr(0, hash);
-    response = trim_copy(std::move(response));
-    return terminated && is_zwo_mount_model(response) ? response : "";
+        // This read is reached via enumerate_zwo_mounts() called from
+        // Impl::connect(Auto), which deliberately holds mutex_ across the
+        // whole auto-detect probe sequence (see that function's doc comment)
+        // so a concurrent connect can't race it. The read's deadline bounds the
+        // probe. IdleGap keeps the old rule: 100 ms of silence after the first
+        // byte ends the read, and only a '#' seen before that counts as a reply.
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::IdleGap;
+        spec.idle_gap = std::chrono::milliseconds(100);
+        spec.skip.clear();
+        // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
+        spec.max_len = 4096;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+        const auto reply = util::read_until(fd, spec, deadline);
+        const std::size_t hash = reply.bytes.find('#');
+        if (hash == std::string::npos) return std::nullopt;
+        return trim_copy(reply.bytes.substr(0, hash));
+    };
+    return identify_mount(query);
 #endif
 }
 
@@ -595,31 +609,33 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     rcv_timeout.tv_usec = static_cast<suseconds_t>(timeout_ms % 1000) * 1000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
 
-    const std::string cmd = ":GVP#";
-    if (!util::send_all(sock, cmd.c_str(), cmd.size(), MSG_NOSIGNAL)) {
-        return "";
-    }
+    const auto query = [&](const std::string& cmd) -> std::optional<std::string> {
+        if (!util::send_all(sock, cmd.c_str(), cmd.size(), MSG_NOSIGNAL)) {
+            return std::nullopt;
+        }
 
-    std::string response;
-    bool terminated = false;
-    const auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
-           timeout_ms) {
-        char ch = '\0';
-        const ssize_t n = ::recv(sock, &ch, 1, 0);
-        if (n == 1) {
-            if (ch == '#') {
-                terminated = true;
+        std::string response;
+        bool terminated = false;
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
+               timeout_ms) {
+            char ch = '\0';
+            const ssize_t n = ::recv(sock, &ch, 1, 0);
+            if (n == 1) {
+                if (ch == '#') {
+                    terminated = true;
+                    break;
+                }
+                response.push_back(ch);
+            } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
                 break;
             }
-            response.push_back(ch);
-        } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-            break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    response = trim_copy(std::move(response));
-    return terminated && is_zwo_mount_model(response) ? response : "";
+        if (!terminated) return std::nullopt;
+        return trim_copy(std::move(response));
+    };
+    return identify_mount(query);
 #endif
 }
 
@@ -1559,23 +1575,26 @@ std::string ZWOMountProtocolWrapper::get_mount_info() {
     std::string response = send_command(":GVP");
     throw_if_mount_error(response, ":GVP");
     response = trim_copy(std::move(response));
+    if (response.empty()) {
+        throw AlpacaException(
+            "The device gave an empty mount identity; check the configured serial port or host and device type",
+            AlpacaError::DriverException);
+    }
     if (!is_zwo_mount_model(response)) {
-        throw AlpacaException("Expected a ZWO AM3, AM5, AM5N or AM7 identity, but the device answered '" +
-                                  sanitize_for_log(response) +
-                                  "'; check the configured serial port or host and device type",
-                              AlpacaError::DriverException);
+        ALPACA_LOG_WARN("ZWO", "Mount reports an unlisted model '" + sanitize_for_log(response) +
+                                   "'; connecting as ZWO Mount, unvalidated");
     }
     return response;
 }
 
-std::string ZWOMountProtocolWrapper::get_mount_serial_number() {
-    // ZWO ASCOM 6.5.37 GetMountSN uses :GMA# and validates twelve hexadecimal characters.
+std::string ZWOMountProtocolWrapper::get_mount_serial_number(std::string_view identity_reply) {
     std::string response = trim_copy(send_command(":GMA"));
-    if (response.size() != 12 ||
-        !std::all_of(response.begin(), response.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; })) {
+    if (!is_zwo_mount_serial(response)) {
         throw AlpacaException(
-            "Unable to verify ZWO mount serial number; check the configured serial port or host "
-            "and mount firmware support",
+            "Unable to verify ZWO mount serial number" +
+                (identity_reply.empty() ? std::string()
+                                        : " for the device that answered '" + sanitize_for_log(identity_reply) + "'") +
+                "; check the configured serial port or host and mount firmware support",
             AlpacaError::DriverException);
     }
     std::transform(response.begin(), response.end(), response.begin(),

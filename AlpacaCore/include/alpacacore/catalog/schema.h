@@ -185,15 +185,16 @@ struct PeerEntry {
 struct BindContext {
     Source source;
     std::span<const PeerEntry> peers;
+    // Stores config keys learned later, at a connect (the ZWO camera's serial and model name, #2074). May be unset.
+    std::function<void(const DeviceConfig&)> learned_at_connect = nullptr;
 };
 
 // The outcome of Factory::bind. A `rejection` means no device: the router
 // reports it (Source::Api) or skips the entry, and the other members are
 // ignored. `learned` holds config keys the entry should store (written over the
 // stored entry); `erased` names keys to remove from it. `warnings` are what the
-// operator should know about a device that did register (a ZWO camera that
-// learned no identity, #1969): the router shows them on the device card and in
-// the configuredevice reply. The hook logs them itself.
+// operator should know about a device that did register: the router shows them
+// on the device card and in the configuredevice reply. The hook logs them itself.
 struct BindResult {
     std::unique_ptr<AlpacaDriver> driver;
     std::optional<std::string> rejection;
@@ -205,8 +206,9 @@ struct BindResult {
 // `create` builds a driver from one normalized config and touches no hardware.
 // `bind` is optional, for a device whose registration depends on the other
 // persisted entries or learns something about its device: it runs instead of
-// `create` (DeviceCatalog::bind), may reach the SDK to do so, and is the only
-// way to return learned config. A factory with neither is not a factory.
+// `create` (DeviceCatalog::bind). It returns learned config in BindResult, or
+// later through BindContext::learned_at_connect (the ZWO camera, #2074). A
+// factory with neither is not a factory.
 struct Factory {
     DeviceKey key;
     std::function<std::unique_ptr<AlpacaDriver>(const DeviceConfig&, int device_number)> create;

@@ -79,8 +79,13 @@ bool is_ieaf_model(std::int32_t model) {
     return model == 2 || model == 3;
 }
 
+bool ieaf_refuses_model(std::int32_t model) {
+    // Another product on the same protocol: the iFR (5, its own driver) and the iEFW wheels (98, 99).
+    return model == 5 || model == 98 || model == 99;
+}
+
 // Probe a serial port with the :DeviceInfo# handshake. Returns true (and
-// fills `info`) only if the reply parses and reports an iEAF model code.
+// fills `info`) only if the reply parses and its code names no other product.
 //
 // The iEAF ships with a Prolific PL2303 USB-serial bridge (067b:23d3; the
 // iAFS2/3 uses 067b:23a3, "ATEN Serial Bridge") wired
@@ -122,7 +127,7 @@ bool probe_ieaf_port(const std::string& port_path, IeafDeviceInfo& info) {
         if (reply.outcome == util::ReadOutcome::Terminator) resp.pop_back();
 
         IeafDeviceInfo parsed;
-        if (parse_device_info(resp, parsed) && is_ieaf_model(parsed.model)) {
+        if (parse_device_info(resp, parsed) && !ieaf_refuses_model(parsed.model)) {
             info = parsed;
             return true;
         }
@@ -297,11 +302,15 @@ public:
             throw AlpacaException("iEAF handshake failed after " + std::to_string(HANDSHAKE_RETRIES) + " attempts",
                                   AlpacaError::NotConnected);
         }
-        if (!is_ieaf_model(info.model)) {
+        if (ieaf_refuses_model(info.model)) {
             disconnect_locked();
             throw AlpacaException("Device on " + config_.serial_port + " reported model code " +
-                                      std::to_string(info.model) + ", not an iEAF (expected 2 or 3)",
+                                      std::to_string(info.model) + ", another iOptron product, not an iEAF",
                                   AlpacaError::NotConnected);
+        }
+        if (!is_ieaf_model(info.model)) {
+            ALPACA_LOG_WARN("iOptron", "Focuser reports an unlisted model code " + std::to_string(info.model) +
+                                           "; connecting as iOptron Focuser, unvalidated");
         }
 
         connected_ = true;

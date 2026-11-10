@@ -70,7 +70,9 @@ public:
 
     // Name/Description follow the user-selected model (iEAF vs iAFS2/3 share
     // one protocol and one driver; the config "model" key picks the wording).
-    std::string get_name() const override { return "iOptron " + model_name(); }
+    std::string get_name() const override {
+        return unlisted_model_.load() ? "iOptron Focuser" : "iOptron " + model_name();
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Focuser; }
 
@@ -169,6 +171,7 @@ public:
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_ = info.firmware > 0 ? std::to_string(info.firmware) : std::string();
             }
+            unlisted_model_.store(!is_ieaf_model(info.model));
             connected_.store(true);
             ALPACA_LOG_INFO("iOptron",
                             model_name_ + " focuser connected (model code " + std::to_string(info.model) + ")");
@@ -345,6 +348,7 @@ private:
     // Guards set_connected() against a concurrent set_connected() only (#528).
     std::mutex transition_mutex_;
     std::string firmware_;    // captured at connect; web-UI only (guarded by firmware_mutex_)
+    std::atomic<bool> unlisted_model_{false};
     std::string model_name_;  // "iEAF" / "iAFS2/3" from config; fixed after construction
     mutable std::mutex status_mutex_;
     mutable std::optional<IeafStatus> status_cache_;

@@ -72,7 +72,9 @@ public:
     }
 
     int get_device_number() const override { return device_number_; }
-    std::string get_name() const override { return std::string("iOptron ") + model_.label + " Focuser"; }
+    std::string get_name() const override {
+        return unlisted_model_.load() ? "iOptron Focuser" : std::string("iOptron ") + model_.label + " Focuser";
+    }
     DeviceType get_device_type() const override { return DeviceType::Focuser; }
     std::string fallback_unique_id() const override { return "IOPTRON_IFR_FOCUSER_" + std::to_string(device_number_); }
     std::string get_description() const override {
@@ -128,6 +130,7 @@ public:
         }
         teardown_locked();
         std::shared_ptr<IfrLink> link = session_.open();
+        unlisted_model_.store(!is_ifr_model(link->info().model));
         try {
             // One frame before Connected is published, so every getter has an answer, and the size check.
             const IfrFocuserStatus status = link->focuser_status();
@@ -345,6 +348,7 @@ private:
 
     util::TaskClock& clock_;
     const int device_number_;
+    std::atomic<bool> unlisted_model_{false};
     const IfrModel model_;
     detail::IfrSessionHolder session_;
     std::atomic<bool> connected_{false};

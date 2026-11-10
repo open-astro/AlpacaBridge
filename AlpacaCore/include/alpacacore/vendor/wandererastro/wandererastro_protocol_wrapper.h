@@ -80,7 +80,7 @@ struct WandererStatus {
  *
  * Scans /dev/serial/by-id/ for CH340/CH341 USB-serial adapters (vendor 1a86),
  * then listens on each for the continuously-streamed status frame, accepting a
- * port whose status line reports a "WandererCoverV4" model. Falls back to
+ * port whose status line reports a "WandererCover" model. Falls back to
  * /dev/ttyUSB0..9 if /dev/serial/by-id is absent.
  *
  * @return Vector of detected WandererCover ports

@@ -42,10 +42,8 @@ namespace alpacacore::vendor::wandererastro {
 
 namespace {
 
-// The V2 hardware reports the same handshake token family as the V1 ("Mini"
-// covers both per the INDI reference); prefix-match so a future
-// "WandererRotatorMiniV2" token is also accepted.
-constexpr char kRotatorModelPrefix[] = "WandererRotatorMini";
+// Any version of the product whose handshake parses (#2204); a Mini gets the known name, the rest a generic one.
+constexpr char kRotatorModelPrefix[] = "WandererRotator";
 constexpr int MAX_TOKEN_LEN = 64;
 
 // The motor sweeps roughly 1 degree per 240 ms (INDI reference constant); used
@@ -238,7 +236,9 @@ bool probe_rotator_port(const std::string& port_path, RotatorPortInfo& info) {
     }
     tcflush(probe.fd(), TCIOFLUSH);
 
-    auto handshake = do_handshake(probe.fd(), 1500);
+    // Opening a CH340 resets the MCU and a handshake written during its boot is lost, so the probe allows what a
+    // manual connect does: the retry must land after the boot (#2203).
+    auto handshake = do_handshake(probe.fd(), RotatorConnectionConfig{}.serial_timeout_s * 1000);
 
     // Put back the HUPCL-clear settings if anything changed them, so DTR stays
     // asserted across the close below.
@@ -343,6 +343,19 @@ std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
     return results;
 }
 
+std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports(const std::vector<std::string>& candidate_paths) {
+    std::vector<RotatorPortInfo> results;
+#ifndef _WIN32
+    for (const auto& path : candidate_paths) {
+        RotatorPortInfo info;
+        if (probe_rotator_port(path, info)) results.push_back(info);
+    }
+#else
+    (void)candidate_paths;
+#endif
+    return results;
+}
+
 class WandererRotatorProtocolWrapper::Impl {
 public:
     Impl() = default;
@@ -366,7 +379,7 @@ public:
         if (!handshake.has_value() || handshake->model.rfind(kRotatorModelPrefix, 0) != 0) {
             const std::string found = handshake.has_value() ? (" (device reported '" + handshake->model + "')") : "";
             close_serial_locked();
-            throw AlpacaException("No WandererRotator Mini detected on " + config_.serial_port + found,
+            throw AlpacaException("No WandererRotator detected on " + config_.serial_port + found,
                                   AlpacaError::NotConnected);
         }
         if (handshake->firmware < kRotatorMiniMinFirmware) {

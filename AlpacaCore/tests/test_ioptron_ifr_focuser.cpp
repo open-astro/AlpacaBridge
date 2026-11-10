@@ -315,3 +315,28 @@ TEST_CASE("iOptron iFR - a unit that stops answering faults, then loses the link
     focuser->set_connected(false);
     rotator->set_connected(false);
 }
+
+// #2204: an unknown unit keeps the configured travel and reads under a generic name.
+// Falsified by: ioptron_ifr_protocol_wrapper.cpp IfrLink open refusing a code is_ifr_model() omits.
+TEST_CASE("iOptron iFR Focuser Driver - an unknown model code connects with the configured travel (#2204)",
+          "[ioptron][ifr][focuser][unit]") {
+    FakeIoptronIfr fake;
+    fake.set_model(7);
+    auto driver = ifr::create_ifr_focuser(0, fake.slave_path(), "ifr4");
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == "iOptron Focuser");
+    CHECK(driver->get_max_step() == 65000);
+    driver->set_connected(false);
+}
+
+// Falsified by: ioptron_ifr_protocol_wrapper.cpp ifr_refuses_model() returning false for a unit with no rotator.
+TEST_CASE("iOptron iFR Focuser Driver - a unit with no rotator or another product is refused (#2204)",
+          "[ioptron][ifr][focuser][unit]") {
+    const int code = GENERATE(2, 3, 4, 98, 99);
+    FakeIoptronIfr fake;
+    fake.set_model(code);
+    auto driver = ifr::create_ifr_focuser(0, fake.slave_path());
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK(driver->get_connected() == false);
+}

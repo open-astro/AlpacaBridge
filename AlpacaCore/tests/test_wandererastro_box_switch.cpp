@@ -485,3 +485,27 @@ TEST_CASE("WandererAstro Box Switch Driver - Connected capability and range memb
     }
     driver->set_connected(false);
 }
+
+// #2204: Falsified by: wandererastro_box_protocol_wrapper.cpp await_frame() matching only kBoxProV3ModelToken.
+TEST_CASE("WandererAstro Box Switch Driver - another Pro version connects under a generic name (#2204)",
+          "[wandererastro][switch][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer box(
+        "ZXWBProV4A20250410A-127.00A-127.00A-127.00A45.20A21.30A1.50A0.20A0.30A13.10A1A1A1A1A1A1A0A0A0A1A1A120A\n",
+        std::chrono::milliseconds(50));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_name() == "WandererAstro Switch");
+    driver->set_connected(false);
+}
+
+// #2204: Falsified by: wandererastro_box_protocol_wrapper.cpp is_box_model_token() accepting any ZXWB token.
+TEST_CASE("WandererAstro Box Switch Driver - another Box product is refused (#2204)",
+          "[wandererastro][switch][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer box(
+        "ZXWBPlusV3A20250410A-127.00A-127.00A-127.00A45.20A21.30A1.50A0.20A0.30A13.10A1A1A1A1A1A1A0A0A0A1A1A120A\n",
+        std::chrono::milliseconds(50));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+}

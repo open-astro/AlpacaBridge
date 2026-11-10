@@ -49,9 +49,11 @@ struct IfrDeviceInfo {
     std::string rotator_firmware;  // "260324"
 };
 
-/// True for the iFR's :DeviceInfo# model code (5). The iEAF driver accepts 2 and 3 only, so the two drivers
-/// never claim each other's units.
+/// True for the iFR's :DeviceInfo# model code (5).
 bool is_ifr_model(std::int32_t model);
+
+/// True when the code names a unit this driver cannot drive. An unlisted code is not refused (#2204).
+bool ifr_refuses_model(std::int32_t model);
 
 /// :FI# -> "%7d%1d%5d%1d#": position (signed), moving, temperature (Kelvin x 100), direction flag.
 struct IfrFocuserStatus {
@@ -88,7 +90,8 @@ struct IfrPortInfo {
 /// so the focuser and the rotator of one unit land on the same port.
 std::vector<IfrPortInfo> enumerate_ifr_ports();
 
-/// One port's probe: :DeviceInfo# under a probe claim. True, with @p info filled, only for model code 5.
+/// One port's probe: :DeviceInfo# under a probe claim. True, with @p info filled, unless ifr_refuses_model() refuses
+/// the code.
 bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info);
 
 /**

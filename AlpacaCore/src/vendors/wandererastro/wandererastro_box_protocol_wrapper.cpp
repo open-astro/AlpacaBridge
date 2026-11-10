@@ -183,10 +183,14 @@ std::optional<BoxState> parse_frame_fields(const std::vector<std::string>& f) {
     return s;
 }
 
+// Any Pro version whose frame parses (#2204); a Plus or other Box product has another frame layout.
+bool is_box_model_token(const std::string& token) { return token.rfind("ZXWBPro", 0) == 0; }
+
 // Listen on an already-configured fd for one complete status frame: wait for
 // the identity token, then collect the following 22 fields. The controller
 // streams continuously, so a bounded listen suffices.
 std::optional<BoxState> await_frame(int fd, int timeout_ms) {
+    std::string model;
     std::vector<std::string> fields;
     bool in_frame = false;
     // One read_until per 'A'-terminated token, CR/LF skipped. A token of
@@ -206,9 +210,10 @@ std::optional<BoxState> await_frame(int fd, int timeout_ms) {
             break;  // silent until the deadline, or the line is gone
         }
         const std::string token = reply.bytes.substr(0, reply.bytes.size() - 1);
-        if (token == kBoxProV3ModelToken) {
+        if (is_box_model_token(token)) {
             in_frame = true;
             fields.clear();
+            model = token;
             continue;
         }
         if (!in_frame) {
@@ -218,6 +223,7 @@ std::optional<BoxState> await_frame(int fd, int timeout_ms) {
         if (fields.size() == static_cast<std::size_t>(kBoxFrameFieldCount)) {
             auto state = parse_frame_fields(fields);
             if (state.has_value()) {
+                state->model = model;
                 return state;
             }
             in_frame = false;  // malformed — resynchronise on the next identity token
@@ -252,7 +258,7 @@ bool probe_box_port(const std::string& port_path, BoxPortInfo& info) {
 
     if (state.has_value()) {
         info.port_path = port_path;
-        info.model = kBoxProV3ModelToken;
+        info.model = state->model;
         info.firmware_version = state->firmware_version;
         return true;
     }
@@ -402,9 +408,9 @@ public:
         connected_ = true;
         reader_running_.store(true);
         reader_thread_ = std::thread([this] { reader_loop(); });
-        ALPACA_LOG_INFO("WandererAstro", std::string("Connected to ") + kBoxProV3ModelToken + " (firmware " +
+        ALPACA_LOG_INFO("WandererAstro", "Connected to " + state->model + " (firmware " +
                                              std::to_string(state->firmware_version) + ") on " + config_.serial_port);
-        return kBoxProV3ModelToken;
+        return state->model;
 #endif
     }
 
@@ -561,7 +567,7 @@ private:
             if (!token.has_value()) {
                 continue;
             }
-            if (*token == kBoxProV3ModelToken) {
+            if (is_box_model_token(*token)) {
                 in_frame = true;
                 fields.clear();
                 continue;
