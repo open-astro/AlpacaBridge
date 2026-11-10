@@ -9175,13 +9175,11 @@ int main() {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema_and_bind_factory(router.catalog());
         const auto add = [&] {
-            return api_attempt(router,
-                               nlohmann::json{{"vendor", "zzz"},
-                                              {"deviceType", "focuser"},
-                                              {"deviceNumber", 9262},
-                                              {"count", 7},
-                                              {"ratio", 3.0}},
-                               "Focuser");
+            return api_attempt(
+                router,
+                nlohmann::json{
+                    {"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9262}, {"count", 7}, {"ratio", 3.0}},
+                "Focuser");
         };
         EXPECT(add().ok);
         const auto store = alpacahttp::test_catalog::last_learned_at_connect;

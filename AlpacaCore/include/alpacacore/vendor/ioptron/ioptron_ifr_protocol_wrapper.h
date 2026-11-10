@@ -90,7 +90,8 @@ struct IfrPortInfo {
 /// so the focuser and the rotator of one unit land on the same port.
 std::vector<IfrPortInfo> enumerate_ifr_ports();
 
-/// One port's probe: :DeviceInfo# under a probe claim. True, with @p info filled, unless ifr_refuses_model() refuses the code.
+/// One port's probe: :DeviceInfo# under a probe claim. True, with @p info filled, unless ifr_refuses_model() refuses
+/// the code.
 bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info);
 
 /**
