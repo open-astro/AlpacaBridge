@@ -44,7 +44,7 @@ host_setup_install_vendor_runtime() {
 
   # QHY cameras need firmware the udev rules load with fxload. The apt fxload has no -t fx3 (FX3-based
   # cameras); the QHY SDK ships one that does, for the rule's RUN+="/sbin/fxload -t fx3 ...".
-  local qhy_sdk_dir="${core_dir}/external/QHY/sdk_linux_arm64_26.07.28"
+  local qhy_sdk_dir="${core_dir}/external/QHY/sdk_linux_arm64"
   if [[ -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
     echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
     sudo mkdir -p /lib/firmware/qhy
@@ -66,10 +66,10 @@ host_setup_install_vendor_runtime() {
   for entry in \
     "ZWO/ASI_Camera_SDK/lib/linux/armv8|libASICamera2.so|ZWO ASI Camera" \
     "SVBONY/lib/armv8|libSVBCameraSDK.so|SVBONY Camera" \
-    "ToupTek/toupcamsdk.20260519/linux/arm64/glibc|libtoupcam.so|ToupTek Camera" \
-    "Altair/altaircamsdk.20260531/linux/arm64/glibc|libaltaircam.so|Altair Camera" \
-    "PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64|libPlayerOneCamera.so|Player One Camera" \
-    "PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64|libPlayerOnePW.so|Player One Phoenix Filter Wheel"; do
+    "ToupTek/toupcamsdk/linux/arm64/glibc|libtoupcam.so|ToupTek Camera" \
+    "Altair/altaircamsdk/linux/arm64/glibc|libaltaircam.so|Altair Camera" \
+    "PlayerOne/PlayerOne_Camera_SDK_Linux/lib/arm64|libPlayerOneCamera.so|Player One Camera" \
+    "PlayerOne/PlayerOne_FilterWheel_SDK_Linux/lib/arm64|libPlayerOnePW.so|Player One Phoenix Filter Wheel"; do
     IFS='|' read -r dir lib what <<< "${entry}"
     if [[ -f "${core_dir}/external/${dir}/${lib}" ]]; then
       echo "Installing ${what} shared library to /usr/local/lib"

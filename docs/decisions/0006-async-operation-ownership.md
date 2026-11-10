@@ -76,6 +76,7 @@ Symbol: `AsyncOperation`
 | ToupTek camera | | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted | #1418 | thermal poll and pulse-guide timer slots; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)); Altair rides this driver |
 | ZWO camera | | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | adopted | #1667 | pulse-guide turn-off timer body; a new pulse supersedes it and the new body takes over the pending turn-offs; Disconnect, Connect and the destructor cancel and join it, a link loss cancels it; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)) |
 | ZWO telescope | | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1918 | telemetry poll slot; GOTO, pulse-queue and disconnect-teardown slots; claim protocol; send gate |
+| WeeWX observing conditions | | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted | #2085 | feed poll body |
 
 ## Links
 

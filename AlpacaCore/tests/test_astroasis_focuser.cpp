@@ -194,8 +194,9 @@ TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a 
         std::lock_guard<std::mutex> lock(state->mutex);
         state->position = 5555;
     }
-    act_during_poll(state, rig.clock(), 0x36,
-                    [&] { CHECK_THROWS_AS(rig.driver().move(2000), alpacacore::AlpacaException); });
+    act_during_poll(state, rig.clock(), 0x36, [&] {
+        require_alpaca_error([&] { rig.driver().move(2000); }, alpacacore::AlpacaError::InvalidValue);
+    });
     const int overlapped = rig.driver().get_position();
     CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
     rig.tick();
@@ -220,7 +221,7 @@ TEST_CASE("Astroasis Focuser Driver - the next poll measures the device after a 
         state->position = 5555;
     }
     act_during_poll(state, rig.clock(), 0x37,
-                    [&] { CHECK_THROWS_AS(rig.driver().halt(), alpacacore::AlpacaException); });
+                    [&] { require_alpaca_error([&] { rig.driver().halt(); }, alpacacore::AlpacaError::InvalidValue); });
     const int overlapped = rig.driver().get_position();
     CHECK((overlapped == 1234 || overlapped == 5555));  // dropped, or measured after the failed exchange
     rig.tick();
@@ -254,7 +255,7 @@ TEST_CASE("Astroasis Focuser Driver - failed MaxStep read at connect closes the 
     AstroasisRig rig;
     const auto& state = rig.fake().state;
     state->fail_config = true;
-    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, alpacacore::AlpacaError::InvalidValue);
     CHECK_FALSE(rig.driver().get_connected());
     {
         std::lock_guard<std::mutex> lock(state->mutex);
@@ -388,7 +389,7 @@ TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound dro
     rig.clock().advance(std::chrono::seconds(31));
     REQUIRE(rig.clock().wait_for_woken_settled(kBound));
     CHECK_FALSE(rig.driver().get_connected());
-    CHECK_THROWS_AS(rig.driver().get_position(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
     try {
         (void)rig.driver().get_is_moving();
         FAIL("expected a throw");
@@ -510,7 +511,7 @@ TEST_CASE("Astroasis Focuser Driver - disconnect stops the poll", "[astroasis][f
     const int reads = state->status_reads;
     rig.clock().advance(kTick);
     CHECK(state->status_reads == reads);
-    CHECK_THROWS_AS(rig.driver().get_position(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Astroasis Focuser Driver - Defaults", "[astroasis][focuser][unit]") {
@@ -681,7 +682,7 @@ TEST_CASE("Astroasis Focuser Driver - a getter after a successful connect never 
     state->fail_status = true;
     // Both first polls are lost: the connect is refused, so no getter can run on a
     // session without a frame, and the refused connect leaves nothing behind.
-    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(rig.driver().get_connected());
     CHECK(state->closes == 1);  // the refused connect released the transport
     state->fail_status = false;

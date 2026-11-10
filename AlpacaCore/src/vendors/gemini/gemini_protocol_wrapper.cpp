@@ -375,6 +375,8 @@ public:
 
     bool link_alive() const noexcept { return !link_lost_.load(); }
 
+    void set_exchange_timeout_s(int seconds) noexcept { exchange_timeout_override_s_.store(seconds); }
+
     std::string link_fault() const {
         std::lock_guard<std::mutex> lock(fault_mutex_);
         return fault_;
@@ -743,7 +745,8 @@ private:
     }
 
     std::string read_response() {
-        const int timeout_ms = config_.serial_timeout_s * 1000;
+        const int override_s = exchange_timeout_override_s_.load();
+        const int timeout_ms = (override_s > 0 ? override_s : config_.serial_timeout_s) * 1000;
         std::string response;
 #ifdef _WIN32
         response.reserve(MAX_RESPONSE_LEN);
@@ -823,6 +826,7 @@ private:
     mutable std::mutex mutex_;
     ConnectionConfig config_;
     bool connected_ = false;
+    std::atomic<int> exchange_timeout_override_s_{0};  // set_exchange_timeout_s(); 0 = config_.serial_timeout_s
     std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect
     // The loss reason for get_link_fault(); its own mutex, never held across an exchange, so a getter cannot wait on
     // the wire while mutex_ is held by one.
@@ -858,6 +862,8 @@ bool GeminiProtocolWrapper::is_connected() const {
 bool GeminiProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
 
 std::string GeminiProtocolWrapper::link_fault() const { return impl_->link_fault(); }
+
+void GeminiProtocolWrapper::set_exchange_timeout_s(int seconds) noexcept { impl_->set_exchange_timeout_s(seconds); }
 
 int GeminiProtocolWrapper::get_position() {
     return impl_->get_position();

@@ -249,8 +249,10 @@ private:
     alpacacore::catalog::DeviceCatalog catalog_;
 
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
+    // Set and copied under callback_mutex_: a setter may run while a handler reads.
     std::function<void()> shutdown_callback_;
     std::function<void()> restart_callback_;
+    std::mutex callback_mutex_;
 
     // The 100 ms delayed shutdown/restart callback. A second request while one
     // is waiting out the delay is dropped; once its callback runs, a later
@@ -319,8 +321,9 @@ private:
     Response handle_build_info(const Request& request, std::uint32_t server_tx_id);
     Response handle_configured_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
-    // open-astro#664: GET /management/v1/devicecatalog, serving catalog_json::describe_json(catalog_).
+    // GET /management/v1/faileddevices (web UI extension).
     Response handle_failed_devices(const Request& request, std::uint32_t server_tx_id);
+    // open-astro#664: GET /management/v1/devicecatalog, serving catalog_json::describe_json(catalog_).
     Response handle_device_catalog(const Request& request, std::uint32_t server_tx_id);
     Response handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id);
     Response handle_attached_cameras(const Request& request, std::uint32_t server_tx_id);

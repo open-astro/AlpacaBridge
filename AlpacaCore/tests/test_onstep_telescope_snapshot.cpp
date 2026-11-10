@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <catch2/catch_approx.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -47,6 +48,7 @@
 #include "fake_task_clock.h"
 
 namespace onstep = alpacacore::vendor::onstep;
+using Catch::Approx;
 
 namespace {
 
@@ -72,6 +74,18 @@ struct SnapshotMount {
     std::atomic<bool> overlong_goto{false};    // :MS# answers more than one reply may hold, so its send throws
     std::atomic<int> alt_seconds{0};           // :GA# answers +45*00:<alt_seconds>
     std::mutex mutex;
+    // The pier-side settings (#2179), under `mutex`. An empty reply is answered like an unknown command ("0#").
+    std::string version = "10.23a";   // :GVN#
+    std::string gx96;                 // :GX96# preferred side, E/W/B/A; empty: not answered
+    std::string gx94 = "2";           // :GX94# flips switch, "<n>" on, "<n> N" off
+    std::string gxe9 = "60";          // :GXE9# east meridian limit, minutes
+    std::string gxea = "60";          // :GXEA# west meridian limit, minutes
+    std::string gxee_min = "-180";    // :GXEe# RA-axis minimum, degrees
+    std::string gxee_max = "180";     // :GXEw# RA-axis maximum, degrees
+    std::string ms_reply = "0";       // :MS#
+    std::string mn_reply = "0";       // :MNe#/:MNw# (empty: no reply)
+    std::string ra_text;              // :GRa# when not empty
+    std::string dec_text;             // :GDe# when not empty
     std::string status = "NpEW180#";  // tracking, no GOTO, not parked (under `mutex`)
     std::vector<std::string> log;     // under `mutex`
     // Runs on the server thread for each command before it is answered (under `mutex` to set, called outside it).
@@ -90,11 +104,53 @@ struct SnapshotMount {
         return static_cast<std::size_t>(
             std::count_if(log.begin(), log.end(), [&](const std::string& c) { return c.rfind(prefix, 0) == 0; }));
     }
+    // The commands sent so far, in order.
+    std::vector<std::string> commands() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return log;
+    }
+    void clear_log() {
+        std::lock_guard<std::mutex> lock(mutex);
+        log.clear();
+    }
+    // The mount points at hour angle `ha_hours` and Dec `dec_degrees`, for a driver whose sidereal time is `lst`.
+    void point_at(double lst_hours, double ha_hours, double dec_degrees) {
+        double ra = std::fmod(lst_hours - ha_hours, 24.0);
+        if (ra < 0.0) ra += 24.0;
+        const double total_seconds = std::round(ra * 3600.0 * 10000.0) / 10000.0;
+        const int hours = static_cast<int>(total_seconds / 3600.0);
+        const int minutes = static_cast<int>((total_seconds - hours * 3600.0) / 60.0);
+        const double seconds = total_seconds - hours * 3600.0 - minutes * 60.0;
+        char out[40];
+        std::snprintf(out, sizeof(out), "%02d:%02d:%07.4f#", hours, minutes, seconds);
+        const double abs_dec = std::fabs(dec_degrees);
+        const int dec_d = static_cast<int>(abs_dec);
+        char dec_out[40];
+        std::snprintf(dec_out, sizeof(dec_out), "%c%02d*%02d:%06.3f#", dec_degrees < 0 ? '-' : '+', dec_d,
+                      static_cast<int>((abs_dec - dec_d) * 60.0), std::fmod((abs_dec - dec_d) * 3600.0, 60.0));
+        std::lock_guard<std::mutex> lock(mutex);
+        ra_text = out;
+        dec_text = dec_out;
+    }
 
     std::string answer(const std::string& chunk) {
         if (chunk.rfind(":GVP", 0) == 0) return "OnStep#";
-        if (chunk.rfind(":GVN", 0) == 0) return "10.23a#";
+        if (chunk.rfind(":GVN", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            return version + "#";
+        }
         if (chunk.rfind(":GXEE", 0) == 0) return "1";
+        if (chunk.rfind(":GX96", 0) == 0 || chunk.rfind(":GX94", 0) == 0 || chunk.rfind(":GXE9", 0) == 0 ||
+            chunk.rfind(":GXEA", 0) == 0 || chunk.rfind(":GXEe", 0) == 0 || chunk.rfind(":GXEw", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            const std::string& value = chunk.rfind(":GX96", 0) == 0   ? gx96
+                                       : chunk.rfind(":GX94", 0) == 0 ? gx94
+                                       : chunk.rfind(":GXE9", 0) == 0 ? gxe9
+                                       : chunk.rfind(":GXEA", 0) == 0 ? gxea
+                                       : chunk.rfind(":GXEe", 0) == 0 ? gxee_min
+                                                                      : gxee_max;
+            return value.empty() ? "0#" : value + "#";
+        }
         if (silent_status.load() && chunk.rfind(":GU", 0) == 0) return "";
         if (overlong_goto.load() && chunk.rfind(":MS", 0) == 0) return std::string(65600, '0');
         if (handshake_only.load()) {
@@ -111,11 +167,18 @@ struct SnapshotMount {
         }
         if (chunk.rfind(":GRa", 0) == 0) {
             if (garble_position.load()) return "?#";
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (!ra_text.empty()) return ra_text;
+            }
             char out[32];
             std::snprintf(out, sizeof(out), "12:00:%02d.0000#", ra_seconds.load());
             return out;
         }
-        if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
+        if (chunk.rfind(":GDe", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            return dec_text.empty() ? "+45*00:00.000#" : dec_text;
+        }
         if (chunk.rfind(":GA", 0) == 0) {
             if (garble_altaz.load()) return "?#";
             char out[32];
@@ -133,7 +196,14 @@ struct SnapshotMount {
         if (chunk.rfind(":GE", 0) == 0) return refuse_park.load() ? "22#" : "00#";
         if (chunk.rfind(":hP", 0) == 0 && refuse_park.load()) return "0";
         if (chunk.rfind(":CM", 0) == 0) return "N/A#";
-        if (chunk.rfind(":MS", 0) == 0) return "0";
+        if (chunk.rfind(":MS", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            return ms_reply;
+        }
+        if (chunk.rfind(":MN", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            return mn_reply;
+        }
         if (chunk.rfind(":Q", 0) == 0 || chunk.rfind(":M", 0) == 0 || chunk.rfind(":R", 0) == 0) return "";
         if (chunk.rfind(":hC", 0) == 0) return "";
         if (chunk.rfind(":S", 0) == 0 || chunk.rfind(":h", 0) == 0) return "1";
@@ -976,7 +1046,7 @@ TEST_CASE("OnStep snapshot - a reconnect joins a pulse-end body started after th
 TEST_CASE("OnStep snapshot - members that use the site refuse while it is unknown", "[onstep][telescope][snapshot]") {
     Rig rig(/*with_site=*/false);
     rig.mount->garble_site = true;       // the connect cannot read the mount's site
-    rig.mount->set_status("nNpEW180#");  // Tracking off, so an Alt/Az slew is not refused for Tracking
+    rig.mount->set_status("nNpEo180#");  // Tracking off, so an Alt/Az slew is not refused for Tracking; no pier side
     rig.connect();
     rig.pause();
     const auto refuses = [](const std::function<void()>& call, const std::string& member) {
@@ -994,6 +1064,13 @@ TEST_CASE("OnStep snapshot - members that use the site refuse while it is unknow
     refuses([&] { (void)rig.driver->get_sidereal_time(); }, "SiderealTime");
     CHECK_FALSE(has_entry(*rig.driver, "SideOfPier"));
     CHECK_FALSE(has_entry(*rig.driver, "SiderealTime"));
+
+    // The mount's own pier-side letter needs no site (#2179); only the hour-angle fallback for `o` does.
+    rig.mount->set_status("nNpEW180#");
+    REQUIRE(rig.tick(false));
+    CHECK(rig.driver->get_side_of_pier() == 1);
+    rig.mount->set_status("nNpEo180#");
+    REQUIRE(rig.tick(false));
 
     rig.clock.advance(seconds(3));  // past the site retry delay: the slew reads the site again first
     const auto site_reads = rig.mount->count(":Gt");
@@ -1131,6 +1208,443 @@ TEST_CASE("OnStep snapshot - a pulse guide whose :Mg send fails leaves IsPulseGu
     REQUIRE(rig.server.drop_connections());
     CHECK(error_of([&] { rig.driver->pulse_guide(0, 2000); }) == alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+}
+
+// ── Pier side (#2179) ─────────────────────────────────────────────────────────────────────────────────────────────
+// A scripted OnStepX 10.23a with the settings of the HM-17 rig: preferred side Best, flips on, meridian limits 60/60
+// min, RA axis +/-180 degrees. The status letters: `E` mount type GEM, then `T` pier east, `W` pier west or `o` none.
+
+namespace {
+
+constexpr double kThirdOfAnHour = 20.0 / 60.0;
+const char* const kWestStatus = "NpEW180#";     // tracking, no GOTO, pier west
+const char* const kEastStatus = "NpET180#";     // tracking, no GOTO, pier east
+const char* const kNoSideStatus = "NpEo180#";   // pier side none
+const char* const kHomeStatus = "NHpEo180#";    // at home, no side
+const char* const kParkedStatus = "NPHEo180#";  // parked at home
+const char* const kNotTrackingStatus = "nNpEW180#";
+const char* const kGotoStatus = "pEW180#";  // tracking, a GOTO runs
+
+void set_pier(Rig& rig, const std::string& preferred, const std::string& flips = "2") {
+    std::lock_guard<std::mutex> lock(rig.mount->mutex);
+    rig.mount->gx96 = preferred;
+    rig.mount->gx94 = flips;
+}
+
+// The mount points at hour angle `ha_hours` (Dec 30) with `status`, and the driver has sampled it.
+void place(Rig& rig, double ha_hours, const char* status) {
+    rig.mount->point_at(rig.driver->get_sidereal_time(), ha_hours, 30.0);
+    rig.mount->set_status(status);
+    REQUIRE(rig.tick());
+}
+
+// An RA that has hour angle `ha_hours` now.
+double ra_for(Rig& rig, double ha_hours) {
+    double ra = std::fmod(rig.driver->get_sidereal_time() - ha_hours, 24.0);
+    return ra < 0.0 ? ra + 24.0 : ra;
+}
+
+// A connected, paused rig (north site, from the mount) for the pier cases.
+void connect_paused(Rig& rig) {
+    rig.connect();
+    rig.pause();
+}
+
+std::size_t index_of(const std::vector<std::string>& commands, const std::string& prefix, std::size_t from = 0) {
+    for (std::size_t i = from; i < commands.size(); ++i) {
+        if (commands[i].rfind(prefix, 0) == 0) return i;
+    }
+    return commands.size();
+}
+
+}  // namespace
+
+// The mount's letter, not the hour angle: OnStepX Best stays on the west side past the meridian (HM-17, step B of
+// #2179), and the east side before it (step E).
+// Falsified by: get_side_of_pier() computing from the hour-angle sign (West at HA +20 min would read East).
+TEST_CASE("OnStep pier side - SideOfPier follows the :GU# letter on both sides of HA 0",
+          "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    connect_paused(rig);
+    place(rig, kThirdOfAnHour, kWestStatus);
+    CHECK(rig.driver->get_side_of_pier() == 1);
+    place(rig, -kThirdOfAnHour, kEastStatus);
+    CHECK(rig.driver->get_side_of_pier() == 0);
+    place(rig, -kThirdOfAnHour, kWestStatus);
+    CHECK(rig.driver->get_side_of_pier() == 1);
+    place(rig, kThirdOfAnHour, kEastStatus);
+    CHECK(rig.driver->get_side_of_pier() == 0);
+}
+
+// Falsified by: the letter branch also answering for `o`, or the fallback losing the hour-angle rule.
+TEST_CASE("OnStep pier side - SideOfPier falls back to the hour-angle rule when the mount reports no side",
+          "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    connect_paused(rig);
+    place(rig, 1.0, kNoSideStatus);
+    CHECK(rig.driver->get_side_of_pier() == 0);
+    place(rig, -1.0, kNoSideStatus);
+    CHECK(rig.driver->get_side_of_pier() == 1);
+    place(rig, -1.0, "NpE180#");  // firmware that sends no side letter at all
+    CHECK(rig.driver->get_side_of_pier() == 1);
+}
+
+// Untested firmware and mount types keep the old answer: the letter is served only on an OnStepX German mount.
+// Falsified by: dropping the `onstepx_` or `is_gem` condition from get_side_of_pier()'s letter branch.
+TEST_CASE("OnStep pier side - SideOfPier keeps the hour-angle rule on OnStep 4.x and on a fork mount",
+          "[onstep][telescope][pierside]") {
+    SECTION("OnStep 4.x German mount") {
+        Rig rig(false);
+        rig.mount->version = "4.24s";
+        connect_paused(rig);
+        place(rig, kThirdOfAnHour, kWestStatus);
+        CHECK(rig.driver->get_side_of_pier() == 0);
+        place(rig, -kThirdOfAnHour, kEastStatus);
+        CHECK(rig.driver->get_side_of_pier() == 1);
+    }
+    SECTION("OnStepX fork mount") {
+        Rig rig(false);
+        connect_paused(rig);
+        place(rig, kThirdOfAnHour, "NpKW180#");
+        CHECK(rig.driver->get_side_of_pier() == 0);
+        place(rig, -kThirdOfAnHour, "NpKT180#");
+        CHECK(rig.driver->get_side_of_pier() == 1);
+    }
+}
+
+// Rig steps B, D and E of #2179, and the home start of step A, through the driver, with the settings the mount
+// answers.
+// Falsified by: get_destination_side_of_pier() answering from the hour-angle sign (B, E and A would be wrong), or
+// ignoring the preferred side (D would read West).
+TEST_CASE("OnStep pier side - DestinationSideOfPier models the firmware's choice", "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    SECTION("B: Best on the west side stays West at HA +20 min") {
+        set_pier(rig, "B");
+        connect_paused(rig);
+        place(rig, -0.5, kWestStatus);
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, kThirdOfAnHour), 30.0) == 1);
+    }
+    SECTION("D: East preferred flips a west mount to East at HA +20 min") {
+        set_pier(rig, "E");
+        connect_paused(rig);
+        place(rig, -0.5, kWestStatus);
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, kThirdOfAnHour), 30.0) == 0);
+    }
+    SECTION("E: Best on the east side stays East at HA -20 min") {
+        set_pier(rig, "B");
+        connect_paused(rig);
+        place(rig, 0.5, kEastStatus);
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, -kThirdOfAnHour), 30.0) == 0);
+    }
+    SECTION("A: Best at home goes West at HA -20 min") {
+        set_pier(rig, "B");
+        connect_paused(rig);
+        place(rig, 6.0, kHomeStatus);
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, -kThirdOfAnHour), 30.0) == 1);
+    }
+    SECTION("Best on West past the west limit takes East") {
+        set_pier(rig, "B");
+        connect_paused(rig);
+        place(rig, 0.5, kWestStatus);
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, 2.0), 30.0) == 0);
+    }
+    SECTION("a site in the southern hemisphere uses the southern west axis") {
+        Rig southern(true);  // the configured site is at latitude -33.9
+        set_pier(southern, "B");
+        connect_paused(southern);
+        southern.mount->point_at(southern.driver->get_sidereal_time(), 0.0, -30.0);
+        southern.mount->set_status(kHomeStatus);
+        REQUIRE(southern.tick());
+        CHECK(southern.driver->get_destination_side_of_pier(ra_for(southern, -kThirdOfAnHour), -30.0) == 1);
+    }
+}
+
+// The hour-angle rule is the fallback: settings the mount does not answer, a fork mount, a target no side reaches.
+// Falsified by: the model answering with default settings, or a -1 from the model being returned.
+TEST_CASE("OnStep pier side - DestinationSideOfPier falls back to the hour-angle rule",
+          "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    SECTION(":GX96# not answered") {
+        connect_paused(rig);
+        place(rig, -0.5, kWestStatus);
+        // Best would stay West; the hour-angle rule says East for HA +20 min.
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, kThirdOfAnHour), 30.0) == 0);
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, -kThirdOfAnHour), 30.0) == 1);
+        CHECK(rig.mount->count(":GX94") == 0);  // the read stopped at :GX96#
+    }
+    SECTION("a limit that does not parse") {
+        set_pier(rig, "B");
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxe9 = "sixty";
+        }
+        connect_paused(rig);
+        place(rig, -0.5, kWestStatus);
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, kThirdOfAnHour), 30.0) == 0);
+        CHECK_FALSE(rig.driver->get_can_set_pier_side());
+    }
+    SECTION("a fork mount") {
+        set_pier(rig, "B");
+        connect_paused(rig);
+        place(rig, -0.5, "NpKo180#");
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, kThirdOfAnHour), 30.0) == 0);
+    }
+    SECTION("no side reaches the target") {
+        set_pier(rig, "B");
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxee_min = "-90";
+            rig.mount->gxee_max = "90";
+        }
+        connect_paused(rig);
+        place(rig, 0.0, kEastStatus);
+        // HA +8 h is beyond +/-90 degrees on the east side and beyond the west side's range: the firmware would
+        // refuse the GOTO, and the hour-angle rule answers East.
+        CHECK(rig.driver->get_destination_side_of_pier(ra_for(rig, 8.0), 30.0) == 0);
+    }
+}
+
+// The poll reads the settings again every tenth tick, so a preference changed at a handset is followed.
+// Falsified by: no refresh in the poll (the cache would stay on B), or a refresh on every tick (the count check).
+TEST_CASE("OnStep pier side - the poll refreshes the settings every tenth tick", "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    connect_paused(rig);
+    place(rig, -0.5, kWestStatus);
+    const double target = ra_for(rig, kThirdOfAnHour);
+    CHECK(rig.driver->get_destination_side_of_pier(target, 30.0) == 1);  // Best stays West
+
+    set_pier(rig, "E");  // changed at the handset
+    const auto reads_before = rig.mount->count(":GX96");
+    for (int tick = 1; tick < 10; ++tick) {
+        REQUIRE(onstep::poll_status_tick_for_testing(*rig.driver, tick));
+    }
+    CHECK(rig.mount->count(":GX96") == reads_before);
+    CHECK(rig.driver->get_destination_side_of_pier(target, 30.0) == 1);  // not read yet
+    REQUIRE(onstep::poll_status_tick_for_testing(*rig.driver, 10));
+    CHECK(rig.mount->count(":GX96") == reads_before + 1);
+    CHECK(rig.driver->get_destination_side_of_pier(target, 30.0) == 0);  // East preferred now
+
+    // A failed refresh keeps the previous settings.
+    set_pier(rig, "");
+    REQUIRE(onstep::poll_status_tick_for_testing(*rig.driver, 20));
+    CHECK(rig.driver->get_destination_side_of_pier(target, 30.0) == 0);
+    CHECK(rig.driver->get_can_set_pier_side());
+}
+
+// Falsified by: any one of the conditions being dropped from can_set_pier_side_locked().
+TEST_CASE("OnStep pier side - CanSetPierSide needs OnStepX, a GEM, flips on and a read preferred side",
+          "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    SECTION("the full set") {
+        set_pier(rig, "B");
+        CHECK_FALSE(rig.driver->get_can_set_pier_side());  // disconnected
+        connect_paused(rig);
+        CHECK(rig.driver->get_can_set_pier_side());
+        rig.driver->set_connected(false);
+        CHECK_FALSE(rig.driver->get_can_set_pier_side());
+    }
+    SECTION("the other letters") {
+        for (const char* letter : {"E", "W", "A"}) {
+            Rig other(false);
+            set_pier(other, letter);
+            connect_paused(other);
+            INFO(letter);
+            CHECK(other.driver->get_can_set_pier_side());
+        }
+    }
+    SECTION("flips off") {
+        set_pier(rig, "E", "0 N");
+        connect_paused(rig);
+        CHECK_FALSE(rig.driver->get_can_set_pier_side());
+    }
+    SECTION("a fork mount") {
+        set_pier(rig, "B");
+        rig.mount->set_status("NpKo180#");
+        connect_paused(rig);
+        CHECK_FALSE(rig.driver->get_can_set_pier_side());
+    }
+    SECTION("OnStep 4.x") {
+        set_pier(rig, "B");
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->version = "4.24s";
+        }
+        connect_paused(rig);
+        CHECK_FALSE(rig.driver->get_can_set_pier_side());
+        CHECK(rig.mount->count(":GX96") == 0);  // never asked
+    }
+    SECTION(":GX96# not answered") {
+        connect_paused(rig);
+        CHECK_FALSE(rig.driver->get_can_set_pier_side());
+    }
+}
+
+// The flip is the mount's own one-command GOTO to the current position on the other side.
+// Falsified by: the :SX96 preference juggle or a :Sr/:Sd/:MS# re-slew coming back, Slewing not set, or the targets
+// changing.
+TEST_CASE("OnStep pier side - SideOfPier to the east sends :MNe# and nothing else", "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    connect_paused(rig);
+    place(rig, kThirdOfAnHour, kWestStatus);
+    rig.driver->set_target_right_ascension(5.0);
+    rig.driver->set_target_declination(10.0);
+    rig.mount->clear_log();
+
+    REQUIRE_NOTHROW(rig.driver->set_side_of_pier(0));
+
+    CHECK(rig.mount->count(":MNe#") == 1);
+    CHECK(rig.mount->count(":MNw#") == 0);
+    CHECK(rig.mount->count(":SX96") == 0);
+    CHECK(rig.mount->count(":Sr") == 0);
+    CHECK(rig.mount->count(":Sd") == 0);
+    CHECK(rig.mount->count(":MS#") == 0);
+    CHECK(rig.driver->get_slewing());
+    CHECK(rig.driver->get_target_right_ascension() == Approx(5.0));
+    CHECK(rig.driver->get_target_declination() == Approx(10.0));
+    CHECK(rig.driver->get_can_set_pier_side());
+}
+
+// Falsified by: the west flip sending :MNe#, or going through :SX96/:MS#.
+TEST_CASE("OnStep pier side - SideOfPier to the west sends :MNw#", "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    connect_paused(rig);
+    place(rig, -kThirdOfAnHour, kEastStatus);
+    rig.mount->clear_log();
+    REQUIRE_NOTHROW(rig.driver->set_side_of_pier(1));
+    CHECK(rig.mount->count(":MNw#") == 1);
+    CHECK(rig.mount->count(":MNe#") == 0);
+    CHECK(rig.mount->count(":SX96") == 0);
+    CHECK(rig.mount->count(":MS#") == 0);
+}
+
+// Falsified by: a refused flip reporting success, leaving Slewing true, or sending a follow-up command.
+TEST_CASE("OnStep pier side - a refused flip raises and Slewing stays false", "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    connect_paused(rig);
+    place(rig, kThirdOfAnHour, kWestStatus);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->mn_reply = "6";  // outside limits
+    }
+    rig.mount->clear_log();
+    CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
+    const auto commands = rig.mount->commands();
+    const auto flip = index_of(commands, ":MNe#");
+    REQUIRE(flip < commands.size());
+    CHECK(rig.mount->count(":MNe#") == 1);
+    CHECK(rig.mount->count(":SX96") == 0);
+    CHECK(rig.mount->count(":MS#") == 0);
+    for (std::size_t i = flip + 1; i < commands.size(); ++i) {
+        CHECK(commands[i].rfind(":S", 0) != 0);  // no setting is written after the refusal
+    }
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// Falsified by: an empty flip reply being taken as accepted, or the slew hold staying armed.
+TEST_CASE("OnStep pier side - a flip that gets no reply raises", "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    connect_paused(rig);
+    place(rig, kThirdOfAnHour, kWestStatus);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->mn_reply = "";
+    }
+    rig.mount->clear_log();
+    CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) != 0);
+    CHECK(rig.mount->count(":MNe#") == 1);
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// At home OnStepX overrides the requested side with the target's hour angle, so the flip is not sent.
+// Falsified by: the no-side check being dropped (a :MNe# would go out at home).
+TEST_CASE("OnStep pier side - SideOfPier is refused while the mount reports no pier side",
+          "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    connect_paused(rig);
+    place(rig, kThirdOfAnHour, "NpEo180#");  // tracking, no GOTO, not parked, no pier side
+    rig.mount->clear_log();
+    CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.mount->count(":MN") == 0);
+    CHECK(rig.mount->count(":SX96") == 0);
+    CHECK(rig.mount->count(":MS#") == 0);
+}
+
+// Falsified by: the already-there check being dropped (a flip would be sent for nothing).
+TEST_CASE("OnStep pier side - SideOfPier to the side the mount is on sends nothing", "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    connect_paused(rig);
+    place(rig, kThirdOfAnHour, kWestStatus);
+    rig.mount->clear_log();
+    REQUIRE_NOTHROW(rig.driver->set_side_of_pier(1));
+    CHECK(rig.mount->count(":MN") == 0);
+    CHECK(rig.mount->count(":MS#") == 0);
+    CHECK(rig.mount->count(":Sr") == 0);
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// Falsified by: any refusal moving after the first command is sent, or the value check following the connection check.
+TEST_CASE("OnStep pier side - SideOfPier refusals send nothing", "[onstep][telescope][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    const auto nothing_sent = [&] {
+        CHECK(rig.mount->count(":MN") == 0);
+        CHECK(rig.mount->count(":SX96") == 0);
+        CHECK(rig.mount->count(":Sr") == 0);
+        CHECK(rig.mount->count(":MS#") == 0);
+    };
+
+    SECTION("a value other than 0 or 1 is InvalidValue, also while disconnected") {
+        CHECK(error_of([&] { rig.driver->set_side_of_pier(2); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_of([&] { rig.driver->set_side_of_pier(-1); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::NotConnected);
+        connect_paused(rig);
+        CHECK(error_of([&] { rig.driver->set_side_of_pier(2); }) == alpacacore::AlpacaError::InvalidValue);
+        nothing_sent();
+    }
+    SECTION("parked") {
+        connect_paused(rig);
+        place(rig, 0.3, kParkedStatus);
+        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidWhileParked);
+        nothing_sent();
+    }
+    SECTION("Tracking off") {
+        connect_paused(rig);
+        place(rig, 0.3, kNotTrackingStatus);
+        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
+        nothing_sent();
+    }
+    SECTION("a GOTO running") {
+        connect_paused(rig);
+        place(rig, 0.3, kGotoStatus);
+        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::InvalidOperation);
+        nothing_sent();
+    }
+    SECTION("a side that cannot reach the position") {
+        connect_paused(rig);
+        place(rig, -2.0, kWestStatus);  // 2 h east of the meridian: beyond the 1 h east limit
+        try {
+            rig.driver->set_side_of_pier(0);
+            FAIL("SideOfPier to the east was accepted past the east limit");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(std::string(ex.what()).find("east side cannot reach") != std::string::npos);
+        }
+        nothing_sent();
+    }
+    SECTION("CanSetPierSide false: PropertyNotImplemented") {
+        set_pier(rig, "");  // :GX96# not answered
+        connect_paused(rig);
+        place(rig, 0.3, kWestStatus);
+        CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+        nothing_sent();
+    }
 }
 
 #endif  // !_WIN32

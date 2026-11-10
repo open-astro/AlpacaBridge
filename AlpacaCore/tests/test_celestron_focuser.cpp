@@ -116,7 +116,7 @@ TEST_CASE("Celestron Focuser Driver - Unsupported actions", "[celestron][focuser
 
 TEST_CASE("Celestron Focuser Driver - Connect to a missing port fails", "[celestron][focuser][unit]") {
     auto driver = create_celestron_focuser(0, "/dev/alpacabridge-no-such-celestron-focuser");
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, AlpacaError::DriverException);
     CHECK(driver->get_connected() == false);
 }
 
@@ -636,7 +636,7 @@ TEST_CASE("Celestron Focuser Driver - a getter after a successful connect never 
     rig.fake().drop_next_reply(0x13, 2);  // the connect poll and its retry
     // Both first polls are lost: the connect is refused, so no getter can run on a
     // session without a frame, and the refused connect leaves nothing behind.
-    CHECK_THROWS_AS(rig.driver().set_connected(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { rig.driver().set_connected(true); }, AlpacaError::DriverException);
     CHECK_FALSE(rig.driver().get_connected());
     CHECK_FALSE(rig.driver().get_device_firmware().has_value());
     // The port was released: a connect with replies back succeeds and serves a frame.

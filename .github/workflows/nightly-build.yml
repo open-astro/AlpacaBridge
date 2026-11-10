@@ -120,7 +120,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ccache g++ catch2 pkg-config \
+            build-essential cmake ccache g++ catch2 meson pkg-config \
             libusb-1.0-0-dev libudev-dev libsystemd-dev libhidapi-dev \
             libltdl-dev libexif-dev libjpeg-dev libraw-dev \
             nlohmann-json3-dev zlib1g-dev libcurl4-openssl-dev
@@ -140,9 +140,9 @@ jobs:
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
           cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
+          meson setup build --prefix=/usr/local --libdir=lib -Dauto_features=disabled
+          meson compile -C build
+          sudo meson install -C build --no-rebuild
           sudo ldconfig
 
       - name: Build bundled libgphoto2
@@ -157,10 +157,10 @@ jobs:
           libs=(
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
-            "$core/ToupTek/toupcamsdk.20260519/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
-            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
+            "$core/ToupTek/toupcamsdk/linux/arm64/glibc/libtoupcam.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux/lib/arm64/libPlayerOnePW.so"
+            "$core/QHY/sdk_linux_arm64/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then
@@ -226,7 +226,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ccache g++ catch2 pkg-config \
+            build-essential cmake ccache g++ catch2 meson pkg-config \
             libusb-1.0-0-dev libudev-dev libsystemd-dev libhidapi-dev \
             libltdl-dev libexif-dev libjpeg-dev libraw-dev \
             nlohmann-json3-dev zlib1g-dev libcurl4-openssl-dev
@@ -246,9 +246,9 @@ jobs:
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
           cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
+          meson setup build --prefix=/usr/local --libdir=lib -Dauto_features=disabled
+          meson compile -C build
+          sudo meson install -C build --no-rebuild
           sudo ldconfig
 
       - name: Build bundled libgphoto2
@@ -263,10 +263,10 @@ jobs:
           libs=(
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
-            "$core/ToupTek/toupcamsdk.20260519/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
-            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
+            "$core/ToupTek/toupcamsdk/linux/arm64/glibc/libtoupcam.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux/lib/arm64/libPlayerOnePW.so"
+            "$core/QHY/sdk_linux_arm64/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then

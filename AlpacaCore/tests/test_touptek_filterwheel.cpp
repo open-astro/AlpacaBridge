@@ -98,10 +98,6 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - Unsupported actions", "[touptek][fi
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("noop", false); },
@@ -374,7 +370,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - a failed set_position invalidates t
     REQUIRE(wheel.reads() == 1);
 
     wheel.fake.throw_from.insert("set_filter_wheel_position");
-    CHECK_THROWS_AS(wheel.driver->set_position(3), alpacacore::AlpacaException);
+    require_alpaca_error([&] { wheel.driver->set_position(3); }, alpacacore::AlpacaError::DriverException);
     wheel.fake.throw_from.erase("set_filter_wheel_position");
     CHECK(wheel.driver->get_position() == 0);
     CHECK(wheel.reads() == 2);

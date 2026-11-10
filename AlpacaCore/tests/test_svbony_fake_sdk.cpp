@@ -493,7 +493,7 @@ TEST_CASE("SVBONY Camera - connect selects only supported default formats", "[sv
         alpacacore::test::FakeSVBSDK sdk;
         sdk.set_supported_formats({SVBImageType::Rgb32});
         auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
-        CHECK_THROWS_AS(camera->set_connected(true), alpacacore::AlpacaException);
+        require_alpaca_error([&] { camera->set_connected(true); }, alpacacore::AlpacaError::DriverException);
         CHECK_FALSE(camera->get_connected());
         CHECK(sdk.open_count() == 0);
     }
@@ -1249,7 +1249,7 @@ TEST_CASE("SVBONY Camera - unsupported returned format is not published", "[svbo
     camera->start_exposure(0.001, true);
     wait_for_driver_exception(*camera, "unsupported image format");
     require_array_failure(*camera);
-    CHECK_THROWS_AS(camera->get_image_ready(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)camera->get_image_ready(); }, alpacacore::AlpacaError::DriverException);
     CHECK(sdk.call_count("get_video_data") == reads_before);
 
     sdk.return_image_type(alpacacore::vendor::svbony::SVBImageType::Rgb32);
@@ -1291,10 +1291,12 @@ TEST_CASE("SVBONY Camera - frame storage validation rejects short spans", "[svbo
     CHECK(required_frame_storage(16, 8, SVBImageType::Raw16) == 256);
     std::vector<std::uint8_t> empty;
     std::vector<std::uint8_t> short_frame(255);
-    CHECK_THROWS_AS(validate_frame_storage(std::span<const std::uint8_t>(empty), 16, 8, SVBImageType::Raw16),
-                    alpacacore::AlpacaException);
-    CHECK_THROWS_AS(validate_frame_storage(std::span<const std::uint8_t>(short_frame), 16, 8, SVBImageType::Raw16),
-                    alpacacore::AlpacaException);
+    require_alpaca_error(
+        [&] { validate_frame_storage(std::span<const std::uint8_t>(empty), 16, 8, SVBImageType::Raw16); },
+        alpacacore::AlpacaError::DriverException);
+    require_alpaca_error(
+        [&] { validate_frame_storage(std::span<const std::uint8_t>(short_frame), 16, 8, SVBImageType::Raw16); },
+        alpacacore::AlpacaError::DriverException);
 }
 
 // The TaskClock cases below pin each driver wait to the injected clock. Virtual time starts at the epoch while

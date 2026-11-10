@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Debian%2013%20arm64-orange.svg)](#supported-hardware)
 [![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](docs/development.md)
-[![Authored code](https://img.shields.io/badge/Authored%20code-305k%20lines-informational.svg)](docs/architecture.md#modules)
+[![Authored code](https://img.shields.io/badge/Authored%20code-302k%20lines-informational.svg)](docs/architecture.md#modules)
 
 **The engine at the telescope.**
 
@@ -16,7 +16,7 @@ AlpacaBridge turns a single-board computer into a control server for your entire
 
 Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-#### [6.0.0~beta2] - 2026-11-10 &middot; [Changelog](CHANGELOG.md)
+#### [5.0.2] - 2026-10-29 &middot; [Changelog](CHANGELOG.md)
 
 ## Why AlpacaBridge
 

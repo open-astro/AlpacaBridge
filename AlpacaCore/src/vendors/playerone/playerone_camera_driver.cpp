@@ -190,10 +190,11 @@ public:
     int get_device_number() const override { return device_number_; }
 
     std::string get_name() const override {
-        const_cast<PlayerOneCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
+        // Decision 0016 rule 1: no SDK call here. cached_name_ is set at construction and at connect, and
+        // survives a disconnect.
         std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_ && !camera_info_.name.empty()) {
-            return camera_info_.name;
+        if (!cached_name_.empty()) {
+            return cached_name_;
         }
         return "Player One Camera";
     }
@@ -440,6 +441,7 @@ public:
                 lock.lock();
                 camera_info_ = info;
                 camera_info_valid_ = true;
+                if (!info.name.empty()) cached_name_ = info.name;
                 caps_ = caps;
                 active_format_ = format;
                 bin_ = bin;
@@ -1336,6 +1338,8 @@ private:
     static constexpr int kDownloadTimeoutMs = 5000;  // one get_image_data call; the session watchdog bounds the rest
     PlayerOneCameraInfo camera_info_{};
     bool camera_info_valid_{false};
+    // Under mutex_: the last name the SDK reported (start-up or connect), kept across disconnect.
+    std::string cached_name_;
     PlayerOneConfigCaps caps_{};
     // Under mutex_: the last CoolerOn and SetCCDTemperature (whole degrees C) a client set through this driver,
     // written back after each connect (restore_session_cooler(), issue #1998). Memory only; never persisted.
@@ -1633,37 +1637,17 @@ private:
     }
 
     void preload_camera_info() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        try {
-            auto cameras = sdk_.enumerate_cameras();
-            if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
-                camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
-                camera_info_valid_ = true;
-            }
-        } catch (const std::exception& e) {
-            ALPACA_LOG_DEBUG("PlayerOne", "Preload enumerate failed: " + std::string(e.what()));
-        }
-    }
-
-    void refresh_cached_camera_info_if_needed() {
-        // A connect in flight owns the SDK: the enumerate would wait out its open.
-        if (connected_.load() || connect_in_flight_.load()) {
-            return;
-        }
+        // Enumerate outside mutex_ (decision 0016 rule 1); the constructor has no other thread yet.
         try {
             auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                // A connect ran while the enumerate was out: it owns camera_info_ now
-                // (decision 0016 rule 6), and this read may come from a stale index.
-                if (connected_.load() || connect_in_flight_.load()) {
-                    return;
-                }
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
+                cached_name_ = camera_info_.name;
             }
         } catch (const std::exception& e) {
-            ALPACA_LOG_DEBUG("PlayerOne", "camera-info refresh failed: " + std::string(e.what()));
+            ALPACA_LOG_DEBUG("PlayerOne", "Preload enumerate failed: " + std::string(e.what()));
         }
     }
 

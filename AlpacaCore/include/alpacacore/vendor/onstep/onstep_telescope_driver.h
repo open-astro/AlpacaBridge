@@ -95,6 +95,9 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// One poll tick on the calling thread, paused or not; `full` reads Alt/Az and retries an unread site too.
 /// False when the connection is gone or lost.
 bool poll_status_now_for_testing(TelescopeDriver& driver, bool full = true);
+/// One poll tick as the regular poll's tick number `tick` (0 is the first). Every tenth tick after the first also
+/// reads the pier-side settings (#2179).
+bool poll_status_tick_for_testing(TelescopeDriver& driver, int tick);
 /// False once the poll body is cancelled (a disconnect has taken it), even while it is still sampling.
 bool status_poll_running_for_testing(const TelescopeDriver& driver);
 /// Runs between a tick's sample and its publish, with no driver lock held, so a case can land a client write

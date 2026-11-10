@@ -243,6 +243,25 @@ std::string format_longitude(double longitude_degrees) {
     return buf;
 }
 
+// A whole number with an optional sign and nothing else (a reply like "60", "-5", "+10"), or nullopt.
+std::optional<int> parse_whole_number(const std::string& text) {
+    std::size_t first = 0;
+    if (!text.empty() && (text[0] == '-' || text[0] == '+')) {
+        first = 1;
+    }
+    if (text.size() == first || text.size() - first > 6) {
+        return std::nullopt;
+    }
+    int value = 0;
+    for (std::size_t i = first; i < text.size(); ++i) {
+        if (text[i] < '0' || text[i] > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (text[i] - '0');
+    }
+    return text[0] == '-' ? -value : value;
+}
+
 MountStatus parse_status(const std::string& raw) {
     MountStatus status;
     status.raw_status = raw;
@@ -265,7 +284,9 @@ MountStatus parse_status(const std::string& raw) {
     // OnStepX writes the mount type first ('E' GEM, 'K' fork, 'A' alt-az,
     // 'L' alt-alt), then the pier side: 'T' east, 'W' west, 'o' none. 'E' is
     // therefore always present on a GEM and says nothing about the pier
-    // side (#1217; HM-17 traces nNpEW180 = west, nNpET1:0 = east).
+    // side (#1217; HM-17 traces nNpEW180 = west, nNpET1:0 = east); it is
+    // what is_gem reads (#2179).
+    status.is_gem = raw.find('E') != std::string::npos;
     if (raw.find('T') != std::string::npos) {
         status.side_of_pier = 0;  // pier east
     } else if (raw.find('W') != std::string::npos) {
@@ -809,6 +830,35 @@ public:
         return std::nullopt;
     }
 
+    // The pier-side settings (#2179), all '#'-terminated reads; a reply that does not parse is "unknown", never a
+    // guess. A read that gets no reply throws, as every read does.
+    std::optional<char> get_preferred_pier_side() {
+        const std::string reply = send_command(":GX96#", true, kSetAckTimeoutMs);
+        if (reply.size() == 1 && (reply[0] == 'E' || reply[0] == 'W' || reply[0] == 'B' || reply[0] == 'A')) {
+            return reply[0];
+        }
+        return std::nullopt;
+    }
+
+    std::optional<bool> get_pier_flips_enabled() {
+        const std::string reply = send_command(":GX94#", true, kSetAckTimeoutMs);
+        if (reply.size() == 1 && reply[0] >= '0' && reply[0] <= '2') {
+            return true;
+        }
+        if (reply.size() == 3 && reply[0] >= '0' && reply[0] <= '2' && reply[1] == ' ' && reply[2] == 'N') {
+            return false;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<int> get_meridian_limit_minutes(bool east) {
+        return parse_whole_number(send_command(east ? ":GXE9#" : ":GXEA#", true, kSetAckTimeoutMs));
+    }
+
+    std::optional<int> get_axis1_limit_degrees(bool maximum) {
+        return parse_whole_number(send_command(maximum ? ":GXEw#" : ":GXEe#", true, kSetAckTimeoutMs));
+    }
+
     Position get_position() {
         Position pos;
         // :GRa#/:GDe# request OnStep's high-precision reply variants
@@ -886,6 +936,12 @@ public:
         // One digit: "0" means the slew was accepted; 1-9 is the refusal reason
         // (OnStep Command.ino, OnStepX Goto.command.cpp), which the driver reports (#1379).
         return send_command(":MS#", false, kSetAckTimeoutMs);
+    }
+
+    std::string goto_current_position_on_side(char side) {
+        // :MNe#/:MNw# (OnStepX Goto.command.cpp): GOTO the current RA/Dec on the east or west side of the pier.
+        // The reply is one digit with no '#' (suppressFrame, like :MS#); "0" accepted, 1-9 the :MS# refusal codes.
+        return send_command(side == 'e' ? ":MNe#" : ":MNw#", false, kSetAckTimeoutMs);
     }
 
     std::string sync_to_target() {
@@ -1564,6 +1620,22 @@ std::string OnStepProtocolWrapper::get_product_name() { return pimpl_->get_produ
 std::string OnStepProtocolWrapper::get_version_number() { return pimpl_->get_version_number(); }
 
 std::optional<int> OnStepProtocolWrapper::get_mount_coords_mode() { return pimpl_->get_mount_coords_mode(); }
+
+std::optional<char> OnStepProtocolWrapper::get_preferred_pier_side() { return pimpl_->get_preferred_pier_side(); }
+
+std::optional<bool> OnStepProtocolWrapper::get_pier_flips_enabled() { return pimpl_->get_pier_flips_enabled(); }
+
+std::optional<int> OnStepProtocolWrapper::get_meridian_limit_minutes(bool east) {
+    return pimpl_->get_meridian_limit_minutes(east);
+}
+
+std::optional<int> OnStepProtocolWrapper::get_axis1_limit_degrees(bool maximum) {
+    return pimpl_->get_axis1_limit_degrees(maximum);
+}
+
+std::string OnStepProtocolWrapper::goto_current_position_on_side(char side) {
+    return pimpl_->goto_current_position_on_side(side);
+}
 
 Position OnStepProtocolWrapper::get_position() { return pimpl_->get_position(); }
 

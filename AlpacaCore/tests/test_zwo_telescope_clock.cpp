@@ -30,6 +30,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -183,6 +184,23 @@ TEST_CASE("ZWO telescope clock - a slew ends IsPulseGuiding at once", "[zwo][tel
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
 }
 
+// open-astro#2094: MoveAxis, like every other motion initiator, cancels the queued and running guide pulses: after the
+// stop no further ":Mg" is sent and IsPulseGuiding reads false; the same for a jog.
+// Falsified by: zwo_telescope_driver.cpp move_axis() not calling reset_position_offsets() after fence_goto().
+TEST_CASE("ZWO telescope clock - MoveAxis stop cancels a running guide pulse (2094)", "[zwo][telescope][unit][clock]") {
+    const double rate = GENERATE(0.0, 1.0);
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 3000);
+    rig.driver->pulse_guide(0, 500);  // queued behind the running pulse
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.driver->move_axis(0, rate);
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    for (int i = 0; i < 10; ++i) rig.advance(500ms);
+    CHECK(rig.mount.count(":Mg") == 1);
+}
+
 TEST_CASE("ZWO telescope clock - Tracking on waits for an in-flight pulse that ends within 1500 ms",
           "[zwo][telescope][unit][clock]") {
     Rig rig;
@@ -201,6 +219,25 @@ TEST_CASE("ZWO telescope clock - Tracking on waits for an in-flight pulse that e
     REQUIRE(ready(write, kReal));
     write.get();
     CHECK(rig.mount.count(":Te") == enables + 1);
+}
+
+// open-astro#1834 PIN: the Tracking-on wait sleeps to the pulse's exact end, not to the next 200 ms step: the pulse
+// ends 1300 ms into the wait, so the write is done at 1300 ms, not 1400 ms.
+// Falsified by: zwo_telescope_driver.cpp set_tracking() wait_for_pulse_completion: sleeping a fixed 200 ms step
+// instead of min(remaining, 200 ms), so the write returns at 1400 ms.
+TEST_CASE("ZWO telescope clock - Tracking on returns at the pulse end, not at the next 200 ms step (#1834 PIN)",
+          "[zwo][telescope][unit][clock]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 3000);  // pauses the poll, so the cached Tracking state ages past 2 s
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    for (int i = 0; i < 22; ++i) rig.advance(100ms);  // 2200 ms; the pulse ends at 3500 ms
+    auto& write = rig.call([&] { rig.driver->set_tracking(true); });
+    rig.wait_for_blocked_caller(2);                   // the poll loop and the pulse worker wait on the clock too
+    for (int i = 0; i < 12; ++i) rig.advance(100ms);  // 1200 ms into the wait
+    CHECK_FALSE(ready(write));
+    rig.advance(100ms);  // 1300 ms: the pulse ends
+    CHECK(ready(write, kReal));
 }
 
 TEST_CASE("ZWO telescope clock - Tracking on stops waiting for a longer pulse after 1500 ms",
@@ -534,6 +571,89 @@ TEST_CASE("ZWO a Sync whose reset runs before a PulseGuide queues never stops th
         CHECK(sent[i] != ":CM");
     }
     require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
+// open-astro#1925: an older Sync settling on "e4" must not stop a newer MoveAxis jog, FindHome, Park or Unpark. The
+// initiator seam holds each one right after its wire command, where the old code had not yet moved the Sync epoch;
+// the Sync's settle timer runs meanwhile, so its ownership check lands in that window. It must throw, with the
+// neutral message, and send nothing (":Q", ":SMMC", ":Sr", ":CM") after the newer command.
+// Falsified by: zwo_telescope_driver.cpp park() (and find_home(), move_axis(), unpark()): removing the
+// bump_motion_epoch() call before the wire command, so the epoch moves only after it and the Sync still stops it.
+TEST_CASE("ZWO an older Sync never stops a newer MoveAxis, FindHome, Park or Unpark (#1925)",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    const auto initiator_and_command = GENERATE(
+        std::pair<std::string, std::string>{"Park", ":hP"}, std::pair<std::string, std::string>{"FindHome", ":hC"},
+        std::pair<std::string, std::string>{"MoveAxis", ":Me"}, std::pair<std::string, std::string>{"Unpark", ":Spu"});
+    const std::string& label = initiator_and_command.first;
+    const std::string& command = initiator_and_command.second;
+    CAPTURE(label);
+    alpacacore::test::Latch latch;
+    Rig rig;
+    alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == label + " sent") latch.block();
+    });
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its first ":Q" and waits out the 200 ms settle
+
+    auto& initiator = rig.call([&] {
+        if (label == "Park") rig.driver->park();
+        if (label == "FindHome") rig.driver->find_home();
+        if (label == "MoveAxis") rig.driver->move_axis(0, 1.0);
+        if (label == "Unpark") rig.driver->unpark();
+    });
+    const bool held = latch.wait_entered();
+    const bool command_sent = rig.mount.wait_for_count(command, 1, kReal);
+    if (held && command_sent) rig.advance_until([&] { return ready(sync); }, 200ms, 3s);
+    latch.release();  // before any REQUIRE can unwind, so the Rig never waits on the latch
+    REQUIRE(held);
+    REQUIRE(command_sent);
+    REQUIRE(ready(sync, kReal));
+    REQUIRE(ready(initiator, kReal));
+    initiator.get();
+
+    const auto all = rig.mount.commands();
+    const auto command_at =
+        std::find_if(all.begin(), all.end(), [&](const std::string& c) { return c.starts_with(command); });
+    REQUIRE(command_at != all.end());
+    const auto from_sync = [](const std::string& c) {
+        return c == ":Q" || c.starts_with(":SMMC") || c.starts_with(":Sr") || c == ":CM";
+    };
+    CHECK(std::none_of(command_at + 1, all.end(), from_sync));
+    try {
+        sync.get();
+        FAIL("an older Sync must not complete over a newer command");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::InvalidOperation);
+        CHECK(std::string(ex.what()) == "Sync superseded by a newer command");
+    }
+    if (label == "MoveAxis") rig.driver->move_axis(0, 0.0);
+}
+
+// open-astro#1925 item 2: an AbortSlew during the settle starts no motion, so the superseded text must not say it did.
+// Falsified by: zwo_telescope_driver.cpp sync_to_pair(): restoring the message "Sync superseded by a newer motion
+// command".
+TEST_CASE("ZWO an older Sync superseded by AbortSlew says so without claiming motion (#1925)",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();
+    rig.driver->abort_slew();
+    rig.advance_until([&] { return ready(sync); }, 200ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    CHECK(rig.mount.count(":SMMC") == 1);
+    try {
+        sync.get();
+        FAIL("a Sync superseded by AbortSlew must fail");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::InvalidOperation);
+        CHECK(std::string(ex.what()) == "Sync superseded by a newer command");
+    }
 }
 
 TEST_CASE("ZWO SyncToCoordinates sends its own pair, not a target set earlier",

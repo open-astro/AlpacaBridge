@@ -82,7 +82,7 @@ Symbol: `transition_mutex_`
 | ZWO focuser |  | `AlpacaCore/src/vendors/zwo/zwo_focuser_driver.cpp` | adopted |  |  |
 | ZWO rotator |  | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted |  |  |
 | ZWO switch |  | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted |  |  |
-| ZWO telescope | `set_connected_mutex_` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted |  | transition lock named `set_connected_mutex_` |
+| ZWO telescope |  | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted |  |  |
 | remotealpaca (proxied devices) |  | — | planned | #1753 | snapshot-served; commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) |
 
 ## Alternatives rejected

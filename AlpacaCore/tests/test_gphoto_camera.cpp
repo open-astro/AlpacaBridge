@@ -66,17 +66,11 @@ TEST_CASE("GPhoto Camera Driver - Device metadata", "[gphoto][camera][unit]") {
 TEST_CASE("GPhoto Camera Driver - Not connected throws", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    CHECK_THROWS_AS(driver->get_ccd_temperature(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_gain(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_gain(0), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_gains(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->start_exposure(1.0, true), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->stop_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->abort_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->pulse_guide(0, 100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_exposure_max(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_exposure_min(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_gain(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gains(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->abort_exposure(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_exposure_max(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_exposure_min(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("GPhoto Camera Driver - Disconnected state", "[gphoto][camera][unit]") {
@@ -101,19 +95,18 @@ TEST_CASE("GPhoto Camera Driver - Unsupported actions", "[gphoto][camera][unit]"
 
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("anything", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->action("anything", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_blind("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_bool("", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_string("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("GPhoto Camera Driver - Sub-exposure and binning not supported", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    CHECK_THROWS_AS(driver->get_sub_exposure_duration(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_sub_exposure_duration(1.0), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_bin_x(2), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_bin_y(2), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("GPhoto Camera Driver - Value range validation and ASCOM error codes", "[gphoto][camera][unit]") {

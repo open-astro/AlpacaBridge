@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 namespace alpacacore::util {
@@ -46,6 +47,8 @@ namespace alpacacore::util {
  */
 template <typename T>
 class StateSnapshot {
+    static_assert(std::is_copy_constructible_v<T>, "read() returns a copy of the frame");
+
 public:
     using clock = TaskClock::clock;
     using Token = std::uint64_t;
@@ -65,8 +68,9 @@ public:
         return write_epoch_;
     }
 
-    /// Stores a polled frame measured now. False (frame dropped) when a write
-    /// landed after `token` was taken.
+    /// Stores a polled frame, stamped `measured_at` = now, the publish time, not
+    /// when the poll sampled: a slow poll reads fresher than it is by its own
+    /// duration. False (frame dropped) when a write landed after `token` was taken.
     bool publish(Token token, T value) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (token != write_epoch_) {

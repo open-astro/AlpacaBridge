@@ -188,22 +188,12 @@ TEST_CASE("WandererAstro FilterWheel Protocol Wrapper - Disconnected behavior", 
 
 #include "fake_serial_streamer.h"
 #include "fake_task_clock.h"
+#include "wandererastro_streamer_helpers.h"
 
 namespace {
 
-// Moves the fake clock by @p d, then waits (bounded, real time) for the
-// reader thread's next pass: its silence check is the one clock read a muted
-// or severed link makes per pass, taken under the lock the driver's getters
-// also take, so a getter called after this returns sees that pass's verdict.
-bool advance_one_pass(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds d) {
-    clock.advance(d);
-    return clock.wait_for_now_calls(clock.now_calls() + 1, std::chrono::milliseconds(2000));
-}
-
-// set_muted() can land just after the streamer committed one more frame to the
-// pty; give the reader time to take it at the current virtual time before the
-// clock moves, or it would restart the silence window.
-void drain_after_mute() { std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
+using alpacacore::test::wanderer::advance_one_pass;
+using alpacacore::test::wanderer::drain_after_mute;
 
 template <typename Pred>
 bool wait_until_sfw(Pred pred, std::chrono::milliseconds limit) {
@@ -241,18 +231,22 @@ TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and m
             return true;
         }
     };
-    drain_after_mute();
+    REQUIRE(drain_after_mute(wheel, clock));
     // The 10 s limit is inclusive: exactly 10 s of silence still serves the cache.
     REQUIRE(advance_one_pass(clock, std::chrono::seconds(10)));
     CHECK(driver->get_position() == 2);
     // One millisecond more latches the fault.
     REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    const auto sent_before = wheel.commands().size();
     CHECK(position_throws());
     CHECK(driver->get_connected());
     CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
     require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->set_position(5); }, alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(wheel.received("6"));  // no move went on the wire while faulted
+    // No move went on the wire while faulted: a move to Alpaca 5 is wire slot 6, sent as 2000 + slot.
+    REQUIRE(wheel.wait_for_quiet(std::chrono::seconds(5)));  // the streamer has read whatever was written
+    CHECK_FALSE(wheel.received("2006"));
+    CHECK(wheel.commands().size() == sent_before);
     // Names and offsets are driver-side and keep answering.
     CHECK(driver->get_names().size() == 8);
 
@@ -331,7 +325,7 @@ TEST_CASE("WandererAstro FilterWheel Driver - Disconnect returns after the port 
     // A silent link under a blocking-read retune: a VTIME-paced reader would
     // park in read() and never see its stop flag.
     wheel.set_muted(true);
-    drain_after_mute();
+    REQUIRE(wheel.wait_for_quiet(std::chrono::seconds(5)));
     alpacacore::test::wanderer::retune_to_blocking_read(wheel.keepalive_fd());
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
@@ -353,7 +347,7 @@ TEST_CASE("WandererAstro FilterWheel Driver - Link fault restores retuned line s
     // Bytes keep arriving but no frame parses (the wrong baud's garbage), so no
     // read ever times out and tty_read()'s own restore never runs.
     wheel.set_frame("ZZZZZZ\r");
-    drain_after_mute();
+    REQUIRE(alpacacore::test::wanderer::wait_for_frames(wheel, 1));
     alpacacore::test::wanderer::set_line_speed(wheel.keepalive_fd(), B9600);
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     REQUIRE(alpacacore::test::wanderer::line_speed(wheel.keepalive_fd()) == B9600);

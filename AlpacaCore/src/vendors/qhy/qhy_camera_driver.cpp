@@ -2571,12 +2571,14 @@ private:
             // (review finding). Captured into a local under the same lock
             // that publishes it to the member, so the lambda below never
             // has to re-read the (possibly concurrently reassigned) member.
+            // No camera id, no worker: return before a fresh stop signal replaces the
+            // member, so no signal stands with nothing behind it (#2085).
+            id = camera_id_.value_or("");
+            if (id.empty()) {
+                return;
+            }
             stop_flag = std::make_shared<WorkerStopSignal>(clock_);
             temp_thread_stop_ = stop_flag;
-            id = camera_id_.value_or("");
-        }
-        if (id.empty()) {
-            return;
         }
         // Same reasoning as temp_thread_stop_ above: a fresh object so a
         // zombie's eventual RunningGuard destructor can never clear the new

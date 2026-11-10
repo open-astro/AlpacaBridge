@@ -121,6 +121,24 @@ TEST_CASE("SynScan Telescope Driver - Target Range Validation", "[synscan][teles
     require_alpaca_error([&]() { driver->set_target_declination(45.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
+TEST_CASE("SynScan Telescope Driver - slew and sync arguments are checked before the connection",
+          "[synscan][telescope][unit]") {
+    // AGENTS.md: InvalidValue precedes the connection check (open-astro#2084).
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    require_alpaca_error([&]() { driver->slew_to_coordinates(25.0, 10.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(25.0, 10.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(25.0, 10.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 91.0); }, alpacacore::AlpacaError::InvalidValue);
+    // A valid pair still reports the connection.
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 10.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
 TEST_CASE("SynScan Telescope Driver - Axis Rate Ranges", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
     conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
@@ -174,24 +192,24 @@ TEST_CASE("SynScan Telescope Driver - Disconnected Behavior", "[synscan][telesco
     REQUIRE_FALSE(driver->get_connected());
 
     // Position queries require connection
-    CHECK_THROWS_AS(driver->get_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_declination(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_altitude(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_azimuth(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
 
     // Tracking requires connection
-    CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
-    // Slew and park require connection (or target not set, both throw AlpacaException)
-    CHECK_THROWS_AS(driver->slew_to_target_async(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+    // Slew and park require connection; the connection check precedes the unset target (#2075)
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
 
     // Action and command methods
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->command_bool("test", false); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 #ifndef _WIN32  // needs the fake mount server
@@ -950,6 +968,79 @@ TEST_CASE("SynScan Telescope Driver - a cancelled pulse whose stop fails logs th
     }
 }
 
+// The cancelled pulse's stop is sent with no wire turn (run_pulse_stop_body): that is safe only because a replacing
+// initiator joins the slot before it takes its own turn. A replacement must send the first pulse's stop before the
+// rate command of its own turn (the tracking mode is cached here, so no mode read goes out).
+// Falsified by: synscan_telescope_driver.cpp pulse_guide, move pulse_ops_[axis].cancel_all_and_join() below the rate
+// command (after the mutex_ block, before start()): the replacement's rate command then precedes the first pulse's
+// stop.
+TEST_CASE("SynScan Telescope Driver - a cancelled pulse stop precedes the replacement pulse's turn",
+          "[synscan][telescope][unit]") {
+    auto log = std::make_shared<std::vector<std::string>>();
+    auto log_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([log, log_mutex](const std::string& command) {
+        {
+            std::lock_guard<std::mutex> lock(*log_mutex);
+            log->push_back(command);
+        }
+        switch (command.empty() ? '\0' : command[0]) {
+            case 'K':
+                return std::string(1, command.size() > 1 ? command[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return std::string("12AB0500,20000500#");
+            case 't':
+                return std::string(1, '\x01') + "#";
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'L':
+                return std::string("0#");
+            default:
+                return std::string("#");
+        }
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    alpacacore::test::FakeTaskClock clock;  // neither 300 ms pulse elapses on its own
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->pulse_guide(2, 300);  // East, RA
+    {
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        log->clear();
+    }
+    driver->pulse_guide(2, 300);  // replaces the first pulse on the same axis
+
+    std::vector<std::string> sent;
+    {
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        sent = *log;
+    }
+    // RA axis is device 16; the stop is the zero-rate variable command, the start a non-zero rate.
+    const auto is_rate = [](const std::string& c) {
+        return c.size() >= 6 && c[0] == 'P' && c[2] == '\x10' && c[1] == '\x03';
+    };
+    const auto stop = std::find_if(sent.begin(), sent.end(),
+                                   [&](const std::string& c) { return is_rate(c) && c[4] == '\0' && c[5] == '\0'; });
+    const auto start = std::find_if(sent.begin(), sent.end(),
+                                    [&](const std::string& c) { return is_rate(c) && (c[4] != '\0' || c[5] != '\0'); });
+    REQUIRE(stop != sent.end());
+    REQUIRE(start != sent.end());
+    CHECK(stop < start);
+    driver.reset();
+}
+
 // Steps the fake clock until `pred` holds, so a pulse timer parked on it fires without a sleep. Each step waits for
 // the woken task to settle; the 10 s bound is real time (the handset's response timeouts run on it).
 bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred) {
@@ -1011,13 +1102,13 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
         driver->move_axis(0, 1.0);
         REQUIRE(driver->get_slewing());
         fail_t->store(true);
-        CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+        require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
     }
     SECTION("MoveAxis stop") {
         driver->move_axis(0, 1.0);
         REQUIRE(driver->get_slewing());
         fail_t->store(true);
-        CHECK_THROWS_AS(driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+        require_alpaca_error([&] { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::DriverException);
     }
     SECTION("PulseGuide end") {
         driver->pulse_guide(2, 300);  // East, RA

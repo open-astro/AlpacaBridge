@@ -24,6 +24,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_zwo_caa_sdk.h"
 #include "fake_zwo_eaf_sdk.h"
 #include "fake_zwo_efw_sdk.h"
@@ -44,6 +45,7 @@ using alpacacore::test::FakeZWOEFWSDK;
 using alpacacore::test::LockedZWOCAASDK;
 using alpacacore::test::LockedZWOEAFSDK;
 using alpacacore::test::LockedZWOEFWSDK;
+using alpacacore::test::require_alpaca_error;
 
 int error_code(const std::function<void()>& fn) {
     try {
@@ -710,7 +712,7 @@ TEST_CASE("ZWO EFW seam - a failed set_position invalidates the cached Position"
     REQUIRE(sdk.position_calls == 1);
 
     sdk.fail_set_position = true;
-    CHECK_THROWS_AS(driver->set_position(4), AlpacaException);
+    require_alpaca_error([&] { driver->set_position(4); }, alpacacore::AlpacaError::DriverException);
     sdk.fail_set_position = false;
     sdk.position = 2;
     CHECK(driver->get_position() == 2);
@@ -750,7 +752,7 @@ TEST_CASE("ZWO EFW seam - a failed connect leaves the pre-connect name and slot 
     FakeZWOEFWSDK sdk;
     sdk.fail_open = true;
     auto driver = zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
-    REQUIRE_THROWS_AS(driver->set_connected(true), AlpacaException);
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_name() == "ZWO EFW");
     CHECK_NOTHROW(driver->set_names({"A", "B", "C"}));

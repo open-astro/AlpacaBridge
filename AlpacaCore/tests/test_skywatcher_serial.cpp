@@ -82,7 +82,7 @@ TEST_CASE("SkyWatcher serial - a reply that arrives after the timeout is not rea
     // window. A reply later than that window is only caught by the shape
     // check, which cannot help when it is the SAME command's shape.
     link.board.delay_next_reply(400);
-    REQUIRE_THROWS_AS(link.proto.inquire_position(1), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)link.proto.inquire_position(1); }, alpacacore::AlpacaError::DriverException);
 
     link.board.set_counts(1, 0x812345);
     // The late "=…800000" reply is now on the line (or about to be). The next
@@ -133,7 +133,7 @@ TEST_CASE("SkyWatcher serial - a genuine :J rejection on the first frame still t
     SerialLink link(300);
     link.board.reject_j_on_running_axis();
     REQUIRE_NOTHROW(link.proto.send_command('J', 1));
-    REQUIRE_THROWS_AS(link.proto.send_command('J', 1), alpacacore::AlpacaException);
+    require_alpaca_error([&] { link.proto.send_command('J', 1); }, alpacacore::AlpacaError::DriverException);
     REQUIRE(link.board.count_frames('J') == 2);  // no resend after a "!"
 }
 
@@ -150,7 +150,7 @@ TEST_CASE("SkyWatcher serial - giving up on a second mis-pair still settles the 
     // Two mis-paired ":j1" replies, then a stale ":j" reply (the old counts)
     // landing 50 ms after the second one -- inside the settle window.
     link.board.mispair_next(2, "=800000", 50);
-    REQUIRE_THROWS_AS(link.proto.inquire_position(1), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)link.proto.inquire_position(1); }, alpacacore::AlpacaError::DriverException);
     REQUIRE(link.board.count_frames('j') == 2);  // one resend, then gave up
 
     link.board.set_counts(1, 0x812345);
@@ -218,7 +218,7 @@ TEST_CASE("SkyWatcher serial - the settle drain keeps polling after a spurious-r
     board.set_counts(1, 0x800000);
     board.mispair_next(2, "=800000", 50);
     armed = true;
-    REQUIRE_THROWS_AS(proto.inquire_position(1), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)proto.inquire_position(1); }, alpacacore::AlpacaError::DriverException);
     CHECK(eagain_left.load() == 0);
     // Two EAGAINs, then the straggler's bytes: the drain went on past the first.
     CHECK(settle_reads.load() > 2);
@@ -266,7 +266,8 @@ TEST_CASE("SkyWatcher serial - a quiet board times out within the command budget
 
     board.set_muted(true);  // board goes quiet (healthy fd): reads get no data
     const auto start = std::chrono::steady_clock::now();
-    REQUIRE_THROWS_AS(proto.inquire_position(1), alpacacore::AlpacaException);  // times out, does not hang
+    require_alpaca_error([&] { (void)proto.inquire_position(1); },
+                         alpacacore::AlpacaError::DriverException);  // times out, does not hang
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
     // WITH the fix: ~response_timeout (300 ms). WITHOUT it: >= the 2 s broken-read
@@ -278,7 +279,7 @@ TEST_CASE("SkyWatcher serial - a quiet board times out within the command budget
     // SETTLE path too, not just exchange. It must also stay bounded; without the
     // settle poll() gate it would block the seam's full 2 s inside settle_serial.
     const auto start2 = std::chrono::steady_clock::now();
-    REQUIRE_THROWS_AS(proto.inquire_position(1), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)proto.inquire_position(1); }, alpacacore::AlpacaError::DriverException);
     const auto elapsed2 =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start2);
     CHECK(elapsed2 < std::chrono::milliseconds(1500));
@@ -863,11 +864,14 @@ TEST_CASE("SkyWatcher serial - a silent board latches a link fault after three e
     board.set_muted(true);
     // One transient timeout must not brick a session: a single mis-timed reply
     // during a slew is ordinary.
-    CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)protocol.inquire_position(sw::kAxisRa); },
+                         alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(protocol.link_faulted());
-    CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)protocol.inquire_position(sw::kAxisRa); },
+                         alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(protocol.link_faulted());
-    CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)protocol.inquire_position(sw::kAxisRa); },
+                         alpacacore::AlpacaError::DriverException);
     CHECK(protocol.link_faulted());
     CHECK(protocol.link_fault().find("consecutive failures") != std::string::npos);
 
@@ -879,7 +883,8 @@ TEST_CASE("SkyWatcher serial - a silent board latches a link fault after three e
     // The driver must keep talking while faulted: on a polled link these reads
     // are the only traffic that can ever clear the latch.
     const int frames_while_faulted = board.count_frames('j');
-    CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)protocol.inquire_position(sw::kAxisRa); },
+                         alpacacore::AlpacaError::DriverException);
     CHECK(board.count_frames('j') > frames_while_faulted);
 
     const std::uint64_t epoch_before = protocol.link_recovery_epoch();
@@ -929,7 +934,8 @@ TEST_CASE("SkyWatcher serial - a latched fault from a reprogrammed line recovers
 
     board.set_muted(true);
     for (int i = 0; i < 3; ++i) {
-        CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+        require_alpaca_error([&] { (void)protocol.inquire_position(sw::kAxisRa); },
+                             alpacacore::AlpacaError::DriverException);
     }
     CHECK(protocol.link_faulted());
 
@@ -1572,8 +1578,8 @@ TEST_CASE("SkyWatcher serial - a state-latching command is NOT retransmitted aft
     // must not cross, it does not reproduce the issue.
     SerialLink link(300);
     link.board.drop_next_frames('I');
-    REQUIRE_THROWS_AS(link.proto.set_step_period(sw::kAxisRa, 0x001234, /*with_readback=*/false),
-                      alpacacore::AlpacaException);
+    require_alpaca_error([&] { link.proto.set_step_period(sw::kAxisRa, 0x001234, /*with_readback=*/false); },
+                         alpacacore::AlpacaError::DriverException);
     CHECK(link.board.count_frames('I') == 1);
 }
 
@@ -1643,15 +1649,11 @@ TEST_CASE("FakeSkyWatcherSerialBoard - a steady reply latency is paid by every t
     const int before = board.transactions_served();
     board.set_reply_latency(40);
     const auto slow = timed_reads(5);
-    for (int i = 0; i < 40 && board.transactions_served() - before != 5; ++i)  // count follows the send
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    CHECK(board.transactions_served() - before == 5);
+    CHECK(board.transactions_served() - before == 5);  // counted before each reply was sent
     CHECK(slow >= std::chrono::milliseconds(5 * 40));
 
     board.set_reply_latency(0);
     const auto fast = timed_reads(5);
-    for (int i = 0; i < 40 && board.transactions_served() - before != 10; ++i)  // count follows the send
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     CHECK(board.transactions_served() - before == 10);
     CHECK(fast < std::chrono::milliseconds(5 * 40));
     protocol.disconnect();
@@ -1810,4 +1812,14 @@ TEST_CASE("SkyWatcher serial - a muted board's refused connect names the port an
     const std::string last = driver->get_last_connect_error();
     CHECK(last.find(path) != std::string::npos);
     CHECK(last.find("Serial Port setting") != std::string::npos);
+}
+
+TEST_CASE("FakeSkyWatcherBoard - answers :D and :h (#2084)", "[skywatcher][unit]") {
+    alpacacore::test::FakeSkyWatcherBoard board(FakeMountProfile::eqm35_pro());
+    // ":D" is the board's sidereal step period; the EQM-35 Pro capture reads 149592 (0x024858).
+    CHECK(board.handle(":D1") == "=584802");
+    // ":h" reads back the goto target last written with ":S".
+    CHECK(board.handle(":S1563412") == "=");
+    CHECK(board.handle(":h1") == "=563412");
+    CHECK(board.handle(":h2") == "=000080");  // untouched axis: kHome 0x800000
 }

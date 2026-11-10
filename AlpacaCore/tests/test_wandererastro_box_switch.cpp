@@ -80,10 +80,13 @@ TEST_CASE("WandererAstro Box Switch Driver - Unsupported actions", "[wandererast
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
 
-    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { (void)driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { (void)driver->command_bool("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { (void)driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("WandererAstro Box Switch Driver - Value range validation", "[wandererastro][switch][unit]") {
@@ -179,22 +182,12 @@ TEST_CASE("WandererAstro Box Protocol Wrapper - Defaults and disconnected state"
 
 #include "fake_serial_streamer.h"
 #include "fake_task_clock.h"
+#include "wandererastro_streamer_helpers.h"
 
 namespace {
 
-// Moves the fake clock by @p d, then waits (bounded, real time) for the
-// reader thread's next pass: its silence check is the one clock read a muted
-// or severed link makes per pass, taken under the lock the driver's getters
-// also take, so a getter called after this returns sees that pass's verdict.
-bool advance_one_pass(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds d) {
-    clock.advance(d);
-    return clock.wait_for_now_calls(clock.now_calls() + 1, std::chrono::milliseconds(2000));
-}
-
-// set_muted() can land just after the streamer committed one more frame to the
-// pty; give the reader time to take it at the current virtual time before the
-// clock moves, or it would restart the silence window.
-void drain_after_mute() { std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
+using alpacacore::test::wanderer::advance_one_pass;
+using alpacacore::test::wanderer::drain_after_mute;
 
 template <typename Pred>
 bool wait_until_box(Pred pred, std::chrono::milliseconds limit) {
@@ -236,19 +229,23 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
             return true;
         }
     };
-    drain_after_mute();
+    REQUIRE(drain_after_mute(box, clock));
     // Reads keep answering from cache through exactly 10 s of silence (the
     // limit is inclusive); one millisecond more latches the fault.
     REQUIRE(advance_one_pass(clock, std::chrono::seconds(10)));
     CHECK(driver->get_switch_value(14) == 13.1);
     REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    const auto sent_before = box.commands().size();
     CHECK(value_read_throws());
     CHECK(driver->get_connected());  // the client decides whether to reconnect
     CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
     require_alpaca_error([&]() { (void)driver->get_switch_value(14); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { (void)driver->get_switch(7); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->set_switch(7, false); }, alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(box.received("200"));  // nothing went on the wire while faulted
+    // Nothing went on the wire while faulted.
+    REQUIRE(box.wait_for_quiet(std::chrono::seconds(5)));  // the streamer has read whatever was written
+    CHECK_FALSE(box.received("200"));
+    CHECK(box.commands().size() == sent_before);
     // Static metadata does not depend on the box and keeps answering.
     CHECK(driver->get_can_write(7));
     CHECK_FALSE(driver->get_switch_name(14).empty());
@@ -368,7 +365,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Disconnect returns after the port i
     // A silent link under a blocking-read retune: a VTIME-paced reader would
     // park in read() and never see its stop flag.
     box.set_muted(true);
-    drain_after_mute();
+    REQUIRE(box.wait_for_quiet(std::chrono::seconds(5)));
     alpacacore::test::wanderer::retune_to_blocking_read(box.keepalive_fd());
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
@@ -389,7 +386,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Link fault restores retuned line se
     // Bytes keep arriving but no frame parses (the wrong baud's garbage), so no
     // read ever times out and tty_read()'s own restore never runs.
     box.set_frame("garbageA");
-    drain_after_mute();
+    REQUIRE(alpacacore::test::wanderer::wait_for_frames(box, 1));
     alpacacore::test::wanderer::set_line_speed(box.keepalive_fd(), B9600);
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     REQUIRE(alpacacore::test::wanderer::line_speed(box.keepalive_fd()) == B9600);

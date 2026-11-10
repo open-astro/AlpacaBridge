@@ -67,18 +67,32 @@ public:
     bool get_temp_comp() const override { return false; }
     void set_temp_comp(bool) override {}
     double get_temperature() const override { return 0.0; }
-    void halt() override {}
+    void halt() override {
+        if (halt_error_ != 0) {
+            throw alpacacore::AlpacaException("Focuser halt refused", halt_error_);
+        }
+    }
+    void set_halt_error(int code) { halt_error_ = code; }
     void move(int) override {}
 
 private:
     int number_;
     bool connected_ = false;
+    int halt_error_ = 0;
 };
 
 alpacahttp::Response route_get(alpacahttp::Router& router, const std::string& path) {
     alpacahttp::Request request;
     std::ostringstream raw;
     raw << "GET " << path << " HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    EXPECT(request.parse(raw.str()));
+    return router.route(request, 1);
+}
+
+alpacahttp::Response route_put(alpacahttp::Router& router, const std::string& path) {
+    alpacahttp::Request request;
+    std::ostringstream raw;
+    raw << "PUT " << path << " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
     EXPECT(request.parse(raw.str()));
     return router.route(request, 1);
 }
@@ -131,6 +145,59 @@ int main() {
                 if (c.message == line) {
                     ++matched;
                     EXPECT(c.level == alpacacore::logging::LogLevel::Debug);
+                }
+            }
+            EXPECT(matched == 1);
+        }
+
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Focuser, kNumber);
+    }
+
+    // case: client-state refusals (InvalidWhileParked, InvalidWhileSlaved) log at DEBUG; a plain
+    // InvalidOperation stays at ERROR (#2076, decision 0007 rule 9)
+    struct HaltCase {
+        int code;
+        alpacacore::logging::LogLevel expected;
+    };
+    const HaltCase halt_cases[] = {
+        {alpacacore::AlpacaError::InvalidWhileParked, alpacacore::logging::LogLevel::Debug},
+        {alpacacore::AlpacaError::InvalidWhileSlaved, alpacacore::logging::LogLevel::Debug},
+        {alpacacore::AlpacaError::InvalidOperation, alpacacore::logging::LogLevel::Error},
+    };
+    for (const auto& hc : halt_cases) {
+        constexpr int kNumber = 9334;
+        auto focuser = std::make_shared<DisconnectedFocuser>(kNumber);
+        focuser->set_halt_error(hc.code);
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(focuser));
+
+        std::vector<std::pair<alpacacore::logging::LogLevel, std::string>> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(level, std::string(message));
+            });
+
+        const auto resp = route_put(router, "/api/v1/focuser/" + std::to_string(kNumber) + "/halt");
+        EXPECT(resp.status_code() == 200);
+        EXPECT(nlohmann::json::parse(resp.body()).value("ErrorNumber", 0) == hc.code);
+
+        {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            int matched = 0;
+            for (const auto& c : captured) {
+                if (c.second.find("Focuser halt refused") != std::string::npos) {
+                    ++matched;
+                    EXPECT(c.first == hc.expected);
                 }
             }
             EXPECT(matched == 1);

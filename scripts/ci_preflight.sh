@@ -160,10 +160,57 @@ ensure_tool() {
   command -v "${cmd}" >/dev/null 2>&1
 }
 
+# clang_format_pair: prints "<clang-format> <git-clang-format>". CI's format job
+# runs ubuntu-24.04's clang-format 18, so the -18 pair wins when both exist; a
+# newer host default formats some code differently (#1755).
+clang_format_pair() {
+  if command -v clang-format-18 >/dev/null 2>&1 && command -v git-clang-format-18 >/dev/null 2>&1; then
+    echo "clang-format-18 git-clang-format-18"
+  else
+    echo "clang-format git-clang-format"
+  fi
+}
+
+# Pinned PMD release for the duplication gate (keep PMD_VER / PMD_SHA256 in sync
+# with the `duplication` job in .github/workflows/ci.yml; docs-drift check 2).
+PMD_VER="7.29.0"
+PMD_SHA256="d27177c185b837fa57f097e482d1253468aa035379c5eb2671fa0a279109b179"
+
+# ensure_pmd: prints the path of the pinned PMD launcher, downloading the
+# checksum-verified release into the cache once. Never installs a JRE.
+ensure_pmd() {
+  local cache_dir zip launcher sum
+  cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/alpacabridge-preflight"
+  launcher="${cache_dir}/pmd-bin-${PMD_VER}/bin/pmd"
+  if [ -x "${launcher}" ]; then
+    echo "${launcher}"
+    return 0
+  fi
+  if [ "${PREFLIGHT_NO_INSTALL:-0}" = "1" ]; then
+    return 1
+  fi
+  mkdir -p "${cache_dir}"
+  zip="${cache_dir}/pmd-dist-${PMD_VER}-bin.zip"
+  echo ">> Downloading PMD ${PMD_VER}..." >&2
+  if ! curl -fsSL "https://github.com/pmd/pmd/releases/download/pmd_releases%2F${PMD_VER}/pmd-dist-${PMD_VER}-bin.zip" \
+      -o "${zip}"; then
+    echo ">> PMD download failed." >&2
+    return 1
+  fi
+  sum="$( (sha256sum "${zip}" 2>/dev/null || shasum -a 256 "${zip}") | cut -d' ' -f1)"
+  if [ "${sum}" != "${PMD_SHA256}" ]; then
+    echo ">> PMD checksum mismatch -- refusing to use the download." >&2
+    rm -f "${zip}"
+    return 1
+  fi
+  unzip -q -o "${zip}" -d "${cache_dir}" && rm -f "${zip}"
+  [ -x "${launcher}" ] && echo "${launcher}"
+}
+
 # Pinned zizmor release (keep in sync with .github/workflows/ci.yml). GitHub
 # release assets are immutable, so the hash is stable for a given version.
-ZIZMOR_VER="1.31.1"
-ZIZMOR_SHA256="37eebbd5762a44f262d94875431b14a6d2402991e90a685113ea97b8b41be833"
+ZIZMOR_VER="1.32.0"
+ZIZMOR_SHA256="cb152b207f815116d7fa1c1ee4614f61578803351395052908095e79adfd9fd0"
 
 # ensure_zizmor: prints a usable zizmor binary path on stdout and returns 0, or
 # returns non-zero if unavailable. zizmor is not packaged in apt, so (mirroring
@@ -234,6 +281,31 @@ read_lines() {
 
 # --- self-test (issue #1453) -----------------------------------------------
 
+# bash4_lines <file>: prints "line:text" for each bash 4 construct in <file> (the
+# bracketed letters keep the pattern from matching its own line).
+bash4_lines() {
+  grep -nE 'map[f]ile|read[a]rray|(declare|local) +-[a-zA-Z]*[An]\b|\$\{[A-Za-z_]+(,,?|\^\^?)\}|\$\{[A-Za-z_]+\[-[0-9]+\]\}|\|[&]|[&]>>|\bco[p]roc\b' "$1"
+}
+
+# unguarded_gate_lines <file>: prints "line:text" for each gate command (a
+# run_all_tests.sh, cmake -S or cmake --build call) that is not inside a top-level
+# if-chain whose if/elif tests full_only, RUN_TSAN or RUN_SCAN_BUILD. Comment
+# lines are ignored. Empty output means every build gate is quick-run guarded.
+unguarded_gate_lines() {
+  awk '
+    # shortcut: function bodies are skipped (the gates run at top level), so a
+    # gate call added inside a helper is not seen; widen if one ever moves there.
+    /^[A-Za-z_]+\(\) *\{/ { infn = 1 }
+    infn && /^\}/ { infn = 0; next }
+    infn { next }
+    /^if / { depth = 1; guarded = 0 }
+    depth == 1 && /^(if|elif) / && /full_only|RUN_TSAN|RUN_SCAN_BUILD/ { guarded = 1 }
+    /^fi([ ;]|$)/ { depth = 0; guarded = 0 }
+    /^[ \t]*#/ { next }
+    /run_all_tests\.sh|cmake +(--build|-S) / && !(depth == 1 && guarded) { print NR ":" $0 }
+  ' "$1"
+}
+
 # The single-quoted test strings are meant literally ($(...) must not expand).
 # shellcheck disable=SC2016
 self_test() {
@@ -267,7 +339,18 @@ self_test() {
   # Check 4: no bash 4 construct anywhere in the script (the bracketed letters keep
   # this pattern from matching its own line).
   local hits
-  if hits="$(grep -nE 'map[f]ile|read[a]rray|declare +-[a-zA-Z]*A|\$\{[A-Za-z_]+(,,|\^\^)\}|\|[&]|[&]>>' "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
+  # Each construct the pattern must catch, one per line (#2089); none may slip through.
+  # Every fixture string is split with '' so this line does not match the pattern itself.
+  hits="$(printf '%s\n' 'map''file -t a' 'read''array a' 'declare'' -A m' 'declare'' -n r=x' 'local'' -n r=x' \
+    'echo $''{x,,}' 'echo $''{x^^}' 'echo $''{x^}' 'echo $''{x,}' 'echo $''{a[-1]}' 'cmd |''& tee' 'cmd &''>> log' \
+    'co''proc cat' \
+    | bash4_lines /dev/stdin | wc -l | tr -d ' ')"
+  if [ "${hits}" = "13" ]; then
+    st_ok "the bash 4 pattern catches each construct in its fixture"
+  else
+    st_fail "the bash 4 pattern caught ${hits} of 13 fixture constructs"
+  fi
+  if hits="$(bash4_lines "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
     st_fail "bash 4 construct in scripts/ci_preflight.sh:"
     echo "${hits}" >&2
   else
@@ -285,6 +368,7 @@ self_test() {
 
   # Checks 2 and 3: a quick run against an empty diff (base = HEAD).
   out="$(PREFLIGHT_BASE=HEAD PREFLIGHT_NO_INSTALL=1 PREFLIGHT_FULL=0 PREFLIGHT_SELF_TEST_REEXEC='' \
+    RUN_TSAN=0 RUN_SCAN_BUILD=0 PR_BODY_FILE='' \
     /bin/bash "${ROOT_DIR}/scripts/ci_preflight.sh" 2>&1 </dev/null)" || true
   if printf '%s\n' "${out}" | grep -qE 'unbound variable|(map[f]ile|read[a]rray): command not found'; then
     st_fail "empty-diff run aborted:"
@@ -301,7 +385,7 @@ self_test() {
   done
   for n in 'unicode scan' 'stress-test registration' 'falsified-by' 'pr-template' 'ConformU report validation' \
     'docs drift check' 'connect-error hook' 'serial port ownership' 'layering gate' 'contract sweep registration' \
-    'beta VERSION split'; do
+    'beta VERSION split' 'duplication'; do
     if ! printf '%s\n' "${summary}" | grep -qE "^  \[(PASS|SKIP|FAIL)\] ${n}"; then
       st_fail "summary does not list ${n}"
     fi
@@ -311,6 +395,16 @@ self_test() {
       st_fail "quick run: ${n} did not record the quick-run SKIP"
     fi
   done
+  # The inner run must not inherit the caller's RUN_TSAN, RUN_SCAN_BUILD or
+  # PR_BODY_FILE: with them the self-test would build or read files (issue #2089).
+  for n in 'falsified-by \(no PR body\)' 'pr-template \(no PR body\)'; do
+    if ! printf '%s\n' "${summary}" | grep -qE "^  \[SKIP\] ${n}"; then
+      st_fail "inner quick run read the caller's PR_BODY_FILE: ${n} not recorded as SKIP"
+    fi
+  done
+  if printf '%s\n' "${summary}" | grep -qiE '^  \[(PASS|SKIP|FAIL)\] (TSan|scan-build)'; then
+    st_fail "inner quick run inherited RUN_TSAN or RUN_SCAN_BUILD from the caller"
+  fi
   # Check 3, clang-tidy: the empty diff never reaches its full_only call (no C++ changes),
   # so check statically that each build gate is only run through full_only "<name>".
   for n in 'build+test (vendors OFF)' 'build+test (vendors ON)' 'clang-tidy' 'sanitizers'; do
@@ -318,6 +412,40 @@ self_test() {
       st_fail "build gate ${n} is not guarded by full_only"
     fi
   done
+  # One guarded call per gate is not enough: a second build call elsewhere would
+  # still pass the loop above (issue #2089). Every gate command in the script must
+  # sit in a top-level if-chain that tests full_only, RUN_TSAN or RUN_SCAN_BUILD.
+  hits="$(unguarded_gate_lines "${ROOT_DIR}/scripts/ci_preflight.sh")"
+  if [ -n "${hits}" ]; then
+    st_fail "build gate command outside a full_only branch:"
+    echo "${hits}" >&2
+  fi
+  hits="$(printf '%s\n' 'if full_only "x"; then' '  ./run_all_tests.sh' 'fi' 'cmake --build AlpacaHTTP/build' \
+    'if [ "${RUN_TSAN:-0}" = "1" ]; then' '  cmake -S AlpacaCore -B t' 'fi' | unguarded_gate_lines /dev/stdin)"
+  if [ "${hits}" = "4:cmake --build AlpacaHTTP/build" ]; then
+    st_ok "unguarded_gate_lines reports only the unguarded build call"
+  else
+    st_fail "unguarded_gate_lines fixture: expected '4:cmake --build AlpacaHTTP/build', got '${hits}'"
+  fi
+  # Gate 1 prefers clang-format 18, the version CI's format job runs (#1755).
+  local stub_dir
+  stub_dir="$(mktemp -d)"
+  for n in clang-format git-clang-format clang-format-18 git-clang-format-18; do
+    printf '#!/bin/sh\n' > "${stub_dir}/${n}"
+    chmod +x "${stub_dir}/${n}"
+  done
+  if [ "$(PATH="${stub_dir}" clang_format_pair)" = "clang-format-18 git-clang-format-18" ]; then
+    st_ok "clang_format_pair picks clang-format-18 when both -18 tools exist"
+  else
+    st_fail "clang_format_pair did not pick clang-format-18 with both -18 tools on PATH"
+  fi
+  rm -f "${stub_dir}/git-clang-format-18"
+  if [ "$(PATH="${stub_dir}" clang_format_pair)" = "clang-format git-clang-format" ]; then
+    st_ok "clang_format_pair falls back to the unversioned pair"
+  else
+    st_fail "clang_format_pair did not fall back to the unversioned pair"
+  fi
+  rm -rf "${stub_dir}"
   if [ "${failed}" -eq 0 ]; then
     st_ok "empty-diff and quick-run summary lists every gate; every build gate (build+test, clang-tidy, sanitizers) is quick-run guarded"
   fi
@@ -414,8 +542,10 @@ section "clang-format (changed lines)"
 if ! have_cpp_changes; then
   echo "No C/C++ changes -- skipping."
   record SKIP "clang-format (no C/C++ changes)"
-elif ensure_tool clang-format clang-format; then
-  fmt_diff="$(git-clang-format --commit "${MERGE_BASE}" --diff \
+elif read -r fmt_cmd gcf_cmd <<<"$(clang_format_pair)" \
+     && { [ "${fmt_cmd}" = "clang-format-18" ] || ensure_tool clang-format clang-format; }; then
+  echo "Using $("${fmt_cmd}" --version 2>/dev/null | head -1)"
+  fmt_diff="$("${gcf_cmd}" --binary "$(command -v "${fmt_cmd}")" --commit "${MERGE_BASE}" --diff \
     --extensions c,cc,cpp,cxx,h,hh,hpp,hxx 2>/dev/null)"
   if [ "${fmt_diff}" = "no modified files to format" ] || \
      [ "${fmt_diff}" = "clang-format did not modify any files" ]; then
@@ -423,7 +553,7 @@ elif ensure_tool clang-format clang-format; then
     record PASS "clang-format"
   else
     echo "${fmt_diff}"
-    echo "Fix with: git-clang-format ${MERGE_BASE}"
+    echo "Fix with: ${gcf_cmd} --binary $(command -v "${fmt_cmd}") ${MERGE_BASE}"
     record FAIL "clang-format"
   fi
 else
@@ -770,6 +900,26 @@ else
     echo "zizmor unavailable -- CI will still audit the changed workflow(s)."
     record SKIP "zizmor (tool missing)"
   fi
+fi
+
+# --- gate 9b: duplicated-line ratchet (PMD CPD) ----------------------------
+# Mirrors the duplication CI job (#1755). Needs a Java runtime, which this
+# script never installs.
+
+section "duplication (PMD CPD)"
+if ! java -version >/dev/null 2>&1; then
+  record SKIP "duplication (no java)"
+elif ! python3 scripts/check_duplication.py --self-test >/dev/null; then
+  record FAIL "duplication (self-test)"
+elif pmd_bin="$(ensure_pmd)" && [ -n "${pmd_bin}" ]; then
+  if python3 scripts/check_duplication.py --pmd "${pmd_bin}"; then
+    record PASS "duplication"
+  else
+    record FAIL "duplication"
+  fi
+else
+  echo "PMD unavailable -- CI will still run the duplication check."
+  record SKIP "duplication (tool missing)"
 fi
 
 # --- sanitizers (ASan+UBSan: on by default in a full run; RUN_SANITIZERS=0 opts out) -----

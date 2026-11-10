@@ -314,6 +314,16 @@ TEST_CASE("Describe reports availability from the registered factory", "[catalog
     CHECK_FALSE(v[0].available);
 }
 
+TEST_CASE("Describe by key returns one view without listing the catalog (#2086)", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    auto view = catalog.describe(kStubKey);
+    REQUIRE(view.has_value());
+    CHECK(view->display_name == "Stub Switch");
+    CHECK(view->available);
+    CHECK_FALSE(catalog.describe(DeviceKey{"nobody", DeviceType::Switch}).has_value());
+}
+
 TEST_CASE("Create builds the stub driver or names the build option", "[catalog]") {
     DeviceCatalog with;
     register_test_descriptors(with, true);

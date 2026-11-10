@@ -97,7 +97,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(ALPACAHTTP_BUILD_TESTS "Build test suite" ON)
-option(ALPACAHTTP_ENABLE_DISCOVERY "Enable Alpaca Discovery" ON)
 
 # Find dependencies
 find_package(nlohmann_json 3.2.0 QUIET)
@@ -269,12 +268,8 @@ set(ALPACAHTTP_SOURCES
     src/util/host_timezone.cpp
     src/util/wifi_manager.cpp
     src/util/software_update.cpp
+    src/discovery/discovery.cpp
 )
-
-if(ALPACAHTTP_ENABLE_DISCOVERY)
-    list(APPEND ALPACAHTTP_SOURCES src/discovery/discovery.cpp)
-    add_definitions(-DALPACAHTTP_ENABLE_DISCOVERY)
-endif()
 
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacahttp-clean-all
@@ -480,11 +475,9 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_json alpacahttp)
     add_test(NAME test_json COMMAND test_json)
     
-    if(ALPACAHTTP_ENABLE_DISCOVERY)
-        add_executable(test_discovery tests/test_discovery.cpp)
-        target_link_libraries(test_discovery alpacahttp)
-        add_test(NAME test_discovery COMMAND test_discovery)
-    endif()
+    add_executable(test_discovery tests/test_discovery.cpp)
+    target_link_libraries(test_discovery alpacahttp)
+    add_test(NAME test_discovery COMMAND test_discovery)
     
     add_executable(test_config tests/test_config.cpp)
     target_link_libraries(test_config alpacahttp)
@@ -583,5 +576,13 @@ test "$rc" = "$want" && printf '%s' "$err" | grep -q -- "$text"]=])
     add_test(NAME server_cli_missing_config
         COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 1 "cannot read config file"
             ${CMAKE_CURRENT_BINARY_DIR}/no_such_config.yaml)
+    # Issue #2088: a stop nobody asked for (here the first bind failing) exits 1 for systemd.
+    find_program(ALPACAHTTP_PYTHON3 python3)
+    if(ALPACAHTTP_PYTHON3)
+        add_test(NAME server_exit_status_unrequested_stop
+            COMMAND ${ALPACAHTTP_PYTHON3} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/server_exit_status.py
+                $<TARGET_FILE:alpacahttp_server>)
+        set_tests_properties(server_exit_status_unrequested_stop PROPERTIES TIMEOUT 30)
+    endif()
     set_tests_properties(server_cli_unknown_option server_cli_extra_argument server_cli_missing_config PROPERTIES TIMEOUT 20)
 endif()

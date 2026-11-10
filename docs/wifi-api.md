@@ -258,7 +258,11 @@ Since 3.6.0 the manual call is rarely needed: a client's
 connect) steps the SBC clock itself whenever the kernel reports the clock
 undisciplined (`adjtimex` `STA_UNSYNC`, the permanent state of an SBC without
 NTP or RTC). It never overrides NTP/chrony/GPS, applies the same 2000-2100
-window, ignores sub-second deltas, and logs every step with the delta and the
+window, ignores sub-second deltas, does not depend on the device accepting the
+write (a Bisque mount that refuses every `UTCDate` write, or a telescope not yet
+connected, still gets the host step, and the client still receives the device's
+result: most drivers throw NotConnected before connect, while the ZWO AM mount
+caches an offline write and succeeds), and logs every step with the delta and the
 client address. `GET /management/v1/description` reports the state:
 `ClockSynchronized` (kernel-disciplined), `ClockSource` (`ntp` | `client` |
 `rtc` | `none`), `SyncSystemClockFromClients` and `TimeZone` (the host's IANA

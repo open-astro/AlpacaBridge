@@ -214,20 +214,6 @@ TEST_CASE("Player One Camera Driver - Device metadata", "[playerone][camera][uni
     CHECK(driver->get_unique_id() == "PLAYERONE_3");
 }
 
-TEST_CASE("Player One Camera Driver - Not connected throws", "[playerone][camera][unit]") {
-    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0);
-
-    CHECK_THROWS_AS(driver->get_ccd_temperature(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_gain(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_gain(100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_offset(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->start_exposure(1.0, true), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->stop_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->abort_exposure(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->pulse_guide(0, 100), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
-}
-
 TEST_CASE("Player One Camera Driver - Disconnected state", "[playerone][camera][unit]") {
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0);
 
@@ -267,16 +253,18 @@ TEST_CASE("Player One Camera Driver - Actions", "[playerone][camera][unit]") {
     require_alpaca_error([&]() { driver->action("GetFanPower", ""); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->action("SetFanPower", "50"); }, alpacacore::AlpacaError::NotConnected);
 
-    CHECK_THROWS_AS(driver->command_blind("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_bool("", false), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->command_string("", false), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->command_blind("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_bool("", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { (void)driver->command_string("", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("Player One Camera Driver - Sub-exposure not supported", "[playerone][camera][unit]") {
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0);
 
-    CHECK_THROWS_AS(driver->get_sub_exposure_duration(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->set_sub_exposure_duration(1.0), alpacacore::AlpacaException);
+    require_alpaca_error([&] { (void)driver->get_sub_exposure_duration(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Player One Camera Driver - ASCOM Error Codes", "[playerone][camera][unit]") {
@@ -1993,47 +1981,46 @@ TEST_CASE("Player One Camera Driver - Name and identity getters answer while a c
     camera->set_connected(false);
 }
 
-// Decision 0016 rule 6: a name refresh that read the SDK by index while a connect ran must not overwrite what the
-// connect published. The refresh is held inside enumerate_cameras on a latch, a connect completes, the SDK
-// then reports another name, and the refresh is released.
-// Falsified by: playerone_camera_driver.cpp refresh_cached_camera_info_if_needed() writing camera_info_ without the
-// connected_/connect_in_flight_ re-check (get_name() then returns the stale refresh name).
-TEST_CASE("Player One Camera Driver - A name refresh that overlapped a connect does not overwrite the connect's info",
+// Decision 0016 rule 1: Name on a disconnected camera makes no SDK call, so an enumerate held by another SDK user
+// (the thermal switch opening a camera) cannot park it.
+// Falsified by: playerone_camera_driver.cpp get_name() enumerating while disconnected (1 enumerate call, and the
+// getter returns only after the latch is released).
+TEST_CASE("Player One Camera Driver - Name on a disconnected camera never enumerates",
           "[playerone][camera][unit][getter-stall]") {
     using namespace alpacacore::test;
     FakePlayerOneSDK sdk;
     FakeTaskClock clock;
-    static thread_local bool is_refresher = false;
-    std::atomic<bool> refresh_entered{false};
-    std::atomic<bool> release_refresh{false};
+    auto camera = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30), clock);
+    const std::string expected = sdk.camera_name();
+
+    std::atomic<int> enumerate_calls{0};
+    std::atomic<bool> release{false};
     sdk.before_call = [&](const std::string& call) {
-        if (call != "enumerate_cameras" || !is_refresher) return;
-        refresh_entered = true;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!release_refresh.load() && std::chrono::steady_clock::now() < deadline) {
+        if (call != "enumerate_cameras") return;
+        ++enumerate_calls;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!release.load() && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     };
-    auto camera = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30), clock);
+    std::string name;
+    const bool in_budget = timed([&] { name = camera->get_name(); }) < kGetterBudget;
+    release = true;
+    CHECK(in_budget);
+    CHECK(name == expected);
+    CHECK(enumerate_calls.load() == 0);
+}
 
-    std::thread refresher([&] {
-        is_refresher = true;
-        (void)camera->get_name();
-    });
-    const bool entered = wait_for_flag(refresh_entered);
-
-    const std::string connect_name = sdk.camera_name();
-    if (entered) {
-        camera->set_connected(true);
-        sdk.set_camera_name("Stale Refresh Name");
-    }
-    // Release and join before any REQUIRE: a joinable thread at scope exit would terminate the test run.
-    release_refresh = true;
-    refresher.join();
-    REQUIRE(entered);
-
-    CHECK(camera->get_name() == connect_name);
+// Falsified by: playerone_camera_driver.cpp clearing cached_name_ on disconnect (Name falls back to the default).
+TEST_CASE("Player One Camera Driver - Name survives connect and disconnect", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto camera = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    const std::string expected = sdk.camera_name();
+    CHECK(camera->get_name() == expected);
+    camera->set_connected(true);
+    CHECK(camera->get_name() == expected);
     camera->set_connected(false);
+    CHECK(camera->get_name() == expected);
 }
 
 // Issue #1998: on the Uranus-C PRO a Disconnect closes the camera and the next open's POAInitCamera restores the

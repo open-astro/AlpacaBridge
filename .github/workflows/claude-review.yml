@@ -16,6 +16,9 @@ concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Nothing by default: the job grants what it needs (#1755).
+permissions: {}
+
 jobs:
   # The job id is the check-run name the skills bind verdicts to
   # (`.name == "review"` in /pr-checker and /submit-pr); do not add a `name:`.
