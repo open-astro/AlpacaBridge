@@ -67,14 +67,14 @@ struct IefwPortInfo {
  *
  * Scans /dev/serial/by-id/ for Prolific-class USB-serial adapters, then
  * raw /dev/ttyUSB0..9 nodes, probing each with :DeviceInfo#. Only ports
- * that answer with an iEFW model code (98 or 99) are returned.
+ * whose code names no other iOptron product (iefw_refuses_model()) are returned.
  */
 std::vector<IefwPortInfo> enumerate_iefw_ports();
 
 /**
  * @brief The auto-detect probe of one port: :DeviceInfo# handshake under a
  *        serial-port probe claim (waits out another scan's probe of the same
- *        port). True, with @p info filled, only for an iEFW model code.
+ *        port). True, with @p info filled, unless iefw_refuses_model() refuses the code.
  */
 bool probe_iefw_port(const std::string& port_path, IefwDeviceInfo& info);
 

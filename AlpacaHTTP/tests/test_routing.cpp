@@ -9174,12 +9174,16 @@ int main() {
         // case: config a driver learns at connect is stored in its entry, and a removed entry ignores it
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema_and_bind_factory(router.catalog());
-        const auto added = api_attempt(
-            router,
-            nlohmann::json{
-                {"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9262}, {"count", 7}, {"ratio", 3.0}},
-            "Focuser");
-        EXPECT(added.ok);
+        const auto add = [&] {
+            return api_attempt(router,
+                               nlohmann::json{{"vendor", "zzz"},
+                                              {"deviceType", "focuser"},
+                                              {"deviceNumber", 9262},
+                                              {"count", 7},
+                                              {"ratio", 3.0}},
+                               "Focuser");
+        };
+        EXPECT(add().ok);
         const auto store = alpacahttp::test_catalog::last_learned_at_connect;
         EXPECT(static_cast<bool>(store));
         alpacacore::catalog::DeviceConfig learned;
@@ -9189,6 +9193,11 @@ int main() {
         remove_device(router, "zzz", "focuser", 9262);
         store(learned);
         EXPECT(listed_entry(router, "Focuser", 9262).is_null());
+        // A new entry on that number has another UniqueID, so the old driver's late store leaves it alone.
+        EXPECT(add().ok);
+        store(learned);
+        EXPECT(listed_entry(router, "Focuser", 9262).dump().find("learned-at-connect") == std::string::npos);
+        remove_device(router, "zzz", "focuser", 9262);
     }
 
     {

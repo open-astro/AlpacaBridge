@@ -13,10 +13,9 @@
 // The ZWO factories, doing what the router arms they replace did. Compiled only
 // under ALPACACORE_ENABLE_ZWO (unlike zwo_schema.cpp), so the vendor headers are
 // fine here. Every create_* call is hardware-free (the SDK is reached at
-// connect), so nothing is probed at registration. The one exception is the
-// camera's bind hook, which enumerates the SDK at registration as the router arm
-// it replaces did, to learn the serial and model name it binds by (#914); the
-// camera therefore has no create_* at all.
+// connect), so nothing is probed at registration. The camera has a bind hook and
+// no create_*, because it needs the stored peers and the connect-time store for
+// the serial and model name it binds by (#914, #2074).
 
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>

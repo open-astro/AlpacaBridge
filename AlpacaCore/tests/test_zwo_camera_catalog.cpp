@@ -290,6 +290,28 @@ TEST_CASE("ZWO camera catalog - a serial learned at connect is claimed from entr
     second.driver->set_connected(false);
 }
 
+// #2074: a removed entry must not keep its learned serial away from the entries bound after it.
+// Falsified by: zwo_catalog.cpp bind_camera() not calling claims->retain().
+TEST_CASE("ZWO camera catalog - a removed entry stops claiming the serial it learned (#2074)",
+          "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    DeviceConfig by_name;
+    by_name.set("cameraName", std::string(kFakeName));
+    const BindResult first = bind(rig, by_name, 0, Source::Persisted, {});
+    first.driver->set_connected(true);
+    first.driver->set_connected(false);
+
+    // Entry 0 is still stored, so its serial stays claimed.
+    const BindResult kept = bind(rig, by_name, 1, Source::Persisted, {peer(0, std::nullopt)});
+    CHECK_THROWS_AS(kept.driver->set_connected(true), AlpacaException);
+
+    // Entry 0 is gone: the next bind frees the camera.
+    const BindResult freed = bind(rig, by_name, 1, Source::Persisted, {});
+    freed.driver->set_connected(true);
+    CHECK(freed.driver->get_connected());
+    freed.driver->set_connected(false);
+}
+
 TEST_CASE("ZWO camera catalog - a saved serial binds that body whatever cameraIndex says",
           "[catalog][zwo][camera][unit]") {
     // #1970: the web picker saves the picked camera's serial; the index it sends is a hint only.

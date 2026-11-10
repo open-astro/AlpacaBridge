@@ -185,7 +185,7 @@ bool write_line(int fd, const std::string& cmd) {
 }
 
 // Probe a serial port with the hub's identity handshake. Returns true only
-// when the exact kPdhHandshakeReply comes back, so ports hosting the Gemini
+// when is_pdh_handshake_reply() accepts the reply, so ports hosting the Gemini
 // focuser or a flat panel (same CH340 adapter family) are rejected.
 bool probe_pdh_port(const std::string& port_path) {
     // The probe's claim lasts exactly as long as `link`: a connect or another

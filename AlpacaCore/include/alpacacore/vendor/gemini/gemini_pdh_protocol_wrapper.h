@@ -122,8 +122,8 @@ struct GeminiPdhPortInfo {
  *
  * Scans /dev/serial/by-id/ for CH340/CH341 USB-serial adapters (vendor 1a86)
  * plus the raw /dev/ttyUSB0..9 nodes, probes each with the >H# handshake at
- * 19200 baud and accepts only ports whose reply is exactly
- * kPdhHandshakeReply -- so the Gemini focuser and flat panels (which share
+ * 19200 baud and accepts only ports whose reply passes
+ * is_pdh_handshake_reply() -- so the Gemini focuser and flat panels (which share
  * the same adapter chip and by-id naming) can never be mistaken for a hub.
  *
  * @return Vector of detected hub ports
@@ -134,7 +134,7 @@ std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports();
  * @brief The auto-detect identity probe of one serial port (>H# at 19200 baud).
  *
  * Opens the port under a probe claim, so a port a connected driver holds is
- * refused without being opened. Returns true only for the hub's exact reply.
+ * refused without being opened. Returns true only for a hub's identity reply.
  * The driver calls it on the remembered port before it runs the full scan.
  */
 bool probe_gemini_pdh_port(const std::string& port_path);
@@ -149,10 +149,10 @@ struct GeminiPdhScanHooks {
 void set_gemini_pdh_scan_hooks_for_testing(GeminiPdhScanHooks hooks);
 
 /**
- * @brief Check whether a >H# reply identifies a Power & Data Hubs Advanced 3.
+ * @brief Check whether a >H# reply identifies a Gemini power hub.
  *
- * Exact match against kPdhHandshakeReply (line endings and the '#' terminator
- * stripped). Exposed so the discrimination logic is unit-testable.
+ * Refuses an empty identity and one naming a flat panel or the PowerBox Plus V3
+ * (line endings and the '#' terminator stripped); an unlisted hub passes. Exposed so the discrimination logic is unit-testable.
  */
 bool is_pdh_handshake_reply(const std::string& reply);
 

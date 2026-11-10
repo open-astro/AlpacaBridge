@@ -78,15 +78,15 @@ struct IeafPortInfo {
  *
  * Scans /dev/serial/by-id/ for USB-serial adapters, then falls back to raw
  * /dev/ttyUSB0..9 nodes, probing each candidate with the :DeviceInfo#
- * handshake. Only ports whose reply parses and reports an iEAF model code
- * (2 or 3) are returned.
+ * handshake. Only ports whose reply parses and whose code names no other
+ * iOptron product (ieaf_refuses_model()) are returned.
  */
 std::vector<IeafPortInfo> enumerate_ieaf_ports();
 
 /**
  * @brief The auto-detect probe of one port: :DeviceInfo# handshake under a
  *        serial-port probe claim (waits out another scan's probe of the same
- *        port). True, with @p info filled, only for an iEAF model code.
+ *        port). True, with @p info filled, unless ieaf_refuses_model() refuses the code.
  */
 bool probe_ieaf_port(const std::string& port_path, IeafDeviceInfo& info);
 
