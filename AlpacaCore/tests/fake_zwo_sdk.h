@@ -678,6 +678,8 @@ public:
     // Per SDK id; an id absent from a non-empty map has no heater / reads "FAKE1".
     std::map<int, bool> heater_by_id;
     std::map<int, std::string> serial_by_id;
+    // What get_camera_info_by_id() names an id-bound camera; empty = the info read fails.
+    std::string info_name;
 
     /// Every camera id any per-camera call (info, open, init, close, caps,
     /// value read, serial) was made with.
@@ -690,9 +692,12 @@ public:
         ++enumerations;
         return cameras;
     }
-    bool get_camera_info_by_id(int id, vendor::zwo::ZWOCameraInfo&) override {
+    bool get_camera_info_by_id(int id, vendor::zwo::ZWOCameraInfo& info) override {
         touch(id);
-        return false;
+        if (info_name.empty()) return false;
+        info.camera_id = id;
+        info.name = info_name;
+        return true;
     }
     vendor::zwo::SharedOpenTable::Opened open_camera_link(int id) override {
         const InFlight in_flight(*this, open_delay_ms, open_entered);

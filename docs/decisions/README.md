@@ -130,3 +130,4 @@ referred to by its slug until it is written, and numbered then.
 - [Power port power-on state](0021-power-port-power-on-state.md)
 - [Hold window](0022-hold-window.md)
 - [Outbound clients in vendor wrappers](0023-outbound-clients-in-vendor-wrappers.md)
+- [Device names](0024-device-names.md)

@@ -84,13 +84,9 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_model_.empty()) {
-            return camera_model_ + " CFW";
-        }
-        return "QHY CFW";
-    }
+    // Brand + model (decision 0024): the wheel is a QHY CFW whatever camera drives it; the camera is in
+    // the Description.
+    std::string get_name() const override { return "QHY CFW"; }
 
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
@@ -102,7 +98,13 @@ public:
         return "QHY_CFW_" + std::to_string(device_number_);
     }
 
-    std::string get_description() const override { return "QHY integrated color filter wheel driver"; }
+    std::string get_description() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!camera_model_.empty()) {
+            return "QHY color filter wheel on " + camera_model_;
+        }
+        return "QHY integrated color filter wheel driver";
+    }
 
     std::string get_driver_info() const override { return "AlpacaCore QHY Filter Wheel Driver"; }
 

@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/capture_session.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/link_epoch.h>
@@ -137,11 +138,11 @@ public:
         const_cast<ZWOCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_info_valid_ && !camera_info_.name.empty()) {
-            return camera_info_.name;
+            return util::branded_name("ZWO", camera_info_.name);
         }
         // Never read from the SDK: the model the entry is bound to (issue #1958).
         const std::string expected = expected_model();
-        return expected.empty() ? "ZWO Camera" : expected;
+        return expected.empty() ? "ZWO Camera" : util::branded_name("ZWO", expected);
     }
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }

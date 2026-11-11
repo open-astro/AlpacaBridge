@@ -669,6 +669,12 @@ async function loadDevices() {
                         <span class="info-label">Vendor</span>
                         <span class="info-value">${escapeHtml(vendor)}</span>
                     </div>
+                    ${device.Description ? `
+                    <div class="info-item info-item-wide">
+                        <span class="info-label">Description</span>
+                        <span class="info-value">${escapeHtml(device.Description)}</span>
+                    </div>
+                    ` : ''}
                     ${device.Firmware ? `
                     <div class="info-item">
                         <span class="info-label">Firmware</span>

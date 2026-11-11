@@ -266,11 +266,12 @@ TEST_CASE("ZWO ASIAIR Plus (Pi CM4) Switch Driver - model label", "[zwo][switch]
     // The Pi CM4 ASIAIR Plus reuses the Pro libgpiod driver but must not
     // identify itself as a Pro — the router sets model_name accordingly.
     auto config = alpacacore::vendor::zwo::default_asiair_pro_config();
-    config.model_name = "ASIAIR Plus (Pi CM4)";
+    config.model_name = "ASIAIR Plus";
+    config.board = "Pi CM4";
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_switch(0, config);
 
     REQUIRE(driver != nullptr);
-    CHECK(driver->get_name() == "ZWO ASIAIR Plus (Pi CM4) Switch");
+    CHECK(driver->get_name() == "ZWO ASIAIR Plus Switch");
     CHECK(driver->get_description() == "ZWO ASIAIR Plus (Pi CM4) 12V power switch (/dev/gpiochip0)");
     CHECK(driver->get_driver_info() == "AlpacaCore ZWO ASIAIR Plus (Pi CM4) Switch");
 }

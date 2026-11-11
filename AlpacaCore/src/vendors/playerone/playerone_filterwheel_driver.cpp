@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/ttl_status_cache.h>
@@ -64,7 +65,7 @@ public:
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (wheel_info_valid_ && !wheel_info_.name.empty()) {
-            return wheel_info_.name;
+            return util::branded_name("Player One", wheel_info_.name);
         }
         return "Player One Phoenix Wheel";
     }

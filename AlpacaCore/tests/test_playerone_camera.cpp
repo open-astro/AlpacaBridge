@@ -1977,7 +1977,7 @@ TEST_CASE("Player One Camera Driver - Name and identity getters answer while a c
     connector.join();
     REQUIRE(entered);
     CHECK(camera->get_connected());
-    CHECK(camera->get_name() == sdk.camera_name());
+    CHECK(camera->get_name() == "Player One " + sdk.camera_name());  // the fake's name has no brand
     camera->set_connected(false);
 }
 
@@ -1991,7 +1991,7 @@ TEST_CASE("Player One Camera Driver - Name on a disconnected camera never enumer
     FakePlayerOneSDK sdk;
     FakeTaskClock clock;
     auto camera = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, std::chrono::seconds(30), clock);
-    const std::string expected = sdk.camera_name();
+    const std::string expected = "Player One " + sdk.camera_name();  // the fake's name has no brand
 
     std::atomic<int> enumerate_calls{0};
     std::atomic<bool> release{false};
@@ -2015,7 +2015,7 @@ TEST_CASE("Player One Camera Driver - Name on a disconnected camera never enumer
 TEST_CASE("Player One Camera Driver - Name survives connect and disconnect", "[playerone][camera][unit]") {
     alpacacore::test::FakePlayerOneSDK sdk;
     auto camera = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
-    const std::string expected = sdk.camera_name();
+    const std::string expected = "Player One " + sdk.camera_name();  // the fake's name has no brand
     CHECK(camera->get_name() == expected);
     camera->set_connected(true);
     CHECK(camera->get_name() == expected);

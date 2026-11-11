@@ -347,7 +347,7 @@ TEST_CASE("ZWO Camera Driver - Name and identity getters answer while a connect 
     release_open = true;
     connector.join();
     CHECK(camera->get_connected());
-    CHECK(camera->get_name() == sdk.camera.name);
+    CHECK(camera->get_name() == "ZWO " + sdk.camera.name);  // the fake's name has no brand
     camera->set_connected(false);
 }
 
@@ -386,7 +386,7 @@ TEST_CASE("ZWO Camera Driver - A name refresh that overlapped a connect does not
     release_refresh = true;
     refresher.join();
 
-    CHECK(camera->get_name() == connect_name);
+    CHECK(camera->get_name() == "ZWO " + connect_name);
     camera->set_connected(false);
 }
 

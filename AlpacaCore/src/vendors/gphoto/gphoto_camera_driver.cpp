@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/logging.h>
@@ -412,7 +413,8 @@ public:
     std::string get_name() const override {
         const_cast<GPhotoCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.model : "DSLR / Mirrorless Camera";
+        // libgphoto2's model starts with the camera's maker, so it is brand + model once its qualifiers are gone.
+        return camera_info_valid_ ? util::without_qualifiers(camera_info_.model) : "GPhoto Camera";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
@@ -431,7 +433,14 @@ public:
         return "GPHOTO_" + std::to_string(device_number_);
     }
 
-    std::string get_description() const override { return "DSLR / Mirrorless Camera Driver"; }
+    // A qualifier the Name drops ("(Control)") is kept here, with the model as libgphoto2 reports it.
+    std::string get_description() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (camera_info_valid_ && util::without_qualifiers(camera_info_.model) != camera_info_.model) {
+            return "DSLR / Mirrorless Camera Driver, " + camera_info_.model;
+        }
+        return "DSLR / Mirrorless Camera Driver";
+    }
     std::string get_driver_info() const override { return "AlpacaCore GPhoto Camera Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 

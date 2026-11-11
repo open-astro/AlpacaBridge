@@ -353,7 +353,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - get_names does not wait behind a sl
 
     const auto start = std::chrono::steady_clock::now();
     CHECK(wheel.driver->get_names().size() == 5);
-    CHECK(wheel.driver->get_name() == "FakeAFW");
+    CHECK(wheel.driver->get_name() == "ToupTek FakeAFW");
     CHECK(std::chrono::steady_clock::now() - start < 150ms);
     refill.get();
     slow->store(false);

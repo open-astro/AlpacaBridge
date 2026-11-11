@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/last_exposure.h>
@@ -126,7 +127,7 @@ public:
         const_cast<SVBONYCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_info_valid_ && !camera_info_.name.empty()) {
-            return camera_info_.name;
+            return util::branded_name("SVBONY", camera_info_.name);
         }
         return "SVBONY Camera";
     }

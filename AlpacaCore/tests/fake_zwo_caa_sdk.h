@@ -52,6 +52,8 @@ public:
     using Info = vendor::zwo::ZWOCAARotatorInfo;
 
     int id{7};
+    // The unit's EAF_INFO / EFW_INFO / CAA_INFO name; the SDK reports "CAA".
+    std::string name{"CAA"};
     int slot_index{0};
     // What get_firmware_version() answers; an empty string is an unreadable one. fail_firmware makes it throw.
     std::string firmware{"1.0"};
@@ -116,9 +118,9 @@ public:
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
         if (removed) return {};
-        std::vector<Info> rotators{Info{id, "CAA", max_degree, slot_index}};
+        std::vector<Info> rotators{Info{id, name, max_degree, slot_index}};
         if (second_id >= 0) {
-            rotators.insert(second_id < id ? rotators.begin() : rotators.end(), Info{second_id, "CAA", max_degree});
+            rotators.insert(second_id < id ? rotators.begin() : rotators.end(), Info{second_id, name, max_degree});
             for (std::size_t i = 0; i < rotators.size(); ++i) rotators[i].slot_index = static_cast<int>(i);
         }
         return rotators;
@@ -129,7 +131,7 @@ public:
         if (fail_info || removed || (rotator_id != id && rotator_id != second_id)) {
             return false;
         }
-        info = Info{rotator_id, "CAA", max_degree};
+        info = Info{rotator_id, name, max_degree};
         return true;
     }
     bool get_rotator_info_by_index(int index, Info& info) override {

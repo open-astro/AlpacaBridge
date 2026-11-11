@@ -16,6 +16,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
@@ -319,6 +320,9 @@ private:
         std::string get_version_number() const {
             return call([](auto& p) { return p.get_version_number(); });
         }
+        std::string get_product_description() const {
+            return call([](auto& p) { return p.get_product_description(); });
+        }
         std::optional<int> get_mount_coords_mode() const {
             return call([](auto& p) { return p.get_mount_coords_mode(); });
         }
@@ -495,7 +499,12 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "OnStep Telescope"; }
+    // Decision 0024: OnStep is the brand, and the model is OnStepX's :GVC# product description, read at connect;
+    // a firmware without :GVC# is "OnStep Telescope". Kept across a disconnect, like the Sky-Watcher model.
+    std::string get_name() const override {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        return model_cache_.empty() ? "OnStep Telescope" : model_cache_;
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
 
@@ -670,11 +679,12 @@ public:
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
             site_read_warned_ = false;
 
-            // The two reads run without firmware_mutex_: get_device_firmware()
+            // These reads run without firmware_mutex_: get_device_firmware()
             // takes only that lock and must not wait for a serial round trip
             // (decision 0016). Only the store is under it.
             std::string firmware_version;
             std::string firmware;
+            std::string model;
             try {
                 std::string product = protocol.get_product_name();
                 firmware_version = protocol.get_version_number();
@@ -687,6 +697,18 @@ public:
                 firmware_cache_ = firmware;
             }
 
+            // OnStepX only: "0" is OnStep's reply to a command it does not know (a release older than :GVC#).
+            if (is_onstepx_version(firmware_version)) {
+                try {
+                    // The builder's free text: its qualifiers and anything after a comma leave the name, and an
+                    // "OnStepX" description is not branded twice.
+                    std::string description = util::without_qualifiers(protocol.get_product_description());
+                    if (const auto comma = description.find(','); comma != std::string::npos) description.resize(comma);
+                    if (!description.empty() && description != "0") model = util::branded_name("OnStep", description);
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // Unknown: the name stays "OnStep Telescope".
+                }
+            }
             // OnStepX applies refraction to the RA/Dec it reports unless it was
             // built for observed-place coordinates; :GXEE# says which (#1216).
             refraction_from_firmware_.reset();
@@ -786,6 +808,12 @@ public:
                 const std::string lost = OnStepProtocolWrapper::instance().link_lost_reason();
                 fail_connect_locked("the link was lost during the connect" +
                                     (lost.empty() ? std::string() : " (" + lost + ")"));
+            }
+            // Published once the connect can no longer fail on the link, so a failed connect keeps the previous
+            // name (decision 0016 item 3).
+            if (!model.empty()) {
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                model_cache_ = model;
             }
             published_connected_ = true;  // the connect is complete (#910)
             // The poll starts once the connect is complete, with no driver lock held (decision 0006 rule 4).
@@ -3733,6 +3761,8 @@ private:
     // the get_device_firmware() poll never blocks on the coarse connect lock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_cache_;
+    // The name read at connect ("OnStep " + the :GVC# description), under firmware_mutex_; kept across a disconnect.
+    std::string model_cache_;
 
     // Last, so it is destroyed (and its body joined) before every member the
     // body touches. The destructor joins it explicitly as well.

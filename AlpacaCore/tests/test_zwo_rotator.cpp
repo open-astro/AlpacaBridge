@@ -545,7 +545,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Name and UniqueID answer while a connect hol
     CHECK(driver->get_connecting());  // the open is still in flight, so the timings above are not vacuous
 
     REQUIRE(wait_until_connected(*driver));
-    CHECK(driver->get_name() == "CAA");
+    CHECK(driver->get_name() == "ZWO CAA");
     CHECK(driver->get_unique_id() == "ZWO_CAA_SN_CAA-SN-1");
     driver->set_connected(false);
 }

@@ -219,6 +219,14 @@ public:
     std::string get_version_number();
 
     /**
+     * @brief Get OnStepX's product description (its PRODUCT_DESCRIPTION build setting).
+     *
+     * Sends :GVC#. The firmware builder sets it ("the user friendly name for this device";
+     * it defaults to the host name). A firmware without the command answers "0".
+     */
+    std::string get_product_description();
+
+    /**
      * @brief Get OnStepX's coordinate mode (the firmware's MOUNT_COORDS - 1).
      *
      * Sends :GXEE#, which replies with one bare digit and no '#':

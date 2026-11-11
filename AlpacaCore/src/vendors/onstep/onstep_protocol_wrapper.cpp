@@ -834,6 +834,8 @@ public:
 
     std::string get_version_number() { return send_command(":GVN#", true, 0); }
 
+    std::string get_product_description() { return send_command(":GVC#", true, 0); }
+
     std::optional<int> get_mount_coords_mode() {
         // Bare digit, no '#' (OnStepX sets suppressFrame for :GXEE#).
         const std::string reply = send_command(":GXEE#", false, kSetAckTimeoutMs);
@@ -1631,6 +1633,8 @@ std::string OnStepProtocolWrapper::last_connect_error() const { return pimpl_->l
 std::string OnStepProtocolWrapper::get_product_name() { return pimpl_->get_product_name(); }
 
 std::string OnStepProtocolWrapper::get_version_number() { return pimpl_->get_version_number(); }
+
+std::string OnStepProtocolWrapper::get_product_description() { return pimpl_->get_product_description(); }
 
 std::optional<int> OnStepProtocolWrapper::get_mount_coords_mode() { return pimpl_->get_mount_coords_mode(); }
 

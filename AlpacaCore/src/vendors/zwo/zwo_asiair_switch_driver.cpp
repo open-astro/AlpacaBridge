@@ -82,10 +82,14 @@ public:
     std::string fallback_unique_id() const override { return "ZWO_ASIAIR_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
-        return "ZWO " + config_.model_name + " 12V power switch (" + config_.gpio_chip_path + ")";
+        const std::string board = config_.board.empty() ? std::string() : " (" + config_.board + ")";
+        return "ZWO " + config_.model_name + board + " 12V power switch (" + config_.gpio_chip_path + ")";
     }
 
-    std::string get_driver_info() const override { return "AlpacaCore ZWO " + config_.model_name + " Switch"; }
+    std::string get_driver_info() const override {
+        const std::string board = config_.board.empty() ? std::string() : " (" + config_.board + ")";
+        return "AlpacaCore ZWO " + config_.model_name + board + " Switch";
+    }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 

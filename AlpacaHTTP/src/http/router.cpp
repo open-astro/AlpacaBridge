@@ -2184,6 +2184,15 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 } catch (const std::exception& e) {
                     util::log_warning("SDK version query failed for " + cap.name + ": " + e.what());
                 }
+                // Decision 0024: the name is brand + model only, so the connection path and driver state a
+                // driver used to append to it (the Sky-Watcher EQMOD eps source) reach the web UI here.
+                try {
+                    if (auto description = driver->get_description(); !description.empty()) {
+                        device["Description"] = std::move(description);
+                    }
+                } catch (const std::exception& e) {
+                    util::log_warning("Description query failed for " + cap.name + ": " + e.what());
+                }
 
                 // Issue #358, the Platform 7 half. PUT /connect returns success
                 // immediately by design and completion is observed through
