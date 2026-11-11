@@ -1445,6 +1445,22 @@ TEST_CASE("OnStep link loss - a link lost during the connect's first reads fails
     require_alpaca_error([&] { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// Decision 0016 rule 3 and decision 0024: the name the connect read from :GVC# is published only once the connect
+// can no longer fail on the link. Falsified by: onstep_telescope_driver.cpp storing model_cache_ before the
+// link-lost check at the end of the connect.
+TEST_CASE("OnStep link loss - a connect that loses the link keeps the earlier name", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    FakeOnStepSerialMount mount;
+    mount.set_reply(":GVC#", "Example Mount 7#");
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
+    mount.sever_on(":GRa#");  // after the :GVC# read, before the connect's last link check
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(mount.received(":GVC#"));  // the description was read, so the check below is not vacuous
+    CHECK(driver->get_name() == "OnStep Telescope");
+}
+
 // #1895 with #521: failing the connect disconnects the link, which must not consume the loss stamp, or the next
 // Connect would not time the outage and would leave the motion that ran unattended.
 TEST_CASE("OnStep link loss - a link lost during the connect's first reads keeps its loss time for the next connect",
