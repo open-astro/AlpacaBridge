@@ -422,8 +422,8 @@ TEST_CASE("SynScan - a persistently garbled echo fails the connect rather than p
 TEST_CASE("SynScan - Name carries the model once connected", "[synscan][telescope][async]") {
     // PR #278: a mount reachable over both the hand controller and the
     // direct motor-controller path resolves to the same model string in
-    // both drivers; the "(SynScan)" suffix is what tells them apart in a
-    // client's device list. Asserted here rather than only on hardware.
+    // both drivers. Decision 0024 gives both the same Name; the Description
+    // tells them apart.
     auto st = std::make_shared<FakeSynScanState>();
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());

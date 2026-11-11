@@ -792,10 +792,11 @@ TEST_CASE("ZWO EAF Focuser Driver - A removed unit seen by an optional read is a
 
 // Issue #2085: a failed open publishes no identity, so Name falls back like a disconnected driver.
 // Falsified by: zwo_focuser_driver.cpp set_connected(true)'s failure path calling only release_open_locked()
-// (Name keeps the enumerated "EAF").
+// (Name keeps the enumerated "ZWO EAF5").
 TEST_CASE("ZWO EAF Focuser Driver - Name keeps no enumerated identity after a failed open",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
+    sdk.name = "EAF5";  // apart from the "ZWO EAF" fallback, so a kept enumeration shows
     sdk.step_range_removed = true;
     auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0, sdk);
     require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);

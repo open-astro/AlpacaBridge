@@ -53,6 +53,8 @@ public:
     using Info = vendor::zwo::ZWOEAFFocuserInfo;
 
     int id{3};
+    // The unit's EAF_INFO / EFW_INFO / CAA_INFO name; the SDK reports "EAF".
+    std::string name{"EAF"};
     int slot_index{0};
     // What get_firmware_version() answers; an empty string is an unreadable one. fail_firmware makes it throw.
     std::string firmware{"1.0"};
@@ -124,9 +126,9 @@ public:
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard<std::mutex> lock(mutex_);
         if (removed) return {};
-        std::vector<Info> focusers{Info{id, "EAF", max_step, slot_index}};
+        std::vector<Info> focusers{Info{id, name, max_step, slot_index}};
         if (second_id >= 0)
-            focusers.insert(second_id < id ? focusers.begin() : focusers.end(), Info{second_id, "EAF", max_step});
+            focusers.insert(second_id < id ? focusers.begin() : focusers.end(), Info{second_id, name, max_step});
         if (second_id >= 0) {
             for (std::size_t i = 0; i < focusers.size(); ++i) focusers[i].slot_index = static_cast<int>(i);
         }
@@ -138,7 +140,7 @@ public:
         if (fail_info || removed || (focuser_id != id && focuser_id != second_id)) {
             return false;
         }
-        info = Info{focuser_id, "EAF", max_step};
+        info = Info{focuser_id, name, max_step};
         return true;
     }
     bool get_focuser_info_by_index(int index, Info& info) override {

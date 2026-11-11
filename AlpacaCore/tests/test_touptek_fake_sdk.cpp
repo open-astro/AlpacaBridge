@@ -1394,7 +1394,7 @@ TEST_CASE("ToupTek camera - Name and Connected do not wait for a disconnect held
     REQUIRE(entered);
     CHECK(returned);
     const auto [name, connected] = future.get();
-    CHECK(name == "FakeCam One");
+    CHECK(name == "ToupTek FakeCam One");
     CHECK_FALSE(connected);
     CHECK(fake.ref_count("fake-cam-0") == 0);
 }

@@ -340,9 +340,10 @@ TEST_CASE("ZWO CAA link - a reconnect that fails after the serial scan publishes
           "[zwo][rotator][unit][link]") {
     FakeTaskClock clock;
     FakeZWOCAASDK sdk;
+    sdk.name = "CAA M54";  // apart from the "ZWO CAA" fallback, so a kept identity shows
     auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0, sdk, clock);
     driver->set_connected(true);
-    REQUIRE(driver->get_name() == "ZWO CAA");
+    REQUIRE(driver->get_name() == "ZWO CAA M54");
     driver->set_connected(false);  // an index binding forgets its id and info
     REQUIRE(driver->get_name() == "ZWO CAA");
 
@@ -359,6 +360,7 @@ TEST_CASE("ZWO CAA link - a first connect that fails after resolving the index p
           "[zwo][rotator][unit][link]") {
     FakeTaskClock clock;
     FakeZWOCAASDK sdk;
+    sdk.name = "CAA M54";  // apart from the "ZWO CAA" fallback, so a published identity shows
     sdk.fail_info = true;
     auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0, sdk, clock);
 

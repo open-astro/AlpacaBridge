@@ -525,7 +525,8 @@ TEST_CASE("Player One PW Filter Wheel Driver - get_names does not wait behind a 
 // Decision 0016 rule 3: identity and limits publish at the end of connect, so a connect that throws after the
 // enumeration leaves the pre-connect values.
 // Falsified by: playerone_filterwheel_driver.cpp resolve_handle() storing wheel_info_/wheel_info_valid_ again after
-// the enumeration (get_name() reports "FakePhoenixWheel" and set_names() with 3 names is rejected for 5 positions).
+// the enumeration (get_name() reports "Player One FakePhoenixWheel" and set_names() with 3 names is rejected for 5
+// positions).
 TEST_CASE("Player One PW Filter Wheel Driver - a failed connect leaves the pre-connect name and slot limits",
           "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
     alpacacore::test::FakePlayerOnePWSDK fake;

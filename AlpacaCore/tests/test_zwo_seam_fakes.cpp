@@ -746,10 +746,12 @@ TEST_CASE("ZWO EFW seam - get_names does not wait behind a held connect",
 // Decision 0016 rule 3: identity and limits publish at the end of connect, so a connect that throws after the
 // enumeration leaves the pre-connect values.
 // Falsified by: zwo_filterwheel_driver.cpp resolve_wheel_id() storing wheel_info_/wheel_info_valid_ again after the
-// enumeration (get_name() reports the enumerated "EFW" and set_names() with 3 names is rejected for the 7-slot count).
+// enumeration (get_name() reports the enumerated "ZWO EFW 7x36 II" and set_names() with 3 names is rejected for the
+// 7-slot count).
 TEST_CASE("ZWO EFW seam - a failed connect leaves the pre-connect name and slot limits",
           "[zwo][filterwheel][unit][fake-sdk][position-cache]") {
     FakeZWOEFWSDK sdk;
+    sdk.name = "EFW 7x36 II";  // apart from the "ZWO EFW" fallback, so a kept enumeration shows
     sdk.fail_open = true;
     auto driver = zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
     require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
