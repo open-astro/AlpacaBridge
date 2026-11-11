@@ -703,7 +703,7 @@ public:
                     // The builder's free text: its qualifiers and anything after a comma leave the name, and an
                     // "OnStepX" description is not branded twice.
                     std::string description = util::without_qualifiers(protocol.get_product_description());
-                    description = description.substr(0, description.find(','));
+                    if (const auto comma = description.find(','); comma != std::string::npos) description.resize(comma);
                     if (!description.empty() && description != "0") model = util::branded_name("OnStep", description);
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                     // Unknown: the name stays "OnStep Telescope".

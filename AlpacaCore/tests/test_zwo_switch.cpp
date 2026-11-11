@@ -286,8 +286,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - an id-only binding connects without to
 
 // Decision 0016 rule 3 and decision 0024 rule 3: the camera an index picked names the switch only once the connect
 // completes. Falsified by: zwo_switch_driver.cpp resolve_camera_id() writing camera_name_ when it picks the camera.
-TEST_CASE("ZWO Dew Heater Switch Driver - a failed connect does not name the camera it picked",
-          "[zwo][switch][unit]") {
+TEST_CASE("ZWO Dew Heater Switch Driver - a failed connect does not name the camera it picked", "[zwo][switch][unit]") {
     FakeDewSdk sdk;
     add_mini_and_pro(sdk, false);
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk);  // the Mini, no heater
