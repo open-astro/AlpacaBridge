@@ -1312,6 +1312,57 @@ TEST_CASE("OnStep pier side - SideOfPier keeps the hour-angle rule on OnStep 4.x
     }
 }
 
+// AlignmentMode answers from the mount-type letter of the polled :GU# frame, with no device I/O (#2214). Alt-alt has no
+// ASCOM value and is answered AltAz, as clients treat it the same way. No frame, or a frame with no type letter
+// keeps the old GermanPolar answer.
+// Falsified by: get_alignment_mode() returning a constant, ignoring the type letter, or mapping 'L' to anything but
+// AltAz.
+TEST_CASE("OnStep AlignmentMode - answers from the :GU# mount type", "[onstep][telescope][unit]") {
+    Rig rig(false);
+    connect_paused(rig);
+    SECTION("fork K is Polar") {
+        place(rig, 1.0, "NpKW180#");
+        CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::Polar);
+    }
+    SECTION("alt-az A is AltAz") {
+        place(rig, 1.0, "NpAo180#");
+        CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::AltAz);
+    }
+    SECTION("alt-alt L is AltAz") {
+        place(rig, 1.0, "NpLo180#");
+        CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::AltAz);
+    }
+    SECTION("GEM E is GermanPolar") {
+        place(rig, 1.0, "NpEW180#");
+        CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
+    }
+    SECTION("a frame with no type letter is GermanPolar") {
+        place(rig, 1.0, "Np180#");
+        CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
+    }
+}
+
+// OnStep 4.x sends the type letter too (Command.ino writes E, K or A), so a fork frame reads Polar there.
+// Falsified by: get_alignment_mode() gated on OnStepX (is_onstepx_version()).
+TEST_CASE("OnStep AlignmentMode - OnStep 4.x reports the mount type", "[onstep][telescope][unit]") {
+    Rig rig(false);
+    rig.mount->version = "4.24s";
+    connect_paused(rig);
+    place(rig, 1.0, "NpKW180#");
+    CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::Polar);
+}
+
+// A fork frame must not leak a non-GEM answer once the driver is disconnected.
+// Falsified by: a driver that keeps serving the polled frame after set_connected(false).
+TEST_CASE("OnStep AlignmentMode - a disconnected driver reports GermanPolar", "[onstep][telescope][unit]") {
+    Rig rig(false);
+    connect_paused(rig);
+    place(rig, 1.0, "NpKW180#");
+    REQUIRE(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::Polar);
+    rig.driver->set_connected(false);
+    CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
+}
+
 // Rig steps B, D and E of #2179, and the home start of step A, through the driver, with the settings the mount
 // answers.
 // Falsified by: get_destination_side_of_pier() answering from the hour-angle sign (B, E and A would be wrong), or

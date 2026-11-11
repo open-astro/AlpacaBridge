@@ -285,8 +285,21 @@ MountStatus parse_status(const std::string& raw) {
     // 'L' alt-alt), then the pier side: 'T' east, 'W' west, 'o' none. 'E' is
     // therefore always present on a GEM and says nothing about the pier
     // side (#1217; HM-17 traces nNpEW180 = west, nNpET1:0 = east); it is
-    // what is_gem reads (#2179).
-    status.is_gem = raw.find('E') != std::string::npos;
+    // what is_gem reads (#2179). Verified against OnStepX Status.command.cpp and OnStep 4.x Command.ino (the :GU#
+    // builders): the type is written as exactly one of E/K/A/L (4.x: E/K/A, no L); no other :GU# flag uses
+    // uppercase K, A or L ('O' is the solar rate, not alt-az), and the trailing general-error digit is '0'+code
+    // with code <= 15 (Limits.cpp / Globals.h GeneralErrors), so it never reaches a letter. A find() over the frame is
+    // therefore safe (#2214).
+    if (raw.find('E') != std::string::npos) {
+        status.mount_type = MountType::GermanEquatorial;
+    } else if (raw.find('K') != std::string::npos) {
+        status.mount_type = MountType::Fork;
+    } else if (raw.find('A') != std::string::npos) {
+        status.mount_type = MountType::AltAz;
+    } else if (raw.find('L') != std::string::npos) {
+        status.mount_type = MountType::AltAlt;
+    }
+    status.is_gem = status.mount_type == MountType::GermanEquatorial;
     if (raw.find('T') != std::string::npos) {
         status.side_of_pier = 0;  // pier east
     } else if (raw.find('W') != std::string::npos) {

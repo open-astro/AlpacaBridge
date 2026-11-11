@@ -855,7 +855,14 @@ public:
         return wire().send_command(std::string(command));
     }
 
-    AlignmentMode get_alignment_mode() const override { return AlignmentMode::GermanPolar; }
+    // From the mount-type letter of the polled :GU# frame (#2214), no device I/O (decision 0016). Fork is Polar;
+    // alt-az and alt-alt are AltAz (ASCOM has no alt-alt value, and the decisions a client takes from it, pier side
+    // and meridian flips, match alt-az). GermanPolar with no frame, no type letter in the frame, and while
+    // disconnected, with no throw (#1919 owns the disconnected getter behaviour).
+    AlignmentMode get_alignment_mode() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        return alignment_mode_locked();
+    }
 
     double get_altitude() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
@@ -2484,6 +2491,29 @@ private:
         if (park_home_error_ && (!home || *home == park_home_error_->home)) {
             throw AlpacaException(park_home_error_->message, park_home_error_->code);
         }
+    }
+
+    // AlignmentMode from the published frame. set_connected(false) resets the snapshot, so the published_connected_
+    // gate is defence in depth against a frame published around a disconnect. Caller holds mutex_.
+    AlignmentMode alignment_mode_locked() const {
+        if (!published_connected_.load()) {
+            return AlignmentMode::GermanPolar;
+        }
+        const auto reading = snapshot_.read();
+        if (!reading || !reading->value.status_known) {
+            return AlignmentMode::GermanPolar;
+        }
+        switch (reading->value.status.mount_type) {
+            case MountType::Fork:
+                return AlignmentMode::Polar;
+            case MountType::AltAz:
+            case MountType::AltAlt:
+                return AlignmentMode::AltAz;
+            case MountType::GermanEquatorial:
+            case MountType::Unknown:
+                break;
+        }
+        return AlignmentMode::GermanPolar;
     }
 
     // CanSetPierSide: OnStepX, a German mount, the meridian flips on and a read preferred side (#2179). Caller holds

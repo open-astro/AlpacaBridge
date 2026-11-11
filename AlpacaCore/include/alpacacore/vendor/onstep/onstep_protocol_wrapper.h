@@ -79,13 +79,21 @@ struct AltitudeLimits {
 };
 
 /**
+ * @brief The mount type letter of :GU#. OnStepX writes exactly one of E, K, A or L before the pier-side letter
+ * (Status.command.cpp); OnStep 4.x writes E, K or A (Command.ino). Unknown is a frame with no type letter (no frame
+ * yet, or firmware that omits it).
+ */
+enum class MountType : std::uint8_t { Unknown, GermanEquatorial, Fork, AltAz, AltAlt };
+
+/**
  * @brief Mount status decoded from the :GU# extended status string.
  *
  * side_of_pier: -1 = unknown/not reported, 0 = pier east ('T'), 1 = pier west
  * ('W'). 'E' in :GU# is the mount type (GEM), not the pier side (#1217).
- * is_gem: the mount-type letter is 'E' (OnStepX writes 'E' GEM, 'K' fork, 'A' alt-az, 'L' alt-alt; the
- * uppercase letters appear nowhere else in the reply). False for the other types and for firmware that
- * sends no type.
+ * mount_type: the mount-type letter (OnStepX writes 'E' GEM, 'K' fork, 'A' alt-az, 'L' alt-alt; OnStep 4.x the
+ * same except 'L'; the uppercase letters appear nowhere else in the reply). Unknown when the reply has no type.
+ * is_gem: mount_type is GermanEquatorial (the letter is 'E'); false for the other types and when the
+ * reply has no type letter.
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
  * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
@@ -106,6 +114,7 @@ struct MountStatus {
     // when a MoveAxis is still running on the other axis.
     bool is_pulse_guide_active = false;
     int side_of_pier = -1;
+    MountType mount_type = MountType::Unknown;
     bool is_gem = false;
     std::string raw_status;
 };

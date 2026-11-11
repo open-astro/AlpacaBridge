@@ -1592,7 +1592,8 @@ TEST_CASE("OnStep protocol wrapper - :GU# pier side is T/W/o and not the mount-t
     CHECK(tracking_east.is_tracking);
 }
 
-// Falsified by: is_gem reading anything but the uppercase mount-type letter 'E' (#2179).
+// Falsified by: is_gem reading anything but the uppercase mount-type letter 'E' (#2179), or mount_type mapping
+// E/K/A/L/none to the wrong value (#2214).
 TEST_CASE("OnStep protocol wrapper - :GU# mount type E is a German mount", "[onstep][telescope][unit][pierside]") {
     auto reply = std::make_shared<std::string>();
     auto reply_mutex = std::make_shared<std::mutex>();
@@ -1615,14 +1616,16 @@ TEST_CASE("OnStep protocol wrapper - :GU# mount type E is a German mount", "[ons
         alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
         ~DisconnectOnExit() { w.disconnect(); }
     } disconnect_on_exit{wrapper};
-    const auto is_gem = [&](const std::string& raw) {
+    const auto status_of = [&](const std::string& raw) {
         {
             std::lock_guard<std::mutex> lock(*reply_mutex);
             *reply = raw + "#";
         }
-        return wrapper.get_status().is_gem;
+        return wrapper.get_status();
     };
 
+    using alpacacore::vendor::onstep::MountType;
+    const auto is_gem = [&](const std::string& raw) { return status_of(raw).is_gem; };
     CHECK(is_gem("nNpEW180"));
     CHECK(is_gem("NpET1:0"));
     CHECK(is_gem("nNPHEo180"));
@@ -1630,6 +1633,13 @@ TEST_CASE("OnStep protocol wrapper - :GU# mount type E is a German mount", "[ons
     CHECK_FALSE(is_gem("nNpAo180"));  // alt-az
     CHECK_FALSE(is_gem("nNpLo180"));  // alt-alt
     CHECK_FALSE(is_gem("Np180"));     // no type sent
+
+    // The mount type behind is_gem (#2214).
+    CHECK(status_of("nNpEW180").mount_type == MountType::GermanEquatorial);
+    CHECK(status_of("nNpKo180").mount_type == MountType::Fork);
+    CHECK(status_of("nNpAo180").mount_type == MountType::AltAz);
+    CHECK(status_of("nNpLo180").mount_type == MountType::AltAlt);
+    CHECK(status_of("Np180").mount_type == MountType::Unknown);
 }
 
 // The settings reads are strict: a reply that does not parse is unknown, never a guess (#2179).

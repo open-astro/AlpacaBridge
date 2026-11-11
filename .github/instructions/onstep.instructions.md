@@ -152,6 +152,14 @@ it is never reachable through `router.cpp` or the web UI.
   `parse_status` no longer reads it as one. `get_side_of_pier()` takes the frame and never reads the mount (a live
   `:GRa#`/`:GDe#` pair there cost ConformU's 0.1 s FAST target, #1242). Any change to a pier-side source needs a
   ConformU SideofPier/DestinationSideofPier run on the bare mount.
+- **AlignmentMode comes from the `:GU#` mount-type letter** (#2214), read from the polled frame with no I/O
+  (`MountStatus::mount_type`): `E` GermanPolar, `K` (fork) Polar, `A` (alt-az) and `L` (alt-alt) AltAz, since ASCOM has
+  no alt-alt value and what clients decide from it matches alt-az. OnStepX and OnStep 4.x both send the letter (4.x
+  `Command.ino`: `E`, `K`, `A`, no `L`). A frame with no type letter (no frame yet, or firmware that omits it) and a
+  disconnected driver answer GermanPolar; a connected driver whose frame has no `:GU#` status answers GermanPolar
+  deliberately rather than throwing. `set_connected(false)` resets the frame and the getter also checks
+  `published_connected_`, so a stale frame cannot leak. The letter does not change while connected, so a stale frame is
+  served as it is (decision 0010 rule 6). Not hardware-validated on a fork or alt-az mount.
 - **DestinationSideOfPier models the firmware's choice, SideOfPier can be set** (#2179). The settings the choice
   depends on are read on OnStepX (`is_onstepx_version()`) at connect and every tenth poll tick, and cached under
   `mutex_` (`PierSettings`), so the getters never wait on the wire: the preferred side `:GX96#`, the flips switch
@@ -489,10 +497,12 @@ it is never reachable through `router.cpp` or the web UI.
   rule 6): `RightAscension`, `Declination`, `Altitude`, `Azimuth`, `Tracking`, `AtPark`, `AtHome`,
   `Slewing` (with the driver's own MoveAxis flags, slew grace and pending Park/FindHome), `SideOfPier`
   (on an OnStepX German mount the frame's `:GU#` pier-side letter; otherwise, or when there is none, the hour-angle
-  rule from the frame's RA, #2179)
-  and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
+  rule from the frame's RA, #2179) and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
   (`device_state_age()`). A field the mount has not answered yet throws `DriverException` "not
-  available"; a latched fault and a lost link refuse as above. While the frame has no status (every `:GU#`
+  available"; a latched fault and a lost link refuse as above. `AlignmentMode` is also served from the
+  frame, stale or not (the `:GU#` type letter does not change while connected), but it never refuses: it
+  answers `GermanPolar` with no status yet, and serves the last frame's letter on a latched fault or a
+  lost link (#2214). While the frame has no status (every `:GU#`
   since the connect failed), a command that checks for a park or writes the status through (`PulseGuide`, a
   moving `MoveAxis`, `FindHome`, `Tracking=true`, `Unpark`, the slews and syncs) reads `:GU#` first and throws
   `DriverException` ("the mount has not answered :GU# since the connect") when that read fails too, rather than take
@@ -612,7 +622,7 @@ it is never reachable through `router.cpp` or the web UI.
 - **Other slow first FAST reads in old ConformU 4.5.0 runs were not a cold-start window
   either.** Two runs showed `AlignmentMode` (~0.135s), `Declination` (~0.318s),
   `EquatorialSystem` (~0.136s) and `SideOfPier Read` (~0.140s) outside the 0.1s FAST target.
-  `AlignmentMode` and `EquatorialSystem` are compile-time constants with no serial I/O, so that
+  `AlignmentMode` (read from the polled frame) and `EquatorialSystem` (a constant) do no serial I/O, so that
   time is spent in ConformU, not the driver; these two and `SideOfPier` are the first reads of
   an enum type, which matches ConformU's first-use JIT cost on enum-typed members
   (`.github/instructions/ioptron.instructions.md`; worse in the arm64 4.5.0 build, see "ConformU version" in `.github/instructions/testing.instructions.md`).
@@ -644,8 +654,9 @@ it is never reachable through `router.cpp` or the web UI.
     `Park()`/`FindHome()` returning near the pole. The earlier reading that all four labels drive
     one repeated experiment was wrong (the labels are hour angles, see above).
   - Do not "fix" either case by loosening tolerances or by re-adding rate-compensation toggling.
-- **v1 scope is equatorial mounts only** (`AlignmentMode::GermanPolar`), matching every other
-  telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAzAsync`
+- **The driver is built for equatorial mounts** (a fork reports `Polar`, a German mount `GermanPolar`, and
+  an alt-az mount `AltAz` from the `:GU#` type letter, #2214; only the German mount is validated on a rig),
+  like every other telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAzAsync`
   is supported via a local Alt/Az→RA/Dec coordinate transform followed
   by an ordinary GOTO, refused while Tracking is true (#1377) rather than needing it (#1274) (the router refuses synchronous `SlewToAltAz` with
   `MethodNotImplemented`, #775) — this works regardless of the physical mount's mechanical
