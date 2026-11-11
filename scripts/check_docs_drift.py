@@ -2840,6 +2840,63 @@ def print_badge(root=ROOT):
     return 0
 
 
+# --- check 26: CGX state-frame writers (issue #2035) ---------------------------
+#
+# Every control-path write to the CGX state frame drops the poll in flight and
+# keeps measured_at (decision 0010 rules 2 and 3), so the frame ages by the poll
+# alone. A caller that wrote it in a tight loop would starve the poll and, after
+# util::kLinkStalenessBound, read as a lost link mid-motion. Each caller below
+# was checked to be occasional; a new one fails here until it is checked too.
+# The frame-age bound itself is the stress case "the state frame stays fresh
+# through the arrival-refinement loop" in
+# AlpacaCore/tests/test_celestron_cgx_concurrency_stress.cpp.
+
+CGX_DRIVER = "AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp"
+# (calling function, writer) -> call sites, and why that caller is occasional.
+CGX_FRAME_WRITERS = {
+    ("read_sky_position", "write_frame"): (1, "the control-path read below; each of its callers is pinned"),
+    ("finish_slew_operation", "read_sky_position"): (1, "once per arrival check, at most kMaxSlewCorrections + 1"),
+    ("pulse_guide", "read_sky_position"): (1, "once per PulseGuide, for the polarity"),
+    ("sync_to_coordinates", "read_sky_position"): (1, "once per Sync"),
+    ("sync_to_coordinates", "write_frame"): (1, "once per Sync, the verified labels"),
+    ("run_home_operation", "write_frame"): (1, "once per home, the home labels"),
+    ("start_slew_operation", "read_sky_position"): (1, "once per slew, for planning"),
+    ("run_flip_slew_operation", "write_frame"): (1, "once per meridian home route, the re-home labels"),
+    ("publish_guide_end_frame", "write_frame"): (1, "the guide-end frame below"),
+    ("run_pulse_guide", "publish_guide_end_frame"): (1, "once per pulse, when it ends"),
+}
+CGX_MEMBER_DEF_RE = re.compile(r"^[^\s#][^\n;{}]*?\bCelestronCgxTelescopeDriver::(~?\w+)\(", re.M)
+# A call, not a definition (`Class::name(`) or an in-class declaration (`Type name(`).
+CGX_WRITER_CALL_RE = re.compile(r"(?<![\w:])(?<!void )(?<!CgxSkyPosition )(write_frame|read_sky_position|"
+                                r"publish_guide_end_frame)\(")
+
+
+def _cgx_frame_writer_findings(source, pinned=None):
+    """Check 26 over the driver's text. Pure, so --self-test can drive it."""
+    pinned = CGX_FRAME_WRITERS if pinned is None else pinned
+    code = _strip_comments(source)
+    defs = [(m.start(), m.group(1)) for m in CGX_MEMBER_DEF_RE.finditer(code)]
+    found = {}
+    for m in CGX_WRITER_CALL_RE.finditer(code):
+        callers = [name for start, name in defs if start < m.start()]
+        key = (callers[-1] if callers else "<class body>", m.group(1))
+        found[key] = found.get(key, 0) + 1
+    findings = []
+    for key in sorted(set(found) | set(pinned)):
+        want = pinned.get(key, (0, ""))[0]
+        if found.get(key, 0) != want:
+            findings.append(
+                "%s: %s() calls %s() %d time(s), pinned %d. Each call drops the state poll in flight (decision "
+                "0010 rule 3), so a caller in a tight loop starves it into a false link loss (#2035): check the "
+                "cadence, then update CGX_FRAME_WRITERS in %s"
+                % (CGX_DRIVER, key[0], key[1], found.get(key, 0), want, Path(__file__).name))
+    return findings
+
+
+def check_cgx_frame_writers(root=ROOT):
+    return _cgx_frame_writer_findings(read(CGX_DRIVER, root))
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -2868,6 +2925,7 @@ CHECKS = [
     ("Review job timeout, wait and poll budgets agree across the workflow, ci-gates and skills",
      check_review_budget_agrees),
     ("README Authored code badge is within tolerance of the tracked line count", check_authored_lines_badge),
+    ("Celestron CGX state-frame writers match the pinned callers", check_cgx_frame_writers),
 ]
 
 
@@ -4041,6 +4099,20 @@ def self_test():
     check("authored lines: blank lines and excluded files are not counted",
           count_authored_lines({"scripts/a.py": "a\n\n  \nb\n", "AlpacaCore/external/x.h": "x\ny\n",
                                 "README.md": "z\n"}) == 2)
+
+    # check 26: CGX state-frame writers (literal fixtures).
+    writer_src = ("class X {\n    void write_frame(int a) const {}\n    CgxSkyPosition read_sky_position(int);\n};\n"
+                  "CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position(int a) {\n    write_frame(a);\n}\n"
+                  "void CelestronCgxTelescopeDriver::sync(int a) {\n    // write_frame(a) in a comment\n"
+                  "    const auto p = read_sky_position(a);\n}\n")
+    writer_pins = {("read_sky_position", "write_frame"): (1, ""), ("sync", "read_sky_position"): (1, "")}
+    check("cgx writers: the pinned fixture is clean (declarations, definitions and comments are not calls)",
+          _cgx_frame_writer_findings(writer_src, writer_pins) == [])
+    f = _cgx_frame_writer_findings(writer_src.replace("    const auto p", "    for (;;) write_frame(a);\n    const auto p"),
+                                   writer_pins)
+    check("cgx writers: a new writer call is reported", any("sync() calls write_frame() 1 time(s), pinned 0" in x for x in f))
+    f = _cgx_frame_writer_findings(writer_src, {**writer_pins, ("gone", "write_frame"): (1, "")})
+    check("cgx writers: a pinned caller that no longer writes is reported", any("gone() calls write_frame() 0" in x for x in f))
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
