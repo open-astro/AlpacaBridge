@@ -1,0 +1,2 @@
+### Changed (tooling)
+- **Merge gate in the merge queue** (CI, `.github/workflows/merge-gate.yml`, `.github/scripts/merge-gate.sh`): a queued PR merges only when every check on its head ran green, not only the required ones, and the review bot's latest verdict on that head is "✅ Approved". The review job passes on either verdict, so before this a PR whose review found defects could merge. The `merge-gate` check holds the queue once the ruleset requires it.

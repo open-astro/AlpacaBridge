@@ -10,5 +10,7 @@
 /.github/CODEOWNERS @diegopereiran @joeytroy
 /.github/workflows/decision-records.yml @diegopereiran @joeytroy
 /.github/workflows/adr-merge-queue.yml @diegopereiran @joeytroy
+/.github/workflows/merge-gate.yml @diegopereiran @joeytroy
+/.github/scripts/merge-gate.sh @diegopereiran @joeytroy
 /scripts/check_adr_authorization.py @diegopereiran @joeytroy
 /scripts/check_adr_scope.py @diegopereiran @joeytroy
