@@ -36,10 +36,13 @@ Connection types: Serial (RS-232 on hand control base) and Network (WiFi bridge 
 ### CGX / CGX-L direct USB backend
 
 The [published ConformU report](../../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
-records a complete ConformU 4.6.0.56430 (4.6.0-rc.1) pass on 2026-11-06 with both guide rates at
-0.25x sidereal: binary `27bfa9b7` (`stable/6.0` `04e01159` plus the #2166 UTCDate fix), motor
-firmware RA/Dec 7.18.2214, zero errors/warnings/issues and timing misses, all 16 extended guide
-tests and all 97 timing rows passing; DeviceState 18 ms (served from the state snapshot). Since
+records a complete ConformU 4.6.0.56430 (4.6.0-rc.1) pass on 2026-11-11 with both guide rates at
+the 0.5x sidereal default: the v6.0.0-beta.2 release package, binary `18688a0e` (`stable/6.0`
+`61cade85`), on the OPi6-class SBC with the CGX on `cdc_acm`, zero errors/warnings/issues and
+timing misses, all 16 extended guide tests and all 97 timing rows passing; DeviceState 6 ms
+(served from the state snapshot). It replaces the 2026-11-06 pass (binary `27bfa9b7`, `stable/6.0`
+`04e01159` plus the #2166 UTCDate fix, motor firmware RA/Dec 7.18.2214, guide rates 0.25x,
+DeviceState 18 ms). Since
 #2166 `UTCDate` answers from a fresh connect and a write on the NTP-disciplined rig returns
 `PropertyNotImplemented` (accepted by ConformU), so the rig setup no longer writes `UTCDate`; it
 still starts from a fresh connection, since leftover targets fail ConformU's read-before-write
@@ -49,7 +52,8 @@ first Dec guide pulse after a North-to-South reversal moves more than commanded,
 0.2-0.7" and intermittently 1.7-2.7", with identical AUX guide commands and anti-backlash 0, so
 the extra motion is mount-side; it fails ConformU's 1.0" PulseGuide tolerance on some runs (three
 runs of the 2026-11-04 revision and eight of the 2026-11-06 build stopped on it, at +1.3-2.1"; two
-operator Dec gear adjustments moved it, and the published run followed the last one), and the
+operator Dec gear adjustments moved it, and the 2026-11-06 run followed the last one; four
+v6.0.0-beta.2 runs stopped at +1.2-2.0" before the published run), and the
 2026-10-31 0.5x PulseGuide North ISSUE
 fits the same effect. That limit is recorded, not waived.
 This qualifies the tested bare northern CGX/backend, not CGX-L, southern operation
