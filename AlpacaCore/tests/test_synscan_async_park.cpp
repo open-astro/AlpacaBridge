@@ -419,19 +419,33 @@ TEST_CASE("SynScan - a persistently garbled echo fails the connect rather than p
     CHECK(queries->load() == 2);  // only the two echo attempts - never firmware/model/site
 }
 
-TEST_CASE("SynScan - Name carries the model and the (SynScan) suffix once connected", "[synscan][telescope][async]") {
+TEST_CASE("SynScan - Name carries the model once connected", "[synscan][telescope][async]") {
     // PR #278: a mount reachable over both the hand controller and the
     // direct motor-controller path resolves to the same model string in
-    // both drivers; the "(SynScan)" suffix is what tells them apart in a
-    // client's device list. Asserted here rather than only on hardware.
+    // both drivers. Decision 0024 gives both the same Name; the Description
+    // tells them apart.
     auto st = std::make_shared<FakeSynScanState>();
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
-    CHECK(driver->get_name() == "Sky-Watcher Mount (SynScan)");  // no model known yet
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");  // no model known yet
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (SynScan)");  // fake answers model id 50
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");  // fake answers model id 50
+    REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
+}
+
+// Decision 0024. Falsified by: synscan_telescope_driver.cpp synscan_model_id_to_name() returning "Mount (ID n)" for an
+// id not in its table.
+TEST_CASE("SynScan - an unknown model id is named Sky-Watcher Telescope", "[synscan][telescope][async]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    st->model_id.store(77);  // in no row of the V3/V4 table
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
 }
 

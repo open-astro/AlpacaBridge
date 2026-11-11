@@ -191,6 +191,20 @@ TEST_CASE("Player One Switch Driver - Auto binds the one camera with a heater or
     CHECK(sdk.operation_after_close() == false);
 }
 
+// Decision 0024. Falsified by: playerone_switch_driver.cpp get_name() returning "Player One Thermal Switch" while
+// connected.
+TEST_CASE("Player One Switch Driver - the Name is the camera model and Thermal Switch",
+          "[playerone][switch][unit][fakesdk]") {
+    FakePlayerOneSDK sdk;
+    add_cooled_camera(sdk, 18, "Uranus-C Pro", "POA-18");
+    auto driver =
+        alpacacore::vendor::playerone::create_playerone_switch(0, alpacacore::util::kAutoThermalCamera, "", sdk);
+    CHECK(driver->get_name() == "Player One Thermal Switch");
+    driver->set_connected(true);
+    CHECK(driver->get_name() == "Player One Uranus-C Pro Thermal Switch");
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One Switch Driver - a serial binds its camera whatever the index",
           "[playerone][switch][unit][fakesdk]") {
     FakePlayerOneSDK sdk;

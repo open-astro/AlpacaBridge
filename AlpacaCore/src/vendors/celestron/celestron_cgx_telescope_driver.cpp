@@ -147,7 +147,7 @@ public:
 
     int get_device_number() const override { return device_number_; }
     std::string get_name() const override {
-        return unknown_motor_model_.load() ? "Celestron Telescope" : "Celestron CGX/CGX-L USB Telescope";
+        return unknown_motor_model_.load() ? "Celestron Telescope" : "Celestron CGX/CGX-L";
     }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
     std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }

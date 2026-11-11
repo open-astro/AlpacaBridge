@@ -70,6 +70,8 @@ public:
     virtual double get_temperature(int focuser_id) = 0;
     virtual std::string get_serial_number(int focuser_id) = 0;
     virtual std::string get_firmware_version(int focuser_id) = 0;
+    /// The unit's model (EAFGetType): "EAFN" on an EAFN, whose EAF_INFO name still reads "EAF" (rig, SDK 1.8.1).
+    virtual std::string get_type(int focuser_id) = 0;
     virtual std::string get_sdk_version() = 0;
 
 protected:

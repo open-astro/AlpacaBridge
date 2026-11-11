@@ -16,6 +16,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/link_health.h>
@@ -224,7 +225,7 @@ public:
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);  // the connect publishes the model name under it, at its end
         if (!mount_model_name_.empty()) {
-            return "Celestron " + mount_model_name_;
+            return util::branded_name("Celestron", mount_model_name_);
         }
         return "Celestron NexStar Telescope";
     }

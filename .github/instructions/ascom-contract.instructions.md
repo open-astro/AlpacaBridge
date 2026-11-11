@@ -144,6 +144,20 @@ configured later on the same number must not inherit it. State under an older ID
 hardware (a serial) may move at connect. Both use `RotatorSyncOffsetStore::load_or_adopt()` or its
 equivalent. The reasons are in [decision 0018](../../docs/decisions/0018-persisted-unique-id.md).
 
+### Name is brand and model (all drivers)
+
+`get_name()` is the device's brand followed by its model, nothing after it: `Sky-Watcher EQM-35 Pro`,
+`ZWO EAFN`, `QHY CFW`. Before the model is read it is the brand followed by the product family
+(`ZWO EAF`) or the ASCOM device type (`Sky-Watcher Telescope`; never `Mount`). A model string from an
+SDK or a device goes through `util::branded_name(brand, model)` (`alpacacore/util/device_name.h`), which
+adds the brand only when the string does not start with it, and an SDK's ` (...)` connection-mode qualifier
+(libgphoto2's `(Control)`) is dropped with `util::without_qualifiers()`. A connection path, protocol, board revision,
+calibration state or host camera goes in `get_description()` (no device I/O), which the web UI shows; two
+drivers reaching one device (EQMOD and SynScan on one mount) give it the same name. A camera-attached dew
+heater or thermal switch is the camera model plus `Dew Heater` or `Thermal Switch`. A new vendor adds its
+brand to `name_brands_of()` in `test_contract_sweep.cpp`, whose two name cases check every driver. The
+reasons are in [decision 0024](../../docs/decisions/0024-device-names.md).
+
 ### Action names are case-insensitive (all drivers with actions)
 
 ASCOM treats `SelectWheel`, `selectwheel` and `SELECTWHEEL` as the same action: the

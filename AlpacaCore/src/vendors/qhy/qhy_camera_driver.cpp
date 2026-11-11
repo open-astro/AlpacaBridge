@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/last_exposure.h>
@@ -206,7 +207,7 @@ public:
         // camera_info_.model is populated at open+init (construction must not
         // touch the SDK — see the constructor comment). Return it whenever available.
         if (!camera_info_.model.empty()) {
-            return camera_info_.model;
+            return util::branded_name("QHY", camera_info_.model);
         }
         return "QHY Camera";
     }

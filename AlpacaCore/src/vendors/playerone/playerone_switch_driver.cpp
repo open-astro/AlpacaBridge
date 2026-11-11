@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
@@ -157,7 +158,13 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "Player One Thermal Switch"; }
+    // Camera model + function (decision 0024), so two cameras' switches are told apart; "Player One Thermal Switch"
+    // until a connect names the camera.
+    std::string get_name() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (camera_name_ == "Player One Camera") return "Player One Thermal Switch";
+        return util::branded_name("Player One", camera_name_) + " Thermal Switch";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 

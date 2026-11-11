@@ -185,6 +185,14 @@ TEST_CASE("ToupTek AAF Focuser Driver - a disconnected move or limit read is Not
     require_alpaca_error([&]() { (void)driver->get_max_increment(); }, alpacacore::AlpacaError::NotConnected);
 }
 
+// Decision 0024. Falsified by: touptek_focuser_driver.cpp get_name() returning info_.name without the brand.
+TEST_CASE("ToupTek AAF Focuser Driver - the connected Name is ToupTek and the SDK name", "[touptek][focuser][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    CHECK(driver->get_name() == "ToupTek FakeAAF");
+    driver->set_connected(false);
+}
+
 TEST_CASE("ToupTek AAF Focuser Driver - Defaults", "[touptek][focuser][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_index(0, 0);
 

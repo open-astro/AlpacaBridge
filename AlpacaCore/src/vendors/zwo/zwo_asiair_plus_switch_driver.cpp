@@ -110,7 +110,7 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "ZWO ASIAIR Plus Switch (RK3568)"; }
+    std::string get_name() const override { return "ZWO ASIAIR Plus Switch"; }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 

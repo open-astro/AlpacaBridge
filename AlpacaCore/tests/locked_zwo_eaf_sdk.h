@@ -91,6 +91,9 @@ public:
     std::string get_serial_number(int focuser_id) override {
         return locked([&] { return inner_.get_serial_number(focuser_id); });
     }
+    std::string get_type(int focuser_id) override {
+        return locked([&] { return inner_.get_type(focuser_id); });
+    }
     std::string get_firmware_version(int focuser_id) override {
         return locked([&] { return inner_.get_firmware_version(focuser_id); });
     }

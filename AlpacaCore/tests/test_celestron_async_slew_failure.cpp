@@ -1343,6 +1343,7 @@ TEST_CASE("Celestron tracking - mode follows mount geometry and site hemisphere"
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_name() == "Celestron NexStar Telescope");  // decision 0024: never "Celestron Mount"
     require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);

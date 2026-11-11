@@ -1394,7 +1394,7 @@ TEST_CASE("ToupTek camera - Name and Connected do not wait for a disconnect held
     REQUIRE(entered);
     CHECK(returned);
     const auto [name, connected] = future.get();
-    CHECK(name == "FakeCam One");
+    CHECK(name == "ToupTek FakeCam One");
     CHECK_FALSE(connected);
     CHECK(fake.ref_count("fake-cam-0") == 0);
 }
@@ -1424,10 +1424,10 @@ TEST_CASE("ToupTek camera - Name does not wait for a second ToupTek camera held 
 
     REQUIRE(entered);
     CHECK(returned);
-    CHECK(future.get() == "FakeCam One");
+    CHECK(future.get() == "ToupTek FakeCam One");
     other->set_connected(false);
     // Name keeps the identity after a disconnect, without asking the SDK again.
-    CHECK(other->get_name() == "FakeCam Two");
+    CHECK(other->get_name() == "ToupTek FakeCam Two");
 }
 
 TEST_CASE("ToupTek camera - identity getters keep the start-up values after a connect and disconnect (#1844)",

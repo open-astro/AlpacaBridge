@@ -292,7 +292,7 @@ std::optional<std::pair<uint32_t, uint32_t>> parse_axis_pair_response(const std:
     return std::make_pair(first_raw, second_raw);
 }
 
-// NexStar model ID to human-readable name mapping
+// NexStar model ID to human-readable name mapping, or empty for an id not in the table
 std::string model_id_to_name(int model_id) {
     switch (model_id) {
         case 1:  return "NexStar GPS";
@@ -319,7 +319,8 @@ std::string model_id_to_name(int model_id) {
         case 24: return "CGX-L";
         case 25: return "Astro Fi";
         case 26: return "SkyWatcher";
-        default: return "Mount";
+        default:
+            return {};  // unknown: the name falls back to the driver's (decision 0024)
     }
 }
 

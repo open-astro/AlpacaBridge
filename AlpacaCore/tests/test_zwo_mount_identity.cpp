@@ -824,7 +824,7 @@ TEST_CASE("ZWO identity I/O fence rejects an older admitted call on an unverifie
 
 // #2204: Decision 0017 rule 8 still refuses the wrong device, but through :GMA#, not a model list.
 // Falsified by: zwo_mount_protocol_wrapper.cpp get_mount_info() refusing a model that is_zwo_mount_model() omits.
-TEST_CASE("ZWO unlisted model connects as ZWO Mount and logs the model it reported (#2204)",
+TEST_CASE("ZWO unlisted model connects as ZWO Telescope and logs the model it reported (#2204)",
           "[zwo][telescope][identity]") {
     const bool serial = GENERATE(false, true);
     IdentityRig rig;
@@ -845,7 +845,7 @@ TEST_CASE("ZWO unlisted model connects as ZWO Mount and logs the model it report
     rig.driver->set_connected(true);
     logging::set_log_sink(previous_sink);
     CHECK(rig.driver->get_connected());
-    CHECK(rig.driver->get_name() == "ZWO Mount");
+    CHECK(rig.driver->get_name() == "ZWO Telescope");
     CHECK(std::any_of(warnings.begin(), warnings.end(),
                       [](const std::string& line) { return line.find("AM9") != std::string::npos; }));
 }

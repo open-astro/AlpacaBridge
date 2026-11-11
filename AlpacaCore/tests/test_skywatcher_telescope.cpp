@@ -62,7 +62,7 @@ TEST_CASE("SkyWatcher Telescope Driver - Defaults", "[skywatcher][telescope][uni
     REQUIRE(driver->get_device_type() == DeviceType::Telescope);
     REQUIRE_FALSE(driver->get_connected());
     // Disconnected: no ":e" mount code has been read yet, so the name is generic.
-    CHECK(driver->get_name() == "Sky-Watcher Mount (EQMOD)");
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");
 
     REQUIRE(driver->get_can_slew());
     REQUIRE(driver->get_can_slew_async());
@@ -86,7 +86,7 @@ TEST_CASE("SkyWatcher Telescope Driver - Device metadata", "[skywatcher][telesco
     auto driver = make_driver(3);
 
     CHECK(driver->get_device_number() == 3);
-    CHECK(driver->get_description() == "Sky-Watcher EQMOD Direct Mount Driver");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount");
     CHECK(driver->get_driver_info() == "AlpacaCore EQMOD Direct Driver v0.1");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);

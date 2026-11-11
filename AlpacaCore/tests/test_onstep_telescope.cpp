@@ -3263,10 +3263,12 @@ namespace {
 struct RefractionFake {
     std::string version;  // :GVN# reply, without '#'
     std::string gxee;     // :GXEE# reply (bare digit; empty = no reply)
+    std::string gvc = "0";  // :GVC# reply, without '#' ("0" = a firmware without the command)
     std::atomic<int> gxee_queries{0};
 
     std::string reply(const std::string& chunk) {
         if (chunk.rfind(":GVP", 0) == 0) return "On-Step#";
+        if (chunk.rfind(":GVC", 0) == 0) return gvc + "#";
         if (chunk.rfind(":GVN", 0) == 0) return version + "#";
         if (chunk.rfind(":GXEE", 0) == 0) {
             ++gxee_queries;
@@ -3337,6 +3339,52 @@ TEST_CASE("OnStep Telescope Driver - the firmware hook does not wait for the con
     CHECK(took < std::chrono::seconds(1));
     CHECK(driver->get_device_firmware().value_or("") == "On-Step 10.23a");
     driver->set_connected(false);
+}
+
+// Decision 0024: OnStep is the brand and OnStepX's :GVC# description the model. Falsified by:
+// onstep_telescope_driver.cpp connect skipping the :GVC# read (every OnStepX is named "OnStep Telescope").
+TEST_CASE("OnStep Telescope Driver - the Name is OnStep and the OnStepX product description",
+          "[onstep][telescope][unit]") {
+    auto fake = std::make_shared<RefractionFake>();
+    fake->gxee = "1";
+    std::string expected;
+    SECTION("OnStepX with a product description") {
+        fake->version = "10.23a";
+        fake->gvc = "Example Mount 7";
+        expected = "OnStep Example Mount 7";
+    }
+    SECTION("a description that starts with the brand is not branded twice") {
+        fake->version = "10.23a";
+        fake->gvc = "OnStepX";
+        expected = "OnStepX";
+    }
+    SECTION("a description's qualifier and the text after a comma leave the name") {
+        fake->version = "10.23a";
+        fake->gvc = "EQ6 (belt mod), roof";
+        expected = "OnStep EQ6";
+    }
+    SECTION("OnStepX that answers :GVC# with 0") {
+        fake->version = "10.23a";
+        expected = "OnStep Telescope";
+    }
+    SECTION("legacy OnStep is not asked") {
+        fake->version = "4.24s";
+        fake->gvc = "Not Asked";
+        expected = "OnStep Telescope";
+    }
+    alpacacore::test::FakeMountServer server([fake](const std::string& chunk) { return fake->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    CHECK(driver->get_name() == "OnStep Telescope");
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    CHECK(driver->get_name() == expected);
+    driver->set_connected(false);
+    CHECK(driver->get_name() == expected);  // kept across a disconnect
 }
 
 TEST_CASE("OnStep Telescope Driver - DoesRefraction follows the OnStepX coordinate mode", "[onstep][telescope][unit]") {

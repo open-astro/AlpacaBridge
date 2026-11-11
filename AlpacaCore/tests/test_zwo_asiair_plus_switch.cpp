@@ -115,7 +115,7 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - Defaults", "[zwo][switch][asiair-plus
     REQUIRE(driver->get_device_type() == alpacacore::DeviceType::Switch);
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE_FALSE(driver->get_connected());
-    REQUIRE(driver->get_name() == "ZWO ASIAIR Plus Switch (RK3568)");
+    REQUIRE(driver->get_name() == "ZWO ASIAIR Plus Switch");
     REQUIRE(driver->get_max_switch() == 4);
 }
 

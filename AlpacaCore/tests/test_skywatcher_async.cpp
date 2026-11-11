@@ -2744,7 +2744,8 @@ TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher]
     // ":e" -> "=032732": firmware 3.39, mount code 0x32. The third byte is an
     // identity, NOT a patch level, so the version must read "3.39" and never
     // "3.39.50".
-    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (EQMOD, eps: measured)");
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount, eps: measured");
     auto firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.39");
@@ -2754,10 +2755,25 @@ TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher]
     // rig showed the direct connection reverting to a generic name after
     // every disconnect while the synscan driver kept its model (2026-09-10).
     driver->set_connected(false);
-    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (EQMOD, eps: measured)");
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount, eps: measured");
     firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.39");
+}
+
+// Decision 0024: a board mount_code_to_name() does not know has no model to name. Falsified by:
+// skywatcher_telescope_driver.cpp get_name() returning "Sky-Watcher " + model_cache_ for an unknown board.
+TEST_CASE("SkyWatcher - an unknown board is Sky-Watcher Telescope with its code in the Description",
+          "[skywatcher][telescope][eqm35]") {
+    auto profile = alpacacore::test::FakeMountProfile::eqm35_pro();
+    profile.version_reply = "03277E";  // fw 3.39, mount code 0x7E: in no row of mount_code_to_name()
+    FakeSkyWatcherSerialBoard mount(profile);
+    auto driver = connected_driver(mount);
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");
+    CHECK(driver->get_description() ==
+          "Sky-Watcher EQMOD direct mount, unknown board code 0x7E, eps: unmeasured default");
+    driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher EQM-35 - the connect log names the mount code in hex (#458)", "[skywatcher][telescope][eqm35]") {
@@ -2820,7 +2836,8 @@ TEST_CASE("SkyWatcher Wave - home indexer still enables FindHome", "[skywatcher]
     mount.set_home_index_degrees(2, 2.0);
     auto driver = connected_driver(mount);
 
-    CHECK(driver->get_name() == "Sky-Watcher Wave 100i (EQMOD, eps: unmeasured default)");
+    CHECK(driver->get_name() == "Sky-Watcher Wave 100i");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount, eps: unmeasured default");
     CHECK(driver->get_can_find_home() == true);
 
     driver->find_home();

@@ -71,6 +71,8 @@ Each line is a summary; the linked topic file holds the rule and its history.
 - `InvalidValue` precedes the connection check; every other member throws
   `NotConnected` while disconnected
   ([ascom-contract](.github/instructions/ascom-contract.instructions.md#ascom-exception-vocabulary-pick-the-right-one--conformu-checks-it)).
+- `get_name()` is brand + model only; paths and driver state go in `get_description()`
+  ([ascom-contract](.github/instructions/ascom-contract.instructions.md#name-is-brand-and-model-all-drivers)).
 - Declare every persisted config field in the vendor's catalog schema; prefix every
   non-ZWO form field name
   ([http-integration](.github/instructions/http-integration.instructions.md#enumeration-index-fields--unique-names--auto-numbering-all-vendors)).

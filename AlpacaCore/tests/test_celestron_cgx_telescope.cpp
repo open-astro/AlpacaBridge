@@ -554,7 +554,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Defaults", "[celestron][cgx][tel
     CHECK(driver->get_device_type() == alpacacore::DeviceType::Telescope);
     CHECK(driver->get_device_number() == 0);
     CHECK_FALSE(driver->get_connected());
-    CHECK(driver->get_name() == "Celestron CGX/CGX-L USB Telescope");
+    CHECK(driver->get_name() == "Celestron CGX/CGX-L");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "Celestron_CGX_USB_0");
@@ -1178,7 +1178,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - Sync verifies settled label read
 TEST_CASE("Celestron CGX USB Telescope Driver - Device metadata", "[celestron][cgx][telescope][unit]") {
     auto driver = alpacacore::test::create_cgx_telescope_poll_held(3, test_info());
     CHECK(driver->get_device_number() == 3);
-    CHECK(driver->get_name() == "Celestron CGX/CGX-L USB Telescope");
+    CHECK(driver->get_name() == "Celestron CGX/CGX-L");
     CHECK(driver->get_description() == "Celestron CGX/CGX-L direct USB mount");
     CHECK(driver->get_driver_info() == "AlpacaCore Celestron CGX AUX Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);

@@ -45,6 +45,7 @@ public:
     double get_temperature(int focuser_id) override;
     std::string get_serial_number(int focuser_id) override;
     std::string get_firmware_version(int focuser_id) override;
+    std::string get_type(int focuser_id) override;
     std::string get_sdk_version() override;
 
 private:

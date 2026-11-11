@@ -180,7 +180,7 @@ TEST_CASE("Bisque Telescope Driver - Defaults", "[bisque][telescope][unit]") {
     REQUIRE(driver->get_device_type() == DeviceType::Telescope);
     REQUIRE_FALSE(driver->get_connected());
 
-    CHECK(driver->get_name() == "Bisque Paramount Telescope");
+    CHECK(driver->get_name() == "Bisque Paramount");
 
     REQUIRE(driver->get_can_slew());
     REQUIRE(driver->get_can_slew_async());

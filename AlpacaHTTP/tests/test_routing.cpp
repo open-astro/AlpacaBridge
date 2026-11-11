@@ -6433,6 +6433,24 @@ int main() {
         EXPECT(seen == 5);
     }
 
+    {
+        // case: configureddevices lists each device's Description
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto dev = std::make_shared<FirmwareStubDriver>(9517, std::nullopt);
+        EXPECT(registry.register_device(dev));
+        const auto json =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/configureddevices").body());
+        int seen = 0;
+        for (const auto& entry : json["Value"]) {
+            if (entry.value("DeviceType", "") == "CoverCalibrator" && entry.value("DeviceNumber", -1) == 9517) {
+                EXPECT(entry.value("Description", "") == "fake device");
+                ++seen;
+            }
+        }
+        EXPECT(seen == 1);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9517);
+    }
+
     // A device mid-connect is listed Connected=false without get_connected()
     // being called: real drivers hold their coarse mutex across the connect and
     // that call would stall the whole listing (issue #910).
