@@ -57,8 +57,9 @@ jobs:
     timeout-minutes: 40
     env:
       RELEASE_TAG: ${{ inputs.tag }}
-      GH_TOKEN: ${{ github.token }}
       DEBIAN_FRONTEND: noninteractive
+    # GH_TOKEN (contents: write) is set only on the two steps that call gh,
+    # so the tag's build-dep and build steps never see it.
     steps:
       - name: Install packaging tools
         run: |
@@ -76,6 +77,8 @@ jobs:
 
       - name: Map the tag and check the Release
         id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # Fails on anything but vX.Y.Z or vX.Y.Z-beta.N, before the tag is
@@ -83,8 +86,10 @@ jobs:
           python3 tools/scripts/release_tag.py "${RELEASE_TAG}" | tee mapped.txt
           cat mapped.txt >> "${GITHUB_OUTPUT}"
           notes_name="$(sed -n 's/^notes_name=//p' mapped.txt)"
+          # gh's own error goes to the log as well: a failure can also be auth,
+          # a rate limit or the network, not only a missing Release.
           if ! assets="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"; then
-            echo "ERROR: ${RELEASE_TAG} has no GitHub Release; this workflow only adds the .deb to an existing one." >&2
+            echo "ERROR: could not read the Release for ${RELEASE_TAG} (gh error above). This workflow only adds the .deb to an existing Release." >&2
             exit 1
           fi
           if printf '%s\n' "${assets}" | grep -qxF "alpacabridge_${notes_name}_arm64.deb"; then
@@ -151,6 +156,7 @@ jobs:
 
       - name: Attach to the release
         env:
+          GH_TOKEN: ${{ github.token }}
           NOTES_NAME: ${{ steps.tag.outputs.notes_name }}
         run: |
           set -euo pipefail
