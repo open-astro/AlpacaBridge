@@ -1221,6 +1221,7 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
     CHECK(driver->get_link_fault().find("lost") != std::string::npos);
     CHECK(driver->get_device_state().empty());
     require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::NotConnected);
 
     mount.mute(false);
     REQUIRE_FALSE(mount.received_any_stop());

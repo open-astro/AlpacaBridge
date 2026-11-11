@@ -53,7 +53,13 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:RAn.n#` / `:REn.n#` | MoveAxis rate, deg/s per axis | none | blind |
 | `:RS#` | slew-rate preset before a move | none | blind |
 | `:Mgdnnnn#` | pulse guide, `d` = `n`/`s`/`e`/`w`, 4-digit ms | none | blind |
-| `:ST60.164275#` / `:ST0#` | tracking on / off | `0`/`1` | bare digit for the client's `Tracking` write (`0` throws with the `:GE#` reason, #1379); blind for the driver's own tracking restores |
+| `:ST60.164275#` / `:ST0#` | tracking on (OnStep 4.x) / off (both) | `0`/`1` | bare digit for the client's `Tracking` write (`0` throws with the `:GE#` reason, #1379); blind for the driver's own tracking restores |
+| `:Te#` | tracking on (OnStepX; `:ST` sets the rate back to sidereal there) | `0`/`1` | as `:ST` above; `0` is `CE_PARKED` |
+| `:TQ#` / `:TL#` / `:TS#` / `:TK#` | tracking rate sidereal / lunar / solar / King (`TrackingRate` write, OnStepX, #2214) | none | blind; changes neither tracking on/off nor the rate offsets |
+| `:GT#` | tracking rate in Hz (`60.16427` sidereal, `57.90000` lunar, `60.00000` solar, `60.13600` King), `0` when not tracking (OnStepX, #2214) | `n.nnnnn#` | `#`-terminated; read at connect and on the slow tick while compensation hides the `:GU#` letter and the mount tracks; matched within 0.01 Hz, else the last rate stays |
+| `:SXTR,n.n#` / `:SXTD,n.n#` | RA / Dec rate offset, arcseconds per sidereal second (`RightAscensionRate` x 15, `DeclinationRate` x 0.9972695663; OnStepX, #2214) | `0`/`1` | bare digit; `0` throws with the `:GE#` reason; the firmware clamps silently at +/-1800, so the driver refuses a larger request first |
+| `:GXTR#` / `:GXTD#` | RA / Dec rate offset read back (OnStepX, #2214) | `n.nnnnnnnn#` | `#`-terminated; needs a decimal point (an unknown command answers `0`), else the previous value stays |
+| `:GX90#` | pulse-guide rate as a multiple of sidereal (`GuideRate`, both firmwares, #2214) | `n.nn#` | `#`-terminated; a positive decimal, else `GuideRate` keeps its informational value |
 | `:hP#` | park | `0`/`1` | bare digit; then `:GE#` for the reason |
 | `:hC#` | find home | none | blind; then `:GE#` for the reason |
 | `:hR#` | unpark | `0`/`1` | bare digit; `0` throws with the `:GE#` reason, except `11` (not parked), ASCOM's no-op |
@@ -94,6 +100,10 @@ column is from the source, not from hardware.
 - **`:ST`** (tracking rate): both reply `0`/`1`; OnStep 4.x refuses it while slewing
   (`CE_MOUNT_IN_MOTION`); OnStepX does not start tracking while parked (no error, `Mount.command.cpp`).
   The client's `Tracking` write reads the reply, so a 4.x refusal during a GOTO throws (#1379).
+- **Tracking rates, rate offsets and the guide rate** (#2214): OnStepX only for `:TQ#`/`:TL#`/`:TS#`/`:TK#`, `:Te#`, `:GT#`,
+  `:SXTR`/`:SXTD` and `:GXTR#`/`:GXTD#` (OnStepX `Mount.command.cpp` at `af1d26bf`; OnStep 4.x `Command.ino` not read for
+  them, so it keeps `TrackingRates` sidereal, `CanSet*Rate` false and `:ST60.164275#`). `:GX90#` is on both
+  (OnStepX `Guide.command.cpp`, OnStep 4.x `Command.ino:922`), so the guide rate is not gated on the firmware.
 - **A GOTO during a GOTO** (#1379): both stop the running one and refuse the new one (OnStepX
   `Goto.cpp` `CE_SLEW_IN_SLEW`; OnStep 4.x `Goto.ino` `CE_GOTO_ERR_GOTO`, unless built with
   `CE_GOTO_ERR_GOTO_OFF`), with `:MS#` reply `5`.
@@ -152,14 +162,16 @@ it is never reachable through `router.cpp` or the web UI.
   `parse_status` no longer reads it as one. `get_side_of_pier()` takes the frame and never reads the mount (a live
   `:GRa#`/`:GDe#` pair there cost ConformU's 0.1 s FAST target, #1242). Any change to a pier-side source needs a
   ConformU SideofPier/DestinationSideofPier run on the bare mount.
-- **AlignmentMode comes from the `:GU#` mount-type letter** (#2214), read from the polled frame with no I/O
-  (`MountStatus::mount_type`): `E` GermanPolar, `K` (fork) Polar, `A` (alt-az) and `L` (alt-alt) AltAz, since ASCOM has
+- **AlignmentMode comes from the `:GU#` mount-type letter** (#2214), kept in driver state (`mount_type_seen_`) by
+  the poll and the control-path `:GU#` reads, a mount setting and not frame telemetry (decision 0010 OnStep row), with no I/O: `E` GermanPolar, `K` (fork) Polar, `A` (alt-az) and `L` (alt-alt) AltAz, since ASCOM has
   no alt-alt value and what clients decide from it matches alt-az. OnStepX and OnStep 4.x both send the letter (4.x
-  `Command.ino`: `E`, `K`, `A`, no `L`). A frame with no type letter (no frame yet, or firmware that omits it) and a
-  disconnected driver answer GermanPolar; a connected driver whose frame has no `:GU#` status answers GermanPolar
-  deliberately rather than throwing. `set_connected(false)` resets the frame and the getter also checks
-  `published_connected_`, so a stale frame cannot leak. The letter does not change while connected, so a stale frame is
-  served as it is (decision 0010 rule 6). Not hardware-validated on a fork or alt-az mount.
+  `Command.ino`: `E`, `K`, `A`, no `L`). A disconnected driver answers GermanPolar. A connected driver refuses like the other getters: a status with no
+  type letter throws `DriverException` (OnStepX always writes one of E/K/A/L and 4.x one of E/K/A, so none is a
+  supported answer), a latched fault
+  throws the fault, a lost link `NotConnected`, and no `:GU#` status since the connect throws `DriverException`
+  (decisions 0009 rules 1 and 3, 0010 rule 8), never a guessed GermanPolar. `set_connected(false)` clears the state and
+  the getter also checks `published_connected_`. The letter does not change while connected, so a stale frame
+  keeps the last letter seen (decision 0010 rule 6). Not hardware-validated on a fork or alt-az mount.
 - **DestinationSideOfPier models the firmware's choice, SideOfPier can be set** (#2179). The settings the choice
   depends on are read on OnStepX (`is_onstepx_version()`) at connect and every tenth poll tick, and cached under
   `mutex_` (`PierSettings`), so the getters never wait on the wire: the preferred side `:GX96#`, the flips switch
@@ -198,12 +210,16 @@ it is never reachable through `router.cpp` or the web UI.
   the INDI driver's comments implied, and was the single biggest early bug in this driver).
   `H` = at home, `P`/`p` = parked/not parked, `I` = parking in progress, `F` = park failed,
   `h` = homing, `g` = a guide move is running (`guide.active()`: a `:Mn#/:Ms#/:Me#/:Mw#` move, so a `MoveAxis`, and also a home or spiral guide; not a pulse guide),
-  `G` = a pulse guide is running. `N` covers a GOTO only: a `MoveAxis` never clears it. The mount type follows (`E` GEM, `K` fork, `A` alt-az, `L` alt-alt), then the
+  `G` = a pulse guide is running. `(` lunar, `O` solar, `k` King: the tracking rate (sidereal: no letter), written
+  only while tracking compensation is off (`mount.settings.rc == RC_NONE`, OnStepX `Status.command.cpp` at `af1d26bf`);
+  with compensation on the frame has `r` (refraction) or `t` (OnTrack) instead and no rate letter, and the letters
+  do not depend on Tracking being on (#2214). `N` covers a GOTO only: a `MoveAxis` never clears it. The mount type follows (`E` GEM, `K` fork, `A` alt-az, `L` alt-alt), then the
   pier side: `T` east, `W` west, `o` none (OnStepX `Status.command.cpp`; HM-17 traces `nNpEW180`
   = pier west, `nNpET1:0` = pier east, `nNPHEo180` = parked at home). `e` means "sync to
   encoders only": unpark, home and sync set it and the next GOTO clears it, and it matters only
   with external encoders. The last three characters are `'0' + n` for the pulse-guide rate, the
-  guide rate and the general error code (`:` is 10). Error `7` is `ERR_MERIDIAN`: after it,
+  guide rate and the general error code (`:` is 10); the driver reads the first of them (third from the end) to follow
+  `:GX90#` (#2214). Error `7` is `ERR_MERIDIAN`: after it,
   OnStepX acknowledges GOTO, park and home commands but does not move, and a manual move back
   inside the limit clears it (the HM-17's limits are ±60 min, `:GXE9#`/`:GXEA#`). Any other
   character is ignored (forward-compatible with firmware revisions); only a total non-response
@@ -298,7 +314,11 @@ it is never reachable through `router.cpp` or the web UI.
     limits need no check: OnStepX enforces them on every poll and refuses a move further out.
   - A client that goes silent is stopped by the server's 30 s motion watchdog instead of the
     firmware's 10 s.
-- **Tracking on/off**: confirmed on real hardware to be `:ST60.164275#` (start — sets tracking
+- **Tracking on/off**: on OnStepX the start is `:Te#` (#2214; `Mount.command.cpp` `af1d26bf`): `:ST60.164275#` sets the
+  tracking rate to sidereal there, so using it would cancel a lunar, solar or King `TrackingRate` (ASCOM: turning
+  Tracking on uses the last selected rate). Both the client's `Tracking` write and the driver's own restores (after a
+  GOTO, #1230) send `:Te#` on OnStepX; OnStep 4.x keeps `:ST60.164275#`, and stopping is `:ST0#` on both. The `:ST` pair was
+  confirmed on real hardware (HM-17) to turn tracking on and off: `:ST60.164275#` (start — sets tracking
   rate to exact sidereal, `60.164275 = 60.0 × 1.00273790935`) / `:ST0#` (stop — any rate below
   0.1 Hz reads as `TrackingNone`). `:To#`/`:Tn#` (this driver's original guess, inferred from the
   INDI driver's tracking-*compensation* switches) do **not** toggle tracking — they instead
@@ -389,13 +409,12 @@ it is never reachable through `router.cpp` or the web UI.
   keeps the last Alt/Az; it does not count. Altitude and Azimuth can therefore be older than
   `DeviceState`'s `TimeStamp` when `:GA#`/`:GZ#` reads fail while `:GU#` and RA/Dec answer, because they keep
   their last values. The reads that answer from the driver's own state,
-  `SiteLatitude`, `SiteLongitude`, `UTCDate`, `SiderealTime`, `DestinationSideOfPier`,
+  `SiteLatitude`, `SiteLongitude`, `UTCDate`, `SiderealTime`, `DestinationSideOfPier`, `GuideRate` (the mount's `:GX90#` value),
   `TargetRightAscension`/`TargetDeclination` (#2075),
   `DoesRefraction`, `IsPulseGuiding`, `Slewing` (also while a `Park` or `FindHome` is pending or within
   the slew grace) and the rate getters (`DeclinationRate`, `RightAscensionRate`, `TrackingRate`, which
-  read lock-free from the latched fault text), throw the fault too (decision 0009 rule 1, as in
-  Sky-Watcher, open-astro#882). The client's own values answer: `SlewSettleTime`, `SiteElevation` (the device config), `GuideRate`
-  (informational) and the `Can*` constants. A getter asks the mount nothing while faulted, so a faulted
+  answer from the driver's rate state, below), throw the fault too (decision 0009 rule 1, as in
+  Sky-Watcher, open-astro#882). The client's own values answer: `SlewSettleTime`, `SiteElevation` (the device config) and the `Can*` constants. A getter asks the mount nothing while faulted, so a faulted
   `DeviceState` costs no reply timeout (the 2 s back-off of #1626 is gone with the getter reads). Writes
   throw the same `DriverException` (`refuse_while_faulted_locked()`; the motion and state commands and
   the site and `UTCDate` writes (#1626), not the raw `command_blind`/`command_bool` pass-through): the
@@ -499,10 +518,10 @@ it is never reachable through `router.cpp` or the web UI.
   (on an OnStepX German mount the frame's `:GU#` pier-side letter; otherwise, or when there is none, the hour-angle
   rule from the frame's RA, #2179) and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
   (`device_state_age()`). A field the mount has not answered yet throws `DriverException` "not
-  available"; a latched fault and a lost link refuse as above. `AlignmentMode` is also served from the
-  frame, stale or not (the `:GU#` type letter does not change while connected), but it never refuses: it
-  answers `GermanPolar` with no status yet, and serves the last frame's letter on a latched fault or a
-  lost link (#2214). While the frame has no status (every `:GU#`
+  available"; a latched fault and a lost link refuse as above. `AlignmentMode` and `TrackingRate` are not
+  frame telemetry but driver state the poll keeps current from the `:GU#` letters (decision 0010 OnStep row, #2214):
+  a stale frame means they keep the last letter seen, and they refuse like the other getters: the fault,
+  `NotConnected`, or `DriverException` with no status since the connect. While the frame has no status (every `:GU#`
   since the connect failed), a command that checks for a park or writes the status through (`PulseGuide`, a
   moving `MoveAxis`, `FindHome`, `Tracking=true`, `Unpark`, the slews and syncs) reads `:GU#` first and throws
   `DriverException` ("the mount has not answered :GU# since the connect") when that read fails too, rather than take
@@ -622,7 +641,7 @@ it is never reachable through `router.cpp` or the web UI.
 - **Other slow first FAST reads in old ConformU 4.5.0 runs were not a cold-start window
   either.** Two runs showed `AlignmentMode` (~0.135s), `Declination` (~0.318s),
   `EquatorialSystem` (~0.136s) and `SideOfPier Read` (~0.140s) outside the 0.1s FAST target.
-  `AlignmentMode` (read from the polled frame) and `EquatorialSystem` (a constant) do no serial I/O, so that
+  `AlignmentMode` (driver state) and `EquatorialSystem` (a constant) do no serial I/O, so that
   time is spent in ConformU, not the driver; these two and `SideOfPier` are the first reads of
   an enum type, which matches ConformU's first-use JIT cost on enum-typed members
   (`.github/instructions/ioptron.instructions.md`; worse in the arm64 4.5.0 build, see "ConformU version" in `.github/instructions/testing.instructions.md`).
@@ -660,16 +679,55 @@ it is never reachable through `router.cpp` or the web UI.
   is supported via a local Alt/Az→RA/Dec coordinate transform followed
   by an ordinary GOTO, refused while Tracking is true (#1377) rather than needing it (#1274) (the router refuses synchronous `SlewToAltAz` with
   `MethodNotImplemented`, #775) — this works regardless of the physical mount's mechanical
-  alignment, so it does not require native AltAz mount support. `SyncToAltAz` is not implemented
-  (`CanSyncAltAz=false`) since OnStep has no native Alt/Az sync command.
-- `CanSetGuideRates=false` (guide rate is not queryable/settable over this protocol — the
-  `GuideRate` property returns an informational fixed value only). `CanSetPierSide` is true only on an OnStepX
+  alignment, so it does not require native AltAz mount support. `SyncToAltAz` is implemented the same way
+  (`CanSyncAltAz=true`, #2214): the same Alt/Az to RA/Dec conversion, then the `SyncToCoordinates` path
+  (`:Sr#`/`:Sd#`/`:CM#`, the refusal handling and the write-through; OnStep has no native Alt/Az sync command). Its
+  order is `SlewToAltAz`'s: the arguments (`InvalidValue`, also while disconnected), connected, parked, a latched
+  fault, the site, then a GOTO running (`InvalidOperation`). It does not refuse while Tracking is true: ITelescopeV4
+  only says it "may", and plate-solve syncs run on a tracking mount.
+- **Rates** (#2214). All of it is driver state under `mutex_`, filled by the connect and the poll (never by a getter), so
+  no rate getter reaches the wire; a stale frame keeps the last letter seen (decision 0010 rule 6, stale never refuses) and a
+  latched fault throws (decision 0009 rule 1):
+  - **`TrackingRate` / `TrackingRates`**: OnStepX offers sidereal, lunar, solar and King (0-3); OnStep 4.x, and a
+    driver that is not connected, `{0}`. The getter serves driver state (`tracking_rate_known_`), a mount setting kept
+    current by every `:GU#` status the driver sees from the rate letter (none is sidereal) while tracking
+    compensation is off. The letters are not written with compensation on (`r`/`t` in the frame, see the
+    status table), so then the last known rate answers: the driver's own writes, the letter while it last
+    showed one, and `:GT#` (sidereal until one of those answers; read at connect, and on the slow tick only while compensation is on and the mount
+    tracks; `0`, or a rate not within 0.01 Hz of one of the four, keeps the last one). On OnStepX, with no `:GU#` answer
+    since the connect, `TrackingRate` (and the two offset getters built on it) throws `DriverException` as `Tracking` does
+    (decision 0010 rule 8), never sidereal. Known limitation: with compensation on, after a home reset (it sets the rate
+    back to the default) or a connect to a compensated mount that is not tracking, the driver serves its last known or
+    assumed rate until the mount tracks and a slow tick reads `:GT#` (it answers `0` while not tracking). OnStep 4.x always
+    reads sidereal. The
+    setter is `InvalidValue` for a value outside 0-3 (before the connection check), then connected, a latched fault,
+    and `InvalidValue` for a rate the firmware does not offer (1-3 on 4.x; sidereal is accepted and sends nothing there).
+    On OnStepX it sends `:TQ#`/`:TL#`/`:TS#`/`:TK#`, writes the rate through (the next read sees it before the next
+    poll) and reads the offsets again. It does not change Tracking. A change of rate while either stored offset is
+    non-zero first sends `:SXTR,0.000000#` and `:SXTD,0.000000#` (OnStepX keeps applying the offsets on a lunar, solar or
+    King rate while the getters read 0 and writes are refused; as the Sky-Watcher driver, ITelescopeV4 does not require
+    it); a refusal throws with the `:GE#` reason.
+  - **`RightAscensionRate` / `DeclinationRate`** (OnStepX; `CanSet*` false on 4.x and while disconnected, where the
+    setters throw `PropertyNotImplemented` after the connection check): the firmware's offsets in arcseconds per
+    sidereal second, read at connect, after each write, after a `TrackingRate` write, and by the poll when the frame's
+    rate, compensation, tracking, parked or at-home flags differ from the previous frame's (OnStepX zeroes both on every
+    home reset: a find home, the boot, the unpark path; `Home.cpp` `reset()`). A read that does not parse keeps the
+    previous values and does not fail the tick. The getters divide back (RA by 15, Dec by 0.9972695663) and return
+    0 unless `TrackingRate` (as served) is sidereal (ITelescopeV4). A write is `InvalidValue` when the value in the
+    firmware's units is beyond +/-1800 (the firmware clamps there silently), before the connection check, then
+    connected, a latched fault, `InvalidOperation` when `TrackingRate` is not sidereal, then `:SXTR,n.n#`/`:SXTD,n.n#`
+    (six decimals) with the reply read: `0` throws `InvalidOperation` with the `:GE#` reason (#1379).
+  - **`GuideRate`** is the mount's pulse-guide rate: `:GX90#` (a multiple of sidereal) times 15.0410686 arcseconds per
+    second, in degrees per second, on both axes. It is read at connect (any firmware) and again when the pulse-guide
+    digit of `:GU#` changes. A mount that does not answer it, or answers something that is not a positive decimal,
+    keeps the informational half-sidereal value. `CanSetGuideRates` stays `false`: `:R0#`-`:R2#` write the controller's
+    non-volatile memory and take effect only in builds with `GUIDE_SEPARATE_PULSE_RATE`, so a client write could
+    persist on the mount and not be detectable.
+  - Test seam: none beyond the poll's (`set_status_poll_paused_for_testing()`, `poll_status_now_for_testing()`); the
+    cases are in `test_onstep_telescope_snapshot.cpp` (`[rates]`).
+- `CanSetPierSide` is true only on an OnStepX
   German mount with the flips on (#2179, the flip bullet above); the flip is `:MNe#`/`:MNw#`, a GOTO to the
-  current position on the other side. `CanSetDeclinationRate`/`CanSetRightAscensionRate` are
-  also `false` — custom tracking-rate commands were not confirmed against real OnStep firmware
-  during this implementation, so the setters throw `PropertyNotImplemented` rather than
-  advertise support that might silently no-op. The getters read 0, and throw `NotConnected` while
-  disconnected (read lock-free from `Connected`, #1478).
+  current position on the other side.
 - **`UTCDate` is the mount's clock or a client's write, never the host's** (#1478): the connect
   reads the mount clock once (`:GL#`/`:GC#`/`:GG#`, `seed_utc_from_mount_locked()`, after any
   `syncTimeOnConnect` write, which makes the read unneeded), so `UTCDate`, and so `DeviceState`,

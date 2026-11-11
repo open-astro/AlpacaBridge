@@ -81,7 +81,7 @@ struct AltitudeLimits {
 /**
  * @brief The mount type letter of :GU#. OnStepX writes exactly one of E, K, A or L before the pier-side letter
  * (Status.command.cpp); OnStep 4.x writes E, K or A (Command.ino). Unknown is a frame with no type letter (no frame
- * yet, or firmware that omits it).
+ * yet; no supported firmware omits it, so the driver's AlignmentMode throws on it).
  */
 enum class MountType : std::uint8_t { Unknown, GermanEquatorial, Fork, AltAz, AltAlt };
 
@@ -116,6 +116,16 @@ struct MountStatus {
     int side_of_pier = -1;
     MountType mount_type = MountType::Unknown;
     bool is_gem = false;
+    // The tracking-rate letter OnStepX writes into :GU# (Status.command.cpp, af1d26bf): '(' lunar (1), 'O' solar
+    // (2), 'k' King (3), none sidereal (0). The letters appear ONLY while tracking compensation is off; with it on
+    // (`tracking_compensation`: 'r' refraction or 't' OnTrack model) the frame carries no rate letter, and
+    // `tracking_rate` is 0 without saying the rate is sidereal. OnStep 4.x never writes a rate letter.
+    int tracking_rate = 0;
+    bool tracking_compensation = false;
+    // The pulse-guide rate digit, the third character from the end of :GU# ('0' + pulseRateSelect, then the guide
+    // rate digit and the error digit; OnStepX Status.command.cpp, OnStep 4.x Command.ino), or -1 when that
+    // character is not a digit.
+    int pulse_guide_rate_select = -1;
     std::string raw_status;
 };
 
@@ -347,9 +357,13 @@ public:
     void abort_slew();
 
     /**
-     * @brief Start sidereal tracking.
+     * @brief Start tracking.
      *
-     * Sends :ST60.164275# — verified against real OnStep firmware
+     * With `use_enable_command` (OnStepX) sends :Te#, which starts tracking at the rate already selected
+     * (Mount.command.cpp, af1d26bf); :ST sets the rate to sidereal there, which would cancel a lunar, solar or
+     * King selection. Otherwise (OnStep 4.x) sends :ST60.164275# as below.
+     *
+     * The :ST form: sends :ST60.164275# — verified against real OnStep firmware
      * (Command.ino) and live hardware. OnStep's tracking on/off control is
      * :ST[freq]# (set tracking rate in legacy AC-mains-relative Hz), not a
      * dedicated on/off command; 60.164275 = 60.0 * 1.00273790935 solves for
@@ -357,7 +371,7 @@ public:
      * inferred from the INDI driver's tracking-compensation switches) do
      * NOT toggle tracking — confirmed empirically against hardware.
      */
-    void start_tracking();
+    void start_tracking(bool use_enable_command = false);
 
     /**
      * @brief Stop tracking.
@@ -373,9 +387,50 @@ public:
      * Sends what start_tracking()/stop_tracking() send, but reads the bare
      * '0'/'1' reply instead of draining it. Returns true when the mount
      * accepted it; on false, get_last_command_error() says why (OnStep 4.x
-     * refuses it while slewing).
+     * refuses it while slewing). `use_enable_command` sends :Te# instead of the :ST start (OnStepX, see
+     * start_tracking()); stopping is :ST0# either way.
      */
-    bool set_tracking_checked(bool on);
+    bool set_tracking_checked(bool on, bool use_enable_command = false);
+
+    /**
+     * @brief Select the tracking rate (OnStepX): :TQ# sidereal (0), :TL# lunar (1), :TS# solar (2), :TK# King (3).
+     *
+     * No reply (Mount.command.cpp, af1d26bf), sent blind. Changes neither tracking on/off nor the rate offsets.
+     */
+    void set_tracking_rate(int rate);
+
+    /**
+     * @brief The tracking rate in Hz (:GT#), 0 when the mount is not tracking (Mount.command.cpp, af1d26bf).
+     *
+     * std::nullopt for a reply that is not a number.
+     */
+    std::optional<double> get_tracking_rate_hz();
+
+    /**
+     * @brief Set a tracking-rate offset (OnStepX): :SXTR,n.n# RA, :SXTD,n.n# Dec, in arcseconds per sidereal
+     *        second.
+     *
+     * Reads the bare '0'/'1' reply; true when accepted (on false, get_last_command_error() says why). The firmware
+     * clamps silently to +/-1800, so the caller refuses a value beyond it first.
+     */
+    bool set_rate_offset_ra(double arcsec_per_sidereal_second);
+    bool set_rate_offset_dec(double arcsec_per_sidereal_second);
+
+    /**
+     * @brief Read a tracking-rate offset (:GXTR# RA, :GXTD# Dec), arcseconds per sidereal second (8 decimals).
+     *
+     * std::nullopt for a reply that is not a decimal number (an unknown command answers "0").
+     */
+    std::optional<double> get_rate_offset_ra();
+    std::optional<double> get_rate_offset_dec();
+
+    /**
+     * @brief The pulse-guide rate as a multiple of the sidereal rate (:GX90#, "%0.2f"; OnStepX
+     *        Guide.command.cpp and OnStep 4.x Command.ino).
+     *
+     * std::nullopt for a reply that is not a positive decimal number (an unknown command answers "0").
+     */
+    std::optional<double> get_pulse_guide_rate();
 
     /**
      * @brief Park the mount at its configured park position.

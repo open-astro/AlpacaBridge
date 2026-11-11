@@ -106,7 +106,7 @@ TEST_CASE("OnStep Telescope Driver - Defaults", "[onstep][telescope][unit]") {
     CHECK(driver->get_can_slew_alt_az());
     CHECK(driver->get_can_slew_alt_az_async());
     CHECK(driver->get_can_sync());
-    CHECK_FALSE(driver->get_can_sync_alt_az());
+    CHECK(driver->get_can_sync_alt_az());
     CHECK(driver->get_can_find_home());
     CHECK(driver->get_can_park());
     CHECK(driver->get_can_unpark());
@@ -221,14 +221,17 @@ TEST_CASE("OnStep Telescope Driver - State machine", "[onstep][telescope][unit]"
 TEST_CASE("OnStep Telescope Driver - Unsupported methods", "[onstep][telescope][unit]") {
     auto driver = make_driver(0);
 
-    // Guide rate and pier side are fixed/read-only on this driver. While disconnected the connection
-    // check comes first (#1919), not a generic driver error or a silent no-op.
+    // Guide rate and pier side cannot be written on this driver (the guide rate is the mount's :GX90#,
+    // read-only). While disconnected the connection check comes first (#1919), not a generic driver
+    // error or a silent no-op.
     require_alpaca_error([&]() { driver->set_guide_rate({0.001, 0.001}); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_right_ascension_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->sync_to_alt_az(45.0, 90.0); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->set_tracking_rate(1); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    // A DriveRates value is a connected-only write; one outside 0-3 is the value's InvalidValue, before the check.
+    require_alpaca_error([&]() { driver->set_tracking_rate(1); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_tracking_rate(4); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 // open-astro#346, the shape #304 fixed on the Sky-Watcher driver: ASCOM treats
@@ -2079,10 +2082,12 @@ TEST_CASE("OnStep Telescope Driver - Park during a MoveAxis stops the move and p
     driver->set_connected(false);
 }
 
-// Connected, the settings OnStep does not offer keep their capability answers (disconnected: NotConnected, above).
+// Connected to OnStep 4.x, the settings it does not offer keep their capability answers (disconnected: NotConnected,
+// above). The rate offsets are an OnStepX feature (#2214); SyncToAltAz is offered on both.
 TEST_CASE("OnStep Telescope Driver - connected unsupported setters keep their NotImplemented answers",
           "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ParkHomeFake>();
+    mount->version = "4.24s";
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
     REQUIRE(server.ok());
     auto driver = connect_park_home_fake(server, *mount);
@@ -2092,7 +2097,8 @@ TEST_CASE("OnStep Telescope Driver - connected unsupported setters keep their No
     require_alpaca_error([&]() { driver->set_side_of_pier(0); }, AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&]() { driver->set_declination_rate(1.0); }, AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&]() { driver->set_right_ascension_rate(1.0); }, AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&]() { driver->sync_to_alt_az(45.0, 90.0); }, AlpacaError::MethodNotImplemented);
+    CHECK(driver->get_tracking_rates() == std::vector<int>{0});
+    CHECK(driver->get_can_sync_alt_az());
     driver->set_connected(false);
 }
 
@@ -4076,9 +4082,10 @@ TEST_CASE("OnStep Telescope Driver - Connected answers while a connect is in fli
 
 #ifndef _WIN32
 // #1762 B4: members no case called while connected. These four read no mount
-// reply: GuideRate is OnStep's default guide rate (CanSetGuideRates is false),
-// and the optics are the device config's values, so each case also checks that
-// nothing reached the mount.
+// reply when called: GuideRate serves what the connect read from :GX90# (this
+// fake answers "0", which is no answer, so the informational half-sidereal rate
+// stays; CanSetGuideRates is false), and the optics are the device config's
+// values, so each case also checks that nothing reached the mount.
 namespace {
 std::unique_ptr<alpacacore::TelescopeDriver> connect_scripted(alpacacore::test::FakeMountServer& server) {
     alpacacore::vendor::onstep::ConnectionInfo conn;

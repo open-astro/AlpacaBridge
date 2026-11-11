@@ -262,6 +262,30 @@ std::optional<int> parse_whole_number(const std::string& text) {
     return text[0] == '-' ? -value : value;
 }
 
+// A decimal number with a fractional part ("60.16427", "-0.50000000"), nothing else, or nullopt. The fraction is
+// required: an unknown command answers a bare "0".
+std::optional<double> parse_decimal(const std::string& text, bool require_fraction) {
+    if (text.empty() || text.size() > 24) {
+        return std::nullopt;
+    }
+    std::size_t first = (text[0] == '-' || text[0] == '+') ? 1 : 0;
+    bool seen_dot = false;
+    bool seen_digit = false;
+    for (std::size_t i = first; i < text.size(); ++i) {
+        if (text[i] == '.' && !seen_dot) {
+            seen_dot = true;
+        } else if (text[i] >= '0' && text[i] <= '9') {
+            seen_digit = true;
+        } else {
+            return std::nullopt;
+        }
+    }
+    if (!seen_digit || (require_fraction && !seen_dot)) {
+        return std::nullopt;
+    }
+    return std::strtod(text.c_str(), nullptr);
+}
+
 MountStatus parse_status(const std::string& raw) {
     MountStatus status;
     status.raw_status = raw;
@@ -300,6 +324,19 @@ MountStatus parse_status(const std::string& raw) {
         status.mount_type = MountType::AltAlt;
     }
     status.is_gem = status.mount_type == MountType::GermanEquatorial;
+    // The tracking-rate letter and the compensation letters (see MountStatus). 'r' and 't' appear nowhere else in
+    // the reply; '(' 'O' and 'k' are distinct from the mount-type 'K' and the pier-side 'o'.
+    status.tracking_compensation = raw.find('r') != std::string::npos || raw.find('t') != std::string::npos;
+    if (!status.tracking_compensation) {
+        status.tracking_rate = raw.find('(') != std::string::npos   ? 1
+                               : raw.find('O') != std::string::npos ? 2
+                               : raw.find('k') != std::string::npos ? 3
+                                                                    : 0;
+    }
+    // '<pulse rate><guide rate><error>' close the reply, so the pulse-guide rate digit is third from the end.
+    if (raw.size() >= 3 && raw[raw.size() - 3] >= '0' && raw[raw.size() - 3] <= '9') {
+        status.pulse_guide_rate_select = raw[raw.size() - 3] - '0';
+    }
     if (raw.find('T') != std::string::npos) {
         status.side_of_pier = 0;  // pier east
     } else if (raw.find('W') != std::string::npos) {
@@ -977,14 +1014,53 @@ public:
     // otherwise trackingState becomes TrackingSidereal and the rate is
     // freq/60.0/1.00273790935. Solving for an exact 1.0x (sidereal) result
     // gives freq = 60.0 * 1.00273790935.
-    void start_tracking() { send_command_blind(":ST60.164275#"); }
+    //
+    // OnStepX: :Te# starts tracking at the selected rate (:ST sets the rate to sidereal, Mount.command.cpp
+    // af1d26bf, which would cancel a lunar, solar or King selection).
+    void start_tracking(bool use_enable_command) { send_command_blind(use_enable_command ? ":Te#" : ":ST60.164275#"); }
 
     void stop_tracking() { send_command_blind(":ST0#"); }
 
     // A numeric reply: one bare digit, no '#' (OnStepX ProcessCmds.cpp).
-    bool set_tracking_checked(bool on) {
-        const std::string reply = send_command(on ? ":ST60.164275#" : ":ST0#", false, kSetAckTimeoutMs);
+    bool set_tracking_checked(bool on, bool use_enable_command) {
+        const char* const start = use_enable_command ? ":Te#" : ":ST60.164275#";
+        const std::string reply = send_command(on ? start : ":ST0#", false, kSetAckTimeoutMs);
         return !reply.empty() && reply[0] == '1';
+    }
+
+    // :TQ# :TL# :TS# :TK# have no reply (Mount.command.cpp, af1d26bf).
+    void set_tracking_rate(int rate) {
+        static constexpr const char* kCommands[] = {":TQ#", ":TL#", ":TS#", ":TK#"};
+        if (rate < 0 || rate > 3) {
+            throw AlpacaException("Invalid OnStep tracking rate");
+        }
+        send_command_blind(kCommands[rate]);
+    }
+
+    // "60.16427#", or "0#" when not tracking.
+    std::optional<double> get_tracking_rate_hz() {
+        return parse_decimal(send_command(":GT#", true, kSetAckTimeoutMs), /*require_fraction=*/false);
+    }
+
+    // :SXTR,n.n# / :SXTD,n.n#: a numeric reply, one bare digit (Mount.command.cpp, af1d26bf).
+    bool set_rate_offset(char axis, double arcsec_per_sidereal_second) {
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), ":SXT%c,%.6f#", axis, arcsec_per_sidereal_second);
+        const std::string reply = send_command(buf, false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
+    std::optional<double> get_rate_offset(char axis) {
+        const char* const command = axis == 'R' ? ":GXTR#" : ":GXTD#";
+        return parse_decimal(send_command(command, true, kSetAckTimeoutMs), /*require_fraction=*/true);
+    }
+
+    std::optional<double> get_pulse_guide_rate() {
+        const auto rate = parse_decimal(send_command(":GX90#", true, kSetAckTimeoutMs), /*require_fraction=*/true);
+        if (!rate || !(*rate > 0.0)) {
+            return std::nullopt;
+        }
+        return rate;
     }
 
     bool park() {
@@ -1672,10 +1748,30 @@ std::string OnStepProtocolWrapper::sync_to_target() { return pimpl_->sync_to_tar
 
 void OnStepProtocolWrapper::abort_slew() { pimpl_->abort_slew(); }
 
-void OnStepProtocolWrapper::start_tracking() { pimpl_->start_tracking(); }
+void OnStepProtocolWrapper::start_tracking(bool use_enable_command) { pimpl_->start_tracking(use_enable_command); }
 
 void OnStepProtocolWrapper::stop_tracking() { pimpl_->stop_tracking(); }
-bool OnStepProtocolWrapper::set_tracking_checked(bool on) { return pimpl_->set_tracking_checked(on); }
+bool OnStepProtocolWrapper::set_tracking_checked(bool on, bool use_enable_command) {
+    return pimpl_->set_tracking_checked(on, use_enable_command);
+}
+
+void OnStepProtocolWrapper::set_tracking_rate(int rate) { pimpl_->set_tracking_rate(rate); }
+
+std::optional<double> OnStepProtocolWrapper::get_tracking_rate_hz() { return pimpl_->get_tracking_rate_hz(); }
+
+bool OnStepProtocolWrapper::set_rate_offset_ra(double arcsec_per_sidereal_second) {
+    return pimpl_->set_rate_offset('R', arcsec_per_sidereal_second);
+}
+
+bool OnStepProtocolWrapper::set_rate_offset_dec(double arcsec_per_sidereal_second) {
+    return pimpl_->set_rate_offset('D', arcsec_per_sidereal_second);
+}
+
+std::optional<double> OnStepProtocolWrapper::get_rate_offset_ra() { return pimpl_->get_rate_offset('R'); }
+
+std::optional<double> OnStepProtocolWrapper::get_rate_offset_dec() { return pimpl_->get_rate_offset('D'); }
+
+std::optional<double> OnStepProtocolWrapper::get_pulse_guide_rate() { return pimpl_->get_pulse_guide_rate(); }
 
 bool OnStepProtocolWrapper::park() { return pimpl_->park(); }
 
