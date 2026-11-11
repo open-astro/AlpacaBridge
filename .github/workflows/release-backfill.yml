@@ -1,0 +1,163 @@
+# Attach the arm64 .deb to an existing GitHub Release that has none.
+#
+# Releases v3.0.0 through v4.1.0 were published before release.yml built a
+# .deb, and apt.openastro.net keeps only the newest version, so their packages
+# were not downloadable anywhere. This workflow rebuilds one tag's .deb from
+# that tag's own source, in the same debian:trixie container release.yml
+# uses, attaches it under the same asset names (alpacabridge_<tag without
+# v>_arm64.deb and alpacabridge-dbgsym_<tag without v>_arm64.deb, each with a
+# .sha256) and gives both a signed build provenance attestation. It also
+# restores the .deb of a Release recreated by hand after the prune job in
+# release.yml deleted it, once that tag's original run is past GitHub's 30-day
+# re-run window.
+#
+# Run: gh workflow run release-backfill.yml -f tag=vX.Y.Z
+#
+# It refuses a tag that has no Release, a Release that already carries the
+# .deb (a published package is never replaced: delete the asset by hand first
+# if that is really meant), and a tag whose VERSION file does not match it.
+#
+# What differs from release.yml: no SBOM attestation (scripts/dependency_snapshot.py
+# checks the package against today's vendored SDK pins, which an older tag's
+# SDK files do not match, and older tags do not carry the script), no apt
+# dispatch (the apt repository serves only the newest version) and no release
+# notes change. The build installs today's trixie Build-Depends, so the
+# package's shlibs Depends can name newer library versions than a build on the
+# release date would have; the AlpacaBridge source and vendored SDKs are the
+# tag's own.
+
+name: Release backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the .deb to (vX.Y.Z or vX.Y.Z-beta.N). The Release must exist and have no .deb."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-backfill-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  deb:
+    name: Build and attach the .deb
+    permissions:
+      contents: write       # gh release upload
+      id-token: write       # OIDC token Sigstore signs the attestation with
+      attestations: write   # store the provenance attestation
+    runs-on: ubuntu-24.04-arm
+    # Built on the target distribution so dpkg-shlibdeps derives trixie
+    # package names, as release.yml does.
+    container: debian:trixie
+    timeout-minutes: 40
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev gh
+
+      - name: Checkout the workflow's tools
+        # The tag mapper comes from the branch this workflow runs from, not
+        # from the tag, so one rule names the assets of every release.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+          path: tools
+
+      - name: Map the tag and check the Release
+        id: tag
+        run: |
+          set -euo pipefail
+          # Fails on anything but vX.Y.Z or vX.Y.Z-beta.N, before the tag is
+          # used as a checkout ref.
+          python3 tools/scripts/release_tag.py "${RELEASE_TAG}" | tee mapped.txt
+          cat mapped.txt >> "${GITHUB_OUTPUT}"
+          notes_name="$(sed -n 's/^notes_name=//p' mapped.txt)"
+          if ! assets="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"; then
+            echo "ERROR: ${RELEASE_TAG} has no GitHub Release; this workflow only adds the .deb to an existing one." >&2
+            exit 1
+          fi
+          if printf '%s\n' "${assets}" | grep -qxF "alpacabridge_${notes_name}_arm64.deb"; then
+            echo "ERROR: Release ${RELEASE_TAG} already has alpacabridge_${notes_name}_arm64.deb; a published package is never replaced." >&2
+            exit 1
+          fi
+          echo "Release ${RELEASE_TAG} exists and has no .deb."
+
+      - name: Checkout the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+          ref: refs/tags/${{ inputs.tag }}
+          path: src
+
+      - name: Verify the tag matches VERSION
+        env:
+          TAG_VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          file_version="$(tr -d '[:space:]' < src/VERSION)"
+          if [ "${TAG_VERSION}" != "${file_version}" ]; then
+            echo "ERROR: tag ${RELEASE_TAG} does not match its VERSION file (${file_version})." >&2
+            exit 1
+          fi
+          echo "Tag ${RELEASE_TAG} matches VERSION ${file_version}."
+
+      - name: Install build dependencies
+        # The tag's own debian/control, so the build gets what that release needed.
+        working-directory: src
+        run: |
+          set -euo pipefail
+          apt-get build-dep -y ./
+
+      - name: Build the .deb
+        working-directory: src
+        env:
+          NOTES_NAME: ${{ steps.tag.outputs.notes_name }}
+        run: |
+          set -euo pipefail
+          scripts/build_deb.sh
+          version="$(tr -d '[:space:]' < VERSION)"
+          # dpkg-buildpackage writes to the parent directory, the workspace root.
+          mkdir -p ../dist
+          for pkg in alpacabridge alpacabridge-dbgsym; do
+            src="../${pkg}_${version}_arm64.deb"
+            if [ ! -f "${src}" ]; then
+              echo "ERROR: ${src} was not built." >&2
+              exit 1
+            fi
+            asset="${pkg}_${NOTES_NAME}_arm64.deb"
+            cp "${src}" "../dist/${asset}"
+            (cd ../dist && sha256sum "${asset}" > "${asset}.sha256")
+          done
+          dpkg-deb --info "../dist/alpacabridge_${NOTES_NAME}_arm64.deb" | sed -n '/Package:/,/Depends:/p'
+          ls -l ../dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2 pinned (immutable ref)
+        with:
+          subject-path: |
+            dist/alpacabridge_${{ steps.tag.outputs.notes_name }}_arm64.deb
+            dist/alpacabridge-dbgsym_${{ steps.tag.outputs.notes_name }}_arm64.deb
+
+      - name: Attach to the release
+        env:
+          NOTES_NAME: ${{ steps.tag.outputs.notes_name }}
+        run: |
+          set -euo pipefail
+          # No --clobber: if a .deb appeared since the check, the upload fails
+          # instead of replacing it.
+          gh release upload "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            "dist/alpacabridge_${NOTES_NAME}_arm64.deb" \
+            "dist/alpacabridge_${NOTES_NAME}_arm64.deb.sha256" \
+            "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb" \
+            "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb.sha256"
