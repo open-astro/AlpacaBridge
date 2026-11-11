@@ -245,7 +245,7 @@ public:
         if (!mount_info_.empty()) {
             return "ZWO " + mount_info_;
         }
-        return "ZWO Mount";
+        return "ZWO Telescope";
     }
 
     DeviceType get_device_type() const override {

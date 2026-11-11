@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/link_health.h>
@@ -163,8 +164,12 @@ public:
         return device_number_;
     }
 
+    // Camera model + function (decision 0024), so two cameras' heaters are told apart; "ZWO Dew Heater" until a
+    // connect names the camera.
     std::string get_name() const override {
-        return "ZWO Dew Heater";
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (camera_name_ == "ZWO Camera") return "ZWO Dew Heater";
+        return util::branded_name("ZWO", camera_name_) + " Dew Heater";
     }
 
     DeviceType get_device_type() const override {

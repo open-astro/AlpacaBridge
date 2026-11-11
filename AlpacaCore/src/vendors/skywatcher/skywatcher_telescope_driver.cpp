@@ -426,24 +426,34 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
+    // mount_code_to_name()'s fallback for a board not in its table, "Mount (code 0xNN)": no model to name.
+    static bool is_unknown_board(const std::string& model) { return model.rfind("Mount (code ", 0) == 0; }
+
     // Model comes from the ":e" mount-code byte captured at connect. Falls back
     // to the generic name while disconnected. Served from the narrow firmware
-    // mutex so it stays inside ConformU's 0.1 s FAST target. The "(EQMOD)"
-    // suffix disambiguates from the synscan driver's get_name(), which
-    // resolves to the identical model string for a mount reachable over both
-    // its hand controller and its own USB/EQDIR port (hardware-confirmed
-    // 2026-09-10: both connections reported plain "Sky-Watcher EQM-35 Pro"
-    // for the same physical mount, indistinguishable in a client's chooser).
-    // "EQMOD" is the ecosystem's name for the direct motor-controller path
-    // (INDI "EQMod Mount" covers its AZ-GTi/Star Adventurer variants too;
-    // ASCOM "EQMOD"), and it holds for every transport this driver speaks --
-    // built-in USB, EQDIR cable, a handset in PC Direct Mode, and Wi-Fi --
-    // which "USB"/"EQDIR" would not.
+    // mutex so it stays inside ConformU's 0.1 s FAST target. Brand + model only
+    // (decision 0024): the SynScan driver gives the same mount the same name, and
+    // the Description below names the EQMOD path.
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
-        // open-astro#582: the web UI shows this name and has no field for the
-        // eps source, so every connected source is named here. It is kept with
-        // the model across a disconnect, like the model itself.
+        if (model_cache_.empty() || is_unknown_board(model_cache_)) {
+            return "Sky-Watcher Telescope";
+        }
+        return "Sky-Watcher " + model_cache_;
+    }
+
+    DeviceType get_device_type() const override { return DeviceType::Telescope; }
+
+    std::string fallback_unique_id() const override { return "SkyWatcher_" + std::to_string(device_number_); }
+
+    // "EQMOD" is the ecosystem's name for the direct motor-controller path
+    // (INDI "EQMod Mount", ASCOM "EQMOD"); it holds for every transport this
+    // driver speaks (built-in USB, EQDIR cable, a handset in PC Direct Mode,
+    // Wi-Fi). open-astro#582: the web UI shows the Description, so every
+    // connected eps source is named here. It is kept with the model across a
+    // disconnect, like the model itself.
+    std::string get_description() const override {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
         std::string source;
         switch (eps_source_) {
             case EpsSource::Measured:
@@ -462,17 +472,9 @@ public:
             case EpsSource::None:
                 break;
         }
-        if (model_cache_.empty()) {
-            return "Sky-Watcher Mount (EQMOD" + source + ")";
-        }
-        return "Sky-Watcher " + model_cache_ + " (EQMOD" + source + ")";
+        const std::string board = is_unknown_board(model_cache_) ? " (" + model_cache_ + ")" : std::string();
+        return "Sky-Watcher EQMOD direct mount" + board + source;
     }
-
-    DeviceType get_device_type() const override { return DeviceType::Telescope; }
-
-    std::string fallback_unique_id() const override { return "SkyWatcher_" + std::to_string(device_number_); }
-
-    std::string get_description() const override { return "Sky-Watcher EQMOD Direct Mount Driver"; }
 
     std::string get_driver_info() const override { return "AlpacaCore EQMOD Direct Driver v0.1"; }
 
@@ -6742,7 +6744,7 @@ private:
     // Web-UI firmware copy under its own narrow mutex (never mutex_).
     mutable std::mutex firmware_mutex_;
     std::string model_cache_;  // guarded by firmware_mutex_
-    // open-astro#582: where eps came from, shown in get_name(). Guarded by firmware_mutex_.
+    // open-astro#582: where eps came from, shown in get_description(). Guarded by firmware_mutex_.
     enum class EpsSource : std::uint8_t { None, Measured, Override, Unmeasured, IdentifyFailed };
     EpsSource eps_source_ = EpsSource::None;
     std::string firmware_cache_;

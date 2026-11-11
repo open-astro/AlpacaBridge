@@ -319,6 +319,9 @@ private:
         std::string get_version_number() const {
             return call([](auto& p) { return p.get_version_number(); });
         }
+        std::string get_product_description() const {
+            return call([](auto& p) { return p.get_product_description(); });
+        }
         std::optional<int> get_mount_coords_mode() const {
             return call([](auto& p) { return p.get_mount_coords_mode(); });
         }
@@ -495,7 +498,13 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "OnStep Telescope"; }
+    // Decision 0024: OnStep is firmware without a hardware brand, so the name is what the controller calls itself,
+    // read at connect: OnStepX's :GVC# product description, else the :GVP# product ("OnStep", "On-Step"). Kept
+    // across a disconnect, like the Sky-Watcher model.
+    std::string get_name() const override {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        return model_cache_.empty() ? "OnStep Telescope" : model_cache_;
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
 
@@ -670,13 +679,15 @@ public:
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
             site_read_warned_ = false;
 
-            // The two reads run without firmware_mutex_: get_device_firmware()
+            // These reads run without firmware_mutex_: get_device_firmware()
             // takes only that lock and must not wait for a serial round trip
             // (decision 0016). Only the store is under it.
             std::string firmware_version;
             std::string firmware;
+            std::string model;
             try {
                 std::string product = protocol.get_product_name();
+                if (product != "0") model = product;  // "0": the reply to a command the controller does not know
                 firmware_version = protocol.get_version_number();
                 firmware = product + (firmware_version.empty() ? "" : (" " + firmware_version));
             } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -685,6 +696,20 @@ public:
             {
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_ = firmware;
+            }
+
+            // OnStepX only: "0" is OnStep's reply to a command it does not know (a release older than :GVC#).
+            if (is_onstepx_version(firmware_version)) {
+                try {
+                    const std::string description = protocol.get_product_description();
+                    if (!description.empty() && description != "0") model = description;
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // Unknown: the :GVP# product names the mount.
+                }
+            }
+            if (!model.empty()) {
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                model_cache_ = model;
             }
 
             // OnStepX applies refraction to the RA/Dec it reports unless it was
@@ -3703,6 +3728,8 @@ private:
     // the get_device_firmware() poll never blocks on the coarse connect lock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_cache_;
+    // The name read at connect (:GVC#, else :GVP#), under firmware_mutex_; kept across a disconnect.
+    std::string model_cache_;
 
     // Last, so it is destroyed (and its body joined) before every member the
     // body touches. The destructor joins it explicitly as well.

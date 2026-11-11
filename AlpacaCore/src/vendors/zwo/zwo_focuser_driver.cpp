@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/link_health.h>
@@ -82,8 +83,12 @@ public:
 
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        // EAF_INFO's name reads "EAF" on an EAFN too; the type read at connect tells them apart.
+        if (!model_.empty()) {
+            return util::branded_name("ZWO", model_);
+        }
         if (focuser_info_valid_ && !focuser_info_.name.empty()) {
-            return focuser_info_.name;
+            return util::branded_name("ZWO", focuser_info_.name);
         }
         return "ZWO EAF";
     }
@@ -365,6 +370,13 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG("ZWO", "EAF firmware unavailable: " + std::string(e.what()));
         }
+        // Informational like the firmware: an unreadable type names the unit from EAF_INFO instead.
+        std::string model;
+        try {
+            model = sdk_.get_type(focuser_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "EAF type unavailable: " + std::string(e.what()));
+        }
         ZWOEAFFocuserInfo info;
         if (!sdk_.get_focuser_info_by_id(focuser_id, info)) {
             throw AlpacaException("Failed to read focuser info", AlpacaError::DriverException);
@@ -395,6 +407,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             focuser_info_ = info;
             focuser_info_valid_ = true;
+            model_ = model;
             serial_number_ = serial;
         }
         max_step_.store(max_step);
@@ -645,6 +658,7 @@ private:
             focuser_id_.reset();
             focuser_info_ = {};
             focuser_info_valid_ = false;
+            model_.clear();
             serial_number_.clear();
         }
     }
@@ -705,6 +719,7 @@ private:
     std::string serial_number_;
     ZWOEAFFocuserInfo focuser_info_;
     bool focuser_info_valid_;
+    std::string model_;  // EAFGetType at connect, under mutex_; empty when unread
     const std::optional<int> configured_max_step_;  // config "maxStep"; unset = leave the stored value
     // Published at the end of connect and read lock-free by MaxStep/MaxIncrement (decision 0016).
     std::atomic<int> max_step_{0};

@@ -57,6 +57,9 @@ public:
     // What get_firmware_version() answers; an empty string is an unreadable one. fail_firmware makes it throw.
     std::string firmware{"1.0"};
     bool fail_firmware{false};
+    // What get_type() answers (EAFGetType); fail_type makes it throw.
+    std::string type{"EAFN"};
+    bool fail_type{false};
     std::atomic<int> firmware_calls{0};
     // The connect's info read fails (after the firmware read).
     bool fail_info{false};
@@ -190,6 +193,14 @@ public:
     }
     std::string get_firmware_version(int focuser_id) override {
         return table_.call(focuser_id, [&] { return raw_firmware(focuser_id); });
+    }
+    std::string get_type(int focuser_id) override {
+        return table_.call(focuser_id, [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_unit(focuser_id);
+            if (fail_type) throw AlpacaException("EAFGetType: EAF_ERROR_GENERAL_ERROR", AlpacaError::DriverException);
+            return type;
+        });
     }
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
 

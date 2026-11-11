@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/capture_session.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
@@ -194,7 +195,7 @@ public:
         // survives a disconnect.
         std::lock_guard<std::mutex> lock(mutex_);
         if (!cached_name_.empty()) {
-            return cached_name_;
+            return util::branded_name("Player One", cached_name_);
         }
         return "Player One Camera";
     }

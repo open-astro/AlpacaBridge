@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/link_health.h>
@@ -90,7 +91,7 @@ public:
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (rotator_info_valid_ && !rotator_info_.name.empty()) {
-            return rotator_info_.name;
+            return util::branded_name("ZWO", rotator_info_.name);
         }
         return "ZWO CAA";
     }

@@ -15,6 +15,7 @@
 #include <alpacacore/vendor/zwo/zwo_eaf_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_slots.h>
 
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 
@@ -265,6 +266,12 @@ std::string ZWOEAFSDKWrapper::get_firmware_version(int focuser_id) {
     std::ostringstream oss;
     oss << static_cast<int>(major) << "." << static_cast<int>(minor) << "." << static_cast<int>(build);
     return oss.str();
+}
+
+std::string ZWOEAFSDKWrapper::get_type(int focuser_id) {
+    EAF_TYPE type{};
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFGetType(focuser_id, &type), "EAFGetType"); });
+    return std::string(type.type, strnlen(type.type, sizeof(type.type)));
 }
 
 std::string ZWOEAFSDKWrapper::get_sdk_version() {

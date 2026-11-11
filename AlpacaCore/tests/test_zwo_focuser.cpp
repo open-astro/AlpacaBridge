@@ -167,6 +167,25 @@ TEST_CASE("ZWO EAF Focuser Driver - DeviceState is one device read, served from 
     CHECK(sdk.position_calls == 2);
 }
 
+// Decision 0024. EAF_INFO's name reads "EAF" on an EAFN too (rig 2026-11-11, SDK 1.8.1: EAFGetType answered "EAFN").
+// Falsified by: zwo_focuser_driver.cpp get_name() returning focuser_info_.name ahead of model_.
+TEST_CASE("ZWO EAF Focuser Driver - the Name is ZWO and the type read at connect", "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    CHECK(driver->get_name() == "ZWO EAF");
+    SECTION("an EAFN") {
+        driver->set_connected(true);
+        CHECK(driver->get_name() == "ZWO EAFN");
+    }
+    SECTION("a unit whose type read fails is named from EAF_INFO") {
+        sdk.fail_type = true;
+        driver->set_connected(true);
+        CHECK(driver->get_connected());
+        CHECK(driver->get_name() == "ZWO EAF");
+    }
+    driver->set_connected(false);
+}
+
 // Falsified by: zwo_focuser_driver.cpp get_max_step() calling sdk_.get_max_step()
 // instead of returning max_step_ (max_step_calls 3 after the reads, not 1).
 TEST_CASE("ZWO EAF Focuser Driver - Static members are read at connect and reset on disconnect",
@@ -180,7 +199,7 @@ TEST_CASE("ZWO EAF Focuser Driver - Static members are read at connect and reset
     for (int i = 0; i < 3; ++i) {
         CHECK(driver->get_max_step() == 60000);
         CHECK(driver->get_max_increment() == 1000);
-        CHECK(driver->get_name() == "EAF");
+        CHECK(driver->get_name() == "ZWO EAFN");
     }
     CHECK(sdk.max_step_calls == 1);
     CHECK(sdk.step_range_calls == 1);
@@ -423,7 +442,7 @@ TEST_CASE("ZWO EAF Focuser Driver - Name and UniqueID answer while a connect hol
     CHECK(driver->get_connecting());  // the open is still in flight, so the timings above are not vacuous
 
     REQUIRE(wait_until_connected(*driver));
-    CHECK(driver->get_name() == "EAF");
+    CHECK(driver->get_name() == "ZWO EAFN");
     CHECK(driver->get_unique_id() == "ZWO_EAF_SN_EAF-SN-1");
     driver->set_connected(false);
 }

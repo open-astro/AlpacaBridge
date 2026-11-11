@@ -155,6 +155,18 @@ TEST_CASE("ZWO Dew Heater Switch Driver - DeviceState reads the camera once per 
     CHECK(sdk.reads == 2);
 }
 
+// Decision 0024: two cameras' heaters are told apart by the camera model. Falsified by: zwo_switch_driver.cpp
+// get_name() returning "ZWO Dew Heater" while connected.
+TEST_CASE("ZWO Dew Heater Switch Driver - the Name is the camera model and Dew Heater", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    sdk.info_name = "ZWO ASI2600MC Pro";
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    CHECK(driver->get_name() == "ZWO Dew Heater");
+    driver->set_connected(true);
+    CHECK(driver->get_name() == "ZWO ASI2600MC Pro Dew Heater");
+    driver->set_connected(false);
+}
+
 TEST_CASE("ZWO Dew Heater Switch Driver - static members cost no camera reads", "[zwo][switch][unit]") {
     FakeDewSdk sdk;
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);

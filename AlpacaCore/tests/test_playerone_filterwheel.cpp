@@ -131,7 +131,7 @@ TEST_CASE("Player One PW Filter Wheel Driver - connects over an injected SDK",
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(fake.open_count() == 1);
-    CHECK(driver->get_name() == "FakePhoenixWheel");
+    CHECK(driver->get_name() == "Player One FakePhoenixWheel");
     CHECK(driver->get_unique_id() == "PlayerOne_PW_SN_fake-pw-41");
     // Aliases and offsets come from the wheel; an empty alias gets the ASCOM default.
     CHECK(driver->get_names() == std::vector<std::string>{"Slot1", "Slot2", "Filter 3", "Slot4", "Slot5"});
@@ -475,7 +475,7 @@ TEST_CASE("Player One PW Filter Wheel Driver - get_names does not wait behind a 
 
     const auto start = std::chrono::steady_clock::now();
     CHECK(driver->get_names().size() == 5);
-    CHECK(driver->get_name() == "FakePhoenixWheel");
+    CHECK(driver->get_name() == "Player One FakePhoenixWheel");
     CHECK(std::chrono::steady_clock::now() - start < 150ms);
     refill.get();
     driver->set_connected(false);

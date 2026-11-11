@@ -692,7 +692,7 @@ TEST_CASE("ZWO EFW seam - get_names does not wait behind a slow Position refill"
 
     const auto start = std::chrono::steady_clock::now();
     CHECK(driver->get_names().size() == 7);
-    CHECK(driver->get_name() == "EFW");
+    CHECK(driver->get_name() == "ZWO EFW");
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(150));
     refill.get();
     driver->set_connected(false);

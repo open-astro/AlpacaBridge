@@ -194,7 +194,7 @@ LocalTimeInfo compute_local_timezone_info(std::time_t base_time) {
     return info;
 }
 
-// SynScan V3/V4 hand controller model IDs (from "m" command).
+// SynScan V3/V4 hand controller model IDs (from "m" command), or empty for an id not in the table.
 // Only includes mounts that ship with the V3/V4 handset.
 std::string synscan_model_id_to_name(int model_id) {
     switch (model_id) {
@@ -215,7 +215,7 @@ std::string synscan_model_id_to_name(int model_id) {
         default:
             if (model_id >= 128 && model_id <= 143) return "AZ GOTO";
             if (model_id >= 144 && model_id <= 159) return "DOB GOTO";
-            return "Mount (ID " + std::to_string(model_id) + ")";
+            return {};  // unknown: the name falls back to the ASCOM type (decision 0024)
     }
 }
 
@@ -291,18 +291,13 @@ public:
         return device_number_;
     }
 
-    // The "(SynScan)" suffix disambiguates from the skywatcher direct
-    // driver's get_name(), which resolves to the identical model string for a
-    // mount reachable over both connections (see the sibling comment there).
-    // "SynScan" / "EQMOD" are the terms both ecosystems already use for the
-    // two paths (INDI labels: "SynScan", "EQMod Mount"; ASCOM: "SynScan App
-    // Driver", "EQMOD"), so keep them rather than "hand controller"/"direct".
+    // Brand + model only (decision 0024). A mount reachable over both its hand
+    // controller and the EQMOD direct driver has the same name on both; the
+    // Description names the path.
     std::string get_name() const override {
         const int model_id = mount_model_id_.load();
-        if (model_id >= 0) {
-            return "Sky-Watcher " + synscan_model_id_to_name(model_id) + " (SynScan)";
-        }
-        return "Sky-Watcher Mount (SynScan)";
+        const std::string model = model_id >= 0 ? synscan_model_id_to_name(model_id) : std::string();
+        return model.empty() ? "Sky-Watcher Telescope" : "Sky-Watcher " + model;
     }
 
     DeviceType get_device_type() const override {

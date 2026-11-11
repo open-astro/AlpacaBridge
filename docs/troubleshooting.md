@@ -202,7 +202,7 @@ Environment=ALPACAHTTP_MOTION_WATCHDOG_SECONDS=0
 | West | Southern hemisphere | `reversed` |
 | East | Southern hemisphere | `normal` |
 
-`auto` (the default) keeps the measured table, and `k = +1` (eps +1 north, -1 south) for a board that is not in it. `normal` and `reversed` set `eps` only, never the hemisphere term, so a mount you move to the other hemisphere stays right without a change. The setting is used on connect, also when the board does not identify itself, and the device name in the web UI shows where `eps` came from (`eps: measured`, `eps: override normal`, `eps: override reversed`, `eps: unmeasured default` or `eps: identify failed`). Pick the value in the Dec axis sense list of the Sky-Watcher form; saving the form keeps it. An override that disagrees with a measured board logs a WARN and is used anyway.
+`auto` (the default) keeps the measured table, and `k = +1` (eps +1 north, -1 south) for a board that is not in it. `normal` and `reversed` set `eps` only, never the hemisphere term, so a mount you move to the other hemisphere stays right without a change. The setting is used on connect, also when the board does not identify itself, and the device Description in the web UI shows where `eps` came from (`eps: measured`, `eps: override normal`, `eps: override reversed`, `eps: unmeasured default` or `eps: identify failed`). Pick the value in the Dec axis sense list of the Sky-Watcher form; saving the form keeps it. An override that disagrees with a measured board logs a WARN and is used anyway.
 
 If you set it, please post your reading (mount code from the connect log, dovetail side, latitude) on issue #579 so the board can join the measured table.
 

@@ -173,7 +173,7 @@ TEST_CASE("SynScan Telescope Driver - Device metadata", "[synscan][telescope][un
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         3, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
 
-    CHECK(driver->get_name() == "Sky-Watcher Mount (SynScan)");  // fallback before a model id is read
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");  // fallback before a model id is read
     CHECK(driver->get_description() == "Sky-Watcher SynScan V3/V4 Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore SynScan Driver v0.1");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);

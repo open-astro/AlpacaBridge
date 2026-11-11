@@ -342,7 +342,7 @@ TEST_CASE("ZWO CAA link - a reconnect that fails after the serial scan publishes
     FakeZWOCAASDK sdk;
     auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0, sdk, clock);
     driver->set_connected(true);
-    REQUIRE(driver->get_name() == "CAA");
+    REQUIRE(driver->get_name() == "ZWO CAA");
     driver->set_connected(false);  // an index binding forgets its id and info
     REQUIRE(driver->get_name() == "ZWO CAA");
 

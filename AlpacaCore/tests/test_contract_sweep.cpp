@@ -2221,7 +2221,7 @@ struct GPhotoSdkHold {
         alpacacore::test::reset_gphoto_sensor_cache();
         if (!with_camera) return;
         alpacacore::test::FakeGPhotoSDK::FakeCamera cam;
-        cam.model = alpacacore::test::unique_test_model("Nikon DSC D5300 (contract sweep)");
+        cam.model = alpacacore::test::unique_test_model("Nikon DSC D5300 contract sweep");
         cam.port = "usb:001,099";
         cam.choices["iso"] = {"100", "200", "400"};
         cam.choice_value["iso"] = "200";
@@ -3584,6 +3584,68 @@ void check_tier1_cases_have_a_subject() {
 #undef CS_T1_GUARD
 }
 
+namespace {
+// Decision 0024: a Name is the brand followed by the model, nothing appended. The brands each router vendor's
+// names may start with: gphoto's camera model comes from libgphoto2 and starts with the camera's maker, so its
+// list is those makers plus "GPhoto" for a camera not read yet. Compared here without util::branded_name, so a
+// broken helper cannot pass its own check.
+const std::vector<std::string>& name_brands_of(const std::string& vendor) {
+    static const std::map<std::string, std::vector<std::string>> brands{
+        {"altair", {"Altair"}},
+        {"astroasis", {"Astroasis"}},
+        {"bisque", {"Bisque"}},
+        {"celestron", {"Celestron"}},
+        {"gemini", {"Gemini"}},
+        {"gphoto", {"GPhoto", "Canon", "Nikon", "Sony", "Fujifilm", "Panasonic", "Olympus", "OM", "Pentax", "Leica"}},
+        {"ifr", {"iOptron"}},
+        {"iguider", {"iOptron"}},
+        {"ioptron", {"iOptron", "Player One"}},  // the ioptron/camera (iCAM) entry is the Player One camera driver
+        {"onstep", {"OnStep", "On-Step"}},
+        {"playerone", {"Player One"}},
+        {"qhy", {"QHY"}},
+        {"skywatcher", {"Sky-Watcher"}},
+        {"svbony", {"SVBONY"}},
+        {"synscan", {"Sky-Watcher"}},
+        {"touptek", {"ToupTek"}},
+        {"wandererastro", {"WandererAstro"}},
+        {"weewx", {"WeeWX"}},
+        {"zwo", {"ZWO"}},
+    };
+    static const std::vector<std::string> none;
+    const auto it = brands.find(vendor);
+    return it == brands.end() ? none : it->second;
+}
+
+void check_brand_and_model(const std::string& vendor, const std::string& name) {
+    INFO(vendor << " Name \"" << name << "\"");
+    const auto& brands = name_brands_of(vendor);
+    CHECK_FALSE(brands.empty());  // a new vendor states its brand above
+    const bool branded = std::any_of(brands.begin(), brands.end(), [&](const std::string& brand) {
+        return name.size() >= brand.size() &&
+               std::equal(brand.begin(), brand.end(), name.begin(), [](char a, char b) {
+                   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+               });
+    });
+    CHECK(branded);
+    // A connection path, protocol or driver state goes in the Description, never after the model.
+    CHECK(name.find('(') == std::string::npos);
+    CHECK(name.find(',') == std::string::npos);
+    CHECK(name.find(" Mount") == std::string::npos);  // the unknown-model noun is the ASCOM type, Telescope
+}
+}  // namespace
+
+TEST_CASE("Contract sweep - every Name is brand and model while disconnected", "[contract][tier1][name]") {
+    int seen = 0;
+    for (const auto& e : alpacacore::test::contract::contract_entries()) {
+        ++seen;
+        auto d = e.make(0);
+        REQUIRE(d != nullptr);
+        INFO(e.id);
+        check_brand_and_model(e.vendor, d->get_name());
+    }
+    CHECK(seen > 0);
+}
+
 TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected", "[contract][tier1][filterwheel]") {
     int seen = 0;
     for (const auto& e : alpacacore::test::contract::contract_entries()) {
@@ -3652,6 +3714,21 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_IMAGE)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_LASTEXP)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_HOOKS)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_INITIATORS)
+
+TEST_CASE("Contract sweep tier 2 - every Name is brand and model while connected", "[contract][tier2][name]") {
+    int seen = 0;
+#define CS2_NAME(id, kind)                                        \
+    {                                                             \
+        INFO("tier-2 host " #id);                                 \
+        const Tier2Host h = tier2_host_##id();                    \
+        Hosted hosted = connected_host(h);                        \
+        check_brand_and_model(h.vendor, hosted.driver->get_name()); \
+        ++seen;                                                   \
+    }
+    CONTRACT_SWEEP_TIER2_HOSTS(CS2_NAME)
+#undef CS2_NAME
+    CHECK(seen > 0);
+}
 #endif
 
 #ifndef _WIN32

@@ -159,7 +159,7 @@ public:
     }
 
     std::string get_name() const override {
-        return "Bisque Paramount Telescope";
+        return "Bisque Paramount";
     }
 
     DeviceType get_device_type() const override {

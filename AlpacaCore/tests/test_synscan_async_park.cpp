@@ -419,7 +419,7 @@ TEST_CASE("SynScan - a persistently garbled echo fails the connect rather than p
     CHECK(queries->load() == 2);  // only the two echo attempts - never firmware/model/site
 }
 
-TEST_CASE("SynScan - Name carries the model and the (SynScan) suffix once connected", "[synscan][telescope][async]") {
+TEST_CASE("SynScan - Name carries the model once connected", "[synscan][telescope][async]") {
     // PR #278: a mount reachable over both the hand controller and the
     // direct motor-controller path resolves to the same model string in
     // both drivers; the "(SynScan)" suffix is what tells them apart in a
@@ -429,9 +429,9 @@ TEST_CASE("SynScan - Name carries the model and the (SynScan) suffix once connec
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
-    CHECK(driver->get_name() == "Sky-Watcher Mount (SynScan)");  // no model known yet
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");  // no model known yet
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (SynScan)");  // fake answers model id 50
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");  // fake answers model id 50
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
 }
 

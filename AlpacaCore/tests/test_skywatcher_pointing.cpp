@@ -468,7 +468,8 @@ TEST_CASE("SkyWatcher pointing - the EQ-AL55i Pro reaches a southern target on t
 
     // ":e" -> "=032E09": firmware 3.46, mount code 0x09. The name comes from
     // mount_code_to_name(), so this is the only thing that pins `case 0x09`.
-    CHECK(driver->get_name() == "Sky-Watcher EQ-AL55i Pro (EQMOD, eps: measured)");
+    CHECK(driver->get_name() == "Sky-Watcher EQ-AL55i Pro");
+    CHECK(driver->get_description() == "Sky-Watcher EQMOD direct mount, eps: measured");
     const auto firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.46");

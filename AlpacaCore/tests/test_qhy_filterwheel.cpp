@@ -202,7 +202,8 @@ TEST_CASE("QHY Filter Wheel Driver - Connects and reads its slot count", "[qhy][
     CHECK(driver->get_names().size() == 7);
     CHECK(driver->get_names()[0] == "Filter 1");
     CHECK(driver->get_focus_offsets().size() == 7);
-    CHECK(driver->get_name() == "FakeQHY600 CFW");
+    CHECK(driver->get_name() == "QHY CFW");
+    CHECK(driver->get_description() == "QHY color filter wheel on FakeQHY600");
 
     driver->set_connected(false);
     CHECK(fake.physical_closes == 1);

@@ -229,7 +229,7 @@ TEST_CASE("SVBONY Camera Driver - Name and identity getters answer while a conne
     release_open = true;
     connector.join();
     CHECK(camera->get_connected());
-    CHECK(camera->get_name() == "Fake SVBONY Camera");
+    CHECK(camera->get_name() == "SVBONY Fake SVBONY Camera");
     camera->set_connected(false);
 }
 
@@ -264,7 +264,7 @@ TEST_CASE("SVBONY Camera Driver - A name refresh that overlapped a connect does 
     release_refresh = true;
     refresher.join();
 
-    CHECK(camera->get_name() == "Fake SVBONY Camera");
+    CHECK(camera->get_name() == "SVBONY Fake SVBONY Camera");
     CHECK(camera->get_sensor_name() == "Fake SVBONY Camera");
     camera->set_connected(false);
 }
