@@ -429,6 +429,8 @@ private:
     void validate_site_and_coordinates(double ra, double dec, const char* operation) const;
     void start_home_operation(bool park_after);
     void run_home_operation(util::OperationContext& context, bool park_after);
+    std::string home_axes_status();
+    void log_home_wait(std::chrono::steady_clock::time_point& next_log);
     void start_slew_operation(double ra, double dec);
     void run_slew_operation(util::OperationContext& context, double ra, double dec, CgxPointingSide destination_side);
     void run_flip_slew_operation(util::OperationContext& context, double ra, double dec,
@@ -1968,8 +1970,32 @@ void CelestronCgxTelescopeDriver::start_home_operation(bool park_after) {
     }
 }
 
+// #2213: which axis a home is waiting on, and whether it is still moving.
+std::string CelestronCgxTelescopeDriver::home_axes_status() {
+    std::string status;
+    for (const auto axis : {CgxAxis::RightAscension, CgxAxis::Declination}) {
+        status += status.empty() ? "" : "; ";
+        status += axis == CgxAxis::RightAscension ? "RA" : "Dec";
+        try {
+            status += " home_done=" + std::to_string(protocol_.is_axis_home_done(axis));
+            status += " slew_done=" + std::to_string(protocol_.is_axis_slew_done(axis));
+            status += " position=" + std::to_string(protocol_.get_axis_position(axis));
+        } catch (const std::exception& error) {
+            status += std::string(" read failed: ") + error.what();
+        }
+    }
+    return status;
+}
+
+void CelestronCgxTelescopeDriver::log_home_wait(std::chrono::steady_clock::time_point& next_log) {
+    if (logging::get_log_level() > logging::LogLevel::Debug || clock_.now() < next_log) return;
+    next_log += std::chrono::seconds(10);
+    ALPACA_LOG_DEBUG("Celestron CGX", "Home wait: " + home_axes_status());
+}
+
 void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& context, bool park_after) {
     const auto deadline = clock_.now() + std::chrono::seconds(180);
+    auto next_log = clock_.now() + std::chrono::seconds(10);
     try {
         while (true) {
             const auto reason = context.stop_reason();
@@ -2019,7 +2045,9 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
                 return;
             }
             if (clock_.now() >= deadline)
-                throw AlpacaException("Celestron CGX home timed out", AlpacaError::DriverException);
+                throw AlpacaException("Celestron CGX home timed out: " + home_axes_status(),
+                                      AlpacaError::DriverException);
+            log_home_wait(next_log);
             static_cast<void>(context.wait_for(std::chrono::milliseconds(200)));
         }
     } catch (...) {
@@ -2177,6 +2205,7 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
         }
     };
     const auto deadline = clock_.now() + std::chrono::seconds(180);
+    auto next_log = clock_.now() + std::chrono::seconds(10);
     try {
         while (true) {
             const auto reason = context.stop_reason();
@@ -2239,7 +2268,9 @@ void CelestronCgxTelescopeDriver::run_flip_slew_operation(util::OperationContext
                 return;
             }
             if (clock_.now() >= deadline)
-                throw AlpacaException("Celestron CGX meridian home route timed out", AlpacaError::DriverException);
+                throw AlpacaException("Celestron CGX meridian home route timed out: " + home_axes_status(),
+                                      AlpacaError::DriverException);
+            log_home_wait(next_log);
             static_cast<void>(context.wait_for(std::chrono::milliseconds(200)));
         }
     } catch (...) {

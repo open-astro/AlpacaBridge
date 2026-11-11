@@ -1,0 +1,2 @@
+### Changed
+- **CGX home timeouts name the pending axis** (Celestron CGX direct USB, issue #2213): "home timed out" and "meridian home route timed out" now end with each axis's `MC_LEVEL_DONE`, `MC_SLEW_DONE` and encoder position, read before the axes are stopped. At DEBUG the same readings are logged every 10 s while a home is pending, to show whether a stalled home ever started. Behaviour is unchanged.

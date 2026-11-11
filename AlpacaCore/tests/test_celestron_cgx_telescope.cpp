@@ -1489,6 +1489,57 @@ TEST_CASE("Celestron CGX USB Telescope Driver - unsupported methods use ASCOM er
 }
 
 #ifndef _WIN32
+TEST_CASE("Celestron CGX USB Telescope Driver - home timeout names the axis still pending",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+    driver->find_home();
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
+    std::string expected = "home timed out: RA";
+    mount.set_auto_complete_motions(false);
+    SECTION("FindHome") { driver->find_home(); }
+    SECTION("meridian home route") {
+        expected = "meridian home route timed out: RA";
+        driver->set_tracking(true);
+        driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 6.0, 24.0), 30.0);
+    }
+    REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
+    mount.complete_axis_home(0x11);
+    std::string error;
+    for (int second = 0; second < 200 && error.empty(); ++second) {
+        try {
+            if (!driver->get_slewing()) break;
+        } catch (const alpacacore::AlpacaException& failure) {
+            error = failure.what();
+            break;
+        }
+        if (clock.wait_for_waiters(1, 1s)) {
+            clock.advance(1s);
+            REQUIRE(clock.wait_for_woken_settled(2s));
+        }
+    }
+    REQUIRE(wait_until([&] {
+        try {
+            static_cast<void>(driver->get_slewing());
+            return false;
+        } catch (const alpacacore::AlpacaException& failure) {
+            error = failure.what();
+            return true;
+        }
+    }));
+    mount.set_auto_complete_motions(true);
+    CHECK(error.find(expected + " home_done=0 slew_done=0 position=") != std::string::npos);
+    CHECK(error.find("; Dec home_done=1 slew_done=1 position=") != std::string::npos);
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor controllers",
           "[celestron][cgx][telescope][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;
