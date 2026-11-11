@@ -26,8 +26,7 @@ namespace alpacacore::util {
 
 /// True when @p name starts with @p brand, ignoring ASCII case.
 inline bool starts_with_brand(std::string_view name, std::string_view brand) {
-    return name.size() >= brand.size() &&
-           std::equal(brand.begin(), brand.end(), name.begin(), [](char a, char b) {
+    return name.size() >= brand.size() && std::equal(brand.begin(), brand.end(), name.begin(), [](char a, char b) {
                return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
            });
 }

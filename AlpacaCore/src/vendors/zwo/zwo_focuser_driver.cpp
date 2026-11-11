@@ -719,7 +719,7 @@ private:
     std::string serial_number_;
     ZWOEAFFocuserInfo focuser_info_;
     bool focuser_info_valid_;
-    std::string model_;  // EAFGetType at connect, under mutex_; empty when unread
+    std::string model_;                             // EAFGetType at connect, under mutex_; empty when unread
     const std::optional<int> configured_max_step_;  // config "maxStep"; unset = leave the stored value
     // Published at the end of connect and read lock-free by MaxStep/MaxIncrement (decision 0016).
     std::atomic<int> max_step_{0};

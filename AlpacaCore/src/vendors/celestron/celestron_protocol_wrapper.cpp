@@ -319,7 +319,8 @@ std::string model_id_to_name(int model_id) {
         case 24: return "CGX-L";
         case 25: return "Astro Fi";
         case 26: return "SkyWatcher";
-        default: return {};  // unknown: the name falls back to the driver's (decision 0024)
+        default:
+            return {};  // unknown: the name falls back to the driver's (decision 0024)
     }
 }
 
