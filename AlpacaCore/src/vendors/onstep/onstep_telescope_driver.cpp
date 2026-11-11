@@ -707,11 +707,6 @@ public:
                     // Unknown: the :GVP# product names the mount.
                 }
             }
-            if (!model.empty()) {
-                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                model_cache_ = model;
-            }
-
             // OnStepX applies refraction to the RA/Dec it reports unless it was
             // built for observed-place coordinates; :GXEE# says which (#1216).
             refraction_from_firmware_.reset();
@@ -811,6 +806,12 @@ public:
                 const std::string lost = OnStepProtocolWrapper::instance().link_lost_reason();
                 fail_connect_locked("the link was lost during the connect" +
                                     (lost.empty() ? std::string() : " (" + lost + ")"));
+            }
+            // Published once the connect can no longer fail on the link, so a failed connect keeps the previous
+            // name (decision 0016 item 3).
+            if (!model.empty()) {
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                model_cache_ = model;
             }
             published_connected_ = true;  // the connect is complete (#910)
             // The poll starts once the connect is complete, with no driver lock held (decision 0006 rule 4).

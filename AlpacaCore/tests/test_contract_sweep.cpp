@@ -3596,7 +3596,9 @@ const std::vector<std::string>& name_brands_of(const std::string& vendor) {
         {"bisque", {"Bisque"}},
         {"celestron", {"Celestron"}},
         {"gemini", {"Gemini"}},
-        {"gphoto", {"GPhoto", "Canon", "Nikon", "Sony", "Fujifilm", "Panasonic", "Olympus", "OM", "Pentax", "Leica"}},
+        {"gphoto",
+         {"GPhoto", "Canon", "Nikon", "Sony", "Fuji", "Panasonic", "Olympus", "OM", "Pentax", "Leica", "Kodak", "Sigma",
+          "Hasselblad"}},
         {"ifr", {"iOptron"}},
         {"iguider", {"iOptron"}},
         {"ioptron", {"iOptron", "Player One"}},  // the ioptron/camera (iCAM) entry is the Player One camera driver

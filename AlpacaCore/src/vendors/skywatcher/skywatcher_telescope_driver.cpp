@@ -472,7 +472,10 @@ public:
             case EpsSource::None:
                 break;
         }
-        const std::string board = is_unknown_board(model_cache_) ? " (" + model_cache_ + ")" : std::string();
+        // "Mount (code 0xNN)" -> ", unknown board code 0xNN"
+        const std::string board = is_unknown_board(model_cache_)
+                                      ? ", unknown board " + model_cache_.substr(7, model_cache_.size() - 8)
+                                      : std::string();
         return "Sky-Watcher EQMOD direct mount" + board + source;
     }
 

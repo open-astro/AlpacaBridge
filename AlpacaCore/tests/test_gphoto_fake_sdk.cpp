@@ -239,6 +239,25 @@ TEST_CASE("FakeGPhotoSDK via LockedGPhotoSDK - SDK version hook does not wait on
     driver->set_connected(false);
 }
 
+// Decision 0024: libgphoto2 names a Sony body in PC-remote mode "Sony Alpha-A7 III (Control)"; the qualifier is a
+// connection mode, so it goes in the Description. Falsified by: gphoto_camera_driver.cpp get_name() returning
+// camera_info_.model as read.
+TEST_CASE("GPhoto camera fake - the Name drops a libgphoto2 qualifier and the Description keeps it",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera("Sony Alpha-A7 III (Control)"));
+    const std::string model = fake.cameras[0].model;  // "Sony Alpha-A7 III (Control) [pid N]"
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_name().find('(') == std::string::npos);
+    CHECK(driver->get_name().rfind("Sony Alpha-A7 III", 0) == 0);
+    CHECK(driver->get_description() == "DSLR / Mirrorless Camera Driver, " + model);
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto camera fake - exposure validation distinguishes global and connected camera limits",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();

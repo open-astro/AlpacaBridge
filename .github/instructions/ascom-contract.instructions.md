@@ -150,7 +150,8 @@ equivalent. The reasons are in [decision 0018](../../docs/decisions/0018-persist
 `ZWO EAFN`, `QHY CFW`. Before the model is read it is the brand followed by the product family
 (`ZWO EAF`) or the ASCOM device type (`Sky-Watcher Telescope`; never `Mount`). A model string from an
 SDK or a device goes through `util::branded_name(brand, model)` (`alpacacore/util/device_name.h`), which
-adds the brand only when the string does not start with it. A connection path, protocol, board revision,
+adds the brand only when the string does not start with it, and an SDK's ` (...)` connection-mode qualifier
+(libgphoto2's `(Control)`) is dropped with `util::without_qualifiers()`. A connection path, protocol, board revision,
 calibration state or host camera goes in `get_description()` (no device I/O), which the web UI shows; two
 drivers reaching one device (EQMOD and SynScan on one mount) give it the same name. A camera-attached dew
 heater or thermal switch is the camera model plus `Dew Heater` or `Thermal Switch`. A new vendor adds its

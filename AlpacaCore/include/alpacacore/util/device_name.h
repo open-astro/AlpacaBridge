@@ -37,4 +37,16 @@ inline std::string branded_name(std::string_view brand, std::string_view model) 
     return std::string(brand) + " " + std::string(model);
 }
 
+/// @p model without its " (...)" qualifiers, which some SDKs add for a connection mode (libgphoto2 names a Sony body
+/// in PC-remote mode "Sony Alpha-A7 III (Control)"); the qualifier belongs in the Description.
+inline std::string without_qualifiers(std::string_view model) {
+    std::string out(model);
+    for (auto open = out.find(" ("); open != std::string::npos; open = out.find(" (", open)) {
+        const auto close = out.find(')', open);
+        if (close == std::string::npos) break;
+        out.erase(open, close + 1 - open);
+    }
+    return out;
+}
+
 }  // namespace alpacacore::util

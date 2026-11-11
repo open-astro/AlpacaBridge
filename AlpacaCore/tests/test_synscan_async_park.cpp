@@ -435,6 +435,20 @@ TEST_CASE("SynScan - Name carries the model once connected", "[synscan][telescop
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
 }
 
+// Decision 0024. Falsified by: synscan_telescope_driver.cpp synscan_model_id_to_name() returning "Mount (ID n)" for an
+// id not in its table.
+TEST_CASE("SynScan - an unknown model id is named Sky-Watcher Telescope", "[synscan][telescope][async]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    st->model_id.store(77);  // in no row of the V3/V4 table
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_name() == "Sky-Watcher Telescope");
+    REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
+}
+
 TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew ends", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();

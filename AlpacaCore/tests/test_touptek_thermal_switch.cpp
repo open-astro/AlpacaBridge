@@ -120,6 +120,19 @@ TEST_CASE("ToupTek Thermal Switch Driver - Async not supported", "[touptek][swit
     connected->set_connected(false);
 }
 
+// Decision 0024. Falsified by: touptek_thermal_switch_driver.cpp get_name() returning "ToupTek Thermal Switch"
+// while connected.
+TEST_CASE("ToupTek Thermal Switch Driver - the Name is the camera model and Thermal Switch",
+          "[touptek][switch][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    CHECK(driver->get_name() == "ToupTek Thermal Switch");
+    driver->set_connected(true);
+    CHECK(driver->get_name() == "ToupTek FakeCam One Thermal Switch");  // the fake's camera name has no brand
+    driver->set_connected(false);
+}
+
 TEST_CASE("ToupTek Thermal Switch Driver - State machine", "[touptek][switch][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0);
 

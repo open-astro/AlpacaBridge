@@ -14,6 +14,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
@@ -243,7 +244,7 @@ public:
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!mount_info_.empty()) {
-            return "ZWO " + mount_info_;
+            return util::branded_name("ZWO", mount_info_);
         }
         return "ZWO Telescope";
     }
