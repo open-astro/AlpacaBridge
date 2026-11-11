@@ -1582,7 +1582,7 @@ std::string ZWOMountProtocolWrapper::get_mount_info() {
     }
     if (!is_zwo_mount_model(response)) {
         ALPACA_LOG_WARN("ZWO", "Mount reports an unlisted model '" + sanitize_for_log(response) +
-                                   "'; connecting as ZWO Mount, unvalidated");
+                                   "'; connecting as ZWO Telescope, unvalidated");
     }
     return response;
 }

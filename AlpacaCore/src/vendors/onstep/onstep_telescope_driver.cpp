@@ -16,6 +16,7 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
@@ -498,9 +499,8 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    // Decision 0024: OnStep is firmware without a hardware brand, so the name is what the controller calls itself,
-    // read at connect: OnStepX's :GVC# product description, else the :GVP# product ("OnStep", "On-Step"). Kept
-    // across a disconnect, like the Sky-Watcher model.
+    // Decision 0024: OnStep is the brand, and the model is OnStepX's :GVC# product description, read at connect;
+    // a firmware without :GVC# is "OnStep Telescope". Kept across a disconnect, like the Sky-Watcher model.
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         return model_cache_.empty() ? "OnStep Telescope" : model_cache_;
@@ -687,7 +687,6 @@ public:
             std::string model;
             try {
                 std::string product = protocol.get_product_name();
-                if (product != "0") model = product;  // "0": the reply to a command the controller does not know
                 firmware_version = protocol.get_version_number();
                 firmware = product + (firmware_version.empty() ? "" : (" " + firmware_version));
             } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -701,10 +700,13 @@ public:
             // OnStepX only: "0" is OnStep's reply to a command it does not know (a release older than :GVC#).
             if (is_onstepx_version(firmware_version)) {
                 try {
-                    const std::string description = protocol.get_product_description();
-                    if (!description.empty() && description != "0") model = description;
+                    // The builder's free text: its qualifiers and anything after a comma leave the name, and an
+                    // "OnStepX" description is not branded twice.
+                    std::string description = util::without_qualifiers(protocol.get_product_description());
+                    description = description.substr(0, description.find(','));
+                    if (!description.empty() && description != "0") model = util::branded_name("OnStep", description);
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    // Unknown: the :GVP# product names the mount.
+                    // Unknown: the name stays "OnStep Telescope".
                 }
             }
             // OnStepX applies refraction to the RA/Dec it reports unless it was
@@ -3729,7 +3731,7 @@ private:
     // the get_device_firmware() poll never blocks on the coarse connect lock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_cache_;
-    // The name read at connect (:GVC#, else :GVP#), under firmware_mutex_; kept across a disconnect.
+    // The name read at connect ("OnStep " + the :GVC# description), under firmware_mutex_; kept across a disconnect.
     std::string model_cache_;
 
     // Last, so it is destroyed (and its body joined) before every member the

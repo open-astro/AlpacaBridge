@@ -262,7 +262,8 @@ public:
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 std::vector<ZwoDewHeaterCamera> listing;
-                const int resolved_id = resolve_camera_id(listing);
+                std::string listed_name;
+                const int resolved_id = resolve_camera_id(listing, listed_name);
                 SharedOpenTable::Opened opened;
                 try {
                     opened = sdk.open_camera_link(resolved_id);
@@ -274,7 +275,8 @@ public:
                 try {
                     open_id_ = resolved_id;
                     open_link_ = opened.link;
-                    sdk.with_link(resolved_id, opened.link, [&] { publish_connect_state(resolved_id, listing); });
+                    const auto publish = [&] { publish_connect_state(resolved_id, listing, listed_name); };
+                    sdk.with_link(resolved_id, opened.link, publish);
                 } catch (...) {
                     release_open_locked(true);
                     forget_unbound_camera_id();
@@ -633,8 +635,10 @@ private:
     // id without listing (a listing opens every attached camera, and an id-only
     // switch must open only its own); an index or serial binding lists the
     // attached cameras into `listing`, which the capability refusal names too.
-    // Caller holds io_mutex_ (the listing opens cameras); the bound id and name publish under mutex_.
-    int resolve_camera_id(std::vector<ZwoDewHeaterCamera>& listing) {
+    // Caller holds io_mutex_ (the listing opens cameras); the bound id publishes under mutex_. The listed camera's
+    // name goes to `listed_name`, not camera_name_: the Name shows it only once the connect completes (decision 0016
+    // rule 3).
+    int resolve_camera_id(std::vector<ZwoDewHeaterCamera>& listing, std::string& listed_name) {
         if (camera_bound_by_id_only()) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (camera_id_.has_value()) {
@@ -661,9 +665,9 @@ private:
         }
         const auto& camera = listing[choice.chosen.value()];
         ALPACA_LOG_INFO("ZWO", "Dew heater using " + util::describe_thermal_camera(camera.candidate));
+        listed_name = camera.candidate.name;
         std::lock_guard<std::mutex> lock(mutex_);
         camera_id_ = camera.camera_id;
-        camera_name_ = camera.candidate.name;
         return camera.camera_id;
     }
 
@@ -696,9 +700,9 @@ private:
 
     // Reads the camera name, heater capability and serial from the open camera, then publishes them under
     // mutex_ (short). Caller holds io_mutex_ and not mutex_.
-    void publish_connect_state(int camera_id, std::vector<ZwoDewHeaterCamera>& listing) {
-        std::string name;
-        {
+    void publish_connect_state(int camera_id, std::vector<ZwoDewHeaterCamera>& listing, const std::string& listed) {
+        std::string name = listed;
+        if (name.empty()) {
             std::lock_guard<std::mutex> lock(mutex_);
             name = camera_name_;
         }

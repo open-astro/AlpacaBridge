@@ -3341,9 +3341,9 @@ TEST_CASE("OnStep Telescope Driver - the firmware hook does not wait for the con
     driver->set_connected(false);
 }
 
-// Decision 0024: OnStep has no hardware brand, so the Name is what the controller calls itself. Falsified by:
-// onstep_telescope_driver.cpp connect skipping the :GVC# read (an OnStepX is named "On-Step").
-TEST_CASE("OnStep Telescope Driver - the Name is the OnStepX product description, else the product",
+// Decision 0024: OnStep is the brand and OnStepX's :GVC# description the model. Falsified by:
+// onstep_telescope_driver.cpp connect skipping the :GVC# read (every OnStepX is named "OnStep Telescope").
+TEST_CASE("OnStep Telescope Driver - the Name is OnStep and the OnStepX product description",
           "[onstep][telescope][unit]") {
     auto fake = std::make_shared<RefractionFake>();
     fake->gxee = "1";
@@ -3351,16 +3351,26 @@ TEST_CASE("OnStep Telescope Driver - the Name is the OnStepX product description
     SECTION("OnStepX with a product description") {
         fake->version = "10.23a";
         fake->gvc = "Example Mount 7";
-        expected = "Example Mount 7";
+        expected = "OnStep Example Mount 7";
+    }
+    SECTION("a description that starts with the brand is not branded twice") {
+        fake->version = "10.23a";
+        fake->gvc = "OnStepX";
+        expected = "OnStepX";
+    }
+    SECTION("a description's qualifier and the text after a comma leave the name") {
+        fake->version = "10.23a";
+        fake->gvc = "EQ6 (belt mod), roof";
+        expected = "OnStep EQ6";
     }
     SECTION("OnStepX that answers :GVC# with 0") {
         fake->version = "10.23a";
-        expected = "On-Step";
+        expected = "OnStep Telescope";
     }
     SECTION("legacy OnStep is not asked") {
         fake->version = "4.24s";
         fake->gvc = "Not Asked";
-        expected = "On-Step";
+        expected = "OnStep Telescope";
     }
     alpacacore::test::FakeMountServer server([fake](const std::string& chunk) { return fake->reply(chunk); });
     REQUIRE(server.ok());
