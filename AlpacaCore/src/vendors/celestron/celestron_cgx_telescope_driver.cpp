@@ -376,6 +376,7 @@ private:
     // Each write drops the poll in flight and keeps measured_at, so the frame still ages by the poll alone. A control
     // loop that called this every few milliseconds would starve the poll and, after util::kLinkStalenessBound, read
     // as a lost link mid-motion: keep the callers occasional (arrival, Sync, PulseGuide polarity, slew planning).
+    // scripts/check_docs_drift.py check 26 pins these callers and read_sky_position()'s (#2035).
     void write_frame(std::uint32_t ra_encoder, std::uint32_t dec_encoder) const {
         polled_.write([ra_encoder, dec_encoder, read_at = system_now_()](CgxFrame& frame) {
             frame.ra_encoder = ra_encoder;
