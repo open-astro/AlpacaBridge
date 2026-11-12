@@ -154,11 +154,10 @@ TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][cam
     require_alpaca_error([&]() { driver->get_fast_readout(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_fast_readout(true); }, alpacacore::AlpacaError::NotConnected);
 
-    // Sensor geometry (Bayer phase) is unknown until a real exposure has been
-    // decoded, independent of connection state -- InvalidOperation, not
-    // NotConnected/NotImplemented (see gphoto_camera_driver.cpp class comment).
-    require_alpaca_error([&]() { driver->get_bayer_offset_x(); }, alpacacore::AlpacaError::InvalidOperation);
-    require_alpaca_error([&]() { driver->get_bayer_offset_y(); }, alpacacore::AlpacaError::InvalidOperation);
+    // NotConnected before the unknown-geometry InvalidOperation (#1919); the connected answer is pinned in
+    // test_gphoto_fake_sdk.cpp "MLU on skips the connect priming capture".
+    require_alpaca_error([&]() { driver->get_bayer_offset_x(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_bayer_offset_y(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("GPhoto Camera Driver - State machine contracts", "[gphoto][camera][unit]") {
