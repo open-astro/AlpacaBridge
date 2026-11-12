@@ -136,6 +136,16 @@ TEST_CASE("ZWO Mount Telescope Driver - Disconnected Behavior", "[zwo][telescope
     require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->park(); }, alpacacore::AlpacaError::NotConnected);
 
+    // open-astro#1919: an unsupported member checks the connection before its NotImplemented answer.
+    require_alpaca_error([&]() { driver->set_declination_rate(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_right_ascension_rate(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_alt_az(180.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_alt_az_async(180.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_alt_az(180.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
 }
 
@@ -956,16 +966,34 @@ TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange i
 
 // ── #1478 spec-audit items ───────────────────────────────────────────────────
 
-TEST_CASE("ZWO Mount Telescope Driver spec audit - DoesRefraction is not implemented",
+// open-astro#1919: the connection check ahead of each throw leaves the connected answer as it was.
+// Falsified by: zwo_telescope_driver.cpp get_does_refraction() (or any other listed member) without its
+// PropertyNotImplemented/NotImplemented throw, returning a value instead (no error is raised once connected).
+TEST_CASE("ZWO Mount Telescope Driver - connected unsupported members keep their NotImplemented answers",
           "[zwo][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
     alpacacore::vendor::zwo::ConnectionInfo conn;
-    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
-    conn.port_path = "/dev/null";
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    REQUIRE(driver->get_connected());
+
+    namespace AlpacaError = alpacacore::AlpacaError;
+    require_alpaca_error([&] { driver->set_declination_rate(0.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.0); }, AlpacaError::NotImplemented);
     // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
-    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az(180.0, 45.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(180.0, 45.0); }, AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(180.0, 45.0); }, AlpacaError::NotImplemented);
+    driver->set_connected(false);
 }
 
 TEST_CASE("ZWO Mount Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
