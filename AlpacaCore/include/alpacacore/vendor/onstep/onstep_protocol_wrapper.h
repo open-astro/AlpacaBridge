@@ -232,7 +232,8 @@ public:
      * @brief Get OnStepX's product description (its PRODUCT_DESCRIPTION build setting).
      *
      * Sends :GVC#. The firmware builder sets it ("the user friendly name for this device";
-     * it defaults to the host name). A firmware without the command answers "0".
+     * it defaults to the host name). A firmware without the command sends nothing back (an unknown :GV
+     * command gets no reply at all), so the read waits out the response timeout.
      */
     std::string get_product_description();
 

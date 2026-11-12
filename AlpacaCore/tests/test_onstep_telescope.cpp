@@ -3279,12 +3279,19 @@ namespace {
 struct RefractionFake {
     std::string version;  // :GVN# reply, without '#'
     std::string gxee;     // :GXEE# reply (bare digit; empty = no reply)
-    std::string gvc = "0";  // :GVC# reply, without '#' ("0" = a firmware without the command)
+    // :GVC# reply, without '#'. Empty = no reply at all, which is what a firmware without the command does: OnStepX
+    // sets CE_CMD_UNKNOWN for an unknown :GV command and writes nothing back.
+    std::string gvc;
+    std::atomic<int> gvc_queries{0};
     std::atomic<int> gxee_queries{0};
 
     std::string reply(const std::string& chunk) {
         if (chunk.rfind(":GVP", 0) == 0) return "On-Step#";
-        if (chunk.rfind(":GVC", 0) == 0) return gvc + "#";
+        if (chunk.rfind(":GVC", 0) == 0) {
+            ++gvc_queries;
+            if (gvc.empty()) return "";
+            return gvc + "#";
+        }
         if (chunk.rfind(":GVN", 0) == 0) return version + "#";
         if (chunk.rfind(":GXEE", 0) == 0) {
             ++gxee_queries;
@@ -3365,22 +3372,23 @@ TEST_CASE("OnStep Telescope Driver - the Name is OnStep and the OnStepX product 
     fake->gxee = "1";
     std::string expected;
     SECTION("OnStepX with a product description") {
-        fake->version = "10.23a";
+        fake->version = "10.24a";
         fake->gvc = "Example Mount 7";
         expected = "OnStep Example Mount 7";
     }
     SECTION("a description that starts with the brand is not branded twice") {
-        fake->version = "10.23a";
+        fake->version = "10.24a";
         fake->gvc = "OnStepX";
         expected = "OnStepX";
     }
     SECTION("a description's qualifier and the text after a comma leave the name") {
-        fake->version = "10.23a";
+        fake->version = "10.24a";
         fake->gvc = "EQ6 (belt mod), roof";
         expected = "OnStep EQ6";
     }
     SECTION("OnStepX that answers :GVC# with 0") {
-        fake->version = "10.23a";
+        fake->version = "10.24a";
+        fake->gvc = "0";  // real firmware never sends it; the guard stays
         expected = "OnStep Telescope";
     }
     SECTION("legacy OnStep is not asked") {
@@ -3401,6 +3409,60 @@ TEST_CASE("OnStep Telescope Driver - the Name is OnStep and the OnStepX product 
     CHECK(driver->get_name() == expected);
     driver->set_connected(false);
     CHECK(driver->get_name() == expected);  // kept across a disconnect
+}
+
+// OnStepX answers :GVC# from 10.23b (6cf2e575, 2024-06-10), and from two unreleased 10.23a commits minutes before it
+// (d9de0b8d adds it, parent 1b6a020f has no 'C' case); a firmware without it sends nothing back, so asking costs the
+// whole response timeout (#2232). Falsified by: onstep_telescope_driver.cpp firmware_answers_product_description()
+// returning true for 10.23a or 10.22 (the counts and the connect time fail), or false for 10.23b, 10.24a or 11.01.
+TEST_CASE("OnStep Telescope Driver - the connect asks :GVC# only where the firmware answers it",
+          "[onstep][telescope][unit]") {
+    auto fake = std::make_shared<RefractionFake>();
+    fake->gxee = "1";
+    fake->gvc = "Fake Mount";  // answered only if asked; the default fake stays silent
+    bool expect_asked = true;
+    std::string expected = "OnStep Fake Mount";
+    SECTION("10.22 is not asked") {
+        fake->version = "10.22";
+        expect_asked = false;
+        expected = "OnStep Telescope";
+    }
+    SECTION("10.23a is not asked, so the connect does not wait for the response timeout") {
+        fake->version = "10.23a";
+        expect_asked = false;
+        expected = "OnStep Telescope";
+    }
+    SECTION("10.23 with no patch letter is not asked") {
+        fake->version = "10.23";
+        expect_asked = false;
+        expected = "OnStep Telescope";
+    }
+    SECTION("an OnStepX version with no minor is not asked") {
+        fake->version = "10";  // OnStepX by its major, but no minor to judge
+        expect_asked = false;
+        expected = "OnStep Telescope";
+    }
+    SECTION("10.23b is asked") { fake->version = "10.23b"; }
+    SECTION("10.24a is asked") { fake->version = "10.24a"; }
+    SECTION("a major above 10 is asked") { fake->version = "11.01"; }
+    alpacacore::test::FakeMountServer server([fake](const std::string& chunk) { return fake->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 5000;  // left at the default: a wrongly asked :GVC# would wait all of it
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    const auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(20)));
+    const auto took = std::chrono::steady_clock::now() - t0;
+    INFO("connect took " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms");
+    CHECK(fake->gvc_queries.load() == (expect_asked ? 1 : 0));
+    CHECK(driver->get_name() == expected);
+    if (!expect_asked) CHECK(took < std::chrono::seconds(2));
+    CHECK(fake->gxee_queries.load() > 0);
+    CHECK(driver->get_does_refraction());  // :GXEE# 1, read after the :GVC# step
+    driver->set_connected(false);
 }
 
 TEST_CASE("OnStep Telescope Driver - DoesRefraction follows the OnStepX coordinate mode", "[onstep][telescope][unit]") {
