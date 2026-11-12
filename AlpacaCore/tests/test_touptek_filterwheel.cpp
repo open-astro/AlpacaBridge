@@ -132,7 +132,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - Set position validation path", "[to
 
     // ASCOM precedence (per driver-lifecycle.instructions.md): range validation precedes the connection
     // check. A negative position is unconditionally invalid, so it is InvalidValue
-    // even while disconnected. The upper bound depends on slot_count_ (unknown
+    // even while disconnected. The upper bound depends on the slot count (unknown
     // until connect), so an in-range-but-unverifiable index reports NotConnected;
     // ConformU covers the connected out-of-range InvalidValue path on hardware.
     require_alpaca_error([&]() { driver->set_position(-1); }, alpacacore::AlpacaError::InvalidValue);
