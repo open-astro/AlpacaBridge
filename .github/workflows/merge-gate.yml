@@ -1,0 +1,38 @@
+# The merge gate (.github/scripts/merge-gate.sh): a queued PR merges only when
+# every check on its head ran green, not only the required ones (a skipped job
+# does not count), and the review bot's latest verdict on that head is
+# "✅ Approved". The review job passes on either verdict, so the review check
+# alone cannot hold a PR with defects.
+#
+# This is its own workflow, on the merge queue only: a job with this name in a
+# workflow that also runs on PRs would report on the PR too and could satisfy
+# the check there. `merge-gate` holds the queue once the ruleset requires it.
+name: Merge gate
+
+on:
+  merge_group:
+    types: [checks_requested]
+
+permissions: {}
+
+jobs:
+  merge-gate:
+    name: merge-gate
+    runs-on: ubuntu-24.04-arm
+    # Under the queue's 60-minute check timeout: the gate waits up to 50 for checks still running.
+    timeout-minutes: 55
+    permissions:
+      contents: read
+      checks: read
+      statuses: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+      - name: Every check green and the review approved on the PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+        run: .github/scripts/merge-gate.sh "$REPO" "$HEAD_REF"

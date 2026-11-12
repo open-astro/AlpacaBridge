@@ -68,6 +68,10 @@ author must do. Read the docstring before changing a gate.
   `decision-records` (`scripts/check_adr_scope.py`) needs the `## Decision records` section to name
   every record in `docs/decisions/` the PR changes.
   `gh pr create --body` and agents skip GitHub's template fill-in, so write every section.
+- **Merge gate** (`.github/workflows/merge-gate.yml`, `.github/scripts/merge-gate.sh`, the `merge-gate` check, on a merge group only):
+  a queued PR merges only when every check on its head ran green, not only the required ones (a skipped job does not count; the newest run of each name decides),
+  and the review bot's newest verdict written during the latest `review` run is "✅ Approved". Dependabot PRs, and a PR that edits
+  `claude-review.yml` and got no review comment, pass the verdict step with a note. It holds the queue once the ruleset requires `merge-gate`.
 - **Decision-record authorization** (`.github/workflows/decision-records.yml`, the required `adr-authorization`
   commit status; `adr-merge-queue.yml` reports that context on the queued merge commit, and never runs on a PR, so a job can't satisfy the check there): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <sha>`
   comment, which holds until a push changes one of the PR's record files; `scripts/check_adr_authorization.py` runs from the default branch, never from the PR. The
