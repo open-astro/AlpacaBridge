@@ -7,6 +7,8 @@
 # Usage: merge-gate.sh <owner/repo> <merge group head ref>
 # The head ref is refs/heads/gh-readonly-queue/<base>/pr-<N>-<base sha>.
 # Needs GH_TOKEN with checks, statuses and pull-requests read.
+# scripts/tests/test_merge_gate.py runs it against a fake gh on PATH; every gh
+# call returns raw JSON or text, and jq does the selecting here.
 set -euo pipefail
 
 repo="$1"
@@ -18,18 +20,20 @@ if [ -z "$pr" ]; then
   echo "::error::No pull request number in the merge group ref ${ref}."
   exit 1
 fi
-read -r sha author < <(gh pr view "$pr" --repo "$repo" --json headRefOid,author --jq '"\(.headRefOid) \(.author.login)"')
+read -r sha author < <(gh pr view "$pr" --repo "$repo" --json headRefOid,author | jq -r '"\(.headRefOid) \(.author.login)"')
 echo "Pull request #${pr} by ${author}, head ${sha}."
 
 # A check that is still running is waited for, not judged: the queue may start
 # while a check no rule requires still runs on the head. filter=latest is per
 # check suite, and a PR-body edit or a label starts a new suite, so the newest
-# run of each name decides; a skipped run did not run and does not count.
+# run of each name decides (by id: a queued run may have no started_at yet).
+# Skipped runs are dropped first, on purpose: a skipped run did not run, so an
+# older run of the same name still decides.
 deadline=$(( $(date +%s) + wait_minutes * 60 ))
 while :; do
   runs="$(gh api --paginate "repos/${repo}/commits/${sha}/check-runs?filter=latest&per_page=100" \
-    | jq -s '[.[].check_runs[] | select(.conclusion != "skipped")] | group_by(.name) | map(max_by(.started_at))')"
-  statuses="$(gh api "repos/${repo}/commits/${sha}/status" --jq '.statuses')"
+    | jq -s '[.[].check_runs[] | select(.conclusion != "skipped")] | group_by(.name) | map(max_by(.id))')"
+  statuses="$(gh api "repos/${repo}/commits/${sha}/status" | jq '.statuses')"
   pending="$(jq -n --argjson r "$runs" --argjson s "$statuses" \
     '[($r[] | select(.status != "completed") | .name), ($s[] | select(.state == "pending") | .context)]')"
   if [ "$(jq length <<<"$pending")" = 0 ]; then
@@ -59,20 +63,25 @@ if [[ "$author" == *dependabot* ]]; then
   exit 0
 fi
 
-review="$(jq -c '[.[] | select(.name == "review" or .name == "review-fork")] | max_by(.started_at)' <<<"$runs")"
+# review-fork is Ara's fork-PR review job; AlpacaBridge has only review.
+review="$(jq -c '[.[] | select(.name == "review" or .name == "review-fork")] | max_by(.id)' <<<"$runs")"
 if [ "$review" = null ]; then
   echo "::error::No review ran on ${sha}."
   exit 1
 fi
 # Only a bot verdict written during that review run counts, so a verdict on an
-# earlier head, or a human writing "Approved", cannot pass the gate.
+# earlier head, or a human writing "Approved", cannot pass the gate. The
+# sign-off is the comment's last line, so a comment that only quotes it is not
+# a verdict.
 since="$(jq -r '.started_at' <<<"$review")"
 verdict="$(gh api --paginate "repos/${repo}/issues/${pr}/comments?per_page=100" \
   | jq -s -r --arg since "$since" \
     '[.[][] | select(.user.login | test("^(claude|github-actions)(\\[bot\\])?$"))
             | select(.updated_at >= $since)
-            | select(.body | test("✅ Approved|⚠️ Issues found"))]
-     | max_by(.updated_at) | .body // ""')"
+            | (.body | split("\n") | map(select(test("\\S"))) | last // "") as $last
+            | select($last | test("^\\s*(✅ Approved|⚠️ Issues found)\\s*$"))
+            | {updated_at, verdict: $last}]
+     | max_by(.updated_at) | .verdict // ""')"
 if [ -z "$verdict" ]; then
   # The review action skips a PR that edits its own workflow, and the review
   # job passes such a PR without a comment; the maintainer reviews it by eye.
