@@ -161,6 +161,39 @@ bool is_onstepx_version(const std::string& version) {
     return digits > 0 && digits <= 4 && std::stoi(version.substr(0, digits)) >= 10;
 }
 
+// Whether the connect asks :GVC# (the product description, decision 0024). A firmware without it sends nothing back
+// (an unknown :GV command sets CE_CMD_UNKNOWN with numericReply=false, no "0"), so the read would wait out the whole
+// response timeout. OnStepX history: 1b6a020f (2024-05-22) is 10.23a with no 'C' case in the :GV branch; d9de0b8d
+// (2024-06-10 06:41:53) adds :GVC# and is still 10.23a, as is 675cd048 (06:44:33); 6cf2e575 (06:44:38, "Upped patch
+// level") makes it 10.23b, and every later build answers. 10.24a starts at d09b11af (2024-09-18). So only two
+// unreleased 10.23a commits from a three-minute window answer, and the rule is: ask for a major above 10, for 10.24
+// and later, and for 10.23 with a patch letter after 'a'; do not ask for 10.23a, 10.23 with no letter, anything older,
+// or a version that does not parse.
+bool firmware_answers_product_description(const std::string& version) {
+    std::size_t pos = 0;
+    const auto number = [&](int& out) {
+        std::size_t digits = 0;
+        while (pos + digits < version.size() && std::isdigit(static_cast<unsigned char>(version[pos + digits]))) {
+            ++digits;
+        }
+        if (digits == 0 || digits > 4) return false;
+        out = std::stoi(version.substr(pos, digits));
+        pos += digits;
+        return true;
+    };
+    int major = 0;
+    int minor = 0;
+    if (!number(major) || major < 10) return false;
+    if (major > 10) return true;
+    if (pos >= version.size() || version[pos] != '.') return false;
+    ++pos;
+    if (!number(minor)) return false;
+    if (minor >= 24) return true;
+    if (minor != 23 || pos >= version.size()) return false;
+    const char patch = version[pos];
+    return patch >= 'b' && patch <= 'z';
+}
+
 // GuideRate until the mount has answered :GX90# (and for firmware that never does): half the sidereal rate, OnStep's
 // default pulse-guide rate. CanSetGuideRates is false, so the driver never writes a rate; once :GX90# answers, the
 // mount's own pulse-guide rate (a multiple of sidereal) replaces this on both axes.
@@ -739,8 +772,9 @@ public:
                 firmware_cache_ = firmware;
             }
 
-            // OnStepX only: "0" is OnStep's reply to a command it does not know (a release older than :GVC#).
-            if (is_onstepx_version(firmware_version)) {
+            // OnStepX only, and only a release that has :GVC# (firmware_answers_product_description()); the "0"
+            // guard below is for a build that answers anyway.
+            if (firmware_answers_product_description(firmware_version)) {
                 try {
                     // The builder's free text: its qualifiers and anything after a comma leave the name, and an
                     // "OnStepX" description is not branded twice.

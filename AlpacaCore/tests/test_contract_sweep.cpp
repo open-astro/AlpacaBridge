@@ -3723,6 +3723,80 @@ TEST_CASE("Contract sweep tier 2 - every Name is brand and model while connected
 #undef CS2_NAME
     INFO("tier-2 hosts in this build: " << seen);  // vendors-off hosts none; the roster guard pins the list
 }
+
+// Filter wheel slot data while connected and after a Disconnect (issue #1991): one rule over every wheel host,
+// util::FilterWheelSlots. Connected, names and offsets have one entry per slot, a wrong length is InvalidValue and
+// changes nothing, a lone uppercase token of the slot count's length expands, a lowercase one does not, and an
+// empty name reads "Filter i". After a Disconnect the count is unknown and any length is accepted.
+[[maybe_unused]] void case_t2_filterwheel_slot_data(const Tier2Host& h) {
+    INFO(h.id << " over " << h.fake_header);
+    Hosted hosted = connected_host(h);
+    auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*hosted.driver);
+    const std::vector<std::string> names = f.get_names();
+    const std::size_t n = names.size();
+    REQUIRE(n >= 2);
+    for (const auto& name : names) CHECK_FALSE(name.empty());
+    const std::vector<int> offsets = f.get_focus_offsets();
+    CHECK(offsets.size() == n);
+
+    CHECK(thrown_code([&] { f.set_names(std::vector<std::string>(n - 1, "X")); }) == err::InvalidValue);
+    CHECK(thrown_code([&] { f.set_focus_offsets(std::vector<int>(n + 1, 7)); }) == err::InvalidValue);
+    CHECK(f.get_names() == names);
+    CHECK(f.get_focus_offsets() == offsets);
+
+    const std::string token = std::string("ABCDEFGHIJKLMNOP").substr(0, n);
+    CHECK(thrown_code([&] { f.set_names({token}); }) == -1);
+    std::vector<std::string> expanded;
+    for (char c : token) expanded.emplace_back(1, c);
+    CHECK(f.get_names() == expanded);
+    std::string lower = token;
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    CHECK(thrown_code([&] { f.set_names({lower}); }) == err::InvalidValue);
+    CHECK(f.get_names() == expanded);
+
+    std::vector<std::string> gaps(n, "N");
+    gaps[0].clear();
+    gaps[n - 1].clear();
+    CHECK(thrown_code([&] { f.set_names(gaps); }) == -1);
+    const std::vector<std::string> read = f.get_names();
+    REQUIRE(read.size() == n);
+    CHECK(read[0] == "Filter 1");
+    CHECK(read[n - 1] == "Filter " + std::to_string(n));
+
+    f.set_connected(false);
+    REQUIRE_FALSE(f.get_connected());
+    const int names_code = thrown_code([&] { f.set_names({"A", "B"}); });
+    const int offsets_code = thrown_code([&] { f.set_focus_offsets({1, 2, 3}); });
+    if (std::string(h.id) == "wandererastro_filterwheel") {
+        // The whole SFW lineup has 8 slots, so the count is known while disconnected (wandererastro.instructions.md).
+        CHECK(names_code == err::InvalidValue);
+        CHECK(offsets_code == err::InvalidValue);
+    } else {
+        CHECK(names_code == -1);
+        CHECK(offsets_code == -1);
+        CHECK(f.get_names() == std::vector<std::string>{"A", "B"});
+        CHECK(f.get_focus_offsets() == std::vector<int>{1, 2, 3});
+    }
+}
+
+// Falsified by: zwo_filterwheel_driver.cpp set_connected(false) calling slots_.clear_slot_count() only inside
+// `if (wheel_index_.has_value())` (the sweep's ZWO wheel is opened by id, so a 2-name write after Disconnect is
+// InvalidValue); or playerone_filterwheel_driver.cpp seed_slot_data() without slots_.publish_slot_count() (the
+// connected Player One wheel neither checks the length nor expands the token).
+TEST_CASE("Contract sweep tier 2 - filter wheels - slot data while connected", "[contract][tier2][filterwheel]") {
+    int seen = 0;
+#define CS2_SLOTS(id, kind)                      \
+    {                                            \
+        const Tier2Host h = tier2_host_##id();   \
+        if (h.type == DeviceType::FilterWheel) { \
+            case_t2_filterwheel_slot_data(h);    \
+            ++seen;                              \
+        }                                        \
+    }
+    CONTRACT_SWEEP_TIER2_HOSTS(CS2_SLOTS)
+#undef CS2_SLOTS
+    INFO("tier-2 filter wheel hosts in this build: " << seen);  // ZWO, QHY CFW3, Player One, Wanderer when all on
+}
 #endif
 
 #ifndef _WIN32

@@ -3670,7 +3670,7 @@ function normalizeFilterName(name) {
 
 // expandShorthand: when true (the live UI preview), a single all-caps token is
 // split into per-character names for display. On SUBMIT it must be false so the
-// raw token is sent to the server, where the C++ expand_shorthand_locked expands
+// raw token is sent to the server, where util::FilterWheelSlots (filterwheel_slots.h) expands
 // it ONLY when its length matches the wheel's real slot count. Splitting here
 // without knowing the slot count would send e.g. "LRGB" as 4 names to a 5-slot
 // wheel, which gets silently padded (pre-connect) or rejected (post-connect).

@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/filterwheel_slots.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_protocol_wrapper.h>
@@ -39,11 +40,10 @@ public:
           config_(std::move(config)),
           connected_(false),
           protocol_(clock) {
-        // The whole Wanderer lineup is 8-slot, so slot-sized state can be built
-        // at construction rather than at connect (unlike SDK-enumerated wheels).
-        filter_names_.assign(kFilterWheelSlotCount, std::string());
-        apply_default_names_locked();
-        focus_offsets_.assign(kFilterWheelSlotCount, 0);
+        // The whole Wanderer lineup is 8-slot, so the count is published at
+        // construction and never cleared: names and offsets are length-checked
+        // even while disconnected (unlike SDK-enumerated wheels, issue #1991).
+        slots_.publish_slot_count(kFilterWheelSlotCount, "WandererAstro");
     }
 
     ~WandererFilterWheelDriver() override {
@@ -275,31 +275,22 @@ public:
 
     std::vector<int> get_focus_offsets() const override {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        return focus_offsets_;
+        return slots_.offsets();
     }
 
     void set_focus_offsets(const std::vector<int>& offsets) override {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        validate_slot_count_locked(static_cast<int>(offsets.size()), "focusOffsets");
-        focus_offsets_ = offsets;
+        slots_.set_offsets(offsets);
     }
 
     std::vector<std::string> get_names() const override {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        return filter_names_;
+        return slots_.names();
     }
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        // Expand a single-token shorthand ("LRGBSHOC" -> L,R,G,B,S,H,O,C)
-        // before validating the count, then stage on a local copy so a
-        // validation throw leaves the existing names untouched (matches the
-        // ZWO/PlayerOne filter wheel drivers).
-        std::vector<std::string> staged = names;
-        expand_shorthand_locked(staged);
-        validate_slot_count_locked(static_cast<int>(staged.size()), "names");
-        filter_names_ = std::move(staged);
-        apply_default_names_locked();
+        slots_.set_names(names);
     }
 
 private:
@@ -320,42 +311,6 @@ private:
         }
     }
 
-    // Expand a single delimiter-less token into per-slot single-character names
-    // ("LRGBSHOC" -> L,R,G,B,S,H,O,C) only when it looks like a shorthand code
-    // (no lowercase letters), so ordinary names like "Clear" are left intact.
-    void expand_shorthand_locked(std::vector<std::string>& names) const {
-        if (names.size() != 1) {
-            return;
-        }
-        const std::string& candidate = names[0];
-        const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
-        if (candidate.size() == static_cast<std::size_t>(kFilterWheelSlotCount) && !has_lowercase &&
-            candidate.find_first_of(",; \t") == std::string::npos) {
-            std::vector<std::string> expanded;
-            expanded.reserve(candidate.size());
-            for (char ch : candidate) {
-                expanded.emplace_back(1, ch);
-            }
-            names = std::move(expanded);
-        }
-    }
-
-    void apply_default_names_locked() {
-        for (std::size_t i = 0; i < filter_names_.size(); ++i) {
-            if (filter_names_[i].empty()) {
-                filter_names_[i] = "Filter " + std::to_string(i + 1);
-            }
-        }
-    }
-
-    void validate_slot_count_locked(int provided_size, std::string_view field_name) const {
-        if (provided_size != kFilterWheelSlotCount) {
-            throw AlpacaException(
-                "Invalid " + std::string(field_name) + " length: expected " + std::to_string(kFilterWheelSlotCount),
-                AlpacaError::InvalidValue);
-        }
-    }
-
     int device_number_;
     FilterWheelConnectionConfig config_;
     std::atomic<bool> connected_;
@@ -368,8 +323,7 @@ private:
     // moving_ is mutable so the arrival latch can run in const get_position().
     mutable bool moving_ = false;
     int target_slot_ = 0;
-    std::vector<std::string> filter_names_;
-    std::vector<int> focus_offsets_;
+    util::FilterWheelSlots slots_;  // names and offsets; guarded by state_mutex_
 
     std::mutex transition_mutex_;  // serializes set_connected() connect/disconnect transitions
 };

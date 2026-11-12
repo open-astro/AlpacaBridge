@@ -28,6 +28,7 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | Command | Used for | Reply | How the driver reads it |
 | --- | --- | --- | --- |
 | `:GVP#` / `:GVN#` | identity probe, firmware version | `name#` / `M.mm...#` | `#`-terminated; product must be `OnStep` or `On-Step` |
+| `:GVC#` | the device name (OnStepX product description, decision 0024) | `text#`; no reply at all from a firmware without it | `#`-terminated; sent by firmware version, below |
 | `:GXEE#` | coordinate mode (`DoesRefraction`, #1216) | `0#`, `1#`, ... | read without waiting for `#` |
 | `:GU#` | status (tracking, slewing, park, home, guide, mount type, pier side) | packed status `#` | `#`-terminated; see the status table below |
 | `:GX96#` | preferred pier side (OnStepX, #2179) | `E`/`W`/`B`/`A` `#` (`A` on main only; `E` with the flips off) | `#`-terminated; one of the four letters, else unknown |
@@ -86,6 +87,18 @@ column is from the source, not from hardware.
 - **Telling them apart**: OnStepX numbers its releases from 10 (`:GVN#` `10.23a`), OnStep 4.x and
   older below that (`is_onstepx_version()`, version 10 or later). The driver uses this only to
   decide whether to ask `:GXEE#`.
+- **`:GVC#`** (the product description, the device name, decision 0024): OnStepX only, and an unknown `:GV`
+  command gets no reply at all (`CE_CMD_UNKNOWN`, `numericReply=false`), not the `0` of other unknown
+  commands, so a mount without it makes the read wait out the response timeout (6.0 s against about 0.9 s for a
+  connect to the HM-17, #2232). OnStepX history: `1b6a020f` (2024-05-22) is 10.23a with no `'C'` case in the `:GV`
+  branch; `d9de0b8d` (2024-06-10 06:41:53) adds `:GVC#` and is still 10.23a, as is `675cd048` (06:44:33); `6cf2e575`
+  (06:44:38, "Upped patch level") makes it 10.23b, and every later build answers; 10.24a starts at `d09b11af`
+  (2024-09-18). So only two unreleased 10.23a commits from a three-minute window answer. The connect therefore
+  reads `:GVN#` (`firmware_answers_product_description()`) and asks, with the normal response timeout, for a major
+  above 10, for 10.24 and later, and for 10.23 with a patch letter after `a` (`b` to `z`); it does not ask for
+  10.23a, 10.23 with no letter, anything older, or a version that does not parse. The name stays
+  `OnStep Telescope` when it is not asked or there is no answer; a test fake that stands for a firmware without
+  the command must stay silent, not answer `0`.
 - **`:GXEE#`** (coordinate mode, `DoesRefraction`, #1216): OnStepX only. OnStep 4.x answers any
   unknown command with `0`, so the driver does not ask it there and keeps the settable local flag.
 - **`:GE#`**: both, with the same codes up to 23; OnStep 4.x has no `25` (`CE_1`) and keeps the

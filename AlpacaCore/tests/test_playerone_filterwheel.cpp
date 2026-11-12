@@ -538,3 +538,27 @@ TEST_CASE("Player One PW Filter Wheel Driver - a failed connect leaves the pre-c
     CHECK_NOTHROW(driver->set_names({"A", "B", "C"}));
     CHECK(driver->get_names().size() == 3);
 }
+
+// Issue #1991 spec rules 2, 4, 6 and 8: a connected wheel expands a lone shorthand token and checks the length, and
+// a disconnect returns the slot count to unknown.
+// Falsified by: playerone_filterwheel_driver.cpp seed_slot_data() dropping slots_.publish_slot_count() (the count
+// stays unknown: the lone LRGBH token stays one name).
+TEST_CASE("Player One PW Filter Wheel Driver - a connected wheel expands shorthand and checks the names length",
+          "[playerone][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_names().size() == 5);
+
+    driver->set_names({"LRGBH"});
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R", "G", "B", "H"});
+    require_alpaca_error([&] { driver->set_names({"L", "R", "G", "B"}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_focus_offsets({1, 2}); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R", "G", "B", "H"});
+
+    driver->set_connected(false);
+    REQUIRE_NOTHROW(driver->set_names({"L", "R"}));
+    REQUIRE_NOTHROW(driver->set_focus_offsets({1, 2, 3}));
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R"});
+    CHECK(driver->get_focus_offsets() == std::vector<int>{1, 2, 3});
+}

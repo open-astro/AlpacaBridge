@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/filterwheel_slots.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
@@ -160,10 +161,10 @@ public:
             // disconnect's reset(): it counts as a good reply and would be served for up to the TTL.
             status_cache_.reset();
             connected_.store(true);
-            std::int32_t slots = 0;
+            int slots = 0;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                slots = slot_count_;
+                slots = slots_.slot_count().value_or(0);
             }
             ALPACA_LOG_INFO("iOptron", model_name_ + " filter wheel connected (" + std::to_string(slots) + " slots)");
             return;
@@ -264,10 +265,11 @@ public:
         ensure_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (slot_count_ <= 0) {
+            const std::optional<int> slot_count = slots_.slot_count();
+            if (!slot_count) {
                 throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
             }
-            if (position >= slot_count_) {
+            if (position >= *slot_count) {
                 throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
             }
         }
@@ -315,34 +317,22 @@ public:
 
     std::vector<int> get_focus_offsets() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return focus_offsets_;
+        return slots_.offsets();
     }
 
     void set_focus_offsets(const std::vector<int>& offsets) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Config-time values are accepted at any length and resized at
-        // connect; once connected the length must match the slot count.
-        if (connected_.load()) {
-            validate_slot_count_locked(static_cast<int>(offsets.size()), "focusOffsets");
-        }
-        focus_offsets_ = offsets;
+        slots_.set_offsets(offsets);
     }
 
     std::vector<std::string> get_names() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return filter_names_;
+        return slots_.names();
     }
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Stage on a copy so a validation throw leaves filter_names_ intact.
-        std::vector<std::string> staged = names;
-        expand_shorthand_locked(staged);
-        if (connected_.load()) {
-            validate_slot_count_locked(static_cast<int>(staged.size()), "names");
-        }
-        filter_names_ = std::move(staged);
-        apply_default_names_locked();
+        slots_.set_names(names);
     }
 
 private:
@@ -385,6 +375,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             firmware_.clear();
+            slots_.clear_slot_count();
             connected_.store(false);
         }
         status_cache_.reset();
@@ -452,7 +443,7 @@ private:
         bool offsets_configured = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            offsets_configured = !focus_offsets_.empty();
+            offsets_configured = !slots_.offsets().empty();
         }
         std::vector<int> stored;
         if (!offsets_configured) {
@@ -464,14 +455,11 @@ private:
             throw AlpacaException(protocol_.link_fault(), AlpacaError::NotConnected);
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        slot_count_ = slots;
         firmware_ = std::move(firmware);
-        // A FocusOffsets write that landed during the :WF reads is kept (the check above ran unlocked).
-        const bool seed = !offsets_configured && focus_offsets_.empty();
-        normalize_slot_data_locked();
-        if (seed) {
-            focus_offsets_ = std::move(stored);
-        }
+        // A FocusOffsets write that landed during the :WF reads is kept (the check above ran unlocked): the seed only
+        // fills an empty field. Seed before the publish, which sizes the field to the slot count.
+        slots_.seed_offsets(std::move(stored));
+        slots_.publish_slot_count(slots, "iOptron");
         // The move latch from before a loss or a Disconnect ends here, under the I/O lock: a set_position that
         // won the lock before the teardown's connected_ flag was seen can still set it after the teardown, but
         // none can run once the handshake holds the lock. Position is not readable while disconnected.
@@ -491,67 +479,6 @@ private:
             }
         }
         return offsets;
-    }
-
-    void normalize_slot_data_locked() {
-        if (slot_count_ <= 0) {
-            return;
-        }
-        const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        expand_shorthand_locked(filter_names_);
-        if (filter_names_.empty()) {
-            filter_names_.assign(slots, std::string());
-        } else if (filter_names_.size() != slots) {
-            ALPACA_LOG_WARN("iOptron", "Configured filterNames count (" + std::to_string(filter_names_.size()) +
-                                           ") does not match wheel slot count (" + std::to_string(slots) +
-                                           "); resizing to match the wheel");
-            filter_names_.resize(slots);
-        }
-        apply_default_names_locked();
-        if (focus_offsets_.empty()) {
-            focus_offsets_.assign(slots, 0);
-        } else if (focus_offsets_.size() != slots) {
-            ALPACA_LOG_WARN("iOptron", "Configured focusOffsets count (" + std::to_string(focus_offsets_.size()) +
-                                           ") does not match wheel slot count (" + std::to_string(slots) +
-                                           "); resizing to match the wheel");
-            focus_offsets_.resize(slots);
-        }
-    }
-
-    // "LRGB" -> L,R,G,B when the lone token has no lowercase letters and its
-    // length equals the slot count (same rule as the JS parseFilterNamesInput
-    // and the ZWO/ToupTek drivers). No-op until the slot count is known.
-    void expand_shorthand_locked(std::vector<std::string>& names) const {
-        if (slot_count_ <= 0 || names.size() != 1) {
-            return;
-        }
-        const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        const std::string& candidate = names[0];
-        const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
-        if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
-            std::vector<std::string> expanded;
-            expanded.reserve(slots);
-            for (char ch : candidate) {
-                expanded.emplace_back(1, ch);
-            }
-            names = std::move(expanded);
-        }
-    }
-
-    void apply_default_names_locked() {
-        for (std::size_t i = 0; i < filter_names_.size(); ++i) {
-            if (filter_names_[i].empty()) {
-                filter_names_[i] = "Filter " + std::to_string(i + 1);
-            }
-        }
-    }
-
-    void validate_slot_count_locked(int provided_size, std::string_view field_name) const {
-        if (provided_size != slot_count_) {
-            throw AlpacaException(
-                "Invalid " + std::string(field_name) + " length: expected " + std::to_string(slot_count_),
-                AlpacaError::InvalidValue);
-        }
     }
 
     // One refill is one :WP#. `wire` is the raw reply (-1 while moving); the moving_/target_ latch is
@@ -584,12 +511,10 @@ private:
 
     // Everything below is guarded by mutex_.
     mutable std::mutex mutex_;
-    std::int32_t slot_count_ = 0;   // from the handshake model code at connect
     std::atomic<bool> unlisted_model_{false};
     const std::string model_name_;  // "iEFW-15" / "iEFW-18" from config; fixed after construction
     std::string firmware_;          // web-UI only; set at connect, cleared by the next Connect/Disconnect
-    std::vector<std::string> filter_names_;
-    std::vector<int> focus_offsets_;
+    util::FilterWheelSlots slots_;  // count from the handshake model code, published at connect, cleared at teardown
     // Position reports -1 from a commanded move until the wheel reports the
     // target. moving_ is mutable so the arrival latch can run in const get_position().
     mutable bool moving_ = false;

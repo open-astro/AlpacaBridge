@@ -1452,6 +1452,7 @@ TEST_CASE("OnStep link loss - a link lost during the connect's first reads fails
 TEST_CASE("OnStep link loss - a connect that loses the link keeps the earlier name", "[onstep][serial][connected]") {
     WrapperReset reset;
     FakeOnStepSerialMount mount;
+    mount.set_reply(":GVN#", "10.24a#");  // a release that answers :GVC# (10.23a is not asked)
     mount.set_reply(":GVC#", "Example Mount 7#");
     PortLink link(mount.slave_path());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
