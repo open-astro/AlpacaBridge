@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/filterwheel_slots.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
@@ -61,8 +62,6 @@ public:
           serial_number_(),
           wheel_info_(),
           wheel_info_valid_(false),
-          filter_names_(),
-          focus_offsets_(),
           // The TTL and the fault stamp read the injected clock (decision 0005), so a test ages both with advance().
           status_cache_("ZWO EFW", kStatusTtl, 3, "ZWO", clock) {}
 
@@ -209,6 +208,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             lost_reason_.clear();  // decision 0009 rule 5: a Disconnect drops the kept loss reason
+            slots_.clear_slot_count();
             if (wheel_index_.has_value()) {
                 wheel_id_.reset();
                 wheel_info_ = {};
@@ -331,36 +331,22 @@ public:
 
     std::vector<int> get_focus_offsets() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return focus_offsets_;
+        return slots_.offsets();
     }
 
     void set_focus_offsets(const std::vector<int>& offsets) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (wheel_info_valid_ && wheel_info_.slot_count > 0) {
-            validate_slot_count_locked(static_cast<int>(offsets.size()), "focusOffsets");
-        }
-        focus_offsets_ = offsets;
+        slots_.set_offsets(offsets);
     }
 
     std::vector<std::string> get_names() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return filter_names_;
+        return slots_.names();
     }
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Expand a single-token shorthand ("LRGB" -> L,R,G,B) BEFORE validating
-        // the count so it works when connected too, not only on the pre-connect
-        // config path (matches normalize_slot_data_locked). Stage on a local copy
-        // and only commit on success, so a validation throw leaves the existing
-        // filter_names_ untouched. Per the "fix shared patterns everywhere" rule.
-        std::vector<std::string> staged = names;
-        expand_shorthand_locked(staged);
-        if (wheel_info_valid_ && wheel_info_.slot_count > 0) {
-            validate_slot_count_locked(static_cast<int>(staged.size()), "names");
-        }
-        filter_names_ = std::move(staged);
-        apply_default_names_locked();
+        slots_.set_names(names);
     }
 
 private:
@@ -405,7 +391,7 @@ private:
         }
         wheel_info_ = info;
         wheel_info_valid_ = true;
-        normalize_slot_data_locked();
+        slots_.publish_slot_count(info.slot_count, "ZWO");
         serial_number_ = serial;
     }
 
@@ -609,71 +595,6 @@ private:
         throw AlpacaException("Filter wheel ID not specified", AlpacaError::InvalidValue);
     }
 
-    void normalize_slot_data_locked() {
-        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0) {
-            return;
-        }
-        const std::size_t slots = static_cast<std::size_t>(wheel_info_.slot_count);
-        expand_shorthand_locked(filter_names_);
-        if (filter_names_.empty()) {
-            filter_names_.assign(slots, std::string());
-        } else if (filter_names_.size() != slots) {
-            ALPACA_LOG_WARN("ZWO", "Configured filterNames count (" + std::to_string(filter_names_.size()) +
-                                       ") does not match wheel slot count (" + std::to_string(slots) +
-                                       "); resizing to match the wheel");
-            filter_names_.resize(slots);
-        }
-        apply_default_names_locked();
-        if (focus_offsets_.empty()) {
-            focus_offsets_.assign(slots, 0);
-        } else if (focus_offsets_.size() != slots) {
-            ALPACA_LOG_WARN("ZWO", "Configured focusOffsets count (" + std::to_string(focus_offsets_.size()) +
-                                       ") does not match wheel slot count (" + std::to_string(slots) +
-                                       "); resizing to match the wheel");
-            focus_offsets_.resize(slots);
-        }
-    }
-
-    // Expand a single delimiter-less token into per-slot single-character names
-    // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
-    // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
-    // the slot count are left intact. No-op until the slot count is known.
-    void expand_shorthand_locked(std::vector<std::string>& names) const {
-        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0 || names.size() != 1) {
-            return;
-        }
-        const std::size_t slots = static_cast<std::size_t>(wheel_info_.slot_count);
-        const std::string& candidate = names[0];
-        const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
-        if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
-            std::vector<std::string> expanded;
-            expanded.reserve(slots);
-            for (char ch : candidate) {
-                expanded.emplace_back(1, ch);
-            }
-            names = std::move(expanded);
-        }
-    }
-
-    void apply_default_names_locked() {
-        for (std::size_t i = 0; i < filter_names_.size(); ++i) {
-            if (filter_names_[i].empty()) {
-                filter_names_[i] = "Filter " + std::to_string(i + 1);
-            }
-        }
-    }
-
-    void validate_slot_count_locked(int provided_size, std::string_view field_name) const {
-        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        if (provided_size != wheel_info_.slot_count) {
-            throw AlpacaException("Invalid " + std::string(field_name) +
-                                  " length: expected " + std::to_string(wheel_info_.slot_count),
-                                  AlpacaError::InvalidValue);
-        }
-    }
-
     ZWOEFWSDK& sdk_;
     int device_number_;
     std::optional<int> wheel_id_;
@@ -681,8 +602,8 @@ private:
     std::string serial_number_;
     ZWOEFWInfo wheel_info_;
     bool wheel_info_valid_;
-    std::vector<std::string> filter_names_;
-    std::vector<int> focus_offsets_;
+    // Under mutex_: names, offsets and the slot count they are checked against (issue #1991).
+    util::FilterWheelSlots slots_;
     // Connected, as epoch << 1 | open bit: begin_transition() and publish_open() in set_connected(), mark_lost() on
     // loss evidence (issue #1668).
     mutable util::LinkEpoch link_;
