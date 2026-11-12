@@ -114,11 +114,54 @@ TEST_CASE("ZWO Camera Driver - Unsupported actions", "[zwo][camera][unit]") {
                          alpacacore::AlpacaError::MethodNotImplemented);
 }
 
+// Issue #1919: while disconnected NotConnected comes before the capability answer; once connected the member keeps
+// its NotImplemented code. The fake camera is mono, so it has no Bayer offsets.
 TEST_CASE("ZWO Camera Driver - Sub-exposure not supported", "[zwo][camera][unit]") {
-    auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
+    alpacacore::test::FakeZWOSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
 
+    require_alpaca_error([&] { (void)driver->get_sub_exposure_duration(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
     require_alpaca_error([&] { (void)driver->get_sub_exposure_duration(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&] { driver->set_sub_exposure_duration(1.0); }, alpacacore::AlpacaError::NotImplemented);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO Camera Driver - unsupported and caps members answer NotConnected before the capability",
+          "[zwo][camera][unit]") {
+    namespace AlpacaError = alpacacore::AlpacaError;
+    alpacacore::test::FakeZWOSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_exposure_max(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_exposure_min(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gain_max(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gain_min(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_offset_max(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_offset_min(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_gains(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_offsets(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_readout_mode(1); }, AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_gains(); }, AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_offsets(); }, AlpacaError::PropertyNotImplemented);
+    // The fake's caps: Exposure 1..3'600'000'000 us, Gain 0..500, Offset 0..100.
+    CHECK(driver->get_exposure_max() == 3600.0);
+    CHECK(driver->get_exposure_min() == 0.000001);
+    CHECK(driver->get_gain_max() == 500);
+    CHECK(driver->get_gain_min() == 0);
+    CHECK(driver->get_offset_max() == 100);
+    CHECK(driver->get_offset_min() == 0);
+    driver->set_connected(false);
 }
 
 TEST_CASE("ZWO Camera Driver - ASCOM Error Codes", "[zwo][camera][unit]") {
