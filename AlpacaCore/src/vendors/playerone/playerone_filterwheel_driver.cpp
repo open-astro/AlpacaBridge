@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/filterwheel_slots.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
@@ -40,8 +41,6 @@ public:
           handle_(-1),
           wheel_info_(),
           wheel_info_valid_(false),
-          filter_names_(),
-          focus_offsets_(),
           connected_(false),
           status_cache_("Player One PW", kStatusTtl, 3, "PlayerOne") {}
 
@@ -148,6 +147,7 @@ public:
             handle_ = -1;
             wheel_info_ = {};
             wheel_info_valid_ = false;
+            slots_.clear_slot_count();
             connected_.store(false);
         }
         status_cache_.reset();
@@ -253,29 +253,22 @@ public:
 
     std::vector<int> get_focus_offsets() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return focus_offsets_;
+        return slots_.offsets();
     }
 
     void set_focus_offsets(const std::vector<int>& offsets) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (wheel_info_valid_ && wheel_info_.position_count > 0) {
-            validate_slot_count_locked(static_cast<int>(offsets.size()), "focusOffsets");
-        }
-        focus_offsets_ = offsets;
+        slots_.set_offsets(offsets);
     }
 
     std::vector<std::string> get_names() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return filter_names_;
+        return slots_.names();
     }
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (wheel_info_valid_ && wheel_info_.position_count > 0) {
-            validate_slot_count_locked(static_cast<int>(names.size()), "names");
-        }
-        filter_names_ = names;
-        apply_default_names_locked();
+        slots_.set_names(names);
     }
 
 private:
@@ -324,8 +317,8 @@ private:
                 throw AlpacaException("Filter wheel reported no filter positions", AlpacaError::DriverException);
             }
             slots = static_cast<std::size_t>(info.position_count);
-            want_names = filter_names_.empty();
-            want_offsets = focus_offsets_.empty();
+            want_names = slots_.names().empty();
+            want_offsets = slots_.offsets().empty();
         }
         auto& sdk = sdk_;
 
@@ -360,40 +353,9 @@ private:
         handle_ = handle;
         wheel_info_ = info;
         wheel_info_valid_ = true;
-        if (filter_names_.empty()) {
-            filter_names_ = aliases.empty() ? std::vector<std::string>(slots) : std::move(aliases);
-        } else if (filter_names_.size() != slots) {
-            ALPACA_LOG_WARN("PlayerOne", "Configured filterNames count (" + std::to_string(filter_names_.size()) +
-                                             ") does not match wheel position count (" + std::to_string(slots) +
-                                             "); resizing to match the wheel");
-            filter_names_.resize(slots);
-        }
-        apply_default_names_locked();
-
-        if (focus_offsets_.empty()) {
-            focus_offsets_ = offsets.empty() ? std::vector<int>(slots, 0) : std::move(offsets);
-        } else if (focus_offsets_.size() != slots) {
-            ALPACA_LOG_WARN("PlayerOne", "Configured focusOffsets count (" + std::to_string(focus_offsets_.size()) +
-                                             ") does not match wheel position count (" + std::to_string(slots) +
-                                             "); resizing to match the wheel");
-            focus_offsets_.resize(slots);
-        }
-    }
-
-    void apply_default_names_locked() {
-        for (std::size_t i = 0; i < filter_names_.size(); ++i) {
-            if (filter_names_[i].empty()) {
-                filter_names_[i] = "Filter " + std::to_string(i + 1);
-            }
-        }
-    }
-
-    void validate_slot_count_locked(int provided_size, std::string_view field_name) const {
-        if (provided_size != wheel_info_.position_count) {
-            throw AlpacaException("Invalid " + std::string(field_name) + " length: expected " +
-                                      std::to_string(wheel_info_.position_count),
-                                  AlpacaError::InvalidValue);
-        }
+        slots_.seed_names(std::move(aliases));
+        slots_.seed_offsets(std::move(offsets));
+        slots_.publish_slot_count(info.position_count, "PlayerOne");
     }
 
     // One refill reads one device value. closed: a disconnect won the I/O lock (not a frame, not a link failure).
@@ -411,8 +373,8 @@ private:
     int handle_;
     PlayerOnePWInfo wheel_info_;
     bool wheel_info_valid_;
-    std::vector<std::string> filter_names_;
-    std::vector<int> focus_offsets_;
+    // Under mutex_: names, offsets and the slot count they are checked against (issue #1991).
+    util::FilterWheelSlots slots_;
     std::atomic<bool> connected_;
     // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
     // short state reads and writes, never held across an SDK call), then the SDK wrapper's own mutex.
