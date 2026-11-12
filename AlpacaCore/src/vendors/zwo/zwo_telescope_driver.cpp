@@ -1633,7 +1633,7 @@ public:
     }
 
     void abort_slew() override {
-        check_connected(true);
+        check_connected(/*skip_fault=*/true);
         ensure_not_parked("AbortSlew");
         reset_position_offsets();
         // open-astro#575 / #720: fence a GOTO body still writing the target
@@ -2572,20 +2572,21 @@ private:
     }
 
     // Call without mutex_, including safety stops; match Connected without waiting on the wire.
-    void check_connected(bool safety_stop = false) const {
+    void check_connected(bool skip_fault = false) const {
         update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected_locked(safety_stop);
+        check_connected_locked(skip_fault);
     }
 
     // Absent capabilities: NotConnected while disconnected, else their NotImplemented code even on a faulted link.
-    void check_connected_only() const { check_connected(/*safety_stop=*/true); }
+    void check_connected_only() const { check_connected(/*skip_fault=*/true); }
 
-    void check_connected_locked(bool safety_stop = false) const {
+    // skip_fault: a safety stop (AbortSlew) and an absent capability answer even on a faulted link.
+    void check_connected_locked(bool skip_fault = false) const {
         if (!connected_.load() || !caches_ready_.load()) {
             throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
         }
-        if (!safety_stop) {
+        if (!skip_fault) {
             const auto fault = link_fault_locked();
             if (!fault.empty()) throw AlpacaException(fault, AlpacaError::DriverException);
         }
