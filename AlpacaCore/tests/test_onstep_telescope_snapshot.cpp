@@ -29,9 +29,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -83,6 +85,13 @@ struct SnapshotMount {
     std::string gxee_min = "-180";    // :GXEe# RA-axis minimum, degrees
     std::string gxee_max = "180";     // :GXEw# RA-axis maximum, degrees
     std::string ms_reply = "0";       // :MS#
+    // The rate commands (#2214), under `mutex`. An empty reply is answered like an unknown command ("0#").
+    std::string gt;                   // :GT# tracking rate in Hz ("0" when not tracking)
+    std::string gxtr;                 // :GXTR# RA rate offset; :SXTR,n# stores its value here
+    std::string gxtd;                 // :GXTD# Dec rate offset; :SXTD,n# stores its value here
+    std::string gx90;                 // :GX90# pulse-guide rate
+    std::string sxt_reply = "1";      // :SXTR/:SXTD, a bare digit
+    std::string ge_code;              // :GE# when not empty, e.g. "15#"
     std::string mn_reply = "0";       // :MNe#/:MNw# (empty: no reply)
     std::string ra_text;              // :GRa# when not empty
     std::string dec_text;             // :GDe# when not empty
@@ -193,9 +202,37 @@ struct SnapshotMount {
         if (chunk.rfind(":Gg", 0) == 0) return garble_site.load() ? "?#" : "+074*00#";
         if (chunk.rfind(":Gh", 0) == 0) return "-10*#";
         if (chunk.rfind(":Go", 0) == 0) return "90*#";
-        if (chunk.rfind(":GE", 0) == 0) return refuse_park.load() ? "22#" : "00#";
+        if (chunk.rfind(":GE", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!ge_code.empty()) return ge_code;
+            return refuse_park.load() ? "22#" : "00#";
+        }
+        if (chunk.rfind(":GT", 0) == 0 || chunk.rfind(":GXTR", 0) == 0 || chunk.rfind(":GXTD", 0) == 0 ||
+            chunk.rfind(":GX90", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            const std::string& value = chunk.rfind(":GT", 0) == 0     ? gt
+                                       : chunk.rfind(":GXTR", 0) == 0 ? gxtr
+                                       : chunk.rfind(":GXTD", 0) == 0 ? gxtd
+                                                                      : gx90;
+            return value.empty() ? "0#" : value + "#";
+        }
+        if (chunk.rfind(":SXTR,", 0) == 0 || chunk.rfind(":SXTD,", 0) == 0) {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (sxt_reply != "1") return sxt_reply;
+            // The firmware clamps at +/-1800 and reads back eight decimals (Mount.command.cpp, af1d26bf).
+            const double value = std::clamp(std::strtod(chunk.c_str() + 6, nullptr), -1800.0, 1800.0);
+            char text[40];
+            std::snprintf(text, sizeof(text), "%.8f", value);
+            (chunk[4] == 'R' ? gxtr : gxtd) = text;
+            return "1";
+        }
+        if (chunk.rfind(":TQ", 0) == 0 || chunk.rfind(":TL", 0) == 0 || chunk.rfind(":TS", 0) == 0 ||
+            chunk.rfind(":TK", 0) == 0) {
+            return "";  // no reply (Mount.command.cpp, af1d26bf)
+        }
         if (chunk.rfind(":hP", 0) == 0 && refuse_park.load()) return "0";
         if (chunk.rfind(":CM", 0) == 0) return "N/A#";
+        if (chunk.rfind(":Te", 0) == 0) return "1";  // tracking enable (OnStepX): a bare digit
         if (chunk.rfind(":MS", 0) == 0) {
             std::lock_guard<std::mutex> lock(mutex);
             return ms_reply;
@@ -526,10 +563,10 @@ TEST_CASE(
 
     SECTION("the tick that reads the end restores it") {
         REQUIRE(rig.tick());
-        CHECK(rig.mount->count(":ST60") == 1);
+        CHECK(rig.mount->count(":Te#") == 1);
         CHECK(rig.driver->get_tracking());
         REQUIRE(rig.tick());
-        CHECK(rig.mount->count(":ST60") == 1);  // once
+        CHECK(rig.mount->count(":Te#") == 1);  // once
     }
     SECTION("a Park refused in motion and still retrying gets none") {
         // The park's first try is refused "in motion" (22), so its body is to retry; the spawn seam holds that
@@ -549,7 +586,7 @@ TEST_CASE(
         REQUIRE(rig.mount->count(":hP#") == 1);
         REQUIRE(rig.driver->get_slewing());  // the Park is pending
         REQUIRE(rig.tick());
-        CHECK(rig.mount->count(":ST60") == 0);
+        CHECK(rig.mount->count(":Te#") == 0);
         rig.mount->refuse_park = false;
         held = false;
     }
@@ -578,7 +615,7 @@ TEST_CASE("OnStep snapshot - a poll body cancelled mid-sample sends no tracking 
     rig.mount->block_status = false;
     REQUIRE(disconnect.wait_for(seconds(20)) == std::future_status::ready);
     disconnect.get();
-    CHECK(rig.mount->count(":ST60") == 0);
+    CHECK(rig.mount->count(":Te#") == 0);
 }
 
 TEST_CASE("OnStep snapshot - IsPulseGuiding stays true until a frame sampled after the pulse is published",
@@ -928,10 +965,10 @@ TEST_CASE("OnStep snapshot - a reading taken before the :MS# answer does not end
     rig.mount->set_status("nNpEW180#");  // no GOTO, tracking off
     rig.clock.advance(seconds(3));       // past the window
     CHECK(rig.driver->get_slewing());
-    CHECK(rig.mount->count(":ST60") == 0);
+    CHECK(rig.mount->count(":Te#") == 0);
     REQUIRE(rig.tick());  // sampled after the answer: the landing, with no window to wait for
     CHECK_FALSE(rig.driver->get_slewing());
-    CHECK(rig.mount->count(":ST60") == 1);
+    CHECK(rig.mount->count(":Te#") == 1);
 }
 
 // Decision 0022 rule 3 (the Sky-Watcher check, "a short goto reports landed before the 8 s hold ends"): landing is
@@ -1313,10 +1350,10 @@ TEST_CASE("OnStep pier side - SideOfPier keeps the hour-angle rule on OnStep 4.x
 }
 
 // AlignmentMode answers from the mount-type letter of the polled :GU# frame, with no device I/O (#2214). Alt-alt has no
-// ASCOM value and is answered AltAz, as clients treat it the same way. No frame, or a frame with no type letter
-// keeps the old GermanPolar answer.
-// Falsified by: get_alignment_mode() returning a constant, ignoring the type letter, or mapping 'L' to anything but
-// AltAz.
+// ASCOM value and is answered AltAz, as clients treat it the same way. A frame with no type letter is not a
+// supported firmware's answer (OnStepX writes E/K/A/L, 4.x E/K/A) and throws DriverException (decision 0010 rule 8).
+// Falsified by: get_alignment_mode() returning a constant, ignoring the type letter, mapping 'L' to anything but
+// AltAz, or answering GermanPolar for a frame with no type letter.
 TEST_CASE("OnStep AlignmentMode - answers from the :GU# mount type", "[onstep][telescope][unit]") {
     Rig rig(false);
     connect_paused(rig);
@@ -1336,9 +1373,9 @@ TEST_CASE("OnStep AlignmentMode - answers from the :GU# mount type", "[onstep][t
         place(rig, 1.0, "NpEW180#");
         CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
     }
-    SECTION("a frame with no type letter is GermanPolar") {
+    SECTION("a frame with no type letter throws DriverException") {
         place(rig, 1.0, "Np180#");
-        CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
+        CHECK(error_of([&] { (void)rig.driver->get_alignment_mode(); }) == alpacacore::AlpacaError::DriverException);
     }
 }
 
@@ -1695,6 +1732,668 @@ TEST_CASE("OnStep pier side - SideOfPier refusals send nothing", "[onstep][teles
         place(rig, 0.3, kWestStatus);
         CHECK(error_of([&] { rig.driver->set_side_of_pier(0); }) == alpacacore::AlpacaError::PropertyNotImplemented);
         nothing_sent();
+    }
+}
+
+// ── #2214 slice 2: tracking rates, rate offsets, the pulse-guide rate and SyncToAltAz ───────────────────────────────
+// Through the driver's ASCOM members against the loopback OnStepX; what reached the wire is read from its log.
+// Firmware facts are from OnStepX af1d26bf (Status.command.cpp, Mount.command.cpp, Guide.command.cpp).
+
+namespace {
+
+const char* const kLunarStatus = "Np(EW180#";
+const char* const kSolarStatus = "NpOEW180#";
+const char* const kKingStatus = "NpkEW180#";
+const char* const kCompensatedStatus = "NprEW180#";  // refraction compensation: the frame names no rate
+const char* const kCompensatedIdleStatus = "nNprEW180#";
+const char* const kHomeResetStatus = "NHpEo180#";  // at home
+
+// No relative slack: the guide rates differ from the informational one by parts in a million.
+Approx exact(double value) { return Approx(value).epsilon(0.0).margin(1e-12); }
+
+// The mount shows `status` and the driver has sampled it.
+void show(Rig& rig, const char* status, bool full = false) {
+    rig.mount->set_status(status);
+    REQUIRE(rig.tick(full));
+}
+
+// A connected, paused rig whose mount answers `version`.
+void connect_rates(Rig& rig, const char* version = "10.23a") {
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->version = version;
+    }
+    connect_paused(rig);
+}
+
+}  // namespace
+
+// Falsified by: parse_status() ignoring the '(' 'O' 'k' letters (every frame would read driveSidereal).
+TEST_CASE("OnStepX rates - TrackingRate follows the :GU# rate letter", "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_rates(rig);
+    CHECK(rig.driver->get_tracking_rates() == std::vector<int>{0, 1, 2, 3});
+    CHECK(rig.driver->get_tracking_rate() == 0);  // no letter: sidereal
+    show(rig, kLunarStatus);
+    CHECK(rig.driver->get_tracking_rate() == 1);
+    show(rig, kSolarStatus);
+    CHECK(rig.driver->get_tracking_rate() == 2);
+    show(rig, kKingStatus);
+    CHECK(rig.driver->get_tracking_rate() == 3);
+    show(rig, kWestStatus);
+    CHECK(rig.driver->get_tracking_rate() == 0);
+    show(rig, "nNp(EW180#");  // the letters do not depend on Tracking being on
+    CHECK(rig.driver->get_tracking_rate() == 1);
+}
+
+// With tracking compensation on the frame carries 'r' or 't' and no rate letter, so the driver's last known rate
+// answers; the slow tick asks :GT# only while compensation is on and the mount tracks, and keeps the rate when the
+// reply is 0 or none of the four.
+// Falsified by: tracking_rate_served_locked() answering the frame's (absent) letter while compensation is on (it
+// would read sidereal), or the :GT# mapping using a tolerance wider than 0.01 Hz (60.164 would match King).
+TEST_CASE("OnStepX rates - a compensation frame keeps the last known rate and :GT# corrects it",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_rates(rig);
+    show(rig, kLunarStatus);
+    show(rig, kCompensatedStatus);
+    CHECK(rig.driver->get_tracking_rate() == 1);  // the letter is hidden: still lunar
+    rig.mount->clear_log();
+
+    show(rig, kCompensatedStatus, /*full=*/false);
+    CHECK(rig.mount->count(":GT#") == 0);  // only the slow tick asks
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gt = "60.00000";
+    }
+    show(rig, kCompensatedStatus, /*full=*/true);
+    CHECK(rig.mount->count(":GT#") == 1);
+    CHECK(rig.driver->get_tracking_rate() == 2);  // solar, from the mount
+
+    for (const char* hz : {"61.50000", "0", "60.15000"}) {  // none of the four, not tracking, 14 mHz off sidereal
+        INFO(hz);
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gt = hz;
+        }
+        show(rig, kCompensatedStatus, /*full=*/true);
+        CHECK(rig.driver->get_tracking_rate() == 2);
+    }
+    rig.mount->clear_log();
+    show(rig, kCompensatedIdleStatus, /*full=*/true);  // not tracking: no :GT# read
+    CHECK(rig.mount->count(":GT#") == 0);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gt = "60.16427";
+    }
+    show(rig, kCompensatedStatus, /*full=*/true);
+    CHECK(rig.driver->get_tracking_rate() == 0);  // sidereal
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gt = "60.13600";
+    }
+    show(rig, kCompensatedStatus, /*full=*/true);
+    CHECK(rig.driver->get_tracking_rate() == 3);  // King
+}
+
+// The connect reads :GT# too: a mount already on a hidden rate is not taken for sidereal.
+// Falsified by: dropping the :GT# read from seed_rate_state_locked() (the compensated mount would read sidereal).
+TEST_CASE("OnStepX rates - the connect reads the rate the compensation frame hides", "[onstep][telescope][rates]") {
+    Rig rig;
+    rig.mount->set_status(kCompensatedStatus);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gt = "57.90000";
+    }
+    connect_rates(rig);
+    CHECK(rig.driver->get_tracking_rate() == 1);
+}
+
+// Falsified by: set_tracking_rate() skipping the command (nothing on the wire), skipping the write-through (the
+// read right after would still say sidereal), or sending the wrong letter.
+TEST_CASE("OnStepX rates - setting the TrackingRate sends the command and reads back at once",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_rates(rig);
+    const std::vector<std::pair<int, const char*>> rates = {{1, ":TL#"}, {2, ":TS#"}, {3, ":TK#"}, {0, ":TQ#"}};
+    for (const auto& [rate, command] : rates) {
+        INFO(command);
+        rig.mount->clear_log();
+        rig.driver->set_tracking_rate(rate);
+        CHECK(rig.mount->count(command) == 1);
+        CHECK(rig.mount->count(":ST") == 0);             // the rate commands only
+        CHECK(rig.driver->get_tracking_rate() == rate);  // before any poll saw it
+    }
+    // The poll that follows says the same, and with compensation on the written rate stands.
+    rig.driver->set_tracking_rate(3);
+    show(rig, kKingStatus);
+    CHECK(rig.driver->get_tracking_rate() == 3);
+    show(rig, kCompensatedStatus);
+    CHECK(rig.driver->get_tracking_rate() == 3);
+    // 0-3 only, before the connection check (ITelescopeV4 DriveRates).
+    CHECK(error_of([&] { rig.driver->set_tracking_rate(4); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_of([&] { rig.driver->set_tracking_rate(-1); }) == alpacacore::AlpacaError::InvalidValue);
+    rig.driver->set_connected(false);
+    CHECK(error_of([&] { rig.driver->set_tracking_rate(4); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_of([&] { rig.driver->set_tracking_rate(1); }) == alpacacore::AlpacaError::NotConnected);
+}
+
+// "When tracking is turned on, the mount must use the last selected TrackingRate": :ST60.164275# would set the rate
+// back to sidereal on OnStepX (Mount.command.cpp 173-185), :Te# starts tracking at the selected one.
+// Falsified by: set_tracking_checked() sending :ST60.164275# on OnStepX (the wire would carry it and no :Te#).
+TEST_CASE("OnStepX rates - turning Tracking on sends :Te# and keeps the selected rate", "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_rates(rig);
+    rig.driver->set_tracking_rate(1);
+    show(rig, "nNp(EW180#");  // lunar, not tracking
+    CHECK_FALSE(rig.driver->get_tracking());
+    rig.mount->clear_log();
+    rig.driver->set_tracking(true);
+    CHECK(rig.mount->count(":Te#") == 1);
+    CHECK(rig.mount->count(":ST") == 0);
+    CHECK(rig.driver->get_tracking());
+    CHECK(rig.driver->get_tracking_rate() == 1);
+    show(rig, kLunarStatus);  // the mount tracks, still lunar
+    CHECK(rig.driver->get_tracking());
+    CHECK(rig.driver->get_tracking_rate() == 1);
+    rig.mount->clear_log();
+    rig.driver->set_tracking(false);
+    CHECK(rig.mount->count(":ST0#") == 1);  // stopping is :ST0# everywhere
+}
+
+// Falsified by: set_tracking_checked() sending :Te# on every firmware (OnStep 4.x answers an unknown command 0, so
+// Tracking could never be turned on there).
+TEST_CASE("OnStep 4.x rates - Tracking on still sends :ST60.164275# and the rate stays sidereal",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_rates(rig, "4.24s");
+    CHECK(rig.driver->get_tracking_rates() == std::vector<int>{0});
+    show(rig, "nNpEW180#");
+    rig.mount->clear_log();
+    rig.driver->set_tracking(true);
+    CHECK(rig.mount->count(":ST60.164275#") == 1);
+    CHECK(rig.mount->count(":Te#") == 0);
+    CHECK(rig.driver->get_tracking_rate() == 0);
+    show(rig, kLunarStatus);  // 4.x writes no rate letter; one that appears means nothing there
+    CHECK(rig.driver->get_tracking_rate() == 0);
+    // Sidereal is accepted and sends nothing; the others are not offered.
+    rig.mount->clear_log();
+    CHECK_NOTHROW(rig.driver->set_tracking_rate(0));
+    CHECK(error_of([&] { rig.driver->set_tracking_rate(1); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_of([&] { rig.driver->set_tracking_rate(3); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(rig.mount->count(":T") == 0);
+    // The offsets are an OnStepX feature: not offered, never asked.
+    CHECK_FALSE(rig.driver->get_can_set_right_ascension_rate());
+    CHECK_FALSE(rig.driver->get_can_set_declination_rate());
+    CHECK(error_of([&] { rig.driver->set_right_ascension_rate(0.1); }) ==
+          alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(error_of([&] { rig.driver->set_declination_rate(0.1); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(rig.driver->get_right_ascension_rate() == 0.0);
+    CHECK(rig.driver->get_declination_rate() == 0.0);
+    CHECK(rig.mount->count(":GXT") == 0);
+    CHECK(rig.mount->count(":GT#") == 0);
+    CHECK(rig.mount->count(":SXT") == 0);
+}
+
+// ASCOM RightAscensionRate is seconds of RA per sidereal second (x 15 for the firmware's arcseconds), DeclinationRate
+// arcseconds per SI second (x 0.9972695663 for arcseconds per sidereal second); a read divides back.
+// Falsified by: the RA conversion multiplying by 1 or the Dec one dropping the 0.9972695663 (the wire values change),
+// or the getters not dividing back.
+TEST_CASE("OnStepX rates - the rate offsets convert units on the wire and on the read", "[onstep][telescope][rates]") {
+    Rig rig;
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr = "30.00000000";  // 2 seconds of RA per sidereal second
+        rig.mount->gxtd = "-0.99726957";  // -1 arcsecond per SI second
+    }
+    connect_rates(rig);
+    CHECK(rig.driver->get_can_set_right_ascension_rate());
+    CHECK(rig.driver->get_can_set_declination_rate());
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(2.0).margin(1e-6));
+    CHECK(rig.driver->get_declination_rate() == Approx(-1.0).margin(1e-6));
+
+    rig.mount->clear_log();
+    rig.driver->set_right_ascension_rate(0.5);
+    rig.driver->set_declination_rate(2.0);
+    const auto commands = rig.mount->commands();
+    CHECK(index_of(commands, ":SXTR,7.500000#") < commands.size());
+    CHECK(index_of(commands, ":SXTD,1.994539#") < commands.size());
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(0.5).margin(1e-6));  // read back from the mount
+    CHECK(rig.driver->get_declination_rate() == Approx(2.0).margin(1e-6));
+    CHECK(rig.mount->count(":GXTR#") >= 1);
+    CHECK(rig.mount->count(":GXTD#") >= 1);
+    rig.driver->set_right_ascension_rate(-0.25);
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(-0.25).margin(1e-6));
+    rig.mount->clear_log();
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(-0.25).margin(1e-6));
+    CHECK(rig.mount->count(":") == 0);  // a getter asks the mount nothing
+}
+
+// The firmware clamps beyond +/-1800 arcseconds per sidereal second without saying so, so the driver refuses the
+// request itself, before the connection check.
+// Falsified by: dropping the range check (121 s/s would send :SXTR,1815.000000# and the mount would clamp it) or
+// moving it after check_connected() (the disconnected calls would read NotConnected).
+TEST_CASE("OnStepX rates - a rate beyond the firmware's limit is InvalidValue, before the connection check",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    const auto invalid = [&](auto&& call) { return error_of(call) == alpacacore::AlpacaError::InvalidValue; };
+    SECTION("disconnected") {
+        CHECK(invalid([&] { rig.driver->set_right_ascension_rate(121.0); }));
+        CHECK(invalid([&] { rig.driver->set_right_ascension_rate(-121.0); }));
+        CHECK(invalid([&] { rig.driver->set_declination_rate(1805.0); }));  // x 0.9972695663 = 1800.07
+        CHECK(invalid([&] { rig.driver->set_declination_rate(-1805.0); }));
+        CHECK(invalid([&] { rig.driver->set_right_ascension_rate(std::nan("")); }));
+        CHECK(invalid([&] { rig.driver->set_declination_rate(std::numeric_limits<double>::infinity()); }));
+        CHECK(error_of([&] { rig.driver->set_right_ascension_rate(120.0); }) == alpacacore::AlpacaError::NotConnected);
+        CHECK(error_of([&] { rig.driver->set_declination_rate(1804.0); }) == alpacacore::AlpacaError::NotConnected);
+    }
+    SECTION("connected") {
+        connect_rates(rig);
+        rig.mount->clear_log();
+        CHECK(invalid([&] { rig.driver->set_right_ascension_rate(121.0); }));
+        CHECK(invalid([&] { rig.driver->set_declination_rate(-1805.0); }));
+        CHECK(rig.mount->count(":SXT") == 0);
+        rig.driver->set_right_ascension_rate(120.0);  // exactly the limit
+        rig.driver->set_declination_rate(-1804.0);    // x 0.9972695663 = -1799.07
+        CHECK(rig.mount->count(":SXTR,1800.000000#") == 1);
+        CHECK(rig.mount->count(":SXTD,-1799.07") == 1);
+    }
+}
+
+// ITelescopeV4: reading either rate returns zero unless TrackingRate is driveSidereal, writing it is
+// InvalidOperation then.
+// Falsified by: dropping the sidereal condition from either getter (the stored offset would be served on lunar) or
+// from set_rate_offset() (the write would go out under lunar).
+TEST_CASE("OnStepX rates - the offsets read zero and refuse writes while TrackingRate is not sidereal",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr = "15.00000000";
+        rig.mount->gxtd = "0.99726957";
+    }
+    connect_rates(rig);
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(1.0).margin(1e-6));
+    show(rig, kLunarStatus);
+    CHECK(rig.driver->get_right_ascension_rate() == 0.0);
+    CHECK(rig.driver->get_declination_rate() == 0.0);
+    rig.mount->clear_log();
+    CHECK(error_of([&] { rig.driver->set_right_ascension_rate(0.5); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(error_of([&] { rig.driver->set_declination_rate(0.5); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.mount->count(":SXT") == 0);
+    show(rig, kWestStatus);  // sidereal again: the offsets were never reset
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(1.0).margin(1e-6));
+    CHECK(rig.driver->get_declination_rate() == Approx(1.0).margin(1e-6));
+    // A TrackingRate write to the same rate does not touch them.
+    rig.driver->set_tracking_rate(0);
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(1.0).margin(1e-6));
+    CHECK(rig.mount->count(":SXT") == 0);
+}
+
+// Decision 0010 rule 8: with no :GU# answer since the connect the rate is a value only the mount supplies, so the
+// rate getters throw as Tracking does instead of answering sidereal / 0. OnStep 4.x has no rate to read and stays 0.
+// Falsified by: tracking_rate_served_locked() falling back to tracking_rate_known_ when no status is held (the
+// getters would answer 0).
+TEST_CASE("OnStepX rates - the rate getters throw while the connect's :GU# never answered",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    rig.mount->silent_status = true;
+    SECTION("OnStepX") {
+        connect_rates(rig);
+        REQUIRE(error_of([&] { (void)rig.driver->get_tracking(); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_of([&] { (void)rig.driver->get_tracking_rate(); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_of([&] { (void)rig.driver->get_right_ascension_rate(); }) ==
+              alpacacore::AlpacaError::DriverException);
+        CHECK(error_of([&] { (void)rig.driver->get_declination_rate(); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(error_of([&] { rig.driver->set_right_ascension_rate(0.5); }) == alpacacore::AlpacaError::DriverException);
+        rig.mount->silent_status = false;
+        show(rig, kWestStatus);
+        CHECK(rig.driver->get_tracking_rate() == 0);
+    }
+    SECTION("OnStep 4.x has no rate to read and stays sidereal") {
+        connect_rates(rig, "4.24s");
+        CHECK(rig.driver->get_tracking_rate() == 0);
+        CHECK(rig.driver->get_right_ascension_rate() == 0.0);
+    }
+}
+
+// The OnTrack model's 't' hides the rate letter just as refraction's 'r' does.
+// Falsified by: parse_status() treating only 'r' as compensation (a 't' frame would read sidereal).
+TEST_CASE("OnStepX rates - a 't' compensation frame keeps the last known rate", "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_rates(rig);
+    show(rig, kLunarStatus);
+    show(rig, "NptEW180#");
+    CHECK(rig.driver->get_tracking_rate() == 1);
+}
+
+// Falsified by: set_tracking_rate() dropping its read_rate_offsets_locked() (the getter would keep the old offset).
+TEST_CASE("OnStepX rates - the offsets are read again after a TrackingRate write", "[onstep][telescope][rates]") {
+    Rig rig;
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr = "15.00000000";
+    }
+    connect_rates(rig);
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(1.0).margin(1e-6));
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr = "30.00000000";
+    }
+    rig.mount->clear_log();
+    rig.driver->set_tracking_rate(0);
+    CHECK(rig.mount->count(":GXTR#") == 1);
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(2.0).margin(1e-6));
+}
+
+// OnStepX keeps applying the offsets on a lunar/solar/King rate (Mount.cpp 476-515, af1d26bf) while the getters read
+// 0 and writes are refused, so a rate change zeroes both first (as the Sky-Watcher driver does).
+// Falsified by: set_tracking_rate() dropping the :SXTR,0#/:SXTD,0# (the offsets would stay on the mount), or sending
+// them with zero offsets.
+TEST_CASE("OnStepX rates - changing the TrackingRate zeroes non-zero offsets first", "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_rates(rig);
+    rig.mount->clear_log();
+    rig.driver->set_tracking_rate(1);  // zero offsets: nothing to clear
+    CHECK(rig.mount->count(":SXT") == 0);
+    rig.driver->set_tracking_rate(0);
+    rig.driver->set_right_ascension_rate(0.5);
+    rig.driver->set_declination_rate(0.5);
+    rig.mount->clear_log();
+    rig.driver->set_tracking_rate(0);  // same rate: kept
+    CHECK(rig.mount->count(":SXT") == 0);
+    rig.driver->set_tracking_rate(1);
+    const auto commands = rig.mount->commands();
+    const auto tr = index_of(commands, ":SXTR,0.000000#");
+    const auto td = index_of(commands, ":SXTD,0.000000#");
+    const auto tl = index_of(commands, ":TL#");
+    REQUIRE(tr < commands.size());
+    REQUIRE(td < commands.size());
+    REQUIRE(tl < commands.size());
+    CHECK(tr < tl);
+    CHECK(td < tl);
+    rig.driver->set_tracking_rate(0);
+    CHECK(rig.driver->get_right_ascension_rate() == 0.0);
+    CHECK(rig.driver->get_declination_rate() == 0.0);
+}
+
+// A 0 from :SXTR/:SXTD is a refusal, read rather than drained (#1379), with the :GE# reason.
+// Falsified by: set_rate_offset() ignoring the reply (the write would report success).
+TEST_CASE("OnStepX rates - a refused rate offset throws with the :GE# reason", "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_rates(rig);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->sxt_reply = "0";
+        rig.mount->ge_code = "15#";
+    }
+    for (const bool ra : {true, false}) {
+        try {
+            if (ra) {
+                rig.driver->set_right_ascension_rate(0.5);
+            } else {
+                rig.driver->set_declination_rate(0.5);
+            }
+            FAIL("a refused rate offset was accepted");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(std::string(ex.what()).find("refused by the mount (target below the horizon limit)") !=
+                  std::string::npos);
+        }
+    }
+    CHECK(rig.driver->get_right_ascension_rate() == 0.0);  // nothing was taken
+}
+
+// OnStepX zeroes both offsets on every home reset (a find home, the boot, the unpark path): the poll reads them again
+// when the frame's rate, tracking, parked or at-home flags differ from the previous frame's, and only then.
+// Falsified by: dropping the RateWatch comparison from refresh_rate_state_locked() (no re-read after the unpark), or
+// comparing nothing (a read on every tick).
+TEST_CASE("OnStepX rates - the offsets are read again when the parked or at-home flags change",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr = "15.00000000";
+    }
+    rig.mount->set_status("NPHEo180#");  // parked at home before the connect
+    connect_rates(rig);
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(1.0).margin(1e-6));
+    rig.mount->clear_log();
+    show(rig, "NPHEo180#");
+    show(rig, "NPHEo180#");
+    CHECK(rig.mount->count(":GXTR#") == 0);  // the same frame: nothing to read again
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr = "0.00000000";  // unpark: the home reset zeroed them
+        rig.mount->gxtd = "0.00000000";
+    }
+    show(rig, kHomeResetStatus);  // unparked, still at home
+    CHECK(rig.mount->count(":GXTR#") == 1);
+    CHECK(rig.mount->count(":GXTD#") == 1);
+    CHECK(rig.driver->get_right_ascension_rate() == 0.0);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr = "15.00000000";
+    }
+    show(rig, kWestStatus);  // leaves home
+    CHECK(rig.mount->count(":GXTR#") == 2);
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(1.0).margin(1e-6));
+    show(rig, kNotTrackingStatus);  // tracking off
+    CHECK(rig.mount->count(":GXTR#") == 3);
+    show(rig, kLunarStatus);  // the rate
+    CHECK(rig.mount->count(":GXTR#") == 4);
+    show(rig, kLunarStatus);
+    CHECK(rig.mount->count(":GXTR#") == 4);
+}
+
+// A failed offset read keeps the previous values and does not end the tick (the pier settings' rule).
+// Falsified by: read_rate_offsets_locked() zeroing the offsets on an unparsable reply.
+TEST_CASE("OnStepX rates - an offset read that does not parse keeps the previous values",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr = "15.00000000";
+    }
+    connect_rates(rig);
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gxtr.clear();  // an unknown command's "0"
+    }
+    show(rig, kHomeResetStatus);
+    CHECK(rig.driver->get_right_ascension_rate() == Approx(1.0).margin(1e-6));
+    CHECK(rig.driver->get_link_fault().empty());
+}
+
+// The pulse-guide rate is :GX90# (a multiple of sidereal) times 15.0410686 arcseconds per second, in degrees per
+// second, on both axes; read at connect and again when the :GU# pulse-guide digit changes.
+// Falsified by: reading :GX90# only at connect (the digit change would not be followed), reading it on every tick
+// (the unchanged-digit count), or not converting to degrees per second.
+TEST_CASE("OnStep guide rate - GuideRate follows :GX90# and re-reads when the :GU# pulse-guide digit changes",
+          "[onstep][telescope][rates]") {
+    Rig rig;
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gx90 = "1.00";
+    }
+    connect_rates(rig);
+    const double sidereal = 15.0410686 / 3600.0;
+    auto rate = rig.driver->get_guide_rate();
+    CHECK(rate.ra == exact(sidereal));
+    CHECK(rate.dec == exact(sidereal));
+    CHECK_FALSE(rig.driver->get_can_set_guide_rates());
+    CHECK(error_of([&] { rig.driver->set_guide_rate({sidereal, sidereal}); }) ==
+          alpacacore::AlpacaError::PropertyNotImplemented);
+
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gx90 = "2.00";
+    }
+    rig.mount->clear_log();
+    show(rig, "NpEW180#");  // the digit has not changed
+    show(rig, "NpEW180#");
+    CHECK(rig.mount->count(":GX90#") == 0);
+    CHECK(rig.driver->get_guide_rate().ra == exact(sidereal));
+    show(rig, "NpEW280#");  // pulse-guide digit 2
+    CHECK(rig.mount->count(":GX90#") == 1);
+    rate = rig.driver->get_guide_rate();
+    CHECK(rate.ra == exact(2.0 * sidereal));
+    CHECK(rate.dec == exact(2.0 * sidereal));
+    rig.mount->clear_log();
+    CHECK(rig.driver->get_guide_rate().ra == exact(2.0 * sidereal));
+    CHECK(rig.mount->count(":") == 0);  // a getter asks the mount nothing
+}
+
+// Falsified by: the 4.x gate on the :GX90# read (the command is on OnStep 4.x too, Command.ino:922), or by a reply
+// of "0" (an unknown command) being taken as a rate.
+TEST_CASE("OnStep guide rate - OnStep 4.x answers :GX90#, and a firmware that does not keeps the informational rate",
+          "[onstep][telescope][rates]") {
+    const double informational = 0.5 * 15.0411 / 3600.0;
+    SECTION("OnStep 4.x") {
+        Rig rig;
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gx90 = "0.25";
+        }
+        connect_rates(rig, "4.24s");
+        CHECK(rig.driver->get_guide_rate().ra == exact(0.25 * 15.0410686 / 3600.0));
+    }
+    SECTION("no :GX90# answer") {
+        Rig rig;
+        connect_rates(rig);
+        CHECK(rig.driver->get_guide_rate().ra == exact(informational));
+        CHECK(rig.driver->get_guide_rate().dec == exact(informational));
+        show(rig, "NpEW280#");  // the digit changes, the read finds nothing again
+        CHECK(rig.driver->get_guide_rate().ra == exact(informational));
+    }
+    SECTION("a reply that is not a rate") {
+        Rig rig;
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gx90 = "fast";
+        }
+        connect_rates(rig);
+        CHECK(rig.driver->get_guide_rate().ra == exact(informational));
+    }
+}
+
+// GuideRate is the mount's :GX90# value, so a latched fault throws it (decision 0009 rule 1).
+// Falsified by: get_guide_rate() dropping throw_if_faulted_locked() (it would answer 0.25 x sidereal through the
+// fault).
+TEST_CASE("OnStep guide rate - GuideRate throws the latched fault", "[onstep][telescope][rates]") {
+    Rig rig;
+    {
+        std::lock_guard<std::mutex> lock(rig.mount->mutex);
+        rig.mount->gx90 = "0.25";
+    }
+    connect_rates(rig);
+    CHECK(rig.driver->get_guide_rate().ra == exact(0.25 * 15.0410686 / 3600.0));
+    rig.mount->mute = true;
+    CHECK(rig.tick());
+    CHECK(rig.tick());
+    CHECK(rig.tick());  // the third latches the fault
+    REQUIRE(rig.driver->get_connected());
+    CHECK(error_of([&] { (void)rig.driver->get_guide_rate(); }) == alpacacore::AlpacaError::DriverException);
+    rig.mount->mute = false;
+    CHECK(rig.tick());  // a good tick clears it
+    CHECK(rig.driver->get_guide_rate().ra == exact(0.25 * 15.0410686 / 3600.0));
+}
+
+// Decision 0010 rule 8: a connected AlignmentMode with no :GU# answer since the connect is a value only the mount
+// supplies, so it throws instead of answering GermanPolar.
+// Falsified by: alignment_mode_locked() returning GermanPolar when no status is held (the mount_type_seen_ check
+// dropped).
+TEST_CASE("OnStep AlignmentMode - throws DriverException while the connect's :GU# never answered",
+          "[onstep][telescope][unit]") {
+    Rig rig;
+    rig.mount->silent_status = true;
+    connect_rates(rig);
+    CHECK(error_of([&] { (void)rig.driver->get_alignment_mode(); }) == alpacacore::AlpacaError::DriverException);
+    rig.mount->silent_status = false;
+    show(rig, kWestStatus);
+    CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
+}
+
+// A latched fault throws from AlignmentMode as from SideOfPier (decision 0009 rule 1).
+// Falsified by: alignment_mode_locked() dropping the fault check (it would answer the last letter through the fault).
+TEST_CASE("OnStep AlignmentMode - a latched fault throws", "[onstep][telescope][unit]") {
+    Rig rig;
+    connect_rates(rig);
+    show(rig, kWestStatus);
+    CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
+    rig.mount->mute = true;
+    CHECK(rig.tick());
+    CHECK(rig.tick());
+    CHECK(rig.tick());  // the third latches the fault
+    REQUIRE(rig.driver->get_connected());
+    CHECK(error_of([&] { (void)rig.driver->get_alignment_mode(); }) == alpacacore::AlpacaError::DriverException);
+    rig.mount->mute = false;
+    CHECK(rig.tick());  // a good tick clears it
+    CHECK(rig.driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
+}
+
+// SyncToAltAz converts as SlewToAltAz does and syncs as SyncToCoordinates does. The ITelescopeV4 "may throw if
+// Tracking is True" is optional, and plate-solve syncs run while the mount tracks, so it is not refused.
+// Falsified by: copying check_alt_az_slew_locked()'s Tracking refusal into SyncToAltAz (the tracking case would
+// throw), or leaving CanSyncAltAz false.
+TEST_CASE("OnStep SyncToAltAz - syncs while tracking through :Sr, :Sd and :CM#", "[onstep][telescope][rates]") {
+    Rig rig;
+    connect_paused(rig);
+    CHECK(rig.driver->get_can_sync_alt_az());
+    REQUIRE(rig.driver->get_tracking());
+    rig.mount->clear_log();
+    CHECK_NOTHROW(rig.driver->sync_to_alt_az(45.0, 135.0));
+    const auto commands = rig.mount->commands();
+    const auto sr = index_of(commands, ":Sr");
+    const auto sd = index_of(commands, ":Sd");
+    const auto cm = index_of(commands, ":CM#");
+    REQUIRE(cm < commands.size());
+    CHECK(sr < sd);
+    CHECK(sd < cm);
+    CHECK(rig.mount->count(":MS#") == 0);  // a sync, not a slew
+    // The target and the served position are the converted RA/Dec, as after SyncToCoordinates.
+    CHECK(rig.driver->get_right_ascension() == Approx(rig.driver->get_target_right_ascension()).margin(1e-9));
+    CHECK(rig.driver->get_declination() == Approx(rig.driver->get_target_declination()).margin(1e-9));
+    // The slew's opposite rule stays with the slew.
+    CHECK(error_of([&] { rig.driver->slew_to_alt_az_async(45.0, 135.0); }) ==
+          alpacacore::AlpacaError::InvalidOperation);
+}
+
+// The order SlewToAltAz uses: the arguments (even disconnected), connected, parked, a latched fault, then the
+// GOTO check shared with SyncToCoordinates.
+// Falsified by: moving validate_alt_az() after check_connected() (the disconnected InvalidValue), or dropping the
+// GOTO check from sync_to_mount_locked().
+TEST_CASE("OnStep SyncToAltAz - validation order matches SlewToAltAz", "[onstep][telescope][rates]") {
+    Rig rig;
+    CHECK(error_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 361.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::NotConnected);
+    connect_paused(rig);
+    rig.mount->clear_log();
+
+    SECTION("parked") {
+        show(rig, kParkedStatus);
+        CHECK(error_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::InvalidWhileParked);
+        CHECK(error_of([&] { rig.driver->slew_to_alt_az_async(45.0, 90.0); }) ==
+              alpacacore::AlpacaError::InvalidWhileParked);
+        CHECK(rig.mount->count(":CM#") == 0);
+    }
+    SECTION("a latched fault, after the parked check") {
+        rig.mount->mute = true;
+        for (int i = 0; i < 3; ++i) CHECK(rig.tick());
+        rig.mount->mute = false;
+        REQUIRE_FALSE(rig.driver->get_link_fault().empty());
+        rig.mount->clear_log();
+        CHECK(error_of([&] { rig.driver->sync_to_alt_az(95.0, 10.0); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::DriverException);
+        CHECK(rig.mount->count(":CM#") == 0);
+    }
+    SECTION("a GOTO running") {
+        show(rig, kGotoStatus);
+        CHECK(error_of([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }) == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(rig.mount->count(":CM#") == 0);
+        CHECK(rig.mount->count(":Sr") == 0);
     }
 }
 

@@ -153,9 +153,6 @@ std::string describe_onstepx_error(int code) {
 // tick costs one response timeout, so a silent mount latches in about three poll
 // periods plus three timeouts.
 constexpr int kLinkFaultThreshold = 3;
-// Informational only — OnStep does not expose a guide-rate query command in
-// this driver, and CanSetGuideRates is false, so this value is never sent to
-// or read from the mount; it merely satisfies the ASCOM GuideRate property.
 // OnStepX numbers its releases from 10 (the HM-17 answers :GVN# with
 // "10.23a"); legacy OnStep is 4.x and older. Only OnStepX knows :GXEE#.
 bool is_onstepx_version(const std::string& version) {
@@ -164,7 +161,31 @@ bool is_onstepx_version(const std::string& version) {
     return digits > 0 && digits <= 4 && std::stoi(version.substr(0, digits)) >= 10;
 }
 
+// GuideRate until the mount has answered :GX90# (and for firmware that never does): half the sidereal rate, OnStep's
+// default pulse-guide rate. CanSetGuideRates is false, so the driver never writes a rate; once :GX90# answers, the
+// mount's own pulse-guide rate (a multiple of sidereal) replaces this on both axes.
 constexpr double kInformationalGuideRateDegPerSec = (15.0411 / 3600.0) * 0.5;
+// The sidereal rate in arcseconds per SI second, the unit of :GX90#'s multiple.
+constexpr double kSiderealArcsecPerSecond = 15.0410686;
+
+// Rate offsets (OnStepX :SXTR/:SXTD/:GXTR/:GXTD, Mount.command.cpp af1d26bf) are in arcseconds per sidereal second.
+// ASCOM RightAscensionRate is seconds of RA per sidereal second (x 15) and DeclinationRate arcseconds per SI second
+// (x kSiSecondsPerSiderealSecond). The firmware clamps silently at +/-1800, so a larger request is refused.
+constexpr double kRaArcsecPerRaSecond = 15.0;
+constexpr double kSiSecondsPerSiderealSecond = 0.9972695663;
+constexpr double kRateOffsetLimitArcsecPerSiderealSecond = 1800.0;
+
+// :GT# in Hz (Mount.command.cpp af1d26bf: 60.164 sidereal, 57.900 lunar, 60.000 solar, 60.136 King) as DriveRates
+// 0-3, within 0.01 Hz; nullopt for a rate that is none of them (and for 0, not tracking).
+std::optional<int> tracking_rate_for_hz(double hz) {
+    constexpr double kRatesHz[] = {60.164, 57.900, 60.000, 60.136};
+    for (int rate = 0; rate < 4; ++rate) {
+        if (std::fabs(hz - kRatesHz[rate]) <= 0.01) {
+            return rate;
+        }
+    }
+    return std::nullopt;
+}
 
 // Standard spherical-trig horizontal-to-equatorial transform (azimuth
 // measured from North through East). Used to implement SlewToAltAz/
@@ -368,11 +389,32 @@ private:
         void abort_slew() const {
             call([](auto& p) { p.abort_slew(); });
         }
-        void start_tracking() const {
-            call([](auto& p) { p.start_tracking(); });
+        void start_tracking(bool use_enable_command) const {
+            call([&](auto& p) { p.start_tracking(use_enable_command); });
         }
-        bool set_tracking_checked(bool on) const {
-            return call([&](auto& p) { return p.set_tracking_checked(on); });
+        bool set_tracking_checked(bool on, bool use_enable_command) const {
+            return call([&](auto& p) { return p.set_tracking_checked(on, use_enable_command); });
+        }
+        void set_tracking_rate(int rate) const {
+            call([&](auto& p) { p.set_tracking_rate(rate); });
+        }
+        std::optional<double> get_tracking_rate_hz() const {
+            return call([](auto& p) { return p.get_tracking_rate_hz(); });
+        }
+        bool set_rate_offset_ra(double arcsec_per_sidereal_second) const {
+            return call([&](auto& p) { return p.set_rate_offset_ra(arcsec_per_sidereal_second); });
+        }
+        bool set_rate_offset_dec(double arcsec_per_sidereal_second) const {
+            return call([&](auto& p) { return p.set_rate_offset_dec(arcsec_per_sidereal_second); });
+        }
+        std::optional<double> get_rate_offset_ra() const {
+            return call([](auto& p) { return p.get_rate_offset_ra(); });
+        }
+        std::optional<double> get_rate_offset_dec() const {
+            return call([](auto& p) { return p.get_rate_offset_dec(); });
+        }
+        std::optional<double> get_pulse_guide_rate() const {
+            return call([](auto& p) { return p.get_pulse_guide_rate(); });
         }
         bool park() const {
             return call([](auto& p) { return p.park(); });
@@ -713,6 +755,7 @@ public:
             // built for observed-place coordinates; :GXEE# says which (#1216).
             refraction_from_firmware_.reset();
             pier_settings_.reset();
+            reset_rate_state_locked();
             onstepx_ = is_onstepx_version(firmware_version);
             if (onstepx_) {
                 try {
@@ -802,6 +845,7 @@ public:
             // fast-response targets, #1242), and the mount's site when the
             // config did not set both coordinates.
             seed_snapshot_locked();
+            seed_rate_state_locked();
             // The seed takes each failed read as a silent mount's, so a link lost during the connect (decision
             // 0009) shows only here: Connect fails instead of returning while Connected reads false (#1895).
             if (!protocol.link_alive()) {
@@ -883,10 +927,13 @@ public:
         return wire().send_command(std::string(command));
     }
 
-    // From the mount-type letter of the polled :GU# frame (#2214), no device I/O (decision 0016). Fork is Polar;
+    // Driver state the poll keeps current from the :GU# mount-type letter (decision 0010 OnStep row, #2214), no
+    // device I/O (decision 0016). Fork is Polar;
     // alt-az and alt-alt are AltAz (ASCOM has no alt-alt value, and the decisions a client takes from it, pier side
-    // and meridian flips, match alt-az). GermanPolar with no frame, no type letter in the frame, and while
-    // disconnected, with no throw (#1919 owns the disconnected getter behaviour).
+    // and meridian flips, match alt-az). GermanPolar while disconnected, with
+    // no throw (#1919 owns the disconnected getter behaviour). Connected, a latched fault, a lost link, no :GU#
+    // answer since the connect and a status with no type letter throw as the other frame getters do (decisions 0009,
+    // 0010 rule 8).
     AlignmentMode get_alignment_mode() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         return alignment_mode_locked();
@@ -964,12 +1011,14 @@ public:
         return guiding;
     }
 
-    // OnStep's custom tracking-rate commands were not confirmed against real
-    // firmware during this implementation (see .github/instructions/onstep.instructions.md) —
-    // default both to false rather than advertise a setter that would
-    // silently no-op.
-    bool get_can_set_declination_rate() const override { return false; }
-    bool get_can_set_right_ascension_rate() const override { return false; }
+    // The rate offsets (:SXTR/:SXTD) exist on OnStepX only; OnStep 4.x keeps both false, and so does a driver that
+    // is not connected (the firmware is not known). Answers from the driver's state, no I/O.
+    bool get_can_set_declination_rate() const override { return can_set_rate_offsets(); }
+    bool get_can_set_right_ascension_rate() const override { return can_set_rate_offsets(); }
+    bool can_set_rate_offsets() const {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        return published_connected_.load() && onstepx_;
+    }
     bool get_can_set_guide_rates() const override { return false; }
     bool get_can_set_park() const override { return true; }
     // True only on OnStepX, on a German mount, with the meridian flips on and a preferred-side letter read from
@@ -982,7 +1031,7 @@ public:
     bool get_can_set_tracking() const override { return true; }
     bool get_can_slew_alt_az() const override { return true; }
     bool get_can_slew_alt_az_async() const override { return true; }
-    bool get_can_sync_alt_az() const override { return false; }
+    bool get_can_sync_alt_az() const override { return true; }
     bool get_can_slew() const override { return true; }
     bool get_can_slew_async() const override { return true; }
     bool get_can_sync() const override { return true; }
@@ -994,19 +1043,21 @@ public:
         return served_position_locked().dec_degrees;
     }
 
-    // Rates are not supported (always 0), but an ASCOM read still throws
-    // NotConnected while disconnected (#1478). Read lock-free, as Connected
-    // is, so the getter never waits behind serial I/O under mutex_ (#1449).
+    // The rate offsets are driver state, read from the mount at connect, after each write and when the polled
+    // frame shows a change (read_rate_offsets_locked()); a getter asks the mount nothing (decision 0016). ITelescopeV4:
+    // a read is 0 unless TrackingRate is driveSidereal. A stale frame is served as it is (decision 0010 rule 6); a
+    // latched fault throws (decision 0009 rule 1, as Sky-Watcher's rate getters).
     double get_declination_rate() const override {
-        check_connected_lock_free();
-        throw_if_faulted_lock_free();  // as Sky-Watcher's rate getters (decision 0009 rule 1)
-        return 0.0;
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
+        if (tracking_rate_served_locked() != 0 || !onstepx_) {
+            return 0.0;
+        }
+        return rate_offset_dec_arcsec_ / kSiSecondsPerSiderealSecond;
     }
 
     void set_declination_rate(double rate) override {
-        (void)rate;
-        check_connected_lock_free();
-        throw AlpacaException("Declination rate not supported", AlpacaError::PropertyNotImplemented);
+        set_rate_offset("DeclinationRate", rate, kSiSecondsPerSiderealSecond, /*ra=*/false);
     }
 
     bool get_tracking() const override {
@@ -1027,7 +1078,8 @@ public:
         }
         // The reply is read, not drained: OnStep 4.x refuses :ST while slewing
         // (#1379); the internal tracking restores stay blind.
-        if (!wire().set_tracking_checked(tracking)) {
+        // OnStepX starts tracking with :Te#, which keeps the selected rate; :ST would set it back to sidereal.
+        if (!wire().set_tracking_checked(tracking, onstepx_)) {
             // With no :GE# code, refusal_code_locked() has just re-read :GU#: a
             // mount that now tracks as asked took it (#1379 review).
             if (const auto code = refusal_code_locked("Tracking");
@@ -1051,8 +1103,15 @@ public:
         focal_length_m_ = meters;
     }
 
+    // The mount's pulse-guide rate (:GX90#, a multiple of sidereal), read at connect and when the pulse-guide digit
+    // of :GU# changes; the same on both axes. Until it answers, and on firmware that never does, the informational
+    // half-sidereal value. No I/O. A value read from the mount, so a latched fault throws (decision 0009 rule 1).
     GuideRate get_guide_rate() const override {
-        return {kInformationalGuideRateDegPerSec, kInformationalGuideRateDegPerSec};
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        throw_if_faulted_locked();
+        const double rate = guide_rate_multiple_ ? *guide_rate_multiple_ * kSiderealArcsecPerSecond / 3600.0
+                                                 : kInformationalGuideRateDegPerSec;
+        return {rate, rate};
     }
 
     void set_guide_rate(const GuideRate& rate) override {
@@ -1068,15 +1127,60 @@ public:
     }
 
     double get_right_ascension_rate() const override {
-        check_connected_lock_free();  // see get_declination_rate()
-        throw_if_faulted_lock_free();
-        return 0.0;
+        StateLock lock(lock_gate_, StateLock::Mode::State);  // see get_declination_rate()
+        check_connected();
+        if (tracking_rate_served_locked() != 0 || !onstepx_) {
+            return 0.0;
+        }
+        return rate_offset_ra_arcsec_ / kRaArcsecPerRaSecond;
     }
 
     void set_right_ascension_rate(double rate) override {
-        (void)rate;
-        check_connected_lock_free();
-        throw AlpacaException("Right ascension rate not supported", AlpacaError::PropertyNotImplemented);
+        set_rate_offset("RightAscensionRate", rate, kRaArcsecPerRaSecond, /*ra=*/true);
+    }
+
+    // ITelescopeV4 RightAscensionRate / DeclinationRate write (OnStepX only): `rate` times `to_firmware` is the
+    // offset in arcseconds per sidereal second that :SXTR/:SXTD take. Order: the value (InvalidValue, before the
+    // connection check: the firmware clamps silently at +/-1800, so a larger request is refused instead), connected,
+    // the firmware (OnStep 4.x has no offset command), a latched fault, then TrackingRate not sidereal
+    // (InvalidOperation, ITelescopeV4). A refusal throws with the :GE# reason (#1379).
+    void set_rate_offset(const char* who, double rate, double to_firmware, bool ra) {
+        const double offset = rate * to_firmware;
+        if (!std::isfinite(offset) || std::fabs(offset) > kRateOffsetLimitArcsecPerSiderealSecond) {
+            throw AlpacaException(std::string(who) + " must be within +/-" +
+                                      std::to_string(static_cast<int>(kRateOffsetLimitArcsecPerSiderealSecond)) +
+                                      " arcseconds per sidereal second at the mount (the firmware clamps beyond it)",
+                                  AlpacaError::InvalidValue);
+        }
+        StateLock lock(lock_gate_);
+        check_connected();
+        if (!onstepx_) {
+            throw AlpacaException(std::string(who) + " is not supported by this firmware",
+                                  AlpacaError::PropertyNotImplemented);
+        }
+        refuse_while_faulted_locked(who);
+        if (tracking_rate_served_locked() != 0) {
+            throw AlpacaException(std::string(who) + " can only be set while TrackingRate is driveSidereal",
+                                  AlpacaError::InvalidOperation);
+        }
+        const Wire protocol = wire();
+        if (!(ra ? protocol.set_rate_offset_ra(offset) : protocol.set_rate_offset_dec(offset))) {
+            if (const auto code = refusal_code_locked(who)) {
+                throw mount_refused(who, *code);
+            }
+        }
+        // What the mount took, read back (it may differ by the firmware's float precision); the written value
+        // stands until the read answers.
+        (ra ? rate_offset_ra_arcsec_ : rate_offset_dec_arcsec_) = offset;
+        try {
+            read_rate_offsets_locked();
+        } catch (const std::exception& ex) {
+            if (is_link_lost(ex)) {
+                throw;
+            }
+            ALPACA_LOG_INFO("OnStep",
+                            std::string("Rate offset read-back failed; the written value is kept: ") + ex.what());
+        }
     }
 
     int get_side_of_pier() const override {
@@ -1339,19 +1443,75 @@ public:
         ++target_ra_writes_;
     }
 
+    // The rate OnStepX tracks at: driver state the poll keeps current from the :GU# letter ('(' lunar, 'O' solar,
+    // 'k' King, none sidereal; decision 0010 OnStep row, #2214); no I/O. The letters are written only while tracking
+    // compensation is off: with it on the driver's own writes and :GT# answer (tracking_rate_served_locked()).
+    // Always sidereal on OnStep 4.x. A stale frame keeps the last letter seen (decision 0010 rule 6); a latched fault
+    // throws (decision 0009 rule 1).
     int get_tracking_rate() const override {
-        check_connected_lock_free();
-        throw_if_faulted_lock_free();  // as Sky-Watcher (decision 0009 rule 1)
-        return 0;
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
+        return tracking_rate_served_locked();
     }
 
+    // DriveRates 0-3 (InvalidValue for anything else, before the connection check), then connected, a latched
+    // fault, and a rate the firmware offers (OnStep 4.x: sidereal only). OnStepX: :TQ#/:TL#/:TS#/:TK# (no reply),
+    // written through, then the rate offsets are read again. A change of rate with a non-zero offset zeroes
+    // both first (:SXTR,0# :SXTD,0#; see below).
     void set_tracking_rate(int rate) override {
-        if (rate != 0) {
-            throw AlpacaException("Only sidereal tracking rate is supported", AlpacaError::PropertyNotImplemented);
+        if (rate < 0 || rate > 3) {
+            throw AlpacaException("TrackingRate must be 0 (sidereal), 1 (lunar), 2 (solar) or 3 (King)",
+                                  AlpacaError::InvalidValue);
+        }
+        StateLock lock(lock_gate_);
+        check_connected();
+        refuse_while_faulted_locked("TrackingRate");
+        if (!onstepx_) {
+            if (rate != 0) {
+                throw AlpacaException("This firmware tracks at the sidereal rate only", AlpacaError::InvalidValue);
+            }
+            return;
+        }
+        // OnStepX keeps applying the rate offsets on top of a lunar, solar or King rate (Mount.cpp 476-515, af1d26bf)
+        // while the getters read 0 and writes are refused, so a client could never clear them after the switch. As
+        // the Sky-Watcher driver does on a rate change, zero them first (ITelescopeV4 does not require it).
+        if ((rate_offset_ra_arcsec_ != 0.0 || rate_offset_dec_arcsec_ != 0.0) &&
+            rate != tracking_rate_served_locked()) {
+            const Wire protocol = wire();
+            for (const bool ra : {true, false}) {
+                if (!(ra ? protocol.set_rate_offset_ra(0.0) : protocol.set_rate_offset_dec(0.0))) {
+                    if (const auto code = refusal_code_locked("TrackingRate")) {
+                        throw mount_refused("TrackingRate", *code);
+                    }
+                }
+                (ra ? rate_offset_ra_arcsec_ : rate_offset_dec_arcsec_) = 0.0;
+            }
+        }
+        wire().set_tracking_rate(rate);
+        tracking_rate_known_ = rate;
+        // Write-through (decision 0010): the next read sees it before the next poll. The next frame says it too,
+        // unless tracking compensation hides the letter.
+        write_status_locked([rate](MountStatus& status) { status.tracking_rate = rate; });
+        rate_watch_ = rate_watch_of(frame_status_locked());
+        try {
+            read_rate_offsets_locked();
+        } catch (const std::exception& ex) {
+            if (is_link_lost(ex)) {
+                throw;
+            }
+            ALPACA_LOG_INFO("OnStep", std::string("Rate offsets not read after the TrackingRate write: ") + ex.what());
         }
     }
 
-    std::vector<int> get_tracking_rates() const override { return {0}; }
+    // OnStepX knows the four DriveRates (:TQ# :TL# :TS# :TK#); OnStep 4.x, and a driver that is not connected,
+    // sidereal only.
+    std::vector<int> get_tracking_rates() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        if (published_connected_.load() && onstepx_) {
+            return {0, 1, 2, 3};
+        }
+        return {0};
+    }
 
     std::chrono::system_clock::time_point get_utc_date() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
@@ -1574,6 +1734,11 @@ public:
         check_connected();
         refuse_while_faulted_locked(who);
         check_not_parked_locked(who);
+        sync_to_mount_locked(ra, dec, who, targets);
+    }
+
+    // The sync itself, after the caller's checks (SyncToCoordinates, SyncToTarget, SyncToAltAz).
+    void sync_to_mount_locked(double ra, double dec, const char* who, TargetWrites targets) {
         refuse_while_goto_running_locked(who);
         const Wire protocol = wire();
         // Use the mount's own sync command — do NOT maintain a driver-level
@@ -1875,11 +2040,15 @@ public:
         start_slew_locked(ra, dec, "SlewToAltAzAsync", targets);
     }
 
+    // Converts to RA/Dec as SlewToAltAz does and takes the SyncToCoordinates path. ITelescopeV4 lets a driver refuse
+    // it while tracking ("may throw"); a plate-solve sync runs while the mount tracks, so Tracking is not checked.
     void sync_to_alt_az(double altitude, double azimuth) override {
-        (void)altitude;
-        (void)azimuth;
-        check_connected_lock_free();
-        throw AlpacaException("SyncToAltAz not supported", AlpacaError::MethodNotImplemented);
+        double ra = 0.0;
+        double dec = 0.0;
+        StateLock lock(lock_gate_);
+        const TargetWrites targets = target_writes_locked();  // before any check reads the mount
+        resolve_alt_az_locked(altitude, azimuth, ra, dec, "SyncToAltAz");
+        sync_to_mount_locked(ra, dec, "SyncToAltAz", targets);
     }
 
     void set_park_home_before_start_for_testing(std::function<void()> hook) {
@@ -2521,27 +2690,36 @@ private:
         }
     }
 
-    // AlignmentMode from the published frame. set_connected(false) resets the snapshot, so the published_connected_
-    // gate is defence in depth against a frame published around a disconnect. Caller holds mutex_.
+    // AlignmentMode from the mount type last seen (mount_type_seen_), a mount setting kept in driver state by the
+    // poll and the control-path reads (decision 0010 OnStep row, #2214). set_connected(false) clears it, so the
+    // published_connected_ gate is defence in depth. Caller holds mutex_.
     AlignmentMode alignment_mode_locked() const {
         if (!published_connected_.load()) {
             return AlignmentMode::GermanPolar;
         }
-        const auto reading = snapshot_.read();
-        if (!reading || !reading->value.status_known) {
-            return AlignmentMode::GermanPolar;
+        check_connected();
+        // A latched fault throws it, and no :GU# answer since the connect throws DriverException (decisions 0009
+        // rules 1 and 3, 0010 rule 8), never a guessed GermanPolar; a status with no type letter throws too.
+        throw_if_faulted_locked();
+        if (!mount_type_seen_) {
+            throw AlpacaException("OnStep mount status is not available: the mount has not answered :GU#",
+                                  AlpacaError::DriverException);
         }
-        switch (reading->value.status.mount_type) {
+        switch (*mount_type_seen_) {
             case MountType::Fork:
                 return AlignmentMode::Polar;
             case MountType::AltAz:
             case MountType::AltAlt:
                 return AlignmentMode::AltAz;
             case MountType::GermanEquatorial:
+                return AlignmentMode::GermanPolar;
             case MountType::Unknown:
                 break;
         }
-        return AlignmentMode::GermanPolar;
+        // OnStepX always writes one of E/K/A/L and OnStep 4.x one of E/K/A, so a status with no letter is not a
+        // supported firmware's answer: the mount's answer lacks the field (decision 0010 rule 8).
+        throw AlpacaException("OnStep mount type is not available: the :GU# status carries no mount-type letter",
+                              AlpacaError::DriverException);
     }
 
     // CanSetPierSide: OnStepX, a German mount, the meridian flips on and a read preferred side (#2179). Caller holds
@@ -2642,6 +2820,7 @@ private:
         refraction_from_firmware_.reset();
         pier_settings_.reset();
         onstepx_ = false;
+        reset_rate_state_locked();
         {
             std::lock_guard<std::mutex> fwlock(firmware_mutex_);
             firmware_cache_.clear();
@@ -2725,15 +2904,23 @@ private:
     // fault, then Tracking read as the getter reads it, before anything is sent.
     void check_alt_az_slew_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
                                   const char* who) const {
-        validate_alt_az(altitude, azimuth);  // arguments first, even while disconnected (#1478)
-        check_connected();
-        check_not_parked_locked(who);
-        refuse_while_faulted_locked(who);  // named, before the site and Tracking reads (#1414)
-        compute_alt_az_target_locked(altitude, azimuth, ra_out, dec_out, who);
+        resolve_alt_az_locked(altitude, azimuth, ra_out, dec_out, who);
         if (tracking_as_served_locked()) {
             throw AlpacaException(std::string(who) + " is not allowed while Tracking is true",
                                   AlpacaError::InvalidOperation);
         }
+    }
+
+    // The checks both Alt/Az slews and SyncToAltAz start with, in this order: the arguments (even while
+    // disconnected, #1478), connected, parked, a latched fault (named, before the site read, #1414), then the
+    // RA/Dec the Alt/Az means.
+    void resolve_alt_az_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
+                               const char* who) const {
+        validate_alt_az(altitude, azimuth);
+        check_connected();
+        check_not_parked_locked(who);
+        refuse_while_faulted_locked(who);
+        compute_alt_az_target_locked(altitude, azimuth, ra_out, dec_out, who);
     }
 
     // A GOTO sent while one runs makes OnStepX stop the running one and refuse the
@@ -2820,6 +3007,168 @@ private:
             refresh_status_locked();
         }
         return frame_status_locked().is_tracking;
+    }
+
+    // ── Rates (OnStepX tracking rate, rate offsets, pulse-guide rate) ──────────
+
+    // TrackingRate as the getters serve it: tracking_rate_known_, driver state, no I/O; a latched fault throws.
+    // OnStep 4.x is always sidereal. On OnStepX the :GU# letter updates it from every status the driver sees while
+    // tracking compensation is off (none: sidereal); with it on the frame carries 'r' or 't' and no letter, so the
+    // last rate the driver knew answers: its own writes, the letter while it last showed one, and the :GT# reads
+    // (connect, and the slow poll tick while compensation is on and the mount tracks). On OnStepX with no status
+    // seen since the connect it throws DriverException (decision 0010 rule 8), as does everything built on it (the
+    // rate offset getters). Caller holds mutex_.
+    int tracking_rate_served_locked() const {
+        throw_if_faulted_locked();
+        if (!onstepx_) {
+            return 0;
+        }
+        // Decision 0010 rule 8: with no :GU# answer since the connect nothing device-sourced is held (the last known
+        // rate is the reset default then), so this throws as the Tracking getter does instead of answering sidereal.
+        if (!mount_type_seen_) {
+            throw AlpacaException("OnStep mount status is not available: the mount has not answered :GU#",
+                                  AlpacaError::DriverException);
+        }
+        return tracking_rate_known_;
+    }
+
+    // What decides whether the rate offsets must be read again (OnStepX zeroes them on every home reset: a find
+    // home, the home at boot, the unpark path; Home.cpp reset(), af1d26bf): the rate, the compensation, and the
+    // tracking, parked and at-home flags.
+    struct RateWatch {
+        int rate = 0;
+        bool compensation = false;
+        bool tracking = false;
+        bool parked = false;
+        bool at_home = false;
+        bool operator==(const RateWatch&) const = default;
+    };
+    RateWatch rate_watch_of(const MountStatus& status) const {
+        return RateWatch{tracking_rate_known_, status.tracking_compensation, status.is_tracking, status.is_parked,
+                         status.is_at_home};
+    }
+
+    // :GXTR# and :GXTD# into the driver's state; a reply that does not parse keeps the previous value. Caller holds
+    // the operation lock. A read that gets no reply throws.
+    void read_rate_offsets_locked() {
+        const Wire protocol = wire();
+        const auto ra = protocol.get_rate_offset_ra();
+        const auto dec = protocol.get_rate_offset_dec();
+        if (ra) {
+            rate_offset_ra_arcsec_ = *ra;
+        }
+        if (dec) {
+            rate_offset_dec_arcsec_ = *dec;
+        }
+    }
+
+    // :GX90# into the pulse-guide rate; no answer or a reply that is not a positive decimal keeps what was known.
+    void read_pulse_guide_rate_locked() {
+        if (const auto rate = wire().get_pulse_guide_rate()) {
+            guide_rate_multiple_ = rate;
+        }
+    }
+
+    // :GT# mapped to a DriveRate, within 0.01 Hz. "0" (not tracking) and a rate that is none of the four keep the
+    // last known one.
+    void read_tracking_rate_hz_locked() {
+        if (const auto hz = wire().get_tracking_rate_hz()) {
+            if (const auto rate = tracking_rate_for_hz(*hz)) {
+                tracking_rate_known_ = *rate;
+            }
+        }
+    }
+
+    // The session's rate state, cleared at connect and disconnect. Under mutex_.
+    void reset_rate_state_locked() {
+        tracking_rate_known_ = 0;
+        mount_type_seen_.reset();
+        rate_offset_ra_arcsec_ = 0.0;
+        rate_offset_dec_arcsec_ = 0.0;
+        guide_rate_multiple_.reset();
+        guide_rate_digit_read_ = -1;
+        rate_watch_.reset();
+    }
+
+    // At the end of a connect, after the first frame: the pulse-guide rate on any firmware (:GX90# is on OnStep 4.x
+    // too, Command.ino), and on OnStepX the tracking rate (:GT#, then the frame's letter when it shows one) and
+    // the rate offsets. A read that fails leaves the default; the connect still succeeds, and the poll follows the
+    // frame. Caller holds the operation lock.
+    void seed_rate_state_locked() {
+        const auto reading = snapshot_.read();
+        const bool have_status = reading && reading->value.status_known;
+        const MountStatus status = have_status ? reading->value.status : MountStatus{};
+        const auto attempt = [](const char* what, const auto& read) {
+            try {
+                read();
+            } catch (const std::exception& ex) {
+                ALPACA_LOG_INFO("OnStep", std::string(what) + " not read at connect: " + ex.what());
+            }
+        };
+        if (have_status) {
+            guide_rate_digit_read_ = status.pulse_guide_rate_select;
+            note_status_seen_locked(status);
+        }
+        attempt("Pulse-guide rate", [&] { read_pulse_guide_rate_locked(); });
+        if (!onstepx_) {
+            return;
+        }
+        attempt("Tracking rate", [&] { read_tracking_rate_hz_locked(); });
+        if (have_status) {
+            note_status_seen_locked(status);  // the frame's letter wins over :GT# while it names the rate
+        }
+        attempt("Rate offsets", [&] { read_rate_offsets_locked(); });
+        if (have_status) {
+            rate_watch_ = rate_watch_of(status);
+        }
+    }
+
+    // One poll tick's rate bookkeeping, from the frame it sampled (the operation lock is held). The pulse-guide rate
+    // is read again when its :GU# digit changes. On OnStepX the frame's letter keeps the last known tracking rate
+    // current while it shows one; while tracking compensation hides it, the slow tick asks :GT# once the mount
+    // tracks. The rate offsets are read again when the rate, the compensation or the tracking, parked or at-home
+    // flags differ from the previous frame's. Any failure but a lost link keeps what was known (a read that gets
+    // no reply is not tried again until the frame changes again).
+    void refresh_rate_state_locked(const MountStatus& status, bool full) {
+        if (status.pulse_guide_rate_select >= 0 && status.pulse_guide_rate_select != guide_rate_digit_read_) {
+            guide_rate_digit_read_ = status.pulse_guide_rate_select;
+            try {
+                read_pulse_guide_rate_locked();
+            } catch (const std::exception& ex) {
+                if (is_link_lost(ex)) {
+                    throw;
+                }
+                ALPACA_LOG_INFO("OnStep", std::string("Pulse-guide rate not read: ") + ex.what());
+            }
+        }
+        if (!onstepx_) {
+            return;
+        }
+        // Taken here too, before the watch below compares: this frame publishes only at the end of the tick.
+        note_status_seen_locked(status);
+        if (status.tracking_compensation && full && status.is_tracking) {
+            try {
+                read_tracking_rate_hz_locked();
+            } catch (const std::exception& ex) {
+                if (is_link_lost(ex)) {
+                    throw;
+                }
+                ALPACA_LOG_INFO("OnStep", std::string("Tracking rate not read: ") + ex.what());
+            }
+        }
+        const RateWatch watch = rate_watch_of(status);
+        if (rate_watch_ && *rate_watch_ == watch) {
+            return;
+        }
+        rate_watch_ = watch;
+        try {
+            read_rate_offsets_locked();
+        } catch (const std::exception& ex) {
+            if (is_link_lost(ex)) {
+                throw;
+            }
+            ALPACA_LOG_INFO("OnStep", std::string("Rate offsets not read: ") + ex.what());
+        }
     }
 
     // `stop`: AbortSlew and MoveAxis(axis, 0) refuse only a status that reads parked, so an unread one never holds
@@ -2971,7 +3320,7 @@ private:
             return false;
         }
         try {
-            wire().start_tracking();
+            wire().start_tracking(onstepx_);
         } catch (const std::exception& ex) {
             if (is_link_lost(ex)) {
                 throw;
@@ -3155,6 +3504,7 @@ private:
     // the Park/FindHome settle) does not drop every poll tick and freeze the position. `counts_for_move`: a read
     // after the last MoveAxis start, which may end it (#1378).
     void note_status_read_locked(const MountStatus& status, bool counts_for_move) const {
+        note_status_seen_locked(status);
         if (counts_for_move) {
             note_status_measured_locked(status);
         }
@@ -3168,8 +3518,18 @@ private:
         });
     }
 
+    // Every status the driver learns, from the poll or a control-path read, updates the mount settings it keeps
+    // (decision 0010 OnStep row, #2214): the mount type, and on OnStepX the rate letter while compensation shows it.
+    void note_status_seen_locked(const MountStatus& status) const {
+        mount_type_seen_ = status.mount_type;
+        if (onstepx_ && !status.tracking_compensation) {
+            tracking_rate_known_ = status.tracking_rate;
+        }
+    }
+
     // A :GU# measured after the last MoveAxis start reached the frame (#1378).
     void note_status_measured_locked(const MountStatus& status) const {
+        note_status_seen_locked(status);
         status_read_since_move_ = true;
         if (status.is_guide_active && !status.is_pulse_guide_active) {
             firmware_reports_guide_move_ = true;
@@ -3400,8 +3760,21 @@ private:
                     return false;
                 }
             }
+            if (stopped()) {
+                return false;  // cancelled: no rate reads
+            }
+            try {
+                refresh_rate_state_locked(frame.status, full);
+            } catch (const std::exception& ex) {
+                if (is_link_lost(ex)) {
+                    return false;
+                }
+            }
             // The pier-side settings follow a change made at a handset (#2179). Any failure but a lost link keeps
             // the previous ones.
+            if (stopped()) {
+                return false;
+            }
             if (onstepx_ && tick > 0 && tick % kPierSettingsEvery == 0) {
                 try {
                     refresh_pier_settings_locked(/*at_connect=*/false);
@@ -3737,6 +4110,19 @@ private:
     // whether :GVN# numbered the firmware 10 or later. Both under mutex_, cleared with the session state.
     std::optional<PierSettings> pier_settings_;
     bool onstepx_ = false;
+    // The rate state (see tracking_rate_served_locked()), under mutex_, cleared with the session state: the last
+    // known DriveRate, the rate offsets as the mount holds them (arcseconds per sidereal second), the pulse-guide
+    // rate as a multiple of sidereal (:GX90#; empty while unknown), the :GU# pulse-guide digit it was read for, and
+    // the frame fields the offsets were last read for.
+    // mount_type_seen_: the :GU# mount type last seen since the connect (empty until a status has been), with
+    // tracking_rate_known_ the mount settings the getters serve (decision 0010 OnStep row, #2214).
+    mutable int tracking_rate_known_ = 0;
+    mutable std::optional<MountType> mount_type_seen_;
+    double rate_offset_ra_arcsec_ = 0.0;
+    double rate_offset_dec_arcsec_ = 0.0;
+    std::optional<double> guide_rate_multiple_;
+    int guide_rate_digit_read_ = -1;
+    std::optional<RateWatch> rate_watch_;
     int slew_settle_time_seconds_ = 0;
 
     std::optional<double> pending_site_latitude_;
