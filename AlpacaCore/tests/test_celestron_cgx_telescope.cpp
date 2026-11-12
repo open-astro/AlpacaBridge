@@ -29,6 +29,7 @@
 #include <functional>
 #include <future>
 #include <limits>
+#include <mutex>
 #include <numbers>
 #include <stdexcept>
 #include <string>
@@ -1489,6 +1490,157 @@ TEST_CASE("Celestron CGX USB Telescope Driver - unsupported methods use ASCOM er
 }
 
 #ifndef _WIN32
+TEST_CASE("Celestron CGX USB Telescope Driver - home timeout names the axis still pending",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+    driver->find_home();
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
+    std::string expected = "home timed out: RA";
+    mount.set_auto_complete_motions(false);
+    SECTION("FindHome") { driver->find_home(); }
+    SECTION("meridian home route") {
+        expected = "meridian home route timed out: RA";
+        driver->set_tracking(true);
+        driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 6.0, 24.0), 30.0);
+    }
+    REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
+    mount.complete_axis_home(0x11);
+    std::string error;
+    for (int second = 0; second < 200 && error.empty(); ++second) {
+        try {
+            if (!driver->get_slewing()) break;
+        } catch (const alpacacore::AlpacaException& failure) {
+            error = failure.what();
+            break;
+        }
+        if (!clock.wait_for_waiters(1, 1s)) {
+            // The body may have thrown between the Slewing read and the rendezvous; otherwise it missed a wait.
+            INFO("no home waiter after " << second << " s of fake time");
+            REQUIRE(wait_until([&] {
+                try {
+                    static_cast<void>(driver->get_slewing());
+                    return false;
+                } catch (const alpacacore::AlpacaException&) {
+                    return true;
+                }
+            }));
+            break;
+        }
+        clock.advance(1s);
+        REQUIRE(clock.wait_for_woken_settled(2s));
+    }
+    REQUIRE(wait_until([&] {
+        try {
+            static_cast<void>(driver->get_slewing());
+            return false;
+        } catch (const alpacacore::AlpacaException& failure) {
+            error = failure.what();
+            return true;
+        }
+    }));
+    mount.set_auto_complete_motions(true);
+    CHECK(error.find(expected + " home_done=0 slew_done=0 position=") != std::string::npos);
+    CHECK(error.find("; Dec home_done=1 slew_done=1 position=") != std::string::npos);
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - home wait logs both axes at DEBUG only",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info, clock);
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
+    driver->set_connected(true);
+    driver->find_home();
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
+
+    std::mutex lines_mutex;
+    std::vector<std::string> lines;
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+        ~SinkGuard() {
+            alpacacore::logging::set_log_sink(previous);
+            alpacacore::logging::set_log_level(level);
+        }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel, std::string_view component, std::string_view message) {
+            if (component != "Celestron CGX" || message.find("Home wait: ") == std::string_view::npos) return;
+            std::lock_guard<std::mutex> lock(lines_mutex);
+            lines.emplace_back(message);
+        });
+    const auto home_wait_lines = [&] {
+        std::lock_guard<std::mutex> lock(lines_mutex);
+        return lines;
+    };
+    const bool debug = GENERATE(true, false);
+    INFO("debug=" << debug);
+    alpacacore::logging::set_log_level(debug ? alpacacore::logging::LogLevel::Debug
+                                             : alpacacore::logging::LogLevel::Info);
+
+    mount.set_auto_complete_motions(false);
+    SECTION("FindHome") { driver->find_home(); }
+    SECTION("meridian home route") {
+        driver->set_tracking(true);
+        driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() + 6.0, 24.0), 30.0);
+    }
+    REQUIRE(wait_until([&] { return mount.axis_homing(0x10) && mount.axis_homing(0x11); }));
+    // The body has made its first poll and waits 200 ms; from here each 1 s advance is one loop iteration.
+    REQUIRE(clock.wait_for_waiters(1, 2s));
+    std::vector<int> before;
+    for (const std::uint8_t axis : {std::uint8_t{0x10}, std::uint8_t{0x11}})
+        for (const std::uint8_t command : {std::uint8_t{0x12}, std::uint8_t{0x13}, std::uint8_t{0x01}})
+            before.push_back(mount.count_command(axis, command));
+    const auto step = [&](std::chrono::seconds by) {
+        REQUIRE(clock.wait_for_waiters(1, 2s));
+        clock.advance(by);
+        REQUIRE(clock.wait_for_woken_settled(2s));
+    };
+    for (int second = 1; second <= 12; ++second) {
+        INFO("advanced " << second << " s");
+        step(1s);
+        REQUIRE(driver->get_slewing());
+    }
+    // A long stall logs once, then waits a full 10 s again instead of logging on every tick to catch up.
+    step(25s);
+    step(1s);
+    const int iterations = 14;
+
+    const auto logged = home_wait_lines();
+    if (debug) {
+        REQUIRE(logged.size() == 2);
+        for (const auto& line : logged) {
+            INFO(line);
+            CHECK(line.find("Home wait: RA home_done=0 slew_done=0 position=") != std::string::npos);
+            CHECK(line.find("; Dec home_done=0 slew_done=0 position=") != std::string::npos);
+        }
+    } else {
+        CHECK(logged.empty());
+        // Below DEBUG the loop reads only RA's MC_LEVEL_DONE (Dec's is short-circuited while RA is pending).
+        CHECK(mount.count_command(0x10, 0x12) == before[0] + iterations);
+        CHECK(mount.count_command(0x10, 0x13) == before[1]);
+        CHECK(mount.count_command(0x10, 0x01) == before[2]);
+        CHECK(mount.count_command(0x11, 0x12) == before[3]);
+        CHECK(mount.count_command(0x11, 0x13) == before[4]);
+        CHECK(mount.count_command(0x11, 0x01) == before[5]);
+    }
+    mount.set_auto_complete_motions(true);
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor controllers",
           "[celestron][cgx][telescope][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;
