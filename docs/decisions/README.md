@@ -131,3 +131,5 @@ referred to by its slug until it is written, and numbered then.
 - [Hold window](0022-hold-window.md)
 - [Outbound clients in vendor wrappers](0023-outbound-clients-in-vendor-wrappers.md)
 - [Device names](0024-device-names.md)
+- [Daemon privilege](0025-daemon-privilege.md)
+- [Vendored SDK binaries](0026-vendored-sdk-binaries.md)

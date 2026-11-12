@@ -26,6 +26,8 @@ the matching shared file, not in a vendor file.
 
 Non-camera vendors (focusers, mounts, switches, rotators) also ship their `.so` if the SDK provides one, for consistency — but the camera rule is non-negotiable.
 
+Why the SDK binaries are committed, shipped on the system linker path and kept without written vendor permission: [decision 0026](../../docs/decisions/0026-vendored-sdk-binaries.md).
+
 ### Mandatory Checklist — New Vendor SDK with `.so`
 
 Do **all** of the following when adding a new vendor SDK. Skipping any step will either silently break companion projects (step 1), break CI / clean clones (step 2), or break runtime loading on installed systems (steps 3–4).
@@ -128,7 +130,8 @@ apart from such corrections only `/bump-release` writes `CHANGELOG.md`, through 
 The service runs as the `alpacabridge` user with `NoNewPrivileges=true`, so
 `sudo`, setuid helpers and `pkexec` cannot work from inside it, and the project
 policy is no subprocesses in the daemon. Three mechanisms exist; pick by what
-the operation needs, never add a fourth without a decision record:
+the operation needs, never add a fourth without changing
+[decision 0025](../../docs/decisions/0025-daemon-privilege.md):
 
 - **An ambient capability** for an in-process syscall (`CAP_SYS_TIME` for
   `clock_settime`, `CAP_NET_ADMIN` for nl80211). Granted in
