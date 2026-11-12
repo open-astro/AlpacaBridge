@@ -274,6 +274,11 @@ neither camera. The rules:
   never translate the SDK's moving-read into an exception on the read path.
 - **Names must be non-empty** — default `"Filter 1..N"`; names and focus offsets are
   settable while disconnected.
+- **Slot data lives in `util::FilterWheelSlots`** (`filterwheel_slots.h`, issue #1991): the
+  slot count is known from a successful connect until the next Disconnect (WandererAstro:
+  always, its lineup is 8-slot). While it is known, names and offsets must have one entry per
+  slot and a lone shorthand token expands; while it is not, they are taken as given and
+  resized, with a warning, at the next connect. A lost link keeps the count until the Disconnect.
 - **DeviceState includes operational fields only** (e.g. `Position`); omit `Connected`
   for ConformU compatibility.
 
