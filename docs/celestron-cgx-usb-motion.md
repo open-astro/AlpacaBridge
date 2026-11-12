@@ -473,9 +473,10 @@ local logs/source/tests only; the main operator remains the sole hardware operat
 
 ### Run 5: passing qualification and final software verification
 
-Following explicit user approval to save qualification, the published report is
-[Linux-arm64-usb.txt](../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt).
-It is a new report; the CGX-L hand-controller report remains unchanged. The raw
+Following explicit user approval to save qualification, the report was published as
+[Linux-arm64-usb.txt](../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
+(since replaced; that path now holds the 2026-11-11 v6.0.0-beta.2 pass).
+It was a new report; the CGX-L hand-controller report remains unchanged. The raw
 382-line operator log remains private and unchanged. The publication applies
 only the approved site/elevation and
 latitude-derived Sync-coordinate privacy substitutions, keeping the 0.1-arcsec
