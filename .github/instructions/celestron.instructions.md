@@ -52,7 +52,7 @@ first Dec guide pulse after a North-to-South reversal moves more than commanded,
 0.2-0.7" and intermittently 1.7-2.7", with identical AUX guide commands and anti-backlash 0, so
 the extra motion is mount-side; it fails ConformU's 1.0" PulseGuide tolerance on some runs (three
 runs of the 2026-11-04 revision and eight of the 2026-11-06 build stopped on it, at +1.3-2.1"; two
-operator Dec gear adjustments moved it, and the 2026-11-06 run followed the last one; four
+operator Dec gear adjustments moved it, and the 2026-11-06 run followed the last one; three
 v6.0.0-beta.2 runs stopped at +1.2-2.0" before the published run), and the
 2026-10-31 0.5x PulseGuide North ISSUE
 fits the same effect. That limit is recorded, not waived.
