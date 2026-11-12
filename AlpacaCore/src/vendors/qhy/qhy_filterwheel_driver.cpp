@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/filterwheel_slots.h>
 #include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
@@ -57,10 +58,6 @@ public:
           camera_id_(std::move(camera_id)),
           camera_index_(camera_index),
           camera_model_(),
-          slot_count_(0),
-          slot_count_valid_(false),
-          filter_names_(),
-          focus_offsets_(),
           cached_position_(),
           pending_target_(),
           connected_(false) {}
@@ -323,36 +320,28 @@ public:
         // download on the shared handle, and no read can run until this I/O lock
         // is released.
         std::lock_guard<std::mutex> lock(mutex_);
-        move_deadline_ = clock_.now() + std::max(kMoveDeadlineFloor, kMoveTimePerSlot * slot_count_);
+        move_deadline_ =
+            clock_.now() + std::max(kMoveDeadlineFloor, kMoveTimePerSlot * slots_.slot_count().value_or(0));
     }
 
     std::vector<int> get_focus_offsets() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return focus_offsets_;
+        return slots_.offsets();
     }
 
     void set_focus_offsets(const std::vector<int>& offsets) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (slot_count_valid_ && slot_count_ > 0) {
-            validate_slot_count_locked(static_cast<int>(offsets.size()), "focusOffsets");
-        }
-        focus_offsets_ = offsets;
+        slots_.set_offsets(offsets);
     }
 
     std::vector<std::string> get_names() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return filter_names_;
+        return slots_.names();
     }
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<std::string> staged = names;
-        expand_shorthand_locked(staged);
-        if (slot_count_valid_ && slot_count_ > 0) {
-            validate_slot_count_locked(static_cast<int>(staged.size()), "names");
-        }
-        filter_names_ = std::move(staged);
-        apply_default_names_locked();
+        slots_.set_names(names);
     }
 
 private:
@@ -442,7 +431,7 @@ private:
                 // fixed across reconnects instead.
                 camera_id_.reset();
             }
-            slot_count_valid_ = false;
+            slots_.clear_slot_count();
             cached_position_.reset();
             pending_target_.reset();
             rest_candidate_.reset();
@@ -468,10 +457,11 @@ private:
         if (!get_connected() || !camera_id_.has_value()) {
             throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
-        if (!slot_count_valid_ || slot_count_ <= 0) {
+        const auto slot_count = slots_.slot_count();
+        if (!slot_count) {
             throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
         }
-        if (position >= slot_count_) {
+        if (position >= *slot_count) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         // Protocol ceiling, checked BEFORE any state mutation (PR #142 bot
@@ -561,28 +551,20 @@ private:
             const int initial_pos = sdk_.get_cfw_position(id);
 
             std::lock_guard<std::mutex> lock(mutex_);
-            // Publish with a rollback: normalize_slot_data_locked() can throw
-            // (allocation), and a half-published slot count must not outlive a
-            // connect that fails.
+            // Publish with a rollback: the copies can throw (allocation), and a
+            // half-published identity must not outlive a connect that fails. The
+            // slot data commits all or nothing on its own (FilterWheelSlots).
             const auto saved_id = camera_id_;
             const auto saved_model = camera_model_;
-            const auto saved_names = filter_names_;
-            const auto saved_offsets = focus_offsets_;
             try {
                 camera_id_ = id;
                 if (!enumerated_model.empty()) {
                     camera_model_ = enumerated_model;
                 }
-                slot_count_ = slots;
-                slot_count_valid_ = true;
-                normalize_slot_data_locked();
+                slots_.publish_slot_count(slots, "QHY");
             } catch (...) {
                 camera_id_ = saved_id;
                 camera_model_ = saved_model;
-                filter_names_ = saved_names;
-                focus_offsets_ = saved_offsets;
-                slot_count_valid_ = false;
-                slot_count_ = 0;
                 throw;
             }
             if (initial_pos >= 0) {
@@ -606,81 +588,14 @@ private:
         }
     }
 
-    void normalize_slot_data_locked() {
-        if (!slot_count_valid_ || slot_count_ <= 0) {
-            return;
-        }
-        const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        expand_shorthand_locked(filter_names_);
-        if (filter_names_.empty()) {
-            filter_names_.assign(slots, std::string());
-        } else if (filter_names_.size() != slots) {
-            ALPACA_LOG_WARN("QHY", "Configured filterNames count (" + std::to_string(filter_names_.size()) +
-                                       ") does not match CFW slot count (" + std::to_string(slots) +
-                                       "); resizing to match the wheel");
-            filter_names_.resize(slots);
-        }
-        apply_default_names_locked();
-        if (focus_offsets_.empty()) {
-            focus_offsets_.assign(slots, 0);
-        } else if (focus_offsets_.size() != slots) {
-            ALPACA_LOG_WARN("QHY", "Configured focusOffsets count (" + std::to_string(focus_offsets_.size()) +
-                                       ") does not match CFW slot count (" + std::to_string(slots) +
-                                       "); resizing to match the wheel");
-            focus_offsets_.resize(slots);
-        }
-    }
-
-    // Expand a single delimiter-less token into per-slot single-character names
-    // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
-    // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
-    // the slot count are left intact. No-op until the slot count is known.
-    void expand_shorthand_locked(std::vector<std::string>& names) const {
-        if (!slot_count_valid_ || slot_count_ <= 0 || names.size() != 1) {
-            return;
-        }
-        const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        const std::string& candidate = names[0];
-        const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
-        if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
-            std::vector<std::string> expanded;
-            expanded.reserve(slots);
-            for (char ch : candidate) {
-                expanded.emplace_back(1, ch);
-            }
-            names = std::move(expanded);
-        }
-    }
-
-    void apply_default_names_locked() {
-        for (std::size_t i = 0; i < filter_names_.size(); ++i) {
-            if (filter_names_[i].empty()) {
-                filter_names_[i] = "Filter " + std::to_string(i + 1);
-            }
-        }
-    }
-
-    void validate_slot_count_locked(int provided_size, std::string_view field_name) const {
-        if (!slot_count_valid_ || slot_count_ <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        if (provided_size != slot_count_) {
-            throw AlpacaException(
-                "Invalid " + std::string(field_name) + " length: expected " + std::to_string(slot_count_),
-                AlpacaError::InvalidValue);
-        }
-    }
-
     QHYSDK& sdk_;
     util::TaskClock& clock_;
     int device_number_;
     std::optional<std::string> camera_id_;
     std::optional<int> camera_index_;
     std::string camera_model_;
-    int slot_count_;
-    bool slot_count_valid_;
-    std::vector<std::string> filter_names_;
-    std::vector<int> focus_offsets_;
+    // Names, focus offsets and the slot count they are checked against (guarded by mutex_).
+    util::FilterWheelSlots slots_;
     // Settled-position cache: valid until the next set_position() invalidates
     // it (see get_position()/set_position() for the reasoning). Declared
     // mutable so the const get_position() can populate it on a cache miss.

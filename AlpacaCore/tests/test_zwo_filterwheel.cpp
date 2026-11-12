@@ -198,3 +198,20 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Firmware answers while a status read is
     reader.join();
     driver->set_connected(false);
 }
+
+// Issue #1991 spec rule 6: every disconnect returns the slot count to unknown, also for a wheel opened by SDK id.
+// Falsified by: zwo_filterwheel_driver.cpp set_connected(false) calling slots_.clear_slot_count() only inside the
+// `if (wheel_index_.has_value())` block (the by-id wheel then still rejects the 2-entry names after Disconnect).
+TEST_CASE("ZWO EFW Filter Wheel Driver - A wheel opened by id accepts any names length after a disconnect",
+          "[zwo][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_names().size() == static_cast<std::size_t>(sdk.slot_count));
+    require_alpaca_error([&] { driver->set_names({"L", "R"}); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+    REQUIRE_NOTHROW(driver->set_names({"L", "R"}));
+    REQUIRE_NOTHROW(driver->set_focus_offsets({1, 2, 3}));
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R"});
+    CHECK(driver->get_focus_offsets() == std::vector<int>{1, 2, 3});
+}

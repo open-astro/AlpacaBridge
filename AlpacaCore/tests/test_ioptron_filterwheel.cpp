@@ -428,7 +428,7 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - concurrent set_position calls leav
 }
 
 // A FocusOffsets write that lands while the connect reads the wheel's stored offsets is kept, not replaced by them.
-// Falsified by: ioptron_filterwheel_driver.cpp publish_connect_state() overwriting focus_offsets_ with the stored
+// Falsified by: ioptron_filterwheel_driver.cpp publish_connect_state() overwriting the offsets with the stored
 // offsets without re-checking under mutex_ that they are still empty (Offsets read back as zeros).
 TEST_CASE("iOptron iEFW Filter Wheel Driver - a FocusOffsets write during connect is kept",
           "[ioptron][filterwheel][unit][position-cache][timing]") {
@@ -1003,4 +1003,41 @@ TEST_CASE("iOptron iEFW - a code naming a focuser is refused (#2204)", "[ioptron
     auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path(), "iefw15", clock);
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
+}
+
+// #1991: the slot count is known from a connect until the next Disconnect; while it is unknown names and offsets
+// are taken as given and a lone token is not expanded.
+// Falsified by: ioptron_filterwheel_driver.cpp teardown_locked() without slots_.clear_slot_count() (the lone token
+// still expands to five names after the disconnect).
+TEST_CASE("iOptron iEFW - names and offsets follow the slot count only until a Disconnect (#1991)",
+          "[ioptron][filterwheel][unit]") {
+    ConnectedIefw wheel;
+    CHECK(wheel.driver->get_focus_offsets() == std::vector<int>(5, 0));
+    require_alpaca_error([&] { wheel.driver->set_names({"L", "R"}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { wheel.driver->set_focus_offsets({1}); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(wheel.driver->get_names().size() == 5);
+
+    wheel.driver->set_connected(false);
+    wheel.driver->set_names({"LRGBS"});
+    CHECK(wheel.driver->get_names() == std::vector<std::string>{"LRGBS"});
+    wheel.driver->set_names({"L", "R"});
+    CHECK(wheel.driver->get_names() == std::vector<std::string>{"L", "R"});
+    wheel.driver->set_focus_offsets({1});
+    CHECK(wheel.driver->get_focus_offsets() == std::vector<int>{1});
+}
+
+// #1991: offsets stored on the wheel fill FocusOffsets at connect when the config gives none.
+// Falsified by: ioptron_filterwheel_driver.cpp publish_connect_state() without slots_.seed_offsets() (the offsets
+// read back as five zeros).
+TEST_CASE("iOptron iEFW - offsets stored on the wheel seed FocusOffsets at connect (#1991)",
+          "[ioptron][filterwheel][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(99);
+    fake.set_stored_offset(0, 120);
+    fake.set_stored_offset(2, -45);
+    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path(), "iefw15", clock);
+    driver->set_connected(true);
+    CHECK(driver->get_focus_offsets() == std::vector<int>{120, 0, -45, 0, 0});
+    driver->set_connected(false);
 }

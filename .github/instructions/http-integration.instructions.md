@@ -30,8 +30,8 @@ widget is one reusable component — instantiate `createFilterwheelSlotUI({...})
 an existing vendor in `index.html`. The component keeps the slot rows and the textarea in
 sync; the form submit reads the textarea.
 
-**Single-token shorthand expansion** (shared by `parseFilterNamesInput` in `app.js` and the
-`normalize_slot_data_locked` in the ZWO/ToupTek filter-wheel drivers): a lone name with no
+**Single-token shorthand expansion** (shared by `parseFilterNamesInput` in `app.js` and
+`util::FilterWheelSlots` in `filterwheel_slots.h`, which every filter wheel driver uses): a lone name with no
 delimiters whose length equals the slot count expands to one character per slot (`LRGB` →
 `L,R,G,B`). Guard it with **"no lowercase letters"** so ordinary names like `Clear` or
 `Ha_NB` that happen to match the slot count are NOT exploded — a bot-review foot-gun. Keep

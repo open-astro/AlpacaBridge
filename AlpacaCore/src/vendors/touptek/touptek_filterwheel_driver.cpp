@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/filterwheel_slots.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/poll_settle.h>
 #include <alpacacore/util/task_clock.h>
@@ -213,8 +214,7 @@ public:
                         if (!superseded && settled) {
                             handle_ = handle;
                             info_ = info;
-                            slot_count_ = slots;
-                            normalize_slot_data_locked();
+                            slots_.publish_slot_count(slots, kLogTag);
                         }
                     }
                     if (superseded) {
@@ -237,12 +237,12 @@ public:
                     sdk.close_filter_wheel(handle);
                 }
                 {
-                    // Restore a clean disconnected state — handle_/info_/slot_count_
+                    // Restore a clean disconnected state — handle_/info_ and the slot count
                     // may have been published before the throw.
                     std::lock_guard<std::mutex> lock(mutex_);
                     handle_ = nullptr;
                     info_ = {};
-                    slot_count_ = 0;
+                    slots_.clear_slot_count();
                     connecting_homing_ = false;
                 }
                 // Deliberately consumed even if a disconnect was recorded during
@@ -260,15 +260,15 @@ public:
 
         // Clear driver state before the SDK close: if the close throws (e.g.
         // device unplugged) the error still surfaces, but the driver must not
-        // stay half-connected. The slot count is reset so a post-disconnect
+        // stay half-connected. The slot count is cleared so a post-disconnect
         // set_names/set_focus_offsets isn't validated against a stale count (e.g. after
-        // swapping a 5-slot wheel for a 7-slot before reconnecting). A fresh instance starts at 0 too.
+        // swapping a 5-slot wheel for a 7-slot before reconnecting). A fresh instance has none either.
         HToupcam close_handle = nullptr;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             close_handle = handle_;
             handle_ = nullptr;
-            slot_count_ = 0;
+            slots_.clear_slot_count();
             info_ = {};
             connected_.store(false);
         }
@@ -338,7 +338,7 @@ public:
         // Range validation precedes the connection check (ASCOM precedence, per
         // driver-lifecycle.instructions.md): a negative position is unconditionally invalid, so it is
         // InvalidValue even while disconnected. The upper bound depends on
-        // slot_count_ (0 until connect), so it is checked below under the lock.
+        // the slot count (unknown until connect), so it is checked below under the lock.
         if (position < 0) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
@@ -351,10 +351,11 @@ public:
             if (!handle_) {
                 throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
             }
-            if (slot_count_ <= 0) {
+            const auto slot_count = slots_.slot_count();
+            if (!slot_count) {
                 throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
             }
-            if (position >= slot_count_) {
+            if (position >= *slot_count) {
                 throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
             }
         }
@@ -380,36 +381,22 @@ public:
 
     std::vector<int> get_focus_offsets() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return focus_offsets_;
+        return slots_.offsets();
     }
 
     void set_focus_offsets(const std::vector<int>& offsets) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (slot_count_ > 0) {
-            validate_slot_count_locked(static_cast<int>(offsets.size()), "focusOffsets");
-        }
-        focus_offsets_ = offsets;
+        slots_.set_offsets(offsets);
     }
 
     std::vector<std::string> get_names() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return filter_names_;
+        return slots_.names();
     }
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Expand a single-token shorthand ("LRGB" -> L,R,G,B) BEFORE validating
-        // the count, so the shorthand works when connected too — not only on the
-        // pre-connect config path (where slot_count_ is still 0). Stage on a local
-        // copy and only commit on success, so a validation throw leaves the
-        // existing filter_names_ untouched (not a half-applied array).
-        std::vector<std::string> staged = names;
-        expand_shorthand_locked(staged);
-        if (slot_count_ > 0) {
-            validate_slot_count_locked(static_cast<int>(staged.size()), "names");
-        }
-        filter_names_ = std::move(staged);
-        apply_default_names_locked();
+        slots_.set_names(names);
     }
 
 private:
@@ -458,31 +445,6 @@ private:
         throw AlpacaException("Filter wheel identifier not specified", AlpacaError::InvalidValue);
     }
 
-    void normalize_slot_data_locked() {
-        if (slot_count_ <= 0) {
-            return;
-        }
-        const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        expand_shorthand_locked(filter_names_);
-        if (filter_names_.empty()) {
-            filter_names_.assign(slots, std::string());
-        } else if (filter_names_.size() != slots) {
-            ALPACA_LOG_WARN(kLogTag, "Configured filterNames count (" + std::to_string(filter_names_.size()) +
-                                         ") does not match wheel slot count (" + std::to_string(slots) +
-                                         "); resizing to match the wheel");
-            filter_names_.resize(slots);
-        }
-        apply_default_names_locked();
-        if (focus_offsets_.empty()) {
-            focus_offsets_.assign(slots, 0);
-        } else if (focus_offsets_.size() != slots) {
-            ALPACA_LOG_WARN(kLogTag, "Configured focusOffsets count (" + std::to_string(focus_offsets_.size()) +
-                                         ") does not match wheel slot count (" + std::to_string(slots) +
-                                         "); resizing to match the wheel");
-            focus_offsets_.resize(slots);
-        }
-    }
-
     // Block until the wheel firmware finishes its home cycle (SDK reports -1
     // while moving, a non-negative slot once settled), or a timeout elapses.
     // Sleeps first so the move has actually begun before the first read.
@@ -518,46 +480,6 @@ private:
         }
     }
 
-    // Expand a single delimiter-less token into per-slot single-character names
-    // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
-    // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
-    // the slot count are left intact. No-op until the slot count is known.
-    void expand_shorthand_locked(std::vector<std::string>& names) const {
-        if (slot_count_ <= 0 || names.size() != 1) {
-            return;
-        }
-        const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        const std::string& candidate = names[0];
-        const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
-        if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
-            std::vector<std::string> expanded;
-            expanded.reserve(slots);
-            for (char ch : candidate) {
-                expanded.emplace_back(1, ch);
-            }
-            names = std::move(expanded);
-        }
-    }
-
-    void apply_default_names_locked() {
-        for (std::size_t i = 0; i < filter_names_.size(); ++i) {
-            if (filter_names_[i].empty()) {
-                filter_names_[i] = "Filter " + std::to_string(i + 1);
-            }
-        }
-    }
-
-    void validate_slot_count_locked(int provided_size, std::string_view field_name) const {
-        if (slot_count_ <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        if (provided_size != slot_count_) {
-            throw AlpacaException(
-                "Invalid " + std::string(field_name) + " length: expected " + std::to_string(slot_count_),
-                AlpacaError::InvalidValue);
-        }
-    }
-
     // One refill reads one device value. closed: a disconnect won the I/O lock (not a frame, not a link failure).
     struct Status {
         bool closed{};
@@ -576,9 +498,7 @@ private:
 
     HToupcam handle_{nullptr};
     ToupFilterWheelInfo info_{};
-    int slot_count_{0};
-    std::vector<std::string> filter_names_;
-    std::vector<int> focus_offsets_;
+    util::FilterWheelSlots slots_;
 
     std::atomic<bool> connected_{false};
     // True while a set_connected(true) has opened the wheel and is homing. Guarded by mutex_. Read by
