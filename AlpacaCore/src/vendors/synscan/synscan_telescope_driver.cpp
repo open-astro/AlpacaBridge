@@ -606,8 +606,7 @@ public:
 
     void set_declination_rate(double rate) override {
         (void)rate;
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("Declination rate not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -724,8 +723,7 @@ public:
 
     void set_right_ascension_rate(double rate) override {
         (void)rate;
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("Right ascension rate not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -742,8 +740,7 @@ public:
 
     void set_side_of_pier(int side) override {
         (void)side;
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("Pier side not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -769,14 +766,12 @@ public:
 
     // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     void set_does_refraction(bool) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -917,8 +912,7 @@ public:
 
     void set_tracking_rate(int rate) override {
         (void)rate;
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("Tracking rates not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -984,8 +978,7 @@ private:
 
 public:
     void find_home() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("FindHome not supported", AlpacaError::MethodNotImplemented);
     }
 
@@ -2038,24 +2031,21 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("SlewToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("SlewToAltAzAsync not supported", AlpacaError::MethodNotImplemented);
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        require_connected();
         throw AlpacaException("SyncToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
