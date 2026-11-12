@@ -210,6 +210,29 @@ TEST_CASE("QHY Filter Wheel Driver - Connects and reads its slot count", "[qhy][
     CHECK(fake.underflow_closes == 0);
 }
 
+// Falsified by: qhy_filterwheel_driver.cpp teardown() not calling slots_.clear_slot_count(), so a Disconnect keeps
+// the slot count and a names list of another length is still refused.
+TEST_CASE("QHY Filter Wheel Driver - Names follow the slot count only while connected", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();  // 5 slots
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_names().size() == 5);
+
+    const auto before = driver->get_names();
+    require_alpaca_error([&] { driver->set_names({"L", "R"}); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_names() == before);
+
+    driver->set_names({"LRGBH"});
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R", "G", "B", "H"});
+
+    driver->set_connected(false);
+    REQUIRE_NOTHROW(driver->set_names({"L", "R"}));
+    REQUIRE_NOTHROW(driver->set_focus_offsets({1, 2, 3}));
+    CHECK(driver->get_names() == std::vector<std::string>{"L", "R"});
+    CHECK(driver->get_focus_offsets() == std::vector<int>{1, 2, 3});
+}
+
 TEST_CASE("QHY Filter Wheel Driver - A camera with no CFW port is refused", "[qhy][filterwheel][unit]") {
     auto fake = make_fake();
     fake.controls_available.erase(alpacacore::vendor::qhy::control::CFWPORT);
