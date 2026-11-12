@@ -430,6 +430,8 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
             p.push_back({"get_full_well_capacity", [&] { (void)c.get_full_well_capacity(); }});
             p.push_back({"get_readout_mode", [&] { (void)c.get_readout_mode(); }});
             p.push_back({"set_readout_mode", [&] { c.set_readout_mode(0); }});
+            // Index 1: out of range on a Normal-only camera (InvalidValue), a real mode elsewhere (NotConnected).
+            p.push_back({"set_readout_mode(1)", [&] { c.set_readout_mode(1); }});
             p.push_back({"get_readout_modes", [&] { (void)c.get_readout_modes(); }});
             p.push_back({"get_offset", [&] { (void)c.get_offset(); }});
             p.push_back({"set_offset", [&] { c.set_offset(0); }});
