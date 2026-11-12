@@ -356,19 +356,22 @@ public:
         return false;
     }
 
-    // No motorized cover on this model -- a structurally absent capability,
-    // not a connection-state matter, so these throw unconditionally (matches
-    // the same pattern as e.g. Celestron/Bisque's SlewToAltAz on mounts that
-    // don't support it: MethodNotImplemented regardless of Connected).
+    // No motorized cover on this model: connection check first, then
+    // MethodNotImplemented (issue #1919). ICoverCalibratorV2 lists both
+    // exceptions with no order, and CoverState only reports NotPresent after a
+    // connect, so a disconnected client gets NotConnected like every other member.
     void open_cover() override {
+        ensure_connected();
         throw AlpacaException("This Gemini Flat Panel has no motorized cover", AlpacaError::MethodNotImplemented);
     }
 
     void close_cover() override {
+        ensure_connected();
         throw AlpacaException("This Gemini Flat Panel has no motorized cover", AlpacaError::MethodNotImplemented);
     }
 
     void halt_cover() override {
+        ensure_connected();
         throw AlpacaException("This Gemini Flat Panel has no motorized cover", AlpacaError::MethodNotImplemented);
     }
 
