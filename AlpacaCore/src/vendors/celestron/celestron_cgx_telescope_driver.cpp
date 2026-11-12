@@ -1989,7 +1989,7 @@ std::string CelestronCgxTelescopeDriver::home_axes_status() {
 
 void CelestronCgxTelescopeDriver::log_home_wait(std::chrono::steady_clock::time_point& next_log) {
     if (logging::get_log_level() > logging::LogLevel::Debug || clock_.now() < next_log) return;
-    next_log += std::chrono::seconds(10);
+    next_log = clock_.now() + std::chrono::seconds(10);
     ALPACA_LOG_DEBUG("Celestron CGX", "Home wait: " + home_axes_status());
 }
 
