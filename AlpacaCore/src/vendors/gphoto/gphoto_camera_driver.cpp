@@ -627,12 +627,14 @@ public:
     // for the history of this tradeoff.
 
     int get_bayer_offset_x() const override {
+        ensure_connected();  // NotConnected before the geometry answer (#1919)
         std::lock_guard<std::mutex> lock(mutex_);
         require_geometry_known_locked();
         return bayer_offset_x_;
     }
 
     int get_bayer_offset_y() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         require_geometry_known_locked();
         return bayer_offset_y_;

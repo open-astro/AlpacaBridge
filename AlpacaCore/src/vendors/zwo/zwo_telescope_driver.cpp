@@ -843,6 +843,7 @@ public:
     }
 
     void set_declination_rate(double) override {
+        check_connected_only();
         throw AlpacaException("DeclinationRate is not supported", AlpacaError::NotImplemented);
     }
 
@@ -1011,6 +1012,7 @@ public:
     }
 
     void set_right_ascension_rate(double) override {
+        check_connected_only();
         throw AlpacaException("RightAscensionRate is not supported", AlpacaError::NotImplemented);
     }
 
@@ -1073,10 +1075,12 @@ public:
 
     // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
+        check_connected_only();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     void set_does_refraction(bool) override {
+        check_connected_only();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -1094,6 +1098,7 @@ public:
     }
 
     void set_side_of_pier(int) override {
+        check_connected_only();
         throw AlpacaException("SideOfPier is read-only for ZWO mount", AlpacaError::NotImplemented);
     }
 
@@ -1628,7 +1633,7 @@ public:
     }
 
     void abort_slew() override {
-        check_connected(true);
+        check_connected(/*skip_fault=*/true);
         ensure_not_parked("AbortSlew");
         reset_position_offsets();
         // open-astro#575 / #720: fence a GOTO body still writing the target
@@ -2188,14 +2193,17 @@ public:
     }
 
     void slew_to_alt_az(double, double) override {
+        check_connected_only();
         throw AlpacaException("SlewToAltAz is not supported by ZWO mount protocol", AlpacaError::NotImplemented);
     }
 
     void slew_to_alt_az_async(double, double) override {
+        check_connected_only();
         throw AlpacaException("SlewToAltAzAsync is not supported by ZWO mount protocol", AlpacaError::NotImplemented);
     }
 
     void sync_to_alt_az(double, double) override {
+        check_connected_only();
         throw AlpacaException("SyncToAltAz is not supported by ZWO mount protocol", AlpacaError::NotImplemented);
     }
 
@@ -2564,17 +2572,21 @@ private:
     }
 
     // Call without mutex_, including safety stops; match Connected without waiting on the wire.
-    void check_connected(bool safety_stop = false) const {
+    void check_connected(bool skip_fault = false) const {
         update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected_locked(safety_stop);
+        check_connected_locked(skip_fault);
     }
 
-    void check_connected_locked(bool safety_stop = false) const {
+    // Absent capabilities: NotConnected while disconnected, else their NotImplemented code even on a faulted link.
+    void check_connected_only() const { check_connected(/*skip_fault=*/true); }
+
+    // skip_fault: a safety stop (AbortSlew) and an absent capability answer even on a faulted link.
+    void check_connected_locked(bool skip_fault = false) const {
         if (!connected_.load() || !caches_ready_.load()) {
             throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
         }
-        if (!safety_stop) {
+        if (!skip_fault) {
             const auto fault = link_fault_locked();
             if (!fault.empty()) throw AlpacaException(fault, AlpacaError::DriverException);
         }

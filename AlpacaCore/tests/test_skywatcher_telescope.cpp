@@ -263,11 +263,12 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][tel
     // FindHome is supported (goto to the power-on index); unconnected it
     // must raise NotConnected like every other motion method.
     require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); },
-                         alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    // Unsupported members check the connection first (#1919); their connected answer is pinned in
+    // "connected unsupported members keep their NotImplemented answers".
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
     // Rate offsets are supported; like every motion method they raise
     // NotConnected when unconnected.
     require_alpaca_error([&] { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
@@ -417,10 +418,30 @@ TEST_CASE("SkyWatcher Telescope Driver spec audit - DestinationSideOfPier reject
 TEST_CASE("SkyWatcher Telescope Driver spec audit - DoesRefraction is not implemented",
           "[skywatcher][telescope][unit][spec-audit]") {
     auto driver = make_driver(0);
-    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write. While
+    // disconnected the connection check answers first (#1919); the connected answer is pinned below.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("Sky-Watcher Telescope Driver - connected unsupported members keep their NotImplemented answers",
+          "[skywatcher][telescope][unit]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    REQUIRE(driver->get_connected());
+
+    // Falsified by: skywatcher_telescope_driver.cpp sync_to_alt_az() without its MethodNotImplemented throw.
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - CanMoveAxis connected (#1869)", "[skywatcher][telescope][unit]") {

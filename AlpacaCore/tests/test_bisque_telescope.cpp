@@ -1463,14 +1463,46 @@ TEST_CASE("Bisque Telescope Driver spec audit - DestinationSideOfPier rejects ou
 
 TEST_CASE("Bisque Telescope Driver spec audit - DoesRefraction is not implemented",
           "[bisque][telescope][unit][spec-audit]") {
-    alpacacore::vendor::bisque::ConnectionInfo conn;
-    conn.host = "localhost";
-    conn.tcp_port = 3040;
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+    ClockedBisque rig;
+    REQUIRE(rig.driver->get_connected());
     // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
-    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)rig.driver->get_does_refraction(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { rig.driver->set_does_refraction(true); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { rig.driver->set_does_refraction(false); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    // Disconnected, the connection check comes first (#1919).
+    rig.driver->set_connected(false);
+    require_alpaca_error([&] { (void)rig.driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("Bisque Telescope Driver - unsupported members check the connection before NotImplemented (#1919)",
+          "[bisque][telescope][unit][spec-audit]") {
+    ClockedBisque rig;
+    REQUIRE(rig.driver->get_connected());
+    const int before = rig.mount.transactions;
+    require_alpaca_error([&] { rig.driver->set_declination_rate(1.0); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { rig.driver->set_right_ascension_rate(1.0); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { rig.driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { rig.driver->slew_to_alt_az(45.0, 90.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { rig.driver->slew_to_alt_az_async(45.0, 90.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { rig.driver->sync_to_alt_az(45.0, 90.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    CHECK(rig.mount.transactions == before);
+    // Disconnected, the connection check comes first.
+    rig.driver->set_connected(false);
+    require_alpaca_error([&] { rig.driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->set_right_ascension_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->slew_to_alt_az(45.0, 90.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->slew_to_alt_az_async(45.0, 90.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { rig.driver->sync_to_alt_az(45.0, 90.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Bisque Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",

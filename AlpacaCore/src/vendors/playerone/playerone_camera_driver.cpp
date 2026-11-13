@@ -866,8 +866,9 @@ public:
 
     int get_readout_mode() const override { return 0; }
     void set_readout_mode(int mode) override {
+        // ReadoutModes is {"Normal"}: any other index is out of range, InvalidValue even while disconnected.
         if (mode != 0) {
-            throw AlpacaException("Readout mode not supported", AlpacaError::NotImplemented);
+            throw AlpacaException("Invalid readout mode", AlpacaError::InvalidValue);
         }
     }
     std::vector<std::string> get_readout_modes() const override { return {"Normal"}; }

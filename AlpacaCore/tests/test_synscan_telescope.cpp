@@ -205,6 +205,18 @@ TEST_CASE("SynScan Telescope Driver - Disconnected Behavior", "[synscan][telesco
     require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::NotConnected);
 
+    // Unsupported members report the connection first, then their NotImplemented answer once connected (#1919)
+    require_alpaca_error([&] { driver->set_declination_rate(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking_rate(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+
     // Action and command methods
     require_alpaca_error([&] { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&] { driver->command_blind("test", false); }, alpacacore::AlpacaError::NotConnected);
@@ -1262,18 +1274,32 @@ TEST_CASE("SynScan Telescope Driver spec audit - DestinationSideOfPier rejects o
                          alpacacore::AlpacaError::InvalidValue);
 }
 
-TEST_CASE("SynScan Telescope Driver spec audit - DoesRefraction is not implemented",
+#ifndef _WIN32  // needs the fake mount server
+TEST_CASE("SynScan Telescope Driver - connected unsupported members keep their NotImplemented answers",
           "[synscan][telescope][unit][spec-audit]") {
-    alpacacore::vendor::synscan::ConnectionInfo conn;
-    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
-    conn.port_path = "/dev/null";
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
-    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    auto driver = make_connected_driver(server);
+    REQUIRE(driver->get_connected());
+
+    // The connection check comes first (#1919); once connected each absent capability keeps its ITelescopeV4 answer.
+    // The driver applies no refraction correction, so DoesRefraction raises on read and on write.
+    require_alpaca_error([&] { driver->set_declination_rate(0.0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.0); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_tracking_rate(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    driver->set_connected(false);
 }
+#endif
 
 TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
           "[synscan][telescope][unit][spec-audit]") {

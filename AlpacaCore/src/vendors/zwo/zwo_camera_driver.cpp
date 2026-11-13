@@ -390,6 +390,7 @@ public:
     }
 
     int get_bayer_offset_x() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
@@ -398,6 +399,7 @@ public:
     }
 
     int get_bayer_offset_y() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
@@ -504,11 +506,13 @@ public:
     }
 
     double get_exposure_max() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Exposure);
         return static_cast<double>(caps.max_value) / 1'000'000.0;
     }
 
     double get_exposure_min() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Exposure);
         return static_cast<double>(caps.min_value) / 1'000'000.0;
     }
@@ -550,16 +554,19 @@ public:
     }
 
     int get_gain_max() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Gain);
         return static_cast<int>(caps.max_value);
     }
 
     int get_gain_min() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Gain);
         return static_cast<int>(caps.min_value);
     }
 
     std::vector<std::string> get_gains() const override {
+        ensure_connected();
         throw AlpacaException("Gain descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -670,16 +677,19 @@ public:
     }
 
     int get_offset_max() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Offset);
         return static_cast<int>(caps.max_value);
     }
 
     int get_offset_min() const override {
+        ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Offset);
         return static_cast<int>(caps.min_value);
     }
 
     std::vector<std::string> get_offsets() const override {
+        ensure_connected();
         throw AlpacaException("Offset descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -705,6 +715,7 @@ public:
     void set_readout_mode(int mode) override {
         if (!can_get_control(ZWOControlType::HighSpeedMode)) {
             if (mode != 0) {
+                ensure_connected();  // the caps are empty while disconnected (#1919)
                 throw AlpacaException("Readout mode not supported", AlpacaError::NotImplemented);
             }
             return;
@@ -761,10 +772,12 @@ public:
     void set_start_y(int start_y) override { set_start_pos_locked(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
     void set_sub_exposure_duration(double) override {
+        ensure_connected();
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 

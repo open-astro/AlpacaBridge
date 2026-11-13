@@ -281,6 +281,20 @@ TEST_CASE("Player One Camera Driver - ASCOM Error Codes", "[playerone][camera][u
     require_alpaca_error([&]() { driver->get_image_array(); }, alpacacore::AlpacaError::NotConnected);
 }
 
+TEST_CASE("Player One Camera Driver - an out-of-range readout mode is InvalidValue connected or not",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    REQUIRE(driver->get_readout_modes().size() == 1);
+    require_alpaca_error([&] { driver->set_readout_mode(1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_readout_mode(-1); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(true);
+    require_alpaca_error([&] { driver->set_readout_mode(1); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_readout_mode(0);
+    CHECK(driver->get_readout_mode() == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One Camera Driver - Rejects non-finite inputs and overflowing ROI starts",
           "[playerone][camera][unit]") {
     alpacacore::test::FakePlayerOneSDK sdk;

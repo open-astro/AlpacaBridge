@@ -1849,6 +1849,9 @@ TEST_CASE("GPhoto camera fake - MLU on skips the connect priming capture", "[gph
     CHECK(driver->get_connected() == true);
     CHECK(count_calls(fake, "capture_and_download") == 0);
     CHECK(fake.remote_release_history.empty());
+    // Connected with the geometry still unknown: InvalidOperation, not NotConnected (#1919).
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_x(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_bayer_offset_y(); }, alpacacore::AlpacaError::InvalidOperation);
 
     driver->set_connected(false);
 }

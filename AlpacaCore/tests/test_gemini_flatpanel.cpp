@@ -138,13 +138,28 @@ TEST_CASE("Gemini Flat Panel Driver - Unsupported actions", "[gemini][flatpanel]
                          alpacacore::AlpacaError::MethodNotImplemented);
 }
 
-TEST_CASE("Gemini Flat Panel Driver - No motorized cover", "[gemini][flatpanel][unit]") {
+TEST_CASE("Gemini Flat Panel Driver - No motorized cover, disconnected answers NotConnected",
+          "[gemini][flatpanel][unit]") {
     auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, "/dev/ttyUSB0");
 
-    // This model is light-only: OpenCover/CloseCover/HaltCover are a
-    // structurally absent capability (like SlewToAltAz on a mount without alt-
-    // az slewing), so they throw MethodNotImplemented unconditionally --
-    // never NotConnected -- even while disconnected.
+    // This model is light-only, but CoverState only reports NotPresent after a
+    // connect, so OpenCover/CloseCover/HaltCover check the connection first
+    // (issue #1919) and answer NotConnected while disconnected.
+    require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->close_cover(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->halt_cover(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("Gemini Flat Panel Driver - No motorized cover, connected answers MethodNotImplemented",
+          "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Connected, the cover is a structurally absent capability: CoverState is
+    // NotPresent and the cover methods throw MethodNotImplemented.
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::NotPresent);
     require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->close_cover(); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->halt_cover(); }, alpacacore::AlpacaError::MethodNotImplemented);

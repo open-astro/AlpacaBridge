@@ -441,6 +441,7 @@ public:
     }
 
     void set_declination_rate(double /*rate*/) override {
+        check_connected_now();
         throw AlpacaException("Declination rate not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -507,6 +508,7 @@ public:
     }
 
     void set_right_ascension_rate(double /*rate*/) override {
+        check_connected_now();
         throw AlpacaException("RightAscension rate not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -521,6 +523,7 @@ public:
     }
 
     void set_side_of_pier(int /*side*/) override {
+        check_connected_now();
         throw AlpacaException("SetSideOfPier not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -539,10 +542,12 @@ public:
 
     // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
+        check_connected_now();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     void set_does_refraction(bool) override {
+        check_connected_now();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -1108,14 +1113,17 @@ public:
     }
 
     void slew_to_alt_az(double /*altitude*/, double /*azimuth*/) override {
+        check_connected_now();
         throw AlpacaException("SlewToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
     void slew_to_alt_az_async(double /*altitude*/, double /*azimuth*/) override {
+        check_connected_now();
         throw AlpacaException("SlewToAltAzAsync not supported", AlpacaError::MethodNotImplemented);
     }
 
     void sync_to_alt_az(double /*altitude*/, double /*azimuth*/) override {
+        check_connected_now();
         throw AlpacaException("SyncToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 

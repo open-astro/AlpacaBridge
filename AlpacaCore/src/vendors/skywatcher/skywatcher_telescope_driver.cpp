@@ -1206,6 +1206,8 @@ public:
 
     void set_side_of_pier(int side) override {
         (void)side;
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         throw AlpacaException("Pier side not supported", AlpacaError::PropertyNotImplemented);
     }
 
@@ -1227,9 +1229,13 @@ public:
 
     // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
     void set_does_refraction(bool) override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
@@ -2907,18 +2913,24 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         throw AlpacaException("SlewToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         throw AlpacaException("SlewToAltAzAsync not supported", AlpacaError::MethodNotImplemented);
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         throw AlpacaException("SyncToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 

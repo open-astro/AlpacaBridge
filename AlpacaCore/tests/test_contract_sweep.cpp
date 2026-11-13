@@ -374,7 +374,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
 // Members a driver may not implement (capability off, vendor protocol without the command). While disconnected
 // each must answer NotConnected, never NotImplemented: the connection check comes first, then the capability
 // check (AGENTS.md "ASCOM contract precedence"). A probe that returns, or throws InvalidValue, is a static read
-// or an argument check and passes. 0x402/0x40B reads while disconnected are a separate defect (not probed here).
+// or an argument check and passes; any other code fails.
 std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& entry) {
     std::vector<Probe> p;
     switch (entry.type) {
@@ -388,6 +388,9 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
             p.push_back({"get_guide_rate", [&] { (void)t.get_guide_rate(); }});
             p.push_back({"set_guide_rate", [&] { t.set_guide_rate(alpacacore::GuideRate{}); }});
             p.push_back({"set_tracking_rate", [&] { t.set_tracking_rate(0); }});
+            // A non-sidereal rate reaches the capability branch that sidereal skips (OnStep, #1919).
+            p.push_back({"set_tracking_rate(1)", [&] { t.set_tracking_rate(1); }});
+            p.push_back({"set_tracking_rate(3)", [&] { t.set_tracking_rate(3); }});
             p.push_back({"find_home", [&] { t.find_home(); }});
             p.push_back({"park", [&] { t.park(); }});
             p.push_back({"unpark", [&] { t.unpark(); }});
@@ -427,6 +430,8 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
             p.push_back({"get_full_well_capacity", [&] { (void)c.get_full_well_capacity(); }});
             p.push_back({"get_readout_mode", [&] { (void)c.get_readout_mode(); }});
             p.push_back({"set_readout_mode", [&] { c.set_readout_mode(0); }});
+            // Index 1: out of range on a Normal-only camera (InvalidValue), a real mode elsewhere (NotConnected).
+            p.push_back({"set_readout_mode(1)", [&] { c.set_readout_mode(1); }});
             p.push_back({"get_readout_modes", [&] { (void)c.get_readout_modes(); }});
             p.push_back({"get_offset", [&] { (void)c.get_offset(); }});
             p.push_back({"set_offset", [&] { c.set_offset(0); }});
@@ -499,15 +504,6 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
             break;
     }
     return p;
-}
-
-// Entries whose driver files belong to other tickets: the NotImplemented-while-disconnected defect is known and
-// fixed there. Each is skipped until upstream #1919 closes; remove the entry when its driver is fixed.
-bool not_implemented_pending(const ContractEntry& e) {
-    static const std::set<std::string> pending = {
-        "zwo_camera",       "zwo_telescope",     "skywatcher_telescope",
-        "bisque_telescope", "synscan_telescope", "gemini_covercalibrator"};  // open_cover, close_cover, halt_cover
-    return pending.count(e.id) == 1;
 }
 
 // Static capability getters: readable while disconnected (they must not throw).
@@ -611,12 +607,11 @@ bool has_can_subject(const ContractEntry& e) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
     }
-    // Not-implemented members: NotConnected first, never NotImplemented (pending entries wait on upstream #1919).
-    if (!not_implemented_pending(e)) {
-        for (const auto& [name, fn] : not_implemented_probes(*d, e)) {
-            INFO(e.id << " " << name << " must not answer NotImplemented while disconnected");
-            CHECK(thrown_code(fn) != err::NotImplemented);
-        }
+    // Not-implemented members: NotConnected first, never NotImplemented.
+    for (const auto& [name, fn] : not_implemented_probes(*d, e)) {
+        INFO(e.id << " " << name << " must answer NotConnected while disconnected");
+        const int code = thrown_code(fn);
+        CHECK((code == -1 || code == err::NotConnected || code == err::InvalidValue));
     }
     if (e.type == DeviceType::Switch) {
         auto& s = dynamic_cast<alpacacore::SwitchDriver&>(*d);
