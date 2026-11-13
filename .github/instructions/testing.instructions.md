@@ -112,12 +112,12 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   `libusb_hotplug_register_callback` on any host without a working USB stack,
   so the real singleton cannot be touched on a test runner. Two extra rules
   apply there. **(a) No QHY fake method may block** — the camera driver's
-  exposure, temperature, cooler-off and telemetry workers join with a bounded
-  timeout and *detach* on expiry (telemetry since #323), and its pulse-guide
-  worker is detached by design, so a
-  blocking fake leaves detached threads calling into it after the test ends.
-  **(b) Those detachable workers must reach the seam through a captured
-  `QHYSDK*`, never through `this->sdk_`** — the workers still capture `this`
+  exposure worker joins with a bounded timeout and *detaches* on expiry, so a
+  blocking fake leaves a detached thread calling into it after the test ends,
+  and its slot bodies (temperature, telemetry, cooler-off, pulse guide; #1736)
+  make the driver's destructor wait for a blocked call.
+  **(b) The detachable exposure worker must reach the seam through a captured
+  `QHYSDK*`, never through `this->sdk_`** — the worker still captures `this`
   for everything else they touch; only the SDK call is required to go through
   the raw pointer. **This narrows the use-after-free window; it does not close
   it.** A detached worker that outlives the driver still dereferences `this`

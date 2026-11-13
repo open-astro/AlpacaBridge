@@ -53,7 +53,7 @@ vendor-agnostic; do them in the driver from the start.
   `set_connected()` against `set_connected()` only; never take it in a getter.
 - **Operation task threads: use the slot where a driver has adopted it.** The Celestron
   (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide, the OnStep
-  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), the ZWO telescope's GOTO setup, pulse drain, disconnect teardown and telemetry poll (#1918), the ZWO camera's pulse-guide turn-off (#1667), and the Gemini focuser and flat panel run their operation bodies (async slew,
+  telescope's MoveAxis re-send (#1378), Park/FindHome tail (#1430), status poll (#1783) and pulse-end tick (`pulse_measurement_`), the ZWO telescope's GOTO setup, pulse drain, disconnect teardown and telemetry poll (#1918), the ZWO camera's pulse-guide turn-off (#1667), the QHY camera's temperature, telemetry, cooler-off and pulse-guide bodies (#1736), and the Gemini focuser and flat panel run their operation bodies (async slew,
   park, home, pulse-guide timer, slew-completion tail, move re-send) in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](../../docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
@@ -68,14 +68,14 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
-  the exposure workers of cameras not yet on `util::CaptureSession` (Player One and ZWO are; decision 0020),
-  the QHY cooler-off and temperature workers and the GPIO
-  soft-PWM workers; the list is a sample, not a roster.
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One and ZWO are; decision 0020)
+  and the GPIO soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
     writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
     freed memory (UB). Make it a joinable member thread with a cancel flag +
-    `std::condition_variable`, and cancel + join it in the destructor. The one
-    sanctioned exception is the bounded detach-on-timeout worker below. The 2026-07
+    `std::condition_variable`, and cancel + join it in the destructor. The QHY camera's
+    exposure worker is the last bounded detach-on-timeout thread (its CaptureSession slice
+    of #1736 removes it); add no new one. The 2026-07
     full-codebase audit found this rule held on every connect/disconnect *lifecycle*
     path but violated on a dozen *operational* paths; apply it to every thread a driver
     spawns, not just the connection machinery.
@@ -175,8 +175,8 @@ vendor-agnostic; do them in the driver from the start.
   handle, and `Close` never balances. Don't leave post-open SDK calls
   (`put_trigger_mode`, `get_serial_number`, …) outside the cleanup try.
 - **A blocking SDK call with no timeout of its own can hang disconnect forever
-  — bound the wait, detach on timeout, and reference-count the handle** (QHY
-  ConformU session, 2026-07). Some vendor SDK calls (QHY `ControlQHYCCDTemp`,
+  — bound the wait, never the join, and reference-count the handle** (QHY
+  ConformU session, 2026-07; issue #1736). Some vendor SDK calls (QHY `ControlQHYCCDTemp`,
   a PID loop documented at ~10s but occasionally much longer; `SetQHYCCDParam`
   on some control IDs) have no cancellation and no SDK-side timeout. If a
   background worker (temp-control thread, cooler-off task) is stuck inside one
@@ -184,17 +184,18 @@ vendor-agnostic; do them in the driver from the start.
   and ConformU gives the bare `Disconnect()` method a ~5s budget (a ConformU
   timeout, not an ASCOM requirement; other clients set their own), so "just
   wait longer" is not an option. Fix
-  shape: (1) give the worker's own "is it still running" flag as a
-  `shared_ptr<std::atomic<bool>>` (same pattern as a detached timer's flag,
-  Threads & shutdown above); (2) bound the join with a short deadline (2s —
-  comfortably under ConformU's ~5s budget) and `.detach()` instead of
-  `.join()` on timeout; (3) make that detach *safe* by reference-counting the
-  SDK handle itself (`shared_ptr<qhyccd_handle>` with a
-  `CloseQHYCCD`-on-last-reference deleter in the wrapper, not a raw pointer)
-  so a concurrent `close_camera()` can never invalidate a handle the detached
-  worker is still using — the physical close is deferred until every in-flight
-  call actually finishes, instead of racing it. Same shape applies to any
-  vendor SDK with a long, uncancellable, no-timeout call.
+  shape (QHY camera): (1) run the body in a `util::AsyncOperation` slot;
+  disconnect `cancel()`s it and waits at most 2 s on the task clock for
+  `running()` to clear (comfortably under ConformU's ~5s budget), then goes on
+  with the body still cancelled, never joined or detached; (2) the body checks
+  its stop reason under the state lock before touching driver state, so a late
+  return changes nothing; (3) the destructor's `cancel_all_and_join()` waits for
+  it with no bound, the accepted cost of an SDK that never returns; (4)
+  reference-count the SDK handle (`shared_ptr<qhyccd_handle>` with a
+  `CloseQHYCCD`-on-last-reference deleter in the wrapper) so the disconnect's
+  `close_camera()` defers the physical close until every in-flight call
+  finishes. Same shape applies to any vendor SDK with a long, uncancellable,
+  no-timeout call.
 
 **Long-op / exposure state machines (cameras)**
 - A runtime register write during a live exposure corrupts the frame. Guard it with
