@@ -2139,7 +2139,7 @@ private:
     // at zero, so a late PID call cannot follow it.
     bool temp_active_{false};
     uint64_t cooler_on_requests_{0};  // state lock; every accepted CoolerOn=true bumps it
-    std::mutex slot_start_mutex_;  // temperature and telemetry starts; before mutex_
+    std::mutex slot_start_mutex_;     // temperature and telemetry starts; before mutex_
     std::shared_ptr<std::atomic<int>> temp_calls_in_flight_{std::make_shared<std::atomic<int>>(0)};
 
     // Cooler-off body (cooler_off_slot_ below). cooler_off_lifecycle_mutex_
