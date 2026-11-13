@@ -55,29 +55,18 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
  * Every exposure, pulse-guide and reap deadline and every worker wait reads the
  * `clock` argument (decision 0005); a test passes a FakeTaskClock and advance()s
  * instead of sleeping. The clock MUST outlive the returned driver and its
- * detachable workers, like the SDK reference. Pointing time (UTCDate, last
+ * detachable exposure worker, like the SDK reference. Pointing time (UTCDate, last
  * exposure start) stays on the system clock.
  *
- * The SDK reference MUST outlive the returned driver, INCLUDING this driver's
- * detachable workers: the exposure, temperature, cooler-off AND telemetry
- * threads join with a bounded timeout and detach on expiry, and the
- * pulse-guide thread is detached by design. Telemetry joined that list in
- * issue #323: its join used to be unbounded (a poll wedged inside an SDK call
- * hung the disconnect forever), so it now goes through the same
- * join_worker_thread() helper as the temperature worker, and the capture
- * below is what makes its SDK access survivable once detached.
- *
- * All five workers reach the SDK through a captured QHYSDK* rather than
- * through the driver's `sdk_` member.
- *
- * That capture NARROWS the use-after-free window; it does NOT close it. Every
- * one of those workers except pulse-guide also captures `this` and
- * dereferences it after the SDK call returns (`connected_`, `mutex_`, the
- * `exposure_superseded` re-check), which is UB if the driver is already gone.
- * Do not read this as "a worker that only touches the seam is safe to
- * detach": these workers are unsafe once detached, and the bounded-join
- * discipline is what keeps that window small. See the member comment in
- * qhy_camera_driver.cpp and rule (b) in testing.instructions.md ("Hardware-free driver tests via the SDK seam").
+ * The SDK reference MUST outlive the returned driver, INCLUDING its exposure
+ * worker: that thread joins with a bounded timeout and detaches on expiry, and
+ * reaches the SDK through a captured QHYSDK* rather than through `sdk_`. The
+ * capture NARROWS the use-after-free window; it does NOT close it, because the
+ * worker also dereferences `this` after the SDK call returns. The temperature,
+ * telemetry, cooler-off and pulse-guide bodies run in util::AsyncOperation slots
+ * that the destructor joins (issue #1736), so destruction waits for a call
+ * stuck inside the SDK. See the member comment in qhy_camera_driver.cpp and
+ * rule (b) in testing.instructions.md ("Hardware-free driver tests via the SDK seam").
  */
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
                                                 util::TaskClock& clock = util::default_task_clock());
@@ -88,15 +77,15 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
 enum class QHYWorker : std::uint8_t { Telemetry, TempControl, CoolerOff };
 
 /**
- * @brief Test-only hook, called by each worker start after the new thread is
- * built and before it is stored in the driver (issue #510).
+ * @brief Test-only hook, called by each polling worker start after its checks
+ * and before its slot starts the body, with the start mutex held (issues #510, #1736).
  *
- * A disconnect that lands in that window is what used to strand the worker
- * for the life of the driver, and no SDK call runs there, so
+ * A disconnect that landed between building and storing a worker used to
+ * strand it for the life of the driver, and no SDK call runs there, so
  * FakeQHYSDK::before_call cannot hold it open. The hook runs on the starting
- * thread with only the driver's thread-start mutex held, and must not throw
- * (the built thread is still unstored). A hook that blocks must be released
- * before the driver is destroyed. Production passes none.
+ * thread with `slot_start_mutex_` held (no other driver lock); it must not call
+ * back into the driver's starters (CoolerOn=true, Connected=true), and must not throw. A hook that blocks
+ * must be released before the driver is destroyed. Production passes none.
  * CoolerOff instead calls the hook on its worker thread before taking the
  * state mutex; a throwing hook is caught and ends that test-only worker.
  */

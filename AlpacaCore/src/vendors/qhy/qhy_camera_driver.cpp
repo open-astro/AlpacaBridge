@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
@@ -25,7 +26,6 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -194,6 +194,9 @@ public:
                 ALPACA_LOG_WARN("QHY", "Error during destruction: " + std::string(e.what()));
             }
         }
+        // Issue #1736: the disconnect above may start an OFF cleanup; join it last.
+        // No time bound: a wedged PWM write keeps the driver alive, never detached.
+        cooler_off_slot_.cancel_all_and_join();
     }
 
     // ── AlpacaDriver ─────────────────────────────────────────────────────────
@@ -279,8 +282,8 @@ private:
     // destructor. Performs the actual SDK open/close and state changes.
     void set_connected_impl(bool connected) {
         std::unique_lock<std::mutex> transition_lock(transition_mutex_);
-        // Disconnection path: the temp thread acquires mutex_ on each iteration,
-        // so we must join it BEFORE holding mutex_ to avoid deadlock.
+        // Disconnection path: the slot bodies take mutex_, so the waits for them
+        // below run without it.
         if (!connected) {
             // Best-effort, exception-safe teardown. The goal on this path is
             // "do no harm": never let SDK failures propagate to clients or
@@ -327,37 +330,20 @@ private:
                     join_exposure_thread();
                 }
             }
-            // Bound the wait for OFF cleanup, which polls the old PID worker's
-            // running flag; the OFF body never takes mutex_ or joins PID.
+            // Bound the wait for OFF cleanup, which waits for every PID call to
+            // return; the OFF body never takes mutex_.
             // These workers can all be waiting on the same SDK call; spend one reap budget.
             const auto cleanup_deadline = clock_.now() + std::chrono::seconds(2);
-            std::thread temp_to_join;
-            std::thread telemetry_to_join;
-            std::shared_ptr<std::atomic<bool>> temp_running_to_join;
-            std::shared_ptr<std::atomic<bool>> telemetry_running_to_join;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                temp_thread_stop_->request_stop();
-                temp_running_to_join = temp_thread_running_;
-                temp_to_join = std::move(temp_thread_);
-                telemetry_thread_stop_->request_stop();
-                telemetry_running_to_join = telemetry_thread_running_;
-                telemetry_to_join = std::move(telemetry_thread_);
+                stop_temp_control_locked();
+                telemetry_slot_.cancel();
             }
-            join_cooler_off_thread(cleanup_deadline);
-            try {
-                join_worker_thread(temp_to_join, temp_running_to_join, "temp-control", cleanup_deadline);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "Temp thread join failed during disconnect: " + std::string(e.what()));
-            }
-            try {
-                // open-astro#323: bounded and may detach, like the temp
-                // worker's. This join used to be unbounded, so a telemetry
-                // poll wedged inside an SDK call hung the disconnect forever.
-                join_worker_thread(telemetry_to_join, telemetry_running_to_join, "telemetry", cleanup_deadline);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during disconnect: " + std::string(e.what()));
-            }
+            wait_for_cooler_off(cleanup_deadline);
+            // Issue #1736: bounded waits, never a join or a detach. A body still
+            // inside an SDK call with no timeout stays cancelled; the destructor joins it.
+            wait_for_body(temp_slot_, "temp-control", cleanup_deadline);
+            wait_for_body(telemetry_slot_, "telemetry", cleanup_deadline);
 
             std::string id;
             {
@@ -392,7 +378,7 @@ private:
                     ALPACA_LOG_ERROR("QHY", "Failed to prepare cooler OFF during disconnect: " + std::string(e.what()));
                 }
             }
-            join_cooler_off_thread(cleanup_deadline);
+            wait_for_cooler_off(cleanup_deadline);
             std::lock_guard<std::mutex> io_lock(io_mutex_);
             if (!id.empty()) {
                 // Exposure worker cancel attempted above; join_exposure_thread()
@@ -568,7 +554,11 @@ private:
         if (has_cooler) {
             start_telemetry_thread(generation);
             if (cooler_on) {
-                start_temp_control_thread(generation);
+                try {
+                    start_temp_control_thread(generation);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_ERROR("QHY", "Failed to start temperature control: " + std::string(e.what()));
+                }
             }
         }
     }
@@ -801,7 +791,15 @@ public:
                 generation = connection_generation_;
             }
             // Must not hold mutex_ here: start_temp_control_thread() locks internally.
-            start_temp_control_thread(generation);
+            try {
+                start_temp_control_thread(generation);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (generation == connection_generation_) {
+                    cooler_on_ = false;  // a refused start regulates nothing
+                }
+                throw;
+            }
             return;
         }
 
@@ -814,7 +812,7 @@ public:
             }
             cooler_on_ = false;
             // Even a coalesced OFF must stop a worker started by an intervening ON.
-            temp_thread_stop_->request_stop();
+            stop_temp_control_locked();
             if (!cooler_off_running_->load() || cooler_off_request_->load() != CoolerOffState::Issued) {
                 cooler_off_request_->store(CoolerOffState::Pending);
             }
@@ -1009,7 +1007,7 @@ public:
     }
 
     bool get_is_pulse_guiding() const override {
-        if (!pulse_guiding_->load()) {
+        if (!pulse_guiding_.load()) {
             return false;
         }
         // Expiry check and clear under ONE mutex_ hold: an unlocked
@@ -1018,7 +1016,7 @@ public:
         // "not guiding" mid-pulse (Player One camera, PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
         if (clock_.now() >= pulse_guiding_end_) {
-            pulse_guiding_->store(false);
+            pulse_guiding_.store(false);
             return false;
         }
         return true;
@@ -1378,51 +1376,41 @@ public:
 
         uint32_t qhy_dir = alpaca_to_qhy_guide_direction(direction);
         uint16_t dur_ms = static_cast<uint16_t>(std::min(duration, 65535));
-        // Copy, not reference: the detached thread below must not touch `this`.
         std::string cam_id = camera_id_value();
 
         // End timestamp BEFORE the flag, both under one mutex_ hold: a reader
         // that observes the flag as true must never see a stale (epoch) end
         // time, or the self-clearing getter would clear the pulse immediately
         // (same shape as the Player One camera, PR #119).
+        uint64_t pulse = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             pulse_guiding_end_ = clock_.now() + std::chrono::milliseconds(duration);
-            pulse_guiding_->store(true);
+            pulse_guiding_.store(true);
+            pulse = ++pulse_count_;
         }
 
         // ControlQHYCCDGuide blocks the calling thread for the full pulse
         // duration (confirmed on real miniCam8M hardware via ConformU: a
         // 2000ms pulse blocked the HTTP handler for exactly 2000ms), which
         // blows the ASCOM STANDARD (1.0s) response-time target for an
-        // initiator method. Run the SDK call on a detached thread so
-        // PulseGuide returns immediately, matching the async pattern ASCOM
-        // expects; the flag then clears exactly when the physical pulse
-        // completes rather than being tracked by a separate sleep timer that
-        // could drift out of sync with the SDK call.
-        //
-        // The thread captures NO object state — only the copied camera ID
-        // and the shared_ptr flag — so it cannot dereference a destroyed
-        // driver if the object is torn down mid-pulse (driver-lifecycle.instructions.md: never
-        // detach a thread that touches `this`; the Player One camera fixed
-        // this exact bug with the same shared_ptr pattern).
-        std::thread([cam_id, qhy_dir, dur_ms, flag = pulse_guiding_, sdk = &sdk_]() {
-            // guide() throws (NotConnected if a disconnect races this thread's
-            // start, or any SDK failure via check_result); an exception
-            // escaping a std::thread entry point calls std::terminate, so a
-            // disconnect racing a pulse would crash the whole server. The
-            // flag must clear on every exit path or IsPulseGuiding sticks
-            // true forever.
-            try {
-                sdk->guide(cam_id, qhy_dir, dur_ms);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "PulseGuide worker failed: " + std::string(e.what()));
-            } catch (...) {
-                ALPACA_LOG_WARN("QHY", "PulseGuide worker failed: non-std exception");
-            }
-            flag->store(false);
-        }).detach();
+        // initiator method. Run the SDK call in pulse_slot_ so PulseGuide
+        // returns immediately; the flag then clears exactly when the physical
+        // pulse completes. The destructor joins the body (issue #1736).
+        try {
+            pulse_slot_.start([this, cam_id, qhy_dir, dur_ms, pulse](util::OperationContext&) {
+                try {
+                    sdk_.guide(cam_id, qhy_dir, dur_ms);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("QHY", "PulseGuide worker failed: " + std::string(e.what()));
+                }
+                clear_pulse_flag(pulse);
+            });
+        } catch (...) {
+            clear_pulse_flag(pulse);
+            throw;
+        }
     }
 
     void start_exposure(double duration, bool light) override {
@@ -2003,12 +1991,13 @@ private:
 
     // ── Members ──────────────────────────────────────────────────────────────
 
-    // The SDK seam (issue #321). Exposure and polling workers that can be
-    // DETACHED still capture `this` for everything else they touch, but must
+    // The SDK seam (issue #321). The exposure worker, which can be
+    // DETACHED, still captures `this` for everything else it touches, but must
     // reach the SDK itself through a captured raw QHYSDK*, never through
-    // `this->sdk_`. The SDK object outlives every driver built on it -- the
-    // singleton is process-scoped, and a test fake must be declared before
-    // the driver it feeds -- so a worker parked inside a blocking SDK call,
+    // `this->sdk_`. The slot bodies (issue #1736) are joined and use `sdk_`.
+    // The SDK object outlives every driver built on it -- the singleton is
+    // process-scoped, and a test fake must be declared before the driver it
+    // feeds -- so a worker parked inside a blocking SDK call,
     // which is where it spends essentially all its time, holds no reference
     // into the driver for that whole duration. Going through `sdk_` instead
     // would touch the driver at the moment each call returns.
@@ -2017,12 +2006,11 @@ private:
     // detached worker that outlives the driver still dereferences `this`
     // after the call (connected_, mutex_, the exposure_superseded re-check),
     // and that is UB either way. Bound these workers' lifetimes; do not read
-    // the raw-pointer rule as making detachment safe. Cooler-off and guide
-    // bodies capture no driver state.
+    // the raw-pointer rule as making detachment safe. The cooler-off body
+    // captures no driver state.
     QHYSDK& sdk_;
-    // Declared before every member that is built from it (the worker stop
-    // signals below). Workers that can be detached capture &clock_ by value,
-    // like sdk_, and never reach it through `this`.
+    // Declared before every member that is built from it (the slots below).
+    // The exposure worker and the cooler-off body capture &clock_ by value.
     util::TaskClock& clock_;
     const std::chrono::seconds watchdog_margin_;
     // Test-only (issue #510): see QHYWorkerStartHook in the header. Empty in
@@ -2100,13 +2088,13 @@ private:
     // lifecycle or I/O locks, so a joiner may retain them across a bounded reap.
     std::mutex exposure_lifecycle_mutex_;
     // GetQHYCCDSingleFrame has no SDK-side timeout and can hang indefinitely
-    // (it did, before the exposing-guards on temp_thread_/telemetry_thread_
-    // above existed). join_exposure_thread() bounds the wait and detaches on
-    // timeout so a wedged download cannot hang every later
+    // (it did, before the temperature and telemetry polls skipped exposures).
+    // join_exposure_thread() bounds the wait and detaches on timeout so a
+    // wedged download cannot hang every later
     // start_exposure()/stop_exposure()/disconnect() on this camera forever.
     // Both shared_ptr, fresh per generation (not a store() reset of the
-    // member), same reasoning as temp_thread_stop_/temp_thread_running_: a
-    // prior generation's timed-out-and-detached zombie keeps its own copy, so
+    // member): a prior generation's timed-out-and-detached zombie keeps its
+    // own copy, so
     // resetting the member in place would let the zombie's eventual
     // completion clobber a newer exposure's result.
     std::shared_ptr<std::atomic<bool>> exposure_thread_running_{std::make_shared<std::atomic<bool>>(false)};
@@ -2118,78 +2106,22 @@ private:
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
-    // open-astro#323: a stop flag a worker can WAIT on, so setting it wakes the
-    // worker immediately instead of at the end of its current 1 s sleep.
-    //
-    // Both polling workers used a bare sleep_for, which is not interruptible,
-    // so every Connected=false on a cooled camera blocked up to ~1 s (~0.5 s
-    // average) waiting out a sleep the driver had already decided to abandon.
-    // Connected=false is on ConformU's 1.0 s STANDARD budget, so that was most
-    // of the budget spent on nothing, leaving none for the SDK close on a slow
-    // device -- and a [stress] storm that connects and disconnects hundreds of
-    // times per scenario would have been sleep-bound rather than
-    // concurrency-bound.
-    //
-    // shared_ptr-owned for the same reason the flags below are: a worker whose
-    // join timed out and was DETACHED must never touch `this` again, so it
-    // cannot wait on a condition variable that is a member of `this`. Holding
-    // the signal by shared_ptr keeps the mutex and cv alive for exactly as
-    // long as some worker might still be sleeping on them.
-    struct WorkerStopSignal {
-        explicit WorkerStopSignal(util::TaskClock& task_clock) : clock(&task_clock) {}
+    // Temperature regulation (temp_slot_ below). temp_active_ (state lock) is
+    // true from a start until the next OFF or disconnect, so a repeated ON does
+    // not supersede a live body. temp_calls_in_flight_ counts bodies inside
+    // ControlQHYCCDTemp, current or superseded; the OFF body writes PWM zero only
+    // at zero, so a late PID call cannot follow it.
+    bool temp_active_{false};
+    std::mutex slot_start_mutex_;  // temperature and telemetry starts; before mutex_
+    std::shared_ptr<std::atomic<int>> temp_calls_in_flight_{std::make_shared<std::atomic<int>>(0)};
 
-        // The driver's clock, not owned: it outlives the driver and any
-        // detached worker, so waiting on it never reaches `this`.
-        util::TaskClock* clock;
-        std::mutex mutex;
-        std::condition_variable cv;
-        std::atomic<bool> stop{false};
-
-        void request_stop() {
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                stop.store(true);
-            }
-            cv.notify_all();
-        }
-
-        bool stopped() const { return stop.load(); }
-
-        /// Sleep up to `d`, returning early the moment a stop is requested.
-        /// Returns true if it was stopped.
-        bool wait_for(std::chrono::milliseconds d) {
-            std::unique_lock<std::mutex> lock(mutex);
-            return clock->wait_for(lock, cv, d, [this] { return stop.load(); });
-        }
-    };
-
-    // Temperature control. Both flags are shared_ptr, not plain members:
-    // ControlQHYCCDTemp (the per-iteration SDK call) has no timeout of its
-    // own and can occasionally run well past its documented ~10s PID-loop
-    // figure (ConformU finding), so join_temp_thread() below bounds the wait
-    // and detaches on timeout. A detached thread must never touch `this`
-    // (driver-lifecycle.instructions.md) -- these shared_ptrs, plus the immediate stop-flag
-    // recheck in start_temp_control_thread() right after the blocking call,
-    // are what make that safe. Same pattern as pulse_guiding_/
-    // cooler_off_running_.
-    std::thread temp_thread_;
-    std::shared_ptr<WorkerStopSignal> temp_thread_stop_{std::make_shared<WorkerStopSignal>(clock_)};
-    // True for the temp thread's entire lifetime (spawn to natural exit);
-    // lets join_temp_thread() know whether a detach is actually needed.
-    std::shared_ptr<std::atomic<bool>> temp_thread_running_{std::make_shared<std::atomic<bool>>(false)};
-
-    // Cooler-off worker. cooler_off_lifecycle_mutex_ serialises its spawn vs
-    // join; joined in disconnect and the destructor.
-    std::thread cooler_off_thread_;
+    // Cooler-off body (cooler_off_slot_ below). cooler_off_lifecycle_mutex_
+    // serialises its start against disconnect's bounded wait.
     std::mutex cooler_off_lifecycle_mutex_;
     // True until the retained action is released; request state decides whether
     // a repeated OFF coalesces with this worker or needs another PWM-zero attempt.
-    // shared_ptr, not a plain member: SetQHYCCDParam(MANULPWM) can hang
-    // indefinitely on real hardware with no SDK-side timeout (ConformU
-    // finding), so join_cooler_off_thread() bounds its wait and detaches on
-    // timeout. A detached thread must never touch `this` once it might
-    // outlive the driver (driver-lifecycle.instructions.md) — the shared_ptr keeps this flag alive
-    // independent of `this`, same pattern as pulse_guiding_ below.
+    // shared_ptr, not a plain member: the body captures no driver state, and
+    // the wrapper's prepare_cooler_off() action shares this flag.
     std::shared_ptr<std::atomic<bool>> cooler_off_running_{std::make_shared<std::atomic<bool>>(false)};
     std::shared_ptr<std::atomic<bool>> cooler_off_warned_{std::make_shared<std::atomic<bool>>(false)};
     std::shared_ptr<std::atomic<CoolerOffState>> cooler_off_request_{
@@ -2197,20 +2129,7 @@ private:
     // OFF acceptance and a cancelled worker's claim/retirement are indivisible.
     std::shared_ptr<std::mutex> cooler_off_request_mutex_{std::make_shared<std::mutex>()};
 
-    // Serialises temp/telemetry thread starts: two concurrent starters could
-    // both pass the joinable() pre-check and the loser would destroy a
-    // joinable std::thread (std::terminate).
-    std::mutex thread_start_mutex_;
-
-    // Telemetry (non-blocking cached temperature / cooler power)
-    std::thread telemetry_thread_;
-    // open-astro#323: shared_ptr like the temp worker's, and for the same
-    // reason -- the telemetry join is now bounded and can detach, so a zombie
-    // must be able to observe its stop signal without touching `this`.
-    std::shared_ptr<WorkerStopSignal> telemetry_thread_stop_{std::make_shared<WorkerStopSignal>(clock_)};
-    // True for the telemetry thread's whole lifetime; lets the bounded join
-    // know whether a detach is actually needed. Mirrors temp_thread_running_.
-    std::shared_ptr<std::atomic<bool>> telemetry_thread_running_{std::make_shared<std::atomic<bool>>(false)};
+    // Telemetry (non-blocking cached temperature / cooler power), polled by telemetry_slot_.
     double telemetry_ccd_temp_c_{0.0};
     double telemetry_cooler_power_{0.0}; // percentage 0.0–100.0
     bool telemetry_temp_valid_{false};
@@ -2221,12 +2140,23 @@ private:
     mutable std::string exposure_failure_;
     bool telemetry_power_valid_{false};
 
-    // Pulse guide. shared_ptr so the detached flag-clear thread can co-own the
-    // flag and clear it after the pulse WITHOUT capturing `this`
-    // (destructor-safe — the Player One camera's round-9 fix). The timestamp
-    // getter still self-clears for readers in the interim.
-    std::shared_ptr<std::atomic<bool>> pulse_guiding_{std::make_shared<std::atomic<bool>>(false)};
+    // Pulse guide. The body clears the flag only for its own pulse
+    // (pulse_count_, state lock); the getter self-clears from the end time.
+    mutable std::atomic<bool> pulse_guiding_{false};  // the const getter self-clears it
     std::chrono::steady_clock::time_point pulse_guiding_end_;
+    uint64_t pulse_count_{0};
+
+    // Issue #1736 (decision 0006): one slot per background body except the
+    // exposure. Declared after every member a body uses; the destructor joins
+    // them explicitly before any member dies.
+    util::OperationGeneration temp_generation_;
+    util::OperationGeneration telemetry_generation_;
+    util::OperationGeneration cooler_off_generation_;
+    util::OperationGeneration pulse_generation_;
+    util::AsyncOperation temp_slot_{"qhy-temp-control", temp_generation_, clock_};
+    util::AsyncOperation telemetry_slot_{"qhy-telemetry", telemetry_generation_, clock_};
+    util::AsyncOperation cooler_off_slot_{"qhy-cooler-off", cooler_off_generation_, clock_};
+    util::AsyncOperation pulse_slot_{"qhy-pulse-guide", pulse_generation_, clock_};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -2356,7 +2286,7 @@ private:
     void reset_exposure_state_locked() {
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
-        pulse_guiding_->store(false);
+        pulse_guiding_.store(false);
         pulse_guiding_end_ = {};
         exposure_status_   = QHYExposureStatus::Idle;
         exposure_failure_.clear();
@@ -2376,8 +2306,8 @@ private:
         exposure_channels_ = 0;
     }
 
-    // Bounded wait + detach fallback, mirroring join_temp_thread() /
-    // join_cooler_off_thread(): a plain join() here would let a wedged
+    // Bounded wait + detach fallback, the last one in this driver (the
+    // exposure slice of issue #1736 removes it): a plain join() here would let a wedged
     // GetQHYCCDSingleFrame block every later start_exposure()/stop_exposure()/
     // disconnect() on this camera forever. Marks the generation superseded
     // before detaching so the zombie's completion handler (see the lambda in
@@ -2403,25 +2333,24 @@ private:
     // Caller holds cooler_off_lifecycle_mutex_; the body never accesses the driver.
     void start_cooler_off_worker() {
         if (cooler_off_running_->load()) return;
-        if (cooler_off_thread_.joinable()) cooler_off_thread_.join();
         std::string id;
-        std::shared_ptr<std::atomic<bool>> temp_running;
         std::shared_ptr<std::atomic<bool>> warned;
         auto running = std::make_shared<std::atomic<bool>>(true);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (cooler_off_request_->load() != CoolerOffState::Pending) return;
             id = camera_id_.value_or("");
-            temp_thread_stop_->request_stop();
-            temp_running = temp_thread_running_;
+            stop_temp_control_locked();
             warned = cooler_off_warned_;
             cooler_off_running_ = running;
         }
         try {
             auto action = sdk_.prepare_cooler_off(id, running);
-            cooler_off_thread_ = std::thread([action = std::move(action), running, temp_running, warned,
-                                              request = cooler_off_request_, request_mutex = cooler_off_request_mutex_,
-                                              hook = on_worker_start_, clock = &clock_]() mutable {
+            // Not cancellable: an accepted OFF owns its PWM-zero attempt, so the
+            // body ignores its context and the destructor waits for it.
+            cooler_off_slot_.start([action = std::move(action), running, temp_calls = temp_calls_in_flight_, warned,
+                                    request = cooler_off_request_, request_mutex = cooler_off_request_mutex_,
+                                    hook = on_worker_start_, clock = &clock_](util::OperationContext&) mutable {
                 // Declared before the guard: a failed claim releases the action
                 // and clears running before another OFF can publish Pending.
                 std::unique_lock<std::mutex> request_lock(*request_mutex, std::defer_lock);
@@ -2436,7 +2365,7 @@ private:
                 try {
                     if (hook) hook(QHYWorker::CoolerOff);
                     // shortcut: a permanently wedged PID retains this handle; use cancellation if QHY adds it.
-                    while (temp_running->load()) clock->sleep_for(std::chrono::milliseconds(20));
+                    while (temp_calls->load() > 0) clock->sleep_for(std::chrono::milliseconds(20));
                     auto pending = CoolerOffState::Pending;
                     request_lock.lock();
                     if (!request->compare_exchange_strong(pending, CoolerOffState::Issued)) return;
@@ -2468,57 +2397,45 @@ private:
         }
     }
 
-    void join_cooler_off_thread(
-        std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()) {
+    // Bounded wait for OFF cleanup; never joins or detaches (issue #1736).
+    void wait_for_cooler_off(std::chrono::steady_clock::time_point deadline) {
         std::lock_guard<std::mutex> cooler_lock(cooler_off_lifecycle_mutex_);
-        if (!cooler_off_thread_.joinable()) {
-            return;
-        }
-        // Bound logical disconnect even if PID or PWM never returns. The body
-        // owns its retained action and shared flags, and never accesses this.
-        deadline = std::min(deadline, clock_.now() + std::chrono::seconds(2));
         while (cooler_off_running_->load() && clock_.now() < deadline) {
             clock_.sleep_for(std::chrono::milliseconds(20));
         }
         if (cooler_off_running_->load()) {
-            ALPACA_LOG_WARN("QHY", "cooler-off worker still running at reap deadline; detaching");
-            cooler_off_thread_.detach();
-        } else {
-            cooler_off_thread_.join();  // finished worker — instant reap
+            ALPACA_LOG_WARN("QHY", "cooler-off worker still running at reap deadline; it finishes on its own");
+        }
+    }
+
+    // Bounded wait for a cancelled polling body. A body still inside an SDK call
+    // with no timeout stays cancelled; the destructor joins it.
+    void wait_for_body(const util::AsyncOperation& slot, const char* label,
+                       std::chrono::steady_clock::time_point deadline) {
+        while (slot.running() && clock_.now() < deadline) {
+            clock_.sleep_for(std::chrono::milliseconds(20));
+        }
+        if (slot.running()) {
+            ALPACA_LOG_WARN("QHY", std::string(label) + " thread still running at reap deadline; it stays cancelled");
+        }
+    }
+
+    // State lock held. The body sees the cancel at its next check.
+    void stop_temp_control_locked() {
+        temp_active_ = false;
+        temp_slot_.cancel();
+    }
+
+    void clear_pulse_flag(uint64_t pulse) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pulse == pulse_count_) {
+            pulse_guiding_.store(false);
         }
     }
 
     void stop_all_threads() {
         // Function-scoped: release before the destructor calls set_connected_impl.
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-        // Do not hold mutex_ across join: temp and telemetry threads acquire
-        // mutex_ in their loops; joining while holding it would deadlock.
-        // OFF cleanup only polls the old PID worker's running flag. Bound its
-        // wait here too; join_cooler_off_thread takes the lifecycle lock first.
-        join_cooler_off_thread();
-        std::thread temp_to_join;
-        std::thread telemetry_to_join;
-        std::shared_ptr<std::atomic<bool>> temp_running_to_join;
-        std::shared_ptr<std::atomic<bool>> telemetry_running_to_join;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            temp_thread_stop_->request_stop();
-            temp_running_to_join = temp_thread_running_;
-            temp_to_join = std::move(temp_thread_);
-            telemetry_thread_stop_->request_stop();
-            telemetry_running_to_join = telemetry_thread_running_;
-            telemetry_to_join = std::move(telemetry_thread_);
-        }
-        try {
-            join_temp_thread(temp_to_join, temp_running_to_join);  // bounded; may detach
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("QHY", "Temp thread join failed during shutdown: " + std::string(e.what()));
-        }
-        try {
-            join_worker_thread(telemetry_to_join, telemetry_running_to_join, "telemetry");
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during shutdown: " + std::string(e.what()));
-        }
         // Wake a worker parked in GetQHYCCDSingleFrame before joining, or the
         // join blocks for the whole remaining exposure (driver-lifecycle.instructions.md abort rule).
         if (exposure_thread_running_ && exposure_thread_running_->load()) {
@@ -2537,260 +2454,136 @@ private:
             }
         }
         join_exposure_thread();
+        // After the exposure: a queued pulse or poll waits behind its download on
+        // the SDK call lock. Without mutex_: the bodies take it. No time bound (#1736).
+        temp_slot_.cancel_all_and_join();
+        telemetry_slot_.cancel_all_and_join();
+        pulse_slot_.cancel_all_and_join();
     }
 
-    // Start temp control thread. Call without holding mutex_ so the HTTP thread
-    // does not block ~10s (new thread would otherwise contend for mutex_).
+    // Starts regulation in temp_slot_. Call without mutex_. Never waits for a
+    // stopped body (issue #1735 item 1): start() supersedes it. Throws when the
+    // slot refuses the start.
     void start_temp_control_thread(uint64_t generation) {
-        // Serialise concurrent starters: without this, two callers could both
-        // pass the joinable() pre-check and the loser would destroy a joinable
-        // std::thread (std::terminate). Lock order: thread_start_mutex_ -> mutex_.
-        std::lock_guard<std::mutex> start_lock(thread_start_mutex_);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load() || disconnecting_ || !cooler_on_ || generation != connection_generation_) {
-                return;
-            }
-        }
-        if (!reap_stopped_worker(temp_thread_, temp_thread_stop_, temp_thread_running_, "temp-control")) {
-            return;  // a live generation already owns the worker
-        }
+        // Check and start are one step: a starter that passed an old generation's
+        // check cannot replace a newer connection's body (#510). Order: this -> mutex_.
+        std::lock_guard<std::mutex> start_lock(slot_start_mutex_);
         std::string id;
-        std::shared_ptr<WorkerStopSignal> stop_flag;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load() || disconnecting_ || !cooler_on_ || generation != connection_generation_) {
+            if (!connected_.load() || disconnecting_ || !cooler_on_ || temp_active_ ||
+                generation != connection_generation_) {
                 return;
             }
-            // Fresh flag per generation, not a store(false) reset of the
-            // shared member: a prior generation's timed-out-and-detached
-            // zombie (join_temp_thread) keeps its own captured copy of the
-            // OLD flag, so resetting the member here would let this
-            // reconnect un-stop the zombie via the SAME object -- it would
-            // recheck stop_flag, see false, and keep looping, driving the
-            // cooler alongside the new thread and touching `this` again
-            // (review finding). Captured into a local under the same lock
-            // that publishes it to the member, so the lambda below never
-            // has to re-read the (possibly concurrently reassigned) member.
-            // No camera id, no worker: return before a fresh stop signal replaces the
-            // member, so no signal stands with nothing behind it (#2085).
             id = camera_id_.value_or("");
             if (id.empty()) {
                 return;
             }
-            stop_flag = std::make_shared<WorkerStopSignal>(clock_);
-            temp_thread_stop_ = stop_flag;
+            temp_active_ = true;
         }
-        // Same reasoning as temp_thread_stop_ above: a fresh object so a
-        // zombie's eventual RunningGuard destructor can never clear the new
-        // generation's in-flight flag out from under join_temp_thread().
-        auto running_flag = std::make_shared<std::atomic<bool>>(true);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            temp_thread_running_ = running_flag;
-        }
-        std::thread t([this, id, generation, stop_flag, running_flag, sdk = &sdk_]() {
-            struct RunningGuard {
-                std::shared_ptr<std::atomic<bool>> flag;
-                ~RunningGuard() { flag->store(false); }
-            } running_guard{running_flag};
-            while (!stop_flag->stopped()) {
-                double target = 0.0;
-                bool exposing = false;
-                {
-                    std::lock_guard<std::mutex> lk(mutex_);
-                    if (stop_flag->stopped() || !connected_.load() || disconnecting_ ||
-                        generation != connection_generation_) {
-                        break;
-                    }
-                    target = target_temp_;
-                    exposing = exposure_status_ == QHYExposureStatus::Working || mode_change_active_.load() ||
-                               exposure_thread_running_->load() || cooler_off_running_->load();
-                }
-                // Skip this cycle's SDK call while a frame is downloading:
-                // ControlQHYCCDTemp and the exposure worker's
-                // GetQHYCCDSingleFrame share the SAME physical USB handle, and
-                // the QHY SDK is not safe against concurrent calls on one
-                // handle from two threads -- a temp call landing mid-transfer
-                // wedges GetQHYCCDSingleFrame forever (no SDK-side timeout),
-                // which is exactly the "exposure reaches full time but never
-                // downloads" failure this fixes. Skipping here (not locking
-                // around the SDK call) keeps this thread from itself blocking
-                // on a multi-second exposure/readout.
-                if (connected_.load() && !exposing) {
-                    try {
-                        sdk->control_temp(id, target);
-                    } catch (const std::exception& e) {
-                        ALPACA_LOG_DEBUG("QHY", "Temp control error: " + std::string(e.what()));
-                    }
-                }
-                // Recheck the stop flag immediately after the (possibly long,
-                // occasionally >10s -- ConformU finding) blocking SDK call,
-                // BEFORE touching `this` again: if join_temp_thread() timed
-                // out and detached this thread while it was inside
-                // control_temp(), `this` may already be destroyed by the
-                // time we get here.
-                if (stop_flag->stopped()) {
-                    break;
-                }
-                // open-astro#323: interruptible. A disconnect wakes this
-                // immediately instead of waiting out the second.
-                stop_flag->wait_for(std::chrono::seconds(1));
-            }
-        });
         if (on_worker_start_) {
             on_worker_start_(QHYWorker::TempControl);
         }
-        store_or_reap_worker(temp_thread_, std::move(t), stop_flag, running_flag, "temp-control");
+        try {
+            temp_slot_.start([this, id, generation](util::OperationContext& ctx) {
+                do {
+                    double target = 0.0;
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        // A stop or a newer start that lands before the slot holds
+                        // this body is caught here (issue #510).
+                        if (ctx.stop_reason() != util::StopReason::None || !cooler_on_ || !connected_.load() ||
+                            disconnecting_ || generation != connection_generation_) {
+                            return;
+                        }
+                        target = target_temp_;
+                        // Skip this cycle's SDK call while a frame is downloading:
+                        // ControlQHYCCDTemp and the exposure worker's
+                        // GetQHYCCDSingleFrame share the SAME physical USB handle, and
+                        // the QHY SDK is not safe against concurrent calls on one
+                        // handle from two threads -- a temp call landing mid-transfer
+                        // wedges GetQHYCCDSingleFrame forever (no SDK-side timeout).
+                        // New regulation also waits for an issued OFF.
+                        if (exposure_status_ == QHYExposureStatus::Working || mode_change_active_.load() ||
+                            exposure_thread_running_->load() || cooler_off_running_->load()) {
+                            continue;
+                        }
+                        ++*temp_calls_in_flight_;
+                    }
+                    struct InFlight {
+                        std::atomic<int>& count;
+                        ~InFlight() { --count; }
+                    } in_flight{*temp_calls_in_flight_};
+                    try {
+                        sdk_.control_temp(id, target);
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_DEBUG("QHY", "Temp control error: " + std::string(e.what()));
+                    }
+                } while (ctx.wait_for(std::chrono::seconds(1)));
+            });
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            temp_active_ = false;
+            throw;
+        }
     }
 
-    // Bounded wait + detach fallback for the temp-control thread, mirroring
-    // join_cooler_off_thread() -- see that function's comment for why 2s
-    // (well under ASCOM clients' ~5s Disconnect() budget) instead of the
-    // documented ~10s ControlQHYCCDTemp worst case. Safe to detach: see the
-    // comment on temp_thread_running_/temp_thread_stop_ and the recheck in
-    // start_temp_control_thread() above. Caller must have already set
-    // temp_thread_stop_ and moved the thread out of temp_thread_.
-    //
-    // running_flag must be the SAME generation's flag the caller captured
-    // under mutex_ alongside `t` (not a fresh read of the temp_thread_running_
-    // member here): start_temp_control_thread() may reassign that member to a
-    // new generation's flag concurrently with this call, and reading the
-    // member directly would race that reassignment / silently watch the
-    // wrong generation's flag (review finding).
-    // open-astro#323: generalised from join_temp_thread(). The telemetry
-    // worker's join was UNBOUNDED, so a poll wedged inside an SDK call would
-    // hang a disconnect forever rather than degrading -- the one worker in
-    // this file with no ceiling. `label` names the worker in the WARN.
-    void join_worker_thread(
-        std::thread& t, const std::shared_ptr<std::atomic<bool>>& running_flag, const char* label,
-        std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max()) {
-        if (!t.joinable()) {
-            return;
-        }
-        deadline = std::min(deadline, clock_.now() + std::chrono::seconds(2));
-        while (running_flag->load() && clock_.now() < deadline) {
-            clock_.sleep_for(std::chrono::milliseconds(20));
-        }
-        if (running_flag->load()) {
-            ALPACA_LOG_WARN("QHY", std::string(label) + " thread still running at reap deadline; detaching");
-            t.detach();
-        } else {
-            t.join();  // finished — instant reap
-        }
-    }
-
-    void join_temp_thread(std::thread& t, const std::shared_ptr<std::atomic<bool>>& running_flag) {
-        join_worker_thread(t, running_flag, "temp-control");
-    }
-
-    // Start telemetry thread. Call without holding mutex_ to avoid blocking.
+    // Starts the telemetry poll in telemetry_slot_. Call without mutex_.
     void start_telemetry_thread(uint64_t generation) {
-        // Same double-start guard as start_temp_control_thread.
-        std::lock_guard<std::mutex> start_lock(thread_start_mutex_);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load() || disconnecting_ || generation != connection_generation_) {
-                return;
-            }
-        }
-        if (!reap_stopped_worker(telemetry_thread_, telemetry_thread_stop_, telemetry_thread_running_, "telemetry")) {
-            return;  // a live generation already owns the worker
-        }
+        std::lock_guard<std::mutex> start_lock(slot_start_mutex_);  // see start_temp_control_thread()
         std::string id;
-        std::shared_ptr<WorkerStopSignal> stop_flag;
-        std::shared_ptr<std::atomic<bool>> running_flag;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_.load() || disconnecting_ || generation != connection_generation_) {
                 return;
             }
-            // Fresh signal per generation, not a reset of the old one: a
-            // previous generation's timed-out-and-detached zombie keeps its
-            // own copy, and resetting in place would un-stop it (same
-            // reasoning as the temp worker's stop_flag). Both flags are
-            // captured into locals under the same lock that publishes them,
-            // exactly as start_temp_control_thread() does, so the lambda
-            // never re-reads a member that another writer could reassign,
-            // and the running flag is constructed true so a disconnect
-            // interleaving here never observes a published-but-false flag.
-            stop_flag = std::make_shared<WorkerStopSignal>(clock_);
-            running_flag = std::make_shared<std::atomic<bool>>(true);
-            telemetry_thread_stop_ = stop_flag;
-            telemetry_thread_running_ = running_flag;
             id = camera_id_.value_or("");
+            if (id.empty()) {
+                return;
+            }
         }
-        if (id.empty()) {
-            // No worker will run for this generation, so do not leave a
-            // published flag claiming one is in flight.
-            running_flag->store(false);
-            return;
+        const auto stopped = [this, generation](util::OperationContext& ctx) {
+            return ctx.stop_reason() != util::StopReason::None || !connected_.load() || disconnecting_ ||
+                   generation != connection_generation_;
+        };
+        if (on_worker_start_) {
+            on_worker_start_(QHYWorker::Telemetry);
         }
-        std::thread t([this, id, generation, stop_flag, running_flag, sdk_ptr = &sdk_]() {
-            // Clears on every exit path, so the bounded join below can tell a
-            // finished worker from one that needs detaching.
-            struct RunningGuard {
-                std::shared_ptr<std::atomic<bool>> flag;
-                ~RunningGuard() { flag->store(false); }
-            } running_guard{running_flag};
-            auto& sdk = *sdk_ptr;
-            while (!stop_flag->stopped()) {
-                {
-                    std::lock_guard<std::mutex> lk(mutex_);
-                    if (stop_flag->stopped() || !connected_.load() || disconnecting_ ||
-                        generation != connection_generation_) {
-                        break;
+        try {
+            telemetry_slot_.start([this, id, stopped](util::OperationContext& ctx) {
+                do {
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        if (stopped(ctx)) {
+                            return;
+                        }
+                        if (exposure_status_ == QHYExposureStatus::Working || mode_change_active_.load() ||
+                            exposure_thread_running_->load()) {
+                            // Skip this cycle: see the matching comment in
+                            // start_temp_control_thread() -- IsQHYCCDControlAvailable
+                            // and GetQHYCCDParam share the exposure worker's USB
+                            // handle and can wedge its GetQHYCCDSingleFrame call.
+                            continue;
+                        }
                     }
-                }
-
-                bool exposing = false;
-                {
-                    std::lock_guard<std::mutex> lk(mutex_);
-                    exposing = exposure_status_ == QHYExposureStatus::Working || mode_change_active_.load() ||
-                               exposure_thread_running_->load();
-                }
-                if (exposing) {
-                    // Skip this cycle: see the matching comment in
-                    // start_temp_control_thread() -- IsQHYCCDControlAvailable
-                    // and GetQHYCCDParam share the exposure worker's USB
-                    // handle and can wedge its GetQHYCCDSingleFrame call.
-                    stop_flag->wait_for(std::chrono::seconds(1));
-                    continue;
-                }
-
-                bool have_temp = false;
-                bool probed = false;
-                bool unsupported = false;
-                double temp_c = 0.0;
-                try {
-                    if (sdk.is_control_available(id, control::CURTEMP)) {
-                        temp_c = sdk.get_param(id, control::CURTEMP);
-                        have_temp = true;
-                    } else {
-                        unsupported = true;
+                    bool have_temp = false;
+                    bool probed = false;
+                    bool unsupported = false;
+                    double temp_c = 0.0;
+                    try {
+                        if (sdk_.is_control_available(id, control::CURTEMP)) {
+                            temp_c = sdk_.get_param(id, control::CURTEMP);
+                            have_temp = true;
+                        } else {
+                            unsupported = true;
+                        }
+                        probed = true;
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_DEBUG("QHY", "Telemetry CURTEMP read failed: " + std::string(e.what()));
                     }
-                    probed = true;
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_DEBUG("QHY", "Telemetry CURTEMP read failed: " + std::string(e.what()));
-                }
-                // Recheck the stop flag immediately after the blocking SDK
-                // calls, BEFORE touching `this` again (same rule as the temp
-                // worker above): both calls queue on the wrapper's per-handle
-                // call_mutex, which a wedged-and-detached exposure download
-                // can hold for a minute, and since open-astro#323 this
-                // worker's join is bounded too. If join_worker_thread() timed
-                // out and detached this thread while it was inside get_param,
-                // `this` may already be destroyed by the time we get here.
-                if (stop_flag->stopped()) {
-                    break;
-                }
-                {
                     std::lock_guard<std::mutex> lk(mutex_);
-                    // The atomic stop flag can change while acquiring the state lock.
-                    // cppcheck-suppress identicalConditionAfterEarlyExit
-                    if (stop_flag->stopped() || !connected_.load() || disconnecting_ ||
-                        generation != connection_generation_) {
-                        break;
+                    if (stopped(ctx)) {
+                        return;
                     }
                     if (have_temp) {
                         telemetry_ccd_temp_c_ = temp_c;
@@ -2804,77 +2597,13 @@ private:
                             telemetry_temp_unsupported_ = unsupported;
                         }
                     }
-                }
-
-                stop_flag->wait_for(std::chrono::seconds(1));
-            }
-        });
-        if (on_worker_start_) {
-            on_worker_start_(QHYWorker::Telemetry);
+                } while (ctx.wait_for(std::chrono::seconds(1)));
+            });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_ERROR("QHY", "Failed to start telemetry: " + std::string(e.what()));
+            return;
         }
-        store_or_reap_worker(telemetry_thread_, std::move(t), stop_flag, running_flag, "telemetry");
     }
-
-    // Issue #510: both starters publish their generation's stop flag under
-    // mutex_ but store the thread only at the end, after the thread is built.
-    // A stop path (disconnect, destructor, cooler-off) landing in between
-    // requests the stop and moves out a still-empty member, so the thread the
-    // starter then stores belongs to a stopped generation: its worker exits,
-    // nothing joins it, and a joinable() guard alone would refuse every later
-    // start for the life of the driver (CCDTemperature frozen, the cooler
-    // unregulated). The two helpers below close that from both ends. Callers
-    // hold thread_start_mutex_ and not mutex_; the joins run outside mutex_
-    // because the workers take it (lock order thread_start_mutex_ -> mutex_).
-
-    // Start side. Returns false when `member` holds a worker of a live
-    // generation (the caller then has nothing to start). A joinable member
-    // whose generation was stopped is moved out and reaped with the same
-    // bounded join the stop paths use, and true is returned.
-    bool reap_stopped_worker(std::thread& member, const std::shared_ptr<WorkerStopSignal>& member_stop,
-                             const std::shared_ptr<std::atomic<bool>>& member_running, const char* label) {
-        std::thread stale;
-        std::shared_ptr<std::atomic<bool>> stale_running;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!member.joinable()) {
-                return true;
-            }
-            if (!member_stop->stopped()) {
-                return false;
-            }
-            stale = std::move(member);
-            stale_running = member_running;
-        }
-        join_worker_thread(stale, stale_running, label);  // bounded; may detach
-        return true;
-    }
-
-    // Store side. Stores `t` in `member` unless `stop_flag` (this start's own
-    // generation) was stopped while the thread was being built; then the stop
-    // path has already moved `member` out, so storing `t` would strand it, and
-    // it is reaped here instead.
-    void store_or_reap_worker(std::thread& member, std::thread t, const std::shared_ptr<WorkerStopSignal>& stop_flag,
-                              const std::shared_ptr<std::atomic<bool>>& running_flag, const char* label) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!stop_flag->stopped()) {
-                // Serialised by thread_start_mutex_: `member` can only have
-                // been moved out (by a stop path) since reap_stopped_worker(),
-                // never re-assigned.
-                member = std::move(t);
-                return;
-            }
-        }
-        join_worker_thread(t, running_flag, label);  // bounded; may detach
-    }
-
-    // open-astro#323: start_telemetry_thread_locked() and
-    // stop_telemetry_thread_locked() lived here with no callers anywhere in
-    // the repo -- each name appeared exactly once, at its own definition. The
-    // stop one was also a third, unbounded lifecycle path in a file that
-    // already has several, and it is superseded by the bounded
-    // join_worker_thread() the disconnect and destructor now use. Deleted
-    // rather than left to be copied.
 
     void set_bin_locked(int bin_x, int bin_y) {
         ensure_connected();
