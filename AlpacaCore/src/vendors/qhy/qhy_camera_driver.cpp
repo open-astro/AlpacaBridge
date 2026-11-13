@@ -1413,12 +1413,16 @@ public:
         // initiator method. Run the SDK call in pulse_slot_ so PulseGuide
         // returns immediately; the flag then clears exactly when the physical
         // pulse completes. The destructor joins the body (issue #1736).
+        // The body ignores its context on purpose: a superseded pulse is still a
+        // pulse the client asked for, so it guides once the SDK call lock frees.
         try {
             pulse_slot_.start([this, cam_id, qhy_dir, dur_ms, pulse](util::OperationContext&) {
                 try {
                     sdk_.guide(cam_id, qhy_dir, dur_ms);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("QHY", "PulseGuide worker failed: " + std::string(e.what()));
+                } catch (...) {
+                    ALPACA_LOG_WARN("QHY", "PulseGuide worker failed: non-std exception");
                 }
                 clear_pulse_flag(pulse);
             });
