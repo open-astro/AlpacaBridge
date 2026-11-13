@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/action_name.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_epoch.h>
@@ -240,16 +241,20 @@ public:
     }
 
     std::vector<std::string> get_supported_actions() const override {
-        return {};
+        return {std::string(util::kFocuserSetZeroAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view) override {
+        if (util::same_action_name(action_name, util::kFocuserSetZeroAction)) {
+            set_zero();
+            return "";
+        }
         throw AlpacaException("Action not supported: " + std::string(action_name),
                               AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override {
-        return false;
+    bool can_action(std::string_view action_name) const override {
+        return util::same_action_name(action_name, util::kFocuserSetZeroAction);
     }
 
     std::string command_blind(std::string_view, bool) override {
@@ -357,6 +362,27 @@ public:
     }
 
 private:
+    // The SetZero action: the current position becomes 0 and nothing moves (EAFResetPostion). The moving check and
+    // the reset run in one hold of the I/O lock, so no Move or Halt of this driver lands between them.
+    void set_zero() {
+        ensure_connected();
+        // Decision 0009 rule 1, as move(): a latched fault refuses a write with its text.
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException("ZWO EAF communications compromised: " + fault, AlpacaError::DriverException);
+        }
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            call_locked([&] {
+                if (sdk_.is_moving(open_id_)) {
+                    throw AlpacaException("Cannot set zero while the focuser is moving; Halt or wait for the move",
+                                          AlpacaError::InvalidOperation);
+                }
+                sdk_.reset_position(open_id_, 0);
+            });
+        }
+        status_cache_.invalidate();
+    }
+
     // Reads the unit's static members once, writes the configured max step when it differs from the
     // stored one, and publishes the connect-time state: info, the serial read at the open, then the atomics.
     // Caller holds io_mutex_ and not mutex_ (the state lock is taken for the short publish only), and runs it

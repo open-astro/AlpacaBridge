@@ -235,6 +235,13 @@ inline ContractEntry with_clamping_focuser(ContractEntry e, const char* why) {
     return e;
 }
 
+// The ZWO EAF, ToupTek AAF and iOptron iEAF list the SetZero action (read from each driver's
+// get_supported_actions(); assumption: not checked against a hardware run).
+inline ContractEntry with_set_zero_action(ContractEntry e) {
+    e.actions = {"SetZero"};
+    return e;
+}
+
 inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_switch, DisconnectedRead can_write_async,
                                       int writable_id, const char* source) {
     e.switch_max_disconnected = max_switch;
@@ -287,13 +294,13 @@ inline ContractEntry contract_entry_zwo_filterwheel() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_zwo_focuser() {
-    return with_clamping_focuser(
+    return with_set_zero_action(with_clamping_focuser(
         make_entry(
             "zwo_focuser", "zwo", "focuser", DeviceType::Focuser,
             [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_eaf_focuser_by_index(n, 0); },
             kSrcAgents),
         "zwo_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range (ConformU requires clamping, "
-        "#2028)");
+        "#2028)"));
 }
 inline ContractEntry contract_entry_zwo_rotator() {
     return make_entry(
@@ -389,14 +396,15 @@ inline ContractEntry contract_entry_ioptron_telescope() {
         kSrcAgentsAxis));
 }
 inline ContractEntry contract_entry_ioptron_focuser() {
-    return with_clamping_focuser(make_entry(
-                                     "ioptron_focuser", "ioptron", "focuser", DeviceType::Focuser,
-                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                         return vendor::ioptron::create_ieaf_focuser(n, "/dev/ttyUSB0");
-                                     },
-                                     kSrcAgents),
-                                 "ioptron_ieaf_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the "
-                                 "range (ConformU requires clamping, #2028)");
+    return with_set_zero_action(
+        with_clamping_focuser(make_entry(
+                                  "ioptron_focuser", "ioptron", "focuser", DeviceType::Focuser,
+                                  [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                      return vendor::ioptron::create_ieaf_focuser(n, "/dev/ttyUSB0");
+                                  },
+                                  kSrcAgents),
+                              "ioptron_ieaf_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the "
+                              "range (ConformU requires clamping, #2028)"));
 }
 inline ContractEntry contract_entry_ioptron_filterwheel() {
     return make_entry(
@@ -688,14 +696,15 @@ inline ContractEntry contract_entry_touptek_filterwheel() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_touptek_focuser() {
-    return with_clamping_focuser(make_entry(
-                                     "touptek_focuser", "touptek", "focuser", DeviceType::Focuser,
-                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                         return vendor::touptek::create_touptek_focuser_by_index(n, 0);
-                                     },
-                                     kSrcAgents),
-                                 "touptek_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
-                                 "(ConformU requires clamping, #2028)");
+    return with_set_zero_action(
+        with_clamping_focuser(make_entry(
+                                  "touptek_focuser", "touptek", "focuser", DeviceType::Focuser,
+                                  [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                      return vendor::touptek::create_touptek_focuser_by_index(n, 0);
+                                  },
+                                  kSrcAgents),
+                              "touptek_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
+                              "(ConformU requires clamping, #2028)"));
 }
 #endif
 

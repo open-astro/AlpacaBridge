@@ -76,6 +76,9 @@ public:
     void stop(int focuser_id) override {
         locked([&] { inner_.stop(focuser_id); });
     }
+    void reset_position(int focuser_id, int position) override {
+        locked([&] { inner_.reset_position(focuser_id, position); });
+    }
     int get_max_step(int focuser_id) override {
         return locked([&] { return inner_.get_max_step(focuser_id); });
     }

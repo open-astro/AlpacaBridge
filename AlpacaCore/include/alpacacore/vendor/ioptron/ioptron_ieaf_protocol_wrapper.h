@@ -139,7 +139,10 @@ public:
     /** @brief Abort movement. Command :FQ# (blind). */
     void halt();
 
-    /** @brief Set the current position as zero. Command :FZ# (blind). */
+    /**
+     * @brief Set the current position as zero. Command :FZ# (blind). Refused with InvalidOperation while
+     * :FI# reports the motor running; the :FI# check and :FZ# run in one hold of the exchange lock.
+     */
     void set_zero();
 
 private:
