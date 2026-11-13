@@ -68,6 +68,7 @@ Symbol: `AsyncOperation`
 | Gemini focuser | `PolledState` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | poll body |
 | QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | poll body |
 | QHY CFW3 filter wheel | | `AlpacaCore/src/vendors/qhy/qhy_cfw3_filterwheel_driver.cpp` | adopted | #1510 | goto arrival-wait body |
+| QHY camera | | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | partial | #1736 | temperature, telemetry, cooler-off and pulse-guide slots; disconnect cancels and waits at most 2 s; `ControlQHYCCDTemp`, `SetQHYCCDParam(MANULPWM)` and `ControlQHYCCDGuide` have no timeout, so the destructor waits for one whole call; the exposure still runs on a raw thread with a bounded join and detach |
 | Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | poll body |
 | Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378, #1783 | MoveAxis re-send body; status poll slot (`status_poll_`); pulse-end slot (`pulse_measurement_`); Park/FindHome tail (`park_home_`) |
