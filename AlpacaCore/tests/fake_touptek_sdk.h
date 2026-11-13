@@ -125,6 +125,8 @@ public:
     // return 100000 so range validation is testable per action.
     std::map<std::pair<int, int>, int> aaf_range_script;
     bool taillight_supported = true;
+    // What AAF ISMOVING answers; set before the driver reads it (the AAF registers are not synchronised).
+    void set_aaf_moving(bool moving) { aaf_values_[vendor::touptek::ToupAAF::IsMoving] = moving ? 1 : 0; }
 
     // --- observability -----------------------------------------------------
     std::map<std::string, int> calls;
@@ -513,6 +515,11 @@ public:
         hit("aaf_set");
         require_open(h);
         require_aaf_direction(action, /*write=*/true);
+        // SETZERO makes its value the current position (INDI's toupaaf SyncFocuser); nothing moves.
+        if (action == vendor::touptek::ToupAAF::SetZero) {
+            aaf_values_[vendor::touptek::ToupAAF::GetPosition] = value;
+            return;
+        }
         aaf_values_[canonical_aaf_key(action)] = value;
     }
     int aaf_get(HToupcam h, int action, const char*) override {

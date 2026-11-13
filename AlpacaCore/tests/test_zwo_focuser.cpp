@@ -80,7 +80,7 @@ TEST_CASE("ZWO EAF Focuser Driver - Disconnected Behavior", "[zwo][focuser][unit
     // the value, which is what let the missing connection check survive.
     require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
-    REQUIRE(driver->get_supported_actions().empty());
+    REQUIRE(driver->get_supported_actions() == std::vector<std::string>{"SetZero"});
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
     // and are omitted, and TimeStamp itself is withheld too, leaving the
@@ -108,6 +108,7 @@ TEST_CASE("ZWO EAF Focuser Driver - Disconnected Behavior", "[zwo][focuser][unit
     // answer, so a disconnected write refuses on connection grounds.
     require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->action("SetZero", ""); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->command_blind("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_bool("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_string("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
@@ -268,6 +269,29 @@ TEST_CASE("ZWO EAF Focuser Driver - Halt drops the cached frame", "[zwo][focuser
     CHECK(driver->get_is_moving() == true);
     driver->halt();
     CHECK(driver->get_is_moving() == false);
+}
+
+TEST_CASE("ZWO EAF Focuser Driver - The SetZero action makes the current position 0 without moving",
+          "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    CHECK(driver->can_action("SetZero"));
+    CHECK(driver->can_action("setzero"));
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 500);  // cached frame: SetZero must drop it
+
+    SECTION("an idle focuser is zeroed in place") {
+        CHECK(driver->action("setZERO", "") == "");
+        CHECK(sdk.reset_position_calls == 1);
+        CHECK(sdk.last_move_id == -1);  // no move was sent
+        CHECK(driver->get_position() == 0);
+    }
+    SECTION("a moving focuser is refused and keeps its position") {
+        sdk.moving = true;
+        require_alpaca_error([&]() { driver->action("SetZero", ""); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK(sdk.reset_position_calls == 0);
+        CHECK(sdk.position == 500);
+    }
 }
 
 // Falsified by: zwo_focuser_driver.cpp read_status() letting the temperature

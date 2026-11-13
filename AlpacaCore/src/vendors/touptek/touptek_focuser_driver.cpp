@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/action_name.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -186,16 +187,20 @@ public:
     }
 
     std::vector<std::string> get_supported_actions() const override {
-        return {};
+        return {std::string(util::kFocuserSetZeroAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view) override {
+        if (util::same_action_name(action_name, util::kFocuserSetZeroAction)) {
+            set_zero();
+            return "";
+        }
         throw AlpacaException("Action not supported: " + std::string(action_name),
                               AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override {
-        return false;
+    bool can_action(std::string_view action_name) const override {
+        return util::same_action_name(action_name, util::kFocuserSetZeroAction);
     }
 
     std::string command_blind(std::string_view, bool) override {
@@ -292,6 +297,22 @@ public:
     }
 
 private:
+    // The SetZero action: the current position becomes 0 and nothing moves (AAF SETZERO). The moving check and the
+    // write run in one hold of the I/O lock, so no Move or Halt of this driver lands between them.
+    void set_zero() {
+        ensure_connected();
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            ensure_connected();  // a disconnect that won the I/O lock has closed the handle
+            if (sdk_.aaf_get(handle_, ToupAAF::IsMoving, "Toupcam_AAF(ISMOVING)") != 0) {
+                throw AlpacaException("Cannot set zero while the focuser is moving; Halt or wait for the move",
+                                      AlpacaError::InvalidOperation);
+            }
+            sdk_.aaf_set(handle_, ToupAAF::SetZero, 0, "Toupcam_AAF(SETZERO)");
+        }
+        status_cache_.invalidate();
+    }
+
     // The connection flag and the limit are read in one state-lock hold. Connect publishes the limit under
     // the lock before it sets the flag; disconnect clears both under the lock. A disconnected reading throws
     // NotConnected without a second read: a reconnect and disconnect between two reads would yield a zero

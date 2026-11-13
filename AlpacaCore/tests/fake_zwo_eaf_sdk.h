@@ -87,6 +87,7 @@ public:
     int max_step_calls{0};
     int step_range_calls{0};
     int set_max_step_calls{0};
+    int reset_position_calls{0};
     int last_set_max_step{-1};
     int open_calls{0};
     int last_open_id{-1};
@@ -177,6 +178,14 @@ public:
     }
     void stop(int focuser_id) override {
         table_.call(focuser_id, [&] { raw_stop(focuser_id); });
+    }
+    void reset_position(int focuser_id, int value) override {
+        table_.call(focuser_id, [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_unit(focuser_id);
+            ++reset_position_calls;
+            position = value;  // the unit's counter only: nothing moves
+        });
     }
     int get_max_step(int focuser_id) override {
         return table_.call(focuser_id, [&] { return raw_max_step(focuser_id); });

@@ -164,10 +164,12 @@ ASCOM treats `SelectWheel`, `selectwheel` and `SELECTWHEEL` as the same action: 
 `ActionName` parameter of `Action()` is case-insensitive, and the names in
 `SupportedActions` may use any casing. Match the requested name against the supported
 list without regard to case, in `action()` and in `can_action()` alike, and throw
-`ActionNotImplemented` only when no supported name matches. The two drivers with
+`ActionNotImplemented` only when no supported name matches. The drivers with
 actions already do this: the Player One camera (`to_lower_copy`), the Celestron
-focuser (`same_action`) and the iOptron and Celestron mounts' `gps_status`
-(`util::is_gps_status_action`). A new driver with actions does the same.
+focuser (`same_action`), the iOptron and Celestron mounts' `gps_status`
+(`util::is_gps_status_action`) and the ZWO EAF, ToupTek AAF and iOptron iEAF
+focusers' `SetZero` (`util::same_action_name`, `alpacacore/util/action_name.h`).
+A new driver with actions does the same.
 
 ### Camera ROI alignment (all camera vendors)
 

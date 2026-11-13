@@ -230,6 +230,10 @@ void ZWOEAFSDKWrapper::stop(int focuser_id) {
     pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFStop(focuser_id), "EAFStop"); });
 }
 
+void ZWOEAFSDKWrapper::reset_position(int focuser_id, int position) {
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFResetPostion(focuser_id, position), "EAFResetPostion"); });
+}
+
 int ZWOEAFSDKWrapper::get_max_step(int focuser_id) {
     int max_step = 0;
     pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFGetMaxStep(focuser_id, &max_step), "EAFGetMaxStep"); });

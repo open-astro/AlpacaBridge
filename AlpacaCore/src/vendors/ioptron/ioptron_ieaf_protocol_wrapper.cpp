@@ -341,20 +341,7 @@ public:
 
     IeafStatus get_status() {
         std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected_locked();
-        std::string resp = send_command_locked(":FI#");
-        // "%7d%1d%5d%1d#": position, moving flag, temperature (Kelvin x 100),
-        // direction flag (0 = reversed).
-        int pos = 0, moving = 0, temp = 0, dir = 0;
-        if (std::sscanf(resp.c_str(), "%7d%1d%5d%1d", &pos, &moving, &temp, &dir) != 4) {
-            throw AlpacaException("Failed to parse iEAF status: " + resp, AlpacaError::DriverException);
-        }
-        IeafStatus status;
-        status.position = pos;
-        status.moving = moving != 0;
-        status.temperature_c = temp / 100.0 - 273.15;
-        status.reversed = dir == 0;
-        return status;
+        return status_locked();
     }
 
     void move_to(std::int32_t position) {
@@ -377,11 +364,33 @@ public:
 
     void set_zero() {
         std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected_locked();
+        // Checked in the same hold as :FZ#, so no :FM from another caller starts the motor between them.
+        if (status_locked().moving) {
+            throw AlpacaException("Cannot set zero while the focuser is moving; Halt or wait for the move",
+                                  AlpacaError::InvalidOperation);
+        }
         send_command_blind_locked(":FZ#");
     }
 
 private:
+    // Caller holds mutex_.
+    IeafStatus status_locked() {
+        ensure_connected_locked();
+        std::string resp = send_command_locked(":FI#");
+        // "%7d%1d%5d%1d#": position, moving flag, temperature (Kelvin x 100),
+        // direction flag (0 = reversed).
+        int pos = 0, moving = 0, temp = 0, dir = 0;
+        if (std::sscanf(resp.c_str(), "%7d%1d%5d%1d", &pos, &moving, &temp, &dir) != 4) {
+            throw AlpacaException("Failed to parse iEAF status: " + resp, AlpacaError::DriverException);
+        }
+        IeafStatus status;
+        status.position = pos;
+        status.moving = moving != 0;
+        status.temperature_c = temp / 100.0 - 273.15;
+        status.reversed = dir == 0;
+        return status;
+    }
+
     void ensure_connected_locked() const {
         if (!connected_) {
             throw AlpacaException("iEAF not connected", AlpacaError::NotConnected);

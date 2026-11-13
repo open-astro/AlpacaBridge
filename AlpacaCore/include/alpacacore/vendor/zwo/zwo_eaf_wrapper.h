@@ -37,6 +37,7 @@ public:
     int get_position(int focuser_id) override;
     void move(int focuser_id, int position) override;
     void stop(int focuser_id) override;
+    void reset_position(int focuser_id, int position) override;
 
     int get_max_step(int focuser_id) override;
     void set_max_step(int focuser_id, int max_step) override;

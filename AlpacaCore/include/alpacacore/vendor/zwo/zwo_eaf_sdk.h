@@ -61,6 +61,8 @@ public:
     virtual int get_position(int focuser_id) = 0;
     virtual void move(int focuser_id, int position) = 0;
     virtual void stop(int focuser_id) = 0;
+    /// Makes @p position the unit's current position without moving it (EAFResetPostion, sic).
+    virtual void reset_position(int focuser_id, int position) = 0;
 
     virtual int get_max_step(int focuser_id) = 0;
     /// Writes the focuser's stored max step (EAFSetMaxStep); the unit clamps moves at it.

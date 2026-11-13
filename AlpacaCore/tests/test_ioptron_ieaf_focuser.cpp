@@ -24,6 +24,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -77,7 +78,7 @@ TEST_CASE("iOptron iEAF Focuser Driver - Not connected throws", "[ioptron][focus
 TEST_CASE("iOptron iEAF Focuser Driver - Unsupported actions", "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
 
-    CHECK(driver->get_supported_actions().empty());
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"SetZero"});
     CHECK(driver->can_action("anything") == false);
     require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("test", false); },
@@ -188,6 +189,30 @@ TEST_CASE("iOptron iEAF Focuser Driver - connects and moves over the fake", "[io
     CHECK(fake.count(":FM") == 1);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+}
+
+TEST_CASE("iOptron iEAF Focuser Driver - The SetZero action makes the current position 0 without moving",
+          "[ioptron][focuser][unit]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    CHECK(driver->can_action("setZero"));
+    require_alpaca_error([&]() { driver->action("SetZero", ""); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_position() == 1000);  // cached frame: SetZero must drop it
+
+    SECTION("an idle focuser is zeroed in place") {
+        CHECK(driver->action("SETZERO", "") == "");
+        CHECK(fake.count(":FZ#") == 1);
+        CHECK(fake.count(":FM") == 0);
+        CHECK(driver->get_position() == 0);
+    }
+    SECTION("a moving focuser is refused and keeps its position") {
+        fake.set_focuser_moving(true);
+        require_alpaca_error([&]() { driver->action("SetZero", ""); }, alpacacore::AlpacaError::InvalidOperation);
+        CHECK(fake.count(":FZ#") == 0);
+        CHECK(fake.position() == 1000);
+    }
+    driver->set_connected(false);
 }
 
 // #1590: the 100 ms status cache ages by the driver's TaskClock.
