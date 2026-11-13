@@ -3504,6 +3504,120 @@ TEST_CASE("QHY Camera Driver - a finished older pulse does not clear a newer pul
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
 
+TEST_CASE("QHY Camera Driver - a refused regulation start leaves CoolerOn false",
+          "[qhy][camera][unit][cooler-review]") {
+    // Issue #1736: with three replaced regulation bodies still inside
+    // ControlQHYCCDTemp, the slot refuses a fourth replacement after 2 s.
+    // Nothing regulates then, so CoolerOn must not read true.
+    const std::string path = GENERATE("CoolerOn=true", "CoolerOn=true with a concurrent CoolerOn=true", "reconnect",
+                                      "reconnect with a concurrent CoolerOn=true");
+    const bool concurrent = path.find("concurrent") != std::string::npos;
+    const bool reconnect = path.rfind("reconnect", 0) == 0;
+    CAPTURE(path);
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    CoolerReviewSDK sdk(fake);
+    sdk.temperature_gate = &gate;  // held outside the decorator lock, so every body can enter
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard teardown{clock, driver, &gate};
+    driver->set_connected(true);
+    REQUIRE(eventually([&] { return sdk.regulation_calls.load() == 1; }));
+    // Each reconnect replaces the stuck body with a new one that sticks too:
+    // the current body plus three stale ones.
+    for (int calls = 2; calls <= 4; ++calls) {
+        disconnect_stepping(clock, *driver);
+        driver->set_connected(true);
+        REQUIRE(eventually([&] { return sdk.regulation_calls.load() == calls; }));
+    }
+    std::atomic<bool> done{false};
+    int error = -1;
+    if (reconnect) {
+        disconnect_stepping(clock, *driver);
+    } else {
+        driver->set_cooler_on(false);
+    }
+    const auto waits = clock.wait_count();
+    std::thread caller([&] {
+        if (reconnect) {
+            error = error_code_of([&] { driver->set_connected(true); });
+        } else {
+            error = error_code_of([&] { driver->set_cooler_on(true); });
+        }
+        done = true;
+    });
+    JoinPumped joiner{clock, caller, &gate};
+    // A client ON that arrives while the first refused start waits keeps its own
+    // outcome: the first rollback must not undo it silently.
+    std::atomic<bool> client_done{false};
+    int client_error = -1;
+    std::thread client;
+    JoinPumped client_joiner{clock, client, &gate};
+    if (concurrent) {
+        REQUIRE(clock.wait_for_wait_count(waits + 1, seconds(2)));  // the first start() is waiting
+        client = std::thread([&] {
+            client_error = error_code_of([&] { driver->set_cooler_on(true); });
+            client_done = true;
+        });
+        std::this_thread::sleep_for(milliseconds(200));  // let it queue on the start mutex
+    } else {
+        client_done = true;
+    }
+    step_until(clock, [&] { return done.load() && client_done.load(); }, milliseconds(10));
+    REQUIRE(done.load());
+    REQUIRE(client_done.load());
+    CHECK(error == (reconnect ? 0 : AlpacaError::InvalidOperation));
+    if (concurrent) {
+        CHECK(client_error == AlpacaError::InvalidOperation);
+    }
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_cooler_on());
+    CHECK(sdk.regulation_calls.load() == 4);
+}
+
+TEST_CASE("QHY Camera Driver - a pulse refused behind three queued pulses keeps IsPulseGuiding",
+          "[qhy][camera][unit][taskclock]") {
+    // Issue #1736: the fifth pulse finds three older ones still queued behind a
+    // held guide call; the slot refuses it after 2 s. Older pulses still guide, so
+    // the flag stays set.
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    gate.arm(fake, "guide");
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    for (int i = 0; i < 4; ++i) {
+        driver->pulse_guide(0, 5000);
+    }
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    // Two refused pulses at once, like a guider's RA and Dec pair.
+    std::atomic<int> done{0};
+    int error = -1;
+    int second_error = -1;
+    std::thread caller([&] {
+        error = error_code_of([&] { driver->pulse_guide(1, 60000); });
+        ++done;
+    });
+    JoinPumped joiner{clock, caller, &gate};
+    std::thread second([&] {
+        second_error = error_code_of([&] { driver->pulse_guide(2, 60000); });
+        ++done;
+    });
+    JoinPumped second_joiner{clock, second, &gate};
+    const auto spent = step_until(clock, [&] { return done.load() == 2; }, milliseconds(10));
+    REQUIRE(done.load() == 2);
+    CHECK(error == AlpacaError::InvalidOperation);
+    CHECK(second_error == AlpacaError::InvalidOperation);
+    CHECK(spent >= milliseconds(2000));
+    CHECK(driver->get_is_pulse_guiding());
+    // Once the older pulses finish, the newest of them clears the flag; the
+    // refused 60 s pulse must not hold it (no clock advance here).
+    gate.release = true;
+    CHECK(eventually([&] { return !driver->get_is_pulse_guiding(); }));
+}
+
 TEST_CASE("QHY Camera Driver - the polling workers wait a second on the injected clock",
           "[qhy][camera][unit][taskclock]") {
     // Falsified by: the polling bodies waiting with something other than

@@ -137,14 +137,15 @@ namespace guide_direction {
  *   owner releases, so a camera driver and the CFW driver on the same physical
  *   device (e.g. the miniCam8M's integrated wheel) each get an independent
  *   open/close lifecycle over one shared handle.
- * - A fake MUST NOT block in any method. The camera driver's exposure,
- *   temperature and cooler-off workers join with a bounded timeout and DETACH
- *   on expiry, and its pulse-guide thread is detached by design; a blocking
- *   fake turns those into detached threads still calling into the fake after
- *   the test body has moved on.
+ * - A fake MUST NOT block in any method. The camera driver's exposure worker
+ *   joins with a bounded timeout and DETACHES on expiry, so a blocking fake
+ *   turns it into a detached thread still calling into the fake after the test
+ *   body has moved on. Its temperature, telemetry, cooler-off and pulse-guide
+ *   bodies run in slots the destructor joins (issue #1736), so a blocking fake
+ *   hangs the driver's teardown instead.
  *
- * LIFETIME: drivers hold a plain QHYSDK& — and the detachable workers above
- * capture a QHYSDK* — so the SDK object MUST outlive every driver constructed
+ * LIFETIME: drivers hold a plain QHYSDK& — and the detachable exposure worker
+ * captures a QHYSDK* — so the SDK object MUST outlive every driver constructed
  * on it. Declare the fake before the driver (locals destroy in reverse order);
  * never stash a driver beyond the fake's scope.
  */

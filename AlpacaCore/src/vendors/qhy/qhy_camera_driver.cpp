@@ -545,6 +545,7 @@ private:
         const auto generation = ++connection_generation_;
         const bool has_cooler = camera_info_.has_cooler;
         const bool cooler_on = cooler_on_;
+        const uint64_t cooler_on_request = cooler_on_requests_;
         lock.unlock();
         io_lock.unlock();
         lifecycle_lock.unlock();
@@ -558,6 +559,10 @@ private:
                     start_temp_control_thread(generation);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_ERROR("QHY", "Failed to start temperature control: " + std::string(e.what()));
+                    std::lock_guard<std::mutex> state_lock(mutex_);
+                    if (generation == connection_generation_ && cooler_on_request == cooler_on_requests_) {
+                        cooler_on_ = false;  // as for CoolerOn=true: a refused start regulates nothing
+                    }
                 }
             }
         }
@@ -776,6 +781,7 @@ public:
         ensure_connected();
         if (cooler_on) {
             uint64_t generation;
+            uint64_t request;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ensure_connected();
@@ -783,6 +789,7 @@ public:
                     throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
                 }
                 cooler_on_ = true;
+                request = ++cooler_on_requests_;
                 auto pending = CoolerOffState::Pending;
                 cooler_off_request_->compare_exchange_strong(pending, CoolerOffState::None);
                 if (disconnecting_) {
@@ -795,7 +802,8 @@ public:
                 start_temp_control_thread(generation);
             } catch (...) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (generation == connection_generation_) {
+                // A newer ON reports its own start; undo only this request.
+                if (generation == connection_generation_ && request == cooler_on_requests_) {
                     cooler_on_ = false;  // a refused start regulates nothing
                 }
                 throw;
@@ -1382,10 +1390,17 @@ public:
         // that observes the flag as true must never see a stale (epoch) end
         // time, or the self-clearing getter would clear the pulse immediately
         // (same shape as the Player One camera, PR #119).
+        // One initiator at a time, so a refused pulse's hand-back below is
+        // exact even when two pulses are refused together. No body takes it.
+        std::lock_guard<std::mutex> initiator_lock(pulse_initiator_mutex_);
         uint64_t pulse = 0;
+        std::chrono::steady_clock::time_point previous_end;
+        bool previous_flag = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
+            previous_end = pulse_guiding_end_;
+            previous_flag = pulse_guiding_.load();
             pulse_guiding_end_ = clock_.now() + std::chrono::milliseconds(duration);
             pulse_guiding_.store(true);
             pulse = ++pulse_count_;
@@ -1408,7 +1423,18 @@ public:
                 clear_pulse_flag(pulse);
             });
         } catch (...) {
-            clear_pulse_flag(pulse);
+            // Hand the flag and end time back to the newest older pulse, so a
+            // stale-bound refusal (older pulses still run) does not hold the flag
+            // until this pulse's end. A refusal with nothing older guiding (a
+            // refused thread, a drain) puts the flag back down.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pulse == pulse_count_) {
+                pulse_guiding_end_ = previous_end;
+                --pulse_count_;
+                if (!previous_flag) {
+                    pulse_guiding_.store(false);
+                }
+            }
             throw;
         }
     }
@@ -2112,6 +2138,7 @@ private:
     // ControlQHYCCDTemp, current or superseded; the OFF body writes PWM zero only
     // at zero, so a late PID call cannot follow it.
     bool temp_active_{false};
+    uint64_t cooler_on_requests_{0};  // state lock; every accepted CoolerOn=true bumps it
     std::mutex slot_start_mutex_;  // temperature and telemetry starts; before mutex_
     std::shared_ptr<std::atomic<int>> temp_calls_in_flight_{std::make_shared<std::atomic<int>>(0)};
 
@@ -2145,6 +2172,7 @@ private:
     mutable std::atomic<bool> pulse_guiding_{false};  // the const getter self-clears it
     std::chrono::steady_clock::time_point pulse_guiding_end_;
     uint64_t pulse_count_{0};
+    std::mutex pulse_initiator_mutex_;  // pulse_guide() callers; before mutex_
 
     // Issue #1736 (decision 0006): one slot per background body except the
     // exposure. Declared after every member a body uses; the destructor joins
@@ -2426,6 +2454,8 @@ private:
         temp_slot_.cancel();
     }
 
+    // The newest pulse owns the flag: when it finishes it clears the flag, even
+    // while older pulses still queue on the SDK call lock.
     void clear_pulse_flag(uint64_t pulse) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (pulse == pulse_count_) {
