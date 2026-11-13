@@ -66,12 +66,12 @@ namespace alpacacore::test {
  *
  * TWO RULES THIS FAKE MUST KEEP (they are not stylistic):
  *
- * 1. NOTHING HERE MAY BLOCK. The camera driver's exposure, temperature,
- *    cooler-off and telemetry workers join with a bounded timeout and DETACH
- *    on expiry (telemetry since issue #323, so the rule is load-bearing for
- *    it too), and its pulse-guide worker is detached by design. A fake that blocks turns
- *    those into detached threads still calling into it after the test body
- *    has moved on — i.e. a use-after-free of the fake itself. The ONE
+ * 1. NOTHING HERE MAY BLOCK. The camera driver's exposure worker joins with a
+ *    bounded timeout and DETACHES on expiry; a fake that blocks turns it into a
+ *    detached thread still calling into the fake after the test body has moved
+ *    on — i.e. a use-after-free of the fake itself. Its slot bodies
+ *    (temperature, telemetry, cooler-off, pulse guide; issue #1736) are joined
+ *    by the destructor instead, so a blocking fake hangs the driver's teardown. The ONE
  *    sanctioned exception is `before_call`, null in every ordinary test: a
  *    case that sets it to block a named method owns the consequences and
  *    must release the block before its driver is destroyed (the three #339

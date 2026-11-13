@@ -276,8 +276,8 @@ private:
  * fixture member, a vector, or anything outliving the fake -- compiles
  * cleanly and is undefined behaviour, most likely a use-after-free inside a
  * detached worker. That is the failure mode hardest to attribute when it
- * surfaces, and the [stress] storms raise the stakes: exposure, temperature,
- * cooler-off, pulse-guide and telemetry workers are all detachable.
+ * surfaces, and the [stress] storms raise the stakes: the exposure worker is
+ * detachable, and the slot bodies outlive a disconnect until the destructor.
  *
  * The rule was stated in three places (the QHYSDK interface comment, the
  * FakeQHYSDK class comment, and testing.instructions.md) and enforced by nothing. Member

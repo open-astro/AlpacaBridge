@@ -591,7 +591,7 @@ void QHYSDKWrapper::guide(const std::string& camera_id,
                           uint32_t qhy_direction, uint16_t duration_ms) {
     // Holds the per-handle call_mutex for the full ControlQHYCCDGuide call (up
     // to the pulse duration, e.g. 2s) -- the caller (qhy_camera_driver's
-    // pulse_guide()) already runs this on its own detached thread so it never
+    // pulse_guide()) already runs this in its pulse slot so it never
     // blocks the HTTP thread, but it still serialises against every other SDK
     // call on this handle for that duration (see the SharedHandle comment).
     auto ref = pimpl_->get_handle_ref(camera_id);
