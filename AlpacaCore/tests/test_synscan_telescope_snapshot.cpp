@@ -1225,6 +1225,7 @@ TEST_CASE("SynScan snapshot - a never-connected second device's teardown leaves 
     REQUIRE(rig.connect());  // the poll is parked on the task clock and sends nothing
     REQUIRE(connected->get_connected());
     // The rig owns one driver: the second is built by the rig's factory, on the same handset and clock, as device 1.
+    // Keep it declared after the rig: it is then destroyed first, while the handset and clock it was built on live.
     auto never_connected = make_tcp_driver(rig.fake(), rig.clock(), rig.timeout_ms, true, 1);
     // A raised interrupt would last only as long as this teardown, far less than one read slice: hold the teardown
     // where it has decided, so a wrongly raised interrupt is still up while the read below waits.
