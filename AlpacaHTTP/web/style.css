@@ -253,6 +253,9 @@ h2 {
 
 .status-dot.status-connected { --status-dot-color: #0BDA51; }
 .status-dot.status-idle { --status-dot-color: #d4a72c; }
+/* Issue #1764: Connected, but no client request for over 60 s. Same yellow as
+   idle; the tooltip and label say which. */
+.status-dot.status-quiet { --status-dot-color: #d4a72c; }
 .status-dot.status-error { --status-dot-color: #f85149; }
 
 /* Pulsing halo for "online" only; it is absolutely positioned, so no layout shift. */
@@ -273,6 +276,30 @@ h2 {
 
 @media (prefers-reduced-motion: reduce) {
     .status-dot.status-connected::before { animation: none; }
+}
+
+/* Issue #1764: no transition or animation anywhere for a reduced-motion user. */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        transition: none !important;
+        animation: none !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* Issue #1764: one keyboard focus ring for every interactive element. A
+   switch's checkbox is invisible, so its track carries the ring. */
+:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 2px;
+}
+
+.switch input:focus-visible + .slider,
+.oa-switch input:focus-visible + .oa-slider {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 2px;
 }
 
 .device-card.device-error {
@@ -771,6 +798,7 @@ input[type="range"] {
 header > .server-clock {
     margin-right: 0;
     font-family: var(--mono);
+    white-space: nowrap;
 }
 
 .server-helper {
@@ -1054,6 +1082,133 @@ header > .server-clock {
 
 .empty-state p {
     margin-bottom: 10px;
+}
+
+.empty-state-add {
+    min-height: 44px;
+    padding: 10px 20px;
+}
+
+/* ---- in-page dialog, toasts, field errors (issue #1764) ---- */
+.ui-dialog {
+    margin: auto;
+    width: min(440px, calc(100vw - 32px));
+    padding: 0;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+}
+
+.ui-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+}
+
+.ui-dialog-form {
+    padding: 18px;
+}
+
+.ui-dialog-title {
+    margin-bottom: 8px;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+.ui-dialog-body {
+    color: var(--dim);
+    font-size: 14px;
+    white-space: pre-line;
+}
+
+.ui-dialog-body:empty {
+    display: none;
+}
+
+.ui-dialog-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+    font-size: 14px;
+}
+
+.ui-dialog-field[hidden] {
+    display: none;
+}
+
+.ui-dialog-field input {
+    padding: 10px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    font: inherit;
+}
+
+.ui-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 18px;
+}
+
+.ui-dialog-actions .btn {
+    min-height: 44px;
+    min-width: 88px;
+}
+
+.toast-region {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+}
+
+.toast {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 560px;
+    padding: 10px 10px 10px 14px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--ok);
+    border-radius: 8px;
+    font-size: 14px;
+    pointer-events: auto;
+}
+
+.toast-error {
+    border-left-color: var(--accent);
+    color: #f08a7a;
+}
+
+.toast-close {
+    flex: none;
+    min-width: 44px;
+    min-height: 44px;
+    color: var(--dim);
+    background: none;
+    border: none;
+    font-size: 20px;
+    cursor: pointer;
+}
+
+.field-error {
+    margin-top: 4px;
+    color: #f08a7a;
+    font-size: 13px;
+}
+
+[aria-invalid="true"] {
+    border-color: var(--accent) !important;
 }
 
 /* ---- responsive ---- */

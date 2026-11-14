@@ -42,6 +42,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -241,6 +242,14 @@ public:
         return delayed_threads_.size();
     }
 
+    // Test seam (issue #1764): the clock that stamps and ages the per-client
+    // Connected registrations, steady_clock::now() by default. A test sets it
+    // before routing any request; the clock must outlive the Router.
+    void set_client_clock_for_test(std::function<std::chrono::steady_clock::time_point()> clock) {
+        std::lock_guard<std::mutex> lock(client_connections_mutex_);
+        client_clock_ = std::move(clock);
+    }
+
     // Route request and generate response
     Response route(const Request& request, std::uint32_t server_transaction_id);
 
@@ -430,6 +439,15 @@ private:
     bool client_connection_registered(const void* device, const std::string& client_key);
     void touch_client_connection(const void* device, const std::string& client_key);
     void clear_client_connections(const void* device);
+    // Issue #1764: what configureddevices reports per device from the registry
+    // above, never from the driver. `active_clients` counts registrations
+    // refreshed inside the stale window; `last_request_age` is the age of the
+    // newest of them, empty when there is none.
+    struct ClientActivity {
+        std::size_t active_clients = 0;
+        std::optional<std::chrono::milliseconds> last_request_age;
+    };
+    ClientActivity client_activity(const void* device) const;
     // Erase BOTH maps' entries for a removed device (issue #162). Never call
     // while the device's op mutex is held — see clear_client_connections.
     void purge_device_connection_state(const void* device);
@@ -465,6 +483,10 @@ private:
     std::unordered_map<const void*, std::unordered_map<std::string, std::chrono::steady_clock::time_point>>
         client_connections_;
     std::unordered_map<const void*, std::shared_ptr<std::mutex>> connection_op_mutexes_;
+    // Read and set under client_connections_mutex_ (set_client_clock_for_test).
+    std::function<std::chrono::steady_clock::time_point()> client_clock_ = [] {
+        return std::chrono::steady_clock::now();
+    };
 
     // Guards persisted_devices_ and persisted_devices_loaded_. Never held
     // together with server_info_mutex_ or across driver-registry calls.
