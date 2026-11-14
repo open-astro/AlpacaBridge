@@ -661,9 +661,21 @@ public:
             mode = alignment == AlignmentMode::AltAz ? 1 : 2;
         }
         // The cache is written after the send: a motion owner ahead in the queue restores the mode it found.
-        if (!send_in_turn(
+        bool sent = false;
+        try {
+            sent = send_in_turn(
                 lock, [this] { return connected_ && !link_lost(); },
-                [&protocol, mode] { protocol.set_tracking_mode(mode); })) {
+                [&protocol, mode] { protocol.set_tracking_mode(mode); });
+        } catch (...) {
+            // While a restore is owed (ra_stop_unconfirmed_), the cache is the mode the next RA stop sends, and
+            // refresh_tracking_mode_locked() keeps it. A write that failed is still the client's latest request: the
+            // next stop sends this mode, so a failed Tracking=false cannot leave an older mode to turn tracking on.
+            if (ra_stop_unconfirmed_) {
+                set_tracking_mode_cached_locked(mode);
+            }
+            throw;
+        }
+        if (!sent) {
             check_connected();
             return;
         }
@@ -3396,8 +3408,8 @@ private:
         // After a restore that did not land, the cache is the mode still owed to the handset and the handset's own
         // answer is the driver's unfinished stop: the RA rate command replaced tracking and the `T` never arrived, so
         // it reads 0. Reading it here would make that 0 the mode to restore, and the next RA pulse, MoveAxis stop or
-        // AbortSlew would leave the mount untracked. The flag clears with a landed restore, a Tracking write, Park,
-        // an RA MoveAxis, AbortSlew or a reconnect.
+        // AbortSlew would leave the mount untracked. The flag clears with a landed restore, a landed Tracking write,
+        // Park, an RA MoveAxis, AbortSlew or a reconnect; a Tracking write that fails puts its mode in the cache.
         if (tracking_mode_valid_ && ra_stop_unconfirmed_) {
             return;
         }

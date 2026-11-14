@@ -1276,6 +1276,42 @@ TEST_CASE("SynScan stops - AbortSlew and MoveAxis restore tracking after a faile
     }
 }
 
+// A Tracking=false write that times out after a failed restore is still the client's latest request: the next RA
+// stop must not send the older mode 2 and turn tracking back on. Before the fix the cache kept 2, and AbortSlew,
+// MoveAxis(0, 0) or the next RA pulse's end sent `T 2`.
+TEST_CASE("SynScan Tracking - a failed Tracking=false after a failed restore keeps tracking off",
+          "[synscan][telescope][tracking][abort][moveaxis][pulseguiding]") {
+    enum class Stop : std::uint8_t { AbortSlew, MoveAxisStop, RaPulse };
+    for (const Stop stop : {Stop::AbortSlew, Stop::MoveAxisStop, Stop::RaPulse}) {
+        INFO("stop " << static_cast<int>(stop));
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_tracking(true);
+        fail_tracking_restore(*driver, *st, FailedRestore::MoveAxisStop);
+        st->reject_tracking = true;
+        CHECK_THROWS_AS(driver->set_tracking(false), alpacacore::AlpacaException);
+        st->reject_tracking = false;
+
+        const int writes_before = st->command_count('T');  // the log holds the rejected `T 0` too
+        if (stop == Stop::AbortSlew) {
+            REQUIRE_NOTHROW(driver->abort_slew());
+        } else if (stop == Stop::MoveAxisStop) {
+            REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
+        } else {
+            driver->pulse_guide(2, 200);  // East, RA
+            REQUIRE(advance_until(clock, [&] { return !driver->get_is_pulse_guiding(); }));
+        }
+        CHECK(st->command_count('T') == writes_before);
+        CHECK(st->tracking_mode.load() == 0);
+        CHECK_FALSE(driver->get_tracking());
+        driver->set_connected(false);
+    }
+}
+
 TEST_CASE("SynScan MoveAxis - stopping an RA jog restores the mode the handset held before it",
           "[synscan][telescope][moveaxis][tracking]") {
     auto st = make_handset();
