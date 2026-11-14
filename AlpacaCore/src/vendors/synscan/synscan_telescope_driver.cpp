@@ -486,7 +486,12 @@ public:
         return served_altaz_locked().second;
     }
 
+    // The optics and SlewSettleTime are the client's values, not the mount's: lock-free, no fault refusal, but
+    // NotConnected while disconnected or lost like every other member (ASCOM contract precedence). The optics setters
+    // are not ASCOM members: the catalog and updatedevice (#2057) inject the configured values with them, connected
+    // or not.
     double get_aperture_diameter() const override {
+        check_connected();
         return aperture_diameter_m_;
     }
 
@@ -498,6 +503,7 @@ public:
     }
 
     double get_aperture_area() const override {
+        check_connected();
         // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
         const double d = aperture_diameter_m_;
         return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
@@ -668,6 +674,7 @@ public:
     }
 
     double get_focal_length() const override {
+        check_connected();
         return focal_length_m_;
     }
 
@@ -783,6 +790,7 @@ public:
     }
 
     int get_slew_settle_time() const override {
+        check_connected();
         return slew_settle_time_seconds_;
     }
 
@@ -790,6 +798,7 @@ public:
         if (seconds < 0) {
             throw AlpacaException("Slew settle time must be >= 0 seconds", AlpacaError::InvalidValue);
         }
+        check_connected();  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_seconds_ = seconds;
     }
 

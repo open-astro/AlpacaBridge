@@ -773,8 +773,14 @@ public:
 
     double get_altitude() const override { return measured(read_frame().horizontal, "Altitude").altitude_degrees; }
 
+    // The optics and SlewSettleTime are the client's values, not the mount's: answered on a faulted link, but
+    // NotConnected while disconnected or not ready like every other member (ASCOM contract precedence). The optics
+    // setters are not ASCOM members: the catalog and updatedevice (#2057) inject the configured values with them,
+    // connected or not.
     double get_aperture_diameter() const override {
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked(/*skip_fault=*/true);
         return aperture_diameter_m_;
     }
 
@@ -790,7 +796,9 @@ public:
     }
 
     double get_aperture_area() const override {
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked(/*skip_fault=*/true);
         return aperture_area_m2_;
     }
 
@@ -944,7 +952,9 @@ public:
     }
 
     double get_focal_length() const override {
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked(/*skip_fault=*/true);
         return focal_length_m_;
     }
 
@@ -1085,7 +1095,9 @@ public:
     }
 
     int get_slew_settle_time() const override {
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked(/*skip_fault=*/true);
         return slew_settle_time_s_;
     }
 
@@ -1093,7 +1105,9 @@ public:
         if (seconds < 0) {
             throw AlpacaException("SlewSettleTime must be >= 0", AlpacaError::InvalidValue);
         }
+        update_link_state();
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected_locked(/*skip_fault=*/true);  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_s_ = seconds;
     }
 
@@ -1821,7 +1835,12 @@ public:
         const auto deadline = clock_.now() + kDefaultSlewTimeout;
         while (clock_.now() < deadline) {
             if (!get_slewing()) {
-                const int settle = get_slew_settle_time();
+                int settle = 0;
+                {
+                    // The member, not the ASCOM getter: the wait reads the client's value, it is not a client read.
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    settle = slew_settle_time_s_;
+                }
                 if (settle > 0) {
                     clock_.sleep_for(std::chrono::seconds(settle));
                 }

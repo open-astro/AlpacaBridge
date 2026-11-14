@@ -1349,6 +1349,8 @@ TEST_CASE("Builtin catalog - SkyWatcher sanitize keeps every declared field what
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
 
+#include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
+
 namespace {
 
 // Every WARN the block logs, by message (the component is not part of the contract).
@@ -1400,8 +1402,9 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory passes the values through an
         CHECK(telescope->get_site_latitude() == -33.87);
         CHECK(telescope->get_site_longitude() == 151.21);
         CHECK(telescope->get_site_elevation() == 42.0);
-        CHECK(telescope->get_aperture_diameter() == 0.2);
-        CHECK(telescope->get_focal_length() == 1.0);
+        // The optics are ASCOM members, NotConnected while disconnected; the seam reads what the factory injected.
+        require_alpaca_error([&] { (void)telescope->get_aperture_diameter(); }, AlpacaError::NotConnected);
+        CHECK(alpacacore::vendor::skywatcher::optics_for_testing(*telescope) == std::pair{0.2, 1.0});
         // A complete saved config logs nothing (rule 4's WARNING is for a missing site only).
         CHECK(warns.messages.empty());
         // The node does not exist: the connect is refused, and by the serial
@@ -1430,8 +1433,8 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory passes the values through an
         auto* b = dynamic_cast<TelescopeDriver*>(untouched.get());
         REQUIRE(a != nullptr);
         REQUIRE(b != nullptr);
-        CHECK(a->get_aperture_diameter() == b->get_aperture_diameter());
-        CHECK(a->get_focal_length() == b->get_focal_length());
+        CHECK(alpacacore::vendor::skywatcher::optics_for_testing(*a) ==
+              alpacacore::vendor::skywatcher::optics_for_testing(*b));
     }
 
     // Rule 9, network: create_skywatcher_telescope with the host; constructs

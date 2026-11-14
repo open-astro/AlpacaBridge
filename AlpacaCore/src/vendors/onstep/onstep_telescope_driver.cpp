@@ -979,7 +979,14 @@ public:
         return served_altaz_locked().altitude_degrees;
     }
 
-    double get_aperture_diameter() const override { return aperture_diameter_m_; }
+    // The optics and SlewSettleTime are the client's values, not the mount's: lock-free and answered on a faulted
+    // link, but NotConnected exactly when Connected reads false, like every other member (ASCOM contract precedence).
+    // The optics setters are not ASCOM members: the catalog and updatedevice (#2057) inject the configured values
+    // with them, connected or not.
+    double get_aperture_diameter() const override {
+        check_connected_lock_free();
+        return aperture_diameter_m_;
+    }
 
     void set_aperture_diameter(double meters) override {
         if (meters < 0.0) {
@@ -989,6 +996,7 @@ public:
     }
 
     double get_aperture_area() const override {
+        check_connected_lock_free();
         // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
         const double d = aperture_diameter_m_;
         return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
@@ -1128,7 +1136,10 @@ public:
         tracking_before_slew_ = false;
     }
 
-    double get_focal_length() const override { return focal_length_m_; }
+    double get_focal_length() const override {
+        check_connected_lock_free();
+        return focal_length_m_;
+    }
 
     void set_focal_length(double meters) override {
         if (meters < 0.0) {
@@ -1341,12 +1352,16 @@ public:
         does_refraction_ = does_refraction;
     }
 
-    int get_slew_settle_time() const override { return slew_settle_time_seconds_; }
+    int get_slew_settle_time() const override {
+        check_connected_lock_free();
+        return slew_settle_time_seconds_;
+    }
 
     void set_slew_settle_time(int seconds) override {
         if (seconds < 0) {
             throw AlpacaException("Slew settle time must be >= 0 seconds", AlpacaError::InvalidValue);
         }
+        check_connected_lock_free();  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_seconds_ = seconds;
     }
 

@@ -313,7 +313,7 @@ TEST_CASE("Celestron Telescope Driver - Telescope Properties", "[celestron][tele
     auto rates = driver->get_tracking_rates();
     CHECK_FALSE(rates.empty());
 
-    CHECK(driver->get_slew_settle_time() >= 0);
+    require_alpaca_error([&] { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Celestron Telescope Driver - ASCOM Error Codes", "[celestron][telescope][unit]") {

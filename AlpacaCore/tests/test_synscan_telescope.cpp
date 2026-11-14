@@ -323,7 +323,7 @@ TEST_CASE("SynScan Telescope Driver - Telescope Properties", "[synscan][telescop
     auto rates = driver->get_tracking_rates();
     CHECK_FALSE(rates.empty());
 
-    CHECK(driver->get_slew_settle_time() >= 0);
+    require_alpaca_error([&] { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][unit]") {
