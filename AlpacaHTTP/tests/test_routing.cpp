@@ -11128,6 +11128,87 @@ int main() {
         EXPECT(json.value("ErrorMessage", "") == "Log archive build already in progress; retry shortly");
     }
 
+    {
+        // case: configureddevices reports ActiveClients and LastClientRequestAgeMs from the client registry (#1764)
+        const ScopedCwd scratch;
+        auto now = std::chrono::steady_clock::now();
+        alpacahttp::Router router;
+        router.set_client_clock_for_test([&now] { return now; });
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9764);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9764";
+        const auto row = [&router] { return listed_entry(router, "CoverCalibrator", 9764); };
+
+        // No client yet: zero active clients and no age.
+        EXPECT(row().value("ActiveClients", -1) == 0);
+        EXPECT(!row().contains("LastClientRequestAgeMs"));
+
+        put_connected(router, base, "1", true);
+        EXPECT(row().value("ActiveClients", -1) == 1);
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 0);
+
+        // Past 60 s the age is reported, still one active client; reading the
+        // listing is not client activity.
+        now += std::chrono::seconds(61);
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 61000);
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 61000);
+        EXPECT(row().value("ActiveClients", -1) == 1);
+
+        // Any request from the client refreshes it; a second client counts too.
+        route_request(router, "GET", base + "/name?ClientID=1");
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 0);
+        now += std::chrono::seconds(5);
+        put_connected(router, base, "2", true);
+        EXPECT(row().value("ActiveClients", -1) == 2);
+        EXPECT(row().value("LastClientRequestAgeMs", -1) == 0);
+
+        // Past the 10 minute window no slot is active and no age is reported;
+        // the device itself stays connected (the window is unchanged).
+        now += std::chrono::minutes(10) + std::chrono::seconds(1);
+        EXPECT(row().value("ActiveClients", -1) == 0);
+        EXPECT(!row().contains("LastClientRequestAgeMs"));
+        EXPECT(stub->get_connected());
+
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9764);
+    }
+
+    {
+        // case: the web UI's own device requests do not refresh client activity (#1764)
+        const ScopedCwd scratch;
+        auto now = std::chrono::steady_clock::now();
+        alpacahttp::Router router;
+        router.set_client_clock_for_test([&now] { return now; });
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9765);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9765";
+        const auto age = [&router] {
+            return listed_entry(router, "CoverCalibrator", 9765).value("LastClientRequestAgeMs", -1);
+        };
+        // A ClientID-less client and the browser share the peer address, so
+        // they share the anonymous slot: only the header tells them apart.
+        const std::string peer = "192.168.1.50";
+        put_connected(router, base, "", true, peer);
+        now += std::chrono::seconds(61);
+
+        const auto from_web_ui = [&] {
+            alpacahttp::Request request;
+            request.set_remote_address(peer);
+            EXPECT(request.parse("GET " + base +
+                                 "/name HTTP/1.1\r\nHost: localhost\r\nX-AlpacaBridge-Client: web-ui\r\n\r\n"));
+            return router.route(request, 1);
+        };
+        EXPECT(from_web_ui().status_code() == 200);
+        EXPECT(age() == 61000);
+
+        route_request(router, "GET", base + "/name", "", peer);
+        EXPECT(age() == 0);
+
+        put_connected(router, base, "", false, peer);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9765);
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

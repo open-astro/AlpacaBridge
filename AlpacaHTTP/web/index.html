@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=34">
+    <link rel="stylesheet" href="/web/style.css?v=35">
 </head>
 <body>
     <div class="container">
@@ -28,14 +28,14 @@
             <span id="server-clock" class="server-clock" title="Live server (SBC) clock in the server's own time zone (the zone its log lines use); shown in this browser's zone if the server does not report one, or UTC if the browser cannot format it">--:--:--</span>
         </header>
 
-        <nav class="tabs">
-            <button class="tab active" onclick="showTab('devices')">Devices</button>
-            <button class="tab" onclick="showTab('configure')">Configure</button>
-            <button class="tab" onclick="showTab('server')">Server Info</button>
+        <nav class="tabs" role="tablist" aria-label="Sections">
+            <button class="tab active" type="button" role="tab" id="devices-tab-button" data-tab="devices" aria-selected="true" aria-controls="devices-tab" onclick="showTab('devices')">Devices</button>
+            <button class="tab" type="button" role="tab" id="configure-tab-button" data-tab="configure" aria-selected="false" aria-controls="configure-tab" tabindex="-1" onclick="showTab('configure')">Configure</button>
+            <button class="tab" type="button" role="tab" id="server-tab-button" data-tab="server" aria-selected="false" aria-controls="server-tab" tabindex="-1" onclick="showTab('server')">Server Info</button>
         </nav>
 
         <!-- Devices Tab -->
-        <div id="devices-tab" class="tab-content active">
+        <div id="devices-tab" class="tab-content active" role="tabpanel" aria-labelledby="devices-tab-button">
             <h2>Configured Devices</h2>
             <div id="devices-list" class="devices-list">
                 <p class="loading">Loading devices...</p>
@@ -43,7 +43,7 @@
         </div>
 
         <!-- Configure Tab -->
-        <div id="configure-tab" class="tab-content">
+        <div id="configure-tab" class="tab-content" role="tabpanel" aria-labelledby="configure-tab-button">
             <h2 id="configure-title">Add Device</h2>
             <form id="device-form" class="device-form">
                 <div class="form-group">
@@ -2005,7 +2005,7 @@
         </div>
 
         <!-- Server Info Tab -->
-        <div id="server-tab" class="tab-content">
+        <div id="server-tab" class="tab-content" role="tabpanel" aria-labelledby="server-tab-button">
             <h2>Server Information</h2>
             <div id="server-info-section" class="section-card collapsed">
                 <div class="section-card-header">
@@ -2186,8 +2186,25 @@
         </div>
     </div>
 
-    <script src="/web/format.js?v=17"></script>
+    <!-- Issue #1764: the page's own dialog and toasts, never a native alert/confirm/prompt. -->
+    <dialog id="ui-dialog" class="ui-dialog" aria-labelledby="ui-dialog-title" aria-describedby="ui-dialog-body">
+        <form method="dialog" class="ui-dialog-form">
+            <h2 id="ui-dialog-title" class="ui-dialog-title"></h2>
+            <p id="ui-dialog-body" class="ui-dialog-body"></p>
+            <label id="ui-dialog-field" class="ui-dialog-field" hidden>
+                <span id="ui-dialog-input-label"></span>
+                <input id="ui-dialog-input" type="text" autocomplete="off">
+            </label>
+            <div class="ui-dialog-actions">
+                <button id="ui-dialog-cancel" class="btn btn-secondary" type="button">Cancel</button>
+                <button id="ui-dialog-confirm" class="btn btn-primary" type="submit" value="confirm">OK</button>
+            </div>
+        </form>
+    </dialog>
+    <div id="toast-region" class="toast-region"></div>
+
+    <script src="/web/format.js?v=18"></script>
     <script src="/web/catalog_schema.js?v=2"></script>
-    <script src="/web/app.js?v=50"></script>
+    <script src="/web/app.js?v=51"></script>
 </body>
 </html>

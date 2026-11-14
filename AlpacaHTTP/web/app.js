@@ -192,27 +192,207 @@ async function requestLogLevelUpdate(desiredLevel) {
     }
 }
 
+// ---- In-page dialog, toasts and inline field errors (issue #1764) ----
+// The page never opens a native browser dialog: a white system dialog ruins
+// dark adaptation at night and blocks the page. confirmDialog(),
+// noticeDialog() and promptDialog() share the #ui-dialog <dialog> in
+// index.html. Esc and Cancel resolve as "no", and every close returns focus to
+// the control that opened the dialog. One dialog at a time: a second call
+// waits for the first to close.
+let uiDialogQueue = Promise.resolve();
+
+function openUiDialog({ title, body, confirmLabel, cancelLabel, danger, input }) {
+    const run = () => new Promise(resolve => {
+        const dialog = document.getElementById('ui-dialog');
+        if (!dialog || typeof dialog.showModal !== 'function') {
+            resolve(null);
+            return;
+        }
+        const trigger = document.activeElement;
+        const confirmBtn = document.getElementById('ui-dialog-confirm');
+        const cancelBtn = document.getElementById('ui-dialog-cancel');
+        const field = document.getElementById('ui-dialog-field');
+        const fieldInput = document.getElementById('ui-dialog-input');
+        document.getElementById('ui-dialog-title').textContent = title || '';
+        document.getElementById('ui-dialog-body').textContent = body || '';
+        confirmBtn.textContent = confirmLabel || 'OK';
+        confirmBtn.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
+        cancelBtn.hidden = cancelLabel === null;
+        cancelBtn.textContent = cancelLabel || 'Cancel';
+        field.hidden = !input;
+        fieldInput.value = '';
+        if (input) {
+            document.getElementById('ui-dialog-input-label').textContent = input.label || '';
+            fieldInput.type = input.type || 'text';
+        }
+        const onCancel = () => dialog.close('');
+        const onClose = () => {
+            dialog.removeEventListener('close', onClose);
+            cancelBtn.removeEventListener('click', onCancel);
+            const confirmed = dialog.returnValue === 'confirm';
+            const value = input ? fieldInput.value : null;
+            fieldInput.value = '';
+            if (trigger && typeof trigger.focus === 'function' && trigger.isConnected) {
+                trigger.focus();
+            }
+            resolve(confirmed ? (input ? value : true) : (input ? null : false));
+        };
+        cancelBtn.addEventListener('click', onCancel);
+        dialog.addEventListener('close', onClose);
+        dialog.returnValue = '';
+        dialog.showModal();
+        // A destructive action starts on Cancel, so a stray Enter cannot confirm it.
+        (input ? fieldInput : (danger && cancelLabel !== null ? cancelBtn : confirmBtn)).focus();
+    });
+    const result = uiDialogQueue.then(run);
+    uiDialogQueue = result.catch(() => null);
+    return result;
+}
+
+// Resolves true on Confirm, false on Cancel or Esc.
+async function confirmDialog(options) {
+    return (await openUiDialog(Object.assign({ confirmLabel: 'Confirm', cancelLabel: 'Cancel' }, options))) === true;
+}
+
+// A message that needs reading before going on; resolves when it is closed.
+async function noticeDialog(title, body) {
+    await openUiDialog({ title, body, confirmLabel: 'OK', cancelLabel: null });
+}
+
+// Resolves to the typed text, or null on Cancel or Esc.
+function promptDialog(options) {
+    return openUiDialog(Object.assign({ confirmLabel: 'OK', cancelLabel: 'Cancel' }, options));
+}
+
+// A short result line at the bottom of the screen. Success toasts go after
+// TOAST_MS; an error toast stays until dismissed, so it cannot be missed.
+const TOAST_MS = 5000;
+
+function showToast(message, kind) {
+    const region = document.getElementById('toast-region');
+    if (!region) {
+        return;
+    }
+    const isError = kind === 'error';
+    const toast = document.createElement('div');
+    toast.className = 'toast' + (isError ? ' toast-error' : '');
+    toast.setAttribute('role', isError ? 'alert' : 'status');
+    const text = document.createElement('span');
+    text.textContent = message;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.textContent = '×';
+    close.addEventListener('click', () => toast.remove());
+    toast.append(text, close);
+    region.appendChild(toast);
+    if (!isError) {
+        setTimeout(() => toast.remove(), TOAST_MS);
+    }
+}
+
+// A form validation message shown under its field. `field` is an element, an
+// element id or a #device-form control name; the field is focused and marked
+// aria-invalid. The message clears when the field changes and on the next
+// submit or form reset.
+function showFieldError(field, message) {
+    const form = document.getElementById('device-form');
+    let el = field;
+    if (typeof field === 'string') {
+        el = document.getElementById(field) || (form ? form.elements.namedItem(field) : null);
+    }
+    if (el && !el.tagName && el.length) {
+        el = el[0];  // a RadioNodeList
+    }
+    if (!el || !el.parentNode) {
+        const messageDiv = document.getElementById('form-message');
+        if (messageDiv) {
+            messageDiv.style.display = 'block';
+            messageDiv.className = 'message error';
+            messageDiv.textContent = message;
+        }
+        return;
+    }
+    clearFieldError(el);
+    const note = document.createElement('p');
+    note.className = 'field-error';
+    note.id = (el.id || el.name || 'field') + '-error';
+    note.setAttribute('role', 'alert');
+    note.textContent = message;
+    el.insertAdjacentElement('afterend', note);
+    el.dataset.fieldErrorId = note.id;
+    el.dataset.describedByBefore = el.getAttribute('aria-describedby') || '';
+    el.setAttribute('aria-invalid', 'true');
+    el.setAttribute('aria-describedby', (el.dataset.describedByBefore + ' ' + note.id).trim());
+    const clear = () => clearFieldError(el);
+    el.addEventListener('input', clear, { once: true });
+    el.addEventListener('change', clear, { once: true });
+    el.focus();
+}
+
+function clearFieldError(el) {
+    if (!el || !el.dataset || !el.dataset.fieldErrorId) {
+        return;
+    }
+    const note = document.getElementById(el.dataset.fieldErrorId);
+    if (note) {
+        note.remove();
+    }
+    if (el.dataset.describedByBefore) {
+        el.setAttribute('aria-describedby', el.dataset.describedByBefore);
+    } else {
+        el.removeAttribute('aria-describedby');
+    }
+    el.removeAttribute('aria-invalid');
+    delete el.dataset.fieldErrorId;
+    delete el.dataset.describedByBefore;
+}
+
+function clearFieldErrors(form) {
+    if (!form) {
+        return;
+    }
+    form.querySelectorAll('[data-field-error-id]').forEach(clearFieldError);
+}
+
 // Tab management
+// The tab bar is a WAI-ARIA tablist (issue #1764): aria-selected marks the
+// open tab, only it is in the Tab order, and the arrow keys, Home and End move
+// between tabs (nextTabIndex() in format.js).
+function initTabs() {
+    const tabs = Array.from(document.querySelectorAll('.tabs [role="tab"]'));
+    tabs.forEach((tab, index) => {
+        tab.addEventListener('keydown', event => {
+            const next = nextTabIndex(index, event.key, tabs.length);
+            if (next === null) {
+                return;
+            }
+            event.preventDefault();
+            showTab(tabs[next].dataset.tab);
+            tabs[next].focus();
+        });
+    });
+}
+
 function showTab(tabName, options) {
     // Hide all tabs
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.remove('active');
     });
-    document.querySelectorAll('.tab').forEach(btn => {
-        btn.classList.remove('active');
-    });
-
     // Show selected tab. Mark the matching tab button active by name rather
     // than relying on the global `event`, so showTab works when called
     // programmatically (e.g. after a successful add, or from an edit flow).
+    // Matched on the exact data-tab value, so a future tab whose name is a
+    // prefix of another ('configure' vs 'configure-advanced') cannot activate
+    // the wrong button.
     document.getElementById(tabName + '-tab').classList.add('active');
-    // Match the full showTab('<name>') call, not just the bare name, so a future
-    // tab whose name is a prefix of another (e.g. 'configure' vs
-    // 'configure-advanced') can't activate the wrong button via substring match.
-    const tabButton = document.querySelector('.tab[onclick*="showTab(\'' + tabName + '\')"]');
-    if (tabButton) {
-        tabButton.classList.add('active');
-    }
+    document.querySelectorAll('.tab').forEach(btn => {
+        const selected = btn.dataset.tab === tabName;
+        btn.classList.toggle('active', selected);
+        btn.setAttribute('aria-selected', selected ? 'true' : 'false');
+        btn.tabIndex = selected ? 0 : -1;
+    });
 
     // Opening the Configure tab fresh starts a clean "Add Device" form so a
     // previously edited/half-filled device's settings never leak in. Edit
@@ -247,6 +427,7 @@ function resetDeviceForm() {
         return;
     }
     form.reset();
+    clearFieldErrors(form);
     // form.reset() already fires the form's 'reset' listener (which calls
     // setEditMode(false)); call it explicitly too so this helper is
     // self-contained and doesn't silently rely on that listener existing.
@@ -606,10 +787,11 @@ async function loadDevices() {
 
         if (devices.length === 0) {
             currentDevices = [];
+            // Issue #1764: the empty state is a control, not directions.
             devicesList.innerHTML = `
                 <div class="empty-state">
                     <p>No devices configured</p>
-                    <p>Go to the "Configure" tab to add a device</p>
+                    <button type="button" class="btn btn-primary empty-state-add" onclick="showTab('configure')">Add device</button>
                 </div>
             `;
             updateAutoNumbering();
@@ -770,7 +952,9 @@ async function calibrationAction(deviceNumber, actionName) {
     calibrationTransactionId += 1;
     const response = await fetch(API_BASE + '/api/v1/focuser/' + encodeURIComponent(deviceNumber) + '/action', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        // The web UI's own request: not client activity for the status dot (#1764).
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded',
+                   [WEB_UI_CLIENT_HEADER.name]: WEB_UI_CLIENT_HEADER.value },
         body: calibrationActionBody(actionName, calibrationTransactionId),
     });
     if (!response.ok) {
@@ -853,9 +1037,12 @@ function initCalibrationControls(box) {
         }
     };
 
-    startBtn.addEventListener('click', () => {
+    startBtn.addEventListener('click', async () => {
         if (!mayStartCalibration(state)) return;
-        if (!window.confirm(calibrationConfirmText())) return;
+        if (!(await confirmDialog({ title: 'Calibrate the focus motor?', body: calibrationConfirmText(),
+                                     confirmLabel: 'Calibrate' }))) return;
+        // The status can change while the dialog is open.
+        if (!mayStartCalibration(state)) return;
         act('Calibrate');
     });
     abortBtn.addEventListener('click', async () => {
@@ -1041,6 +1228,7 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
             return selection;
         },
         missingMessage: 'Choose the camera this ' + controls + ' is on.',
+        field: select,
     };
 }
 
@@ -1177,6 +1365,7 @@ function createZwoCameraPicker() {
             return selection;
         },
         missingMessage: 'Choose the camera this entry is for, or enter its index by hand.',
+        field: select,
     };
 }
 
@@ -1560,11 +1749,13 @@ function refreshDevices() {
 async function deleteDevice(deviceType, deviceNumber) {
     const normalizedType = normalizeDeviceType(deviceType);
     if (!normalizedType) {
-        alert('Error deleting device: Invalid device type');
+        showToast('Error deleting device: Invalid device type', 'error');
         return;
     }
 
-    if (!confirm(`Are you sure you want to delete ${deviceType} device #${deviceNumber}?`)) {
+    if (!(await confirmDialog({ title: 'Delete device?',
+                                 body: `Delete ${deviceType} device #${deviceNumber}? Its saved settings are removed.`,
+                                 confirmLabel: 'Delete', danger: true }))) {
         return;
     }
     
@@ -1583,13 +1774,13 @@ async function deleteDevice(deviceType, deviceNumber) {
         const result = await response.json();
         
         if (result.ErrorNumber === 0) {
-            alert('Device deleted successfully!');
+            showToast('Device deleted.');
             loadDevices();
         } else {
-            alert('Error deleting device: ' + result.ErrorMessage);
+            showToast('Error deleting device: ' + result.ErrorMessage, 'error');
         }
     } catch (error) {
-        alert('Error deleting device: ' + error.message);
+        showToast('Error deleting device: ' + error.message, 'error');
     }
 }
 
@@ -1668,9 +1859,10 @@ async function loadServerInfo() {
                 <div class="server-info-row">
                     <span class="info-label">Host names</span>
                     <label class="info-value" title="Refuse requests whose Host header is not an allowed name, so a web page cannot reach this server through a rebound DNS name. Off: any Host name is served.">
-                        <input id="server-host-check-toggle" type="checkbox" ${hostCheck.enabled ? 'checked' : ''}>
+                        <input id="server-host-check-toggle" type="checkbox" aria-describedby="server-host-check-note" ${hostCheck.enabled ? 'checked' : ''}>
                         Restrict Host names (DNS-rebinding protection)
                     </label>
+                    <span id="server-host-check-note" class="info-note">${escapeHtml(HOST_CHECK_LOCKOUT_NOTE)}</span>
                 </div>
                 <div class="server-info-row">
                     <span class="info-label">Allowed host names</span>
@@ -2309,8 +2501,8 @@ async function updateChannelChanged() {
         return;
     }
     const notice = channelDowngradeNotice(choice, installed);
-    if (!confirm('Switch the update channel to ' + (choice === 'beta' ? 'Beta' : 'Stable') + '?' +
-                 (notice ? '\n\n' + notice : ''))) {
+    if (!(await confirmDialog({ title: 'Switch the update channel to ' + (choice === 'beta' ? 'Beta' : 'Stable') + '?',
+                                 body: notice || '', confirmLabel: 'Switch' }))) {
         select.value = choice === 'beta' ? 'stable' : 'beta';
         return;
     }
@@ -2392,9 +2584,10 @@ async function updateInstallClicked() {
     }
     const latest = status.LatestVersion;
     const installed = status.InstalledVersion;
-    if (!confirm('Install AlpacaBridge ' + latest + ' (currently ' + installed + ')?\n\n' +
-                 'The server restarts when the upgrade finishes and every connected client is ' +
-                 'disconnected for a few seconds. Do not start this during an exposure or a slew.')) {
+    if (!(await confirmDialog({ title: 'Install AlpacaBridge ' + latest + ' (currently ' + installed + ')?',
+                                 body: 'The server restarts when the upgrade finishes and every connected client is ' +
+                                     'disconnected for a few seconds. Do not start this during an exposure or a slew.',
+                                 confirmLabel: 'Install' }))) {
         return;
     }
     const btn = updateEl('update-install');
@@ -2467,13 +2660,14 @@ async function updatePollTick() {
 // is assumed to have correct time (its OS NTP), which makes it a simple
 // time source for internet-less SBCs that cannot reach an NTP server.
 async function syncTime() {
-    if (!confirm('Sync the server\'s clock to this computer\'s time?\n\nThis is useful when the server has no internet (no NTP) and its clock drifts or resets after a reboot.')) {
+    if (!(await confirmDialog({ title: 'Sync the server\'s clock to this computer\'s time?',
+                                 body: 'This is useful when the server has no internet (no NTP) and its clock drifts or resets after a reboot.',
+                                 confirmLabel: 'Sync Time' }))) {
         return;
     }
 
-    // Capture the epoch AFTER the user confirms - confirm() blocks, so an
-    // epoch taken before it would be stale by however long the dialog was
-    // open.
+    // Capture the epoch AFTER the user confirms: an epoch taken before the
+    // dialog would be stale by however long it was open.
     const epoch = Math.floor(Date.now() / 1000);
     const t0 = Date.now();
 
@@ -2497,13 +2691,13 @@ async function syncTime() {
             const roundTripMs = Date.now() - t0;
             const serverTime = new Date((result.Value * 1000) + Math.floor(roundTripMs / 2));
             refreshServerClockOffset();
-            alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
-            refreshClockRow();  // the source is now "client" (open-astro#292); that row only, after the dialog
+            showToast('Time synced. Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
+            refreshClockRow();  // the source is now "client" (open-astro#292); that row only
         } else {
-            alert('Error syncing time: ' + (result ? (result.ErrorMessage || 'invalid time value') : 'unknown error'));
+            showToast('Error syncing time: ' + (result ? (result.ErrorMessage || 'invalid time value') : 'unknown error'), 'error');
         }
     } catch (e) {
-        alert('Error syncing time: ' + e.message);
+        showToast('Error syncing time: ' + e.message, 'error');
     }
 }
 
@@ -2590,7 +2784,9 @@ function updateServerClock() {
         return;
     }
     const serverNow = new Date(Date.now() + serverClockOffsetMs);
-    el.textContent = formatServerClock(serverNow, serverTimeZone);
+    // Issue #1764: no seconds on a narrow screen, so the clock stays on the title row.
+    const narrow = typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 480px)').matches;
+    el.textContent = headerClockText(formatServerClock(serverNow, serverTimeZone), narrow);
     // The GET returns whole seconds, so up to ±1 s of the offset is
     // quantization, not drift; only flag beyond 2 s.
     el.classList.toggle('drift', Math.abs(serverClockOffsetMs) > 2000);
@@ -2607,12 +2803,15 @@ function showServerClockError(event) {
         return;
     }
     event.preventDefault();
-    alert(serverClockErrorText + '\n\nTo set it from this device, use Sync Time at the bottom of the page.');
+    noticeDialog('Server clock error',
+                 serverClockErrorText + '\n\nTo set it from this device, use Sync Time at the bottom of the page.');
 }
 
 // Shutdown server
 async function shutdownServer() {
-    if (!confirm('Are you sure you want to shutdown the server? This will stop all services.')) {
+    if (!(await confirmDialog({ title: 'Shut down the server?',
+                                 body: 'This stops all services. Every connected client loses its devices.',
+                                 confirmLabel: 'Shut Down', danger: true }))) {
         return;
     }
     
@@ -2629,22 +2828,24 @@ async function shutdownServer() {
         }
 
         if (!result || result.ErrorNumber === 0) {
-            alert('Server shutdown initiated. The server will stop shortly.');
+            showToast('Server shutdown started. The server will stop shortly.');
             // Optionally redirect or show a message
             setTimeout(() => {
                 document.body.innerHTML = '<div style="text-align: center; padding: 50px;"><h1>Server Shutdown</h1><p>The server has been shut down.</p></div>';
             }, 1000);
         } else {
-            alert('Error shutting down server: ' + result.ErrorMessage);
+            showToast('Error shutting down server: ' + result.ErrorMessage, 'error');
         }
     } catch (error) {
-        alert('Shutdown request sent. If the server does not stop, check the server logs. Error: ' + error.message);
+        showToast('Shutdown request sent. If the server does not stop, check the server logs. Error: ' + error.message, 'error');
     }
 }
 
 // Restart server
 async function restartServer() {
-    if (!confirm('Are you sure you want to restart the server? This will briefly interrupt services.')) {
+    if (!(await confirmDialog({ title: 'Restart the server?',
+                                 body: 'This briefly interrupts services. Connected clients lose their devices for a few seconds.',
+                                 confirmLabel: 'Restart', danger: true }))) {
         return;
     }
 
@@ -2661,15 +2862,15 @@ async function restartServer() {
         }
 
         if (!result || result.ErrorNumber === 0) {
-            alert('Server restart initiated. The server will restart shortly.');
+            showToast('Server restart started. The page reloads in a few seconds.');
             setTimeout(() => {
                 window.location.reload();
             }, 3000);
         } else {
-            alert('Error restarting server: ' + result.ErrorMessage);
+            showToast('Error restarting server: ' + result.ErrorMessage, 'error');
         }
     } catch (error) {
-        alert('Restart request sent. If the server does not restart, check the server logs. Error: ' + error.message);
+        showToast('Restart request sent. If the server does not restart, check the server logs. Error: ' + error.message, 'error');
     }
 }
 
@@ -2961,7 +3162,8 @@ async function downloadLogFile(filename) {
 }
 
 async function deleteAllLogFiles() {
-    if (!confirm('Delete ALL stored log files? This cannot be undone.')) {
+    if (!(await confirmDialog({ title: 'Delete all log files?', body: 'Every stored log file is deleted. This cannot be undone.',
+                                 confirmLabel: 'Delete All', danger: true }))) {
         return;
     }
     setLogFilesStatus('Deleting all log files…');
@@ -2985,7 +3187,8 @@ async function deleteAllLogFiles() {
 }
 
 async function deleteLogFile(filename) {
-    if (!confirm(`Delete log file ${filename}? This cannot be undone.`)) {
+    if (!(await confirmDialog({ title: 'Delete log file?', body: `Delete ${filename}? This cannot be undone.`,
+                                 confirmLabel: 'Delete', danger: true }))) {
         return;
     }
     setLogFilesStatus(`Deleting ${filename}…`);
@@ -3631,8 +3834,9 @@ function opticsMetersToMm(value) {
 }
 
 // Reads the optional optics form fields (in mm) and stores them on deviceData
-// in metres. Returns false, after alerting, when a value is small enough that
-// the user almost certainly typed metres into the mm field.
+// in metres. Returns false, after showing a field error, when a value is
+// negative or small enough that the user almost certainly typed metres into
+// the mm field.
 function applyOpticsMm(formData, deviceData, apertureField, focalField) {
     // Per-field "typed metres into the mm field" thresholds, set below any
     // real optic but above any metres-typo: camera lenses on trackers go down
@@ -3651,11 +3855,11 @@ function applyOpticsMm(formData, deviceData, apertureField, focalField) {
             continue;
         }
         if (mm < 0) {
-            alert(`${label} cannot be negative.`);
+            showFieldError(formName, `${label} cannot be negative.`);
             return false;
         }
         if (mm < minMm) {
-            alert(`${label} of ${mm} mm looks too small - this field is in millimetres ` +
+            showFieldError(formName, `${label} of ${mm} mm looks too small. This field is in millimetres ` +
                 `(e.g. a 480 mm focal length is entered as 480). Please re-enter the value in mm.`);
             return false;
         }
@@ -4130,7 +4334,8 @@ function updateZwoConfigFields() {
 
 document.getElementById('device-form').addEventListener('submit', async function(e) {
     e.preventDefault();
-    
+    clearFieldErrors(this);
+
     const formData = new FormData(this);
     const deviceData = {
         deviceType: formData.get('deviceType'),
@@ -4256,7 +4461,8 @@ document.getElementById('device-form').addEventListener('submit', async function
         const skywatcherSiteLatitude = readOptionalNumber(formData, 'skywatcherSiteLatitude');
         const skywatcherSiteLongitude = readOptionalNumber(formData, 'skywatcherSiteLongitude');
         if (skywatcherSiteLatitude === null || skywatcherSiteLongitude === null) {
-            alert('Site latitude and longitude are required for the Sky-Watcher direct driver. ' +
+            showFieldError(skywatcherSiteLatitude === null ? 'skywatcherSiteLatitude' : 'skywatcherSiteLongitude',
+                'Site latitude and longitude are required for the Sky-Watcher direct driver. ' +
                 'The mount stores no site of its own, and tracking direction, guide sign and ' +
                 'pier side all depend on which hemisphere it is in.');
             return;
@@ -4295,7 +4501,7 @@ document.getElementById('device-form').addEventListener('submit', async function
         // Focus motor's own USB port: fixed 9600 baud, explicit port only (issue #896).
         deviceData.portPath = (formData.get('celestronFocuserPortPath') || '').trim();
         if (!deviceData.portPath) {
-            alert('A serial port is required for the Celestron focus motor.');
+            showFieldError('celestronFocuserPortPath', 'A serial port is required for the Celestron focus motor.');
             return;
         }
     } else if (deviceData.vendor === 'celestron') {
@@ -4317,7 +4523,8 @@ document.getElementById('device-form').addEventListener('submit', async function
             const latitude = readOptionalNumber(formData, 'celestronSiteLatitude');
             const longitude = readOptionalNumber(formData, 'celestronSiteLongitude');
             if (latitude === null || longitude === null) {
-                alert('Site latitude and longitude are required for direct CGX USB. Enter both coordinates to identify the hemisphere and calculate pointing.');
+                showFieldError(latitude === null ? 'celestronSiteLatitude' : 'celestronSiteLongitude',
+                    'Site latitude and longitude are required for direct CGX USB. Enter both coordinates to identify the hemisphere and calculate pointing.');
                 return;
             }
             deviceData.siteLatitude = latitude;
@@ -4393,10 +4600,13 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (!Number.isNaN(pwmFreq)) {
                     deviceData.pwmFrequencyHz = pwmFreq;
                 }
-                const duplicateGpio = asiairDuplicateGpioError(
-                    [0, 1, 2, 3].map((i) => Number.parseInt(formData.get('asiairPortGpio' + i), 10)));
+                const asiairGpios = [0, 1, 2, 3].map((i) => Number.parseInt(formData.get('asiairPortGpio' + i), 10));
+                const duplicateGpio = asiairDuplicateGpioError(asiairGpios);
                 if (duplicateGpio) {
-                    alert(duplicateGpio);
+                    // Shown at the later of the two ports, the one that repeats a line.
+                    const repeated = asiairGpios.findIndex(
+                        (gpio, i) => !Number.isNaN(gpio) && asiairGpios.indexOf(gpio) !== i);
+                    showFieldError('asiairPortGpio' + Math.max(repeated, 0), duplicateGpio);
                     return;
                 }
                 const ports = [];
@@ -4454,7 +4664,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             if (normalizedType === 'camera') {
                 const zwoCamera = zwoCameraPicker.read();
                 if (!zwoCamera) {
-                    alert(zwoCameraPicker.missingMessage);
+                    showFieldError(zwoCameraPicker.field, zwoCameraPicker.missingMessage);
                     return;
                 }
                 if (zwoCamera.manual) {
@@ -4469,14 +4679,14 @@ document.getElementById('device-form').addEventListener('submit', async function
                     const bandwidth = zwoUsbBandwidth(formData.get('zwoUsbBandwidth'));
                     if (bandwidth !== undefined) deviceData.usbBandwidth = bandwidth;
                 } catch (error) {
-                    alert(error.message);
+                    showFieldError('zwoUsbBandwidth', error.message);
                     return;
                 }
             }
             if (normalizedType === 'switch' && (formData.get('switchType') || 'dewheater') === 'dewheater') {
                 const dewCamera = zwoDewHeaterPicker.read();
                 if (!dewCamera) {
-                    alert(zwoDewHeaterPicker.missingMessage);
+                    showFieldError(zwoDewHeaterPicker.field, zwoDewHeaterPicker.missingMessage);
                     return;
                 }
                 Object.assign(deviceData, dewCamera);
@@ -4637,7 +4847,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             // ToupTek lists no serial, so this is the index.
             const thermalCamera = touptekThermalPicker.read();
             if (!thermalCamera) {
-                alert(touptekThermalPicker.missingMessage);
+                showFieldError(touptekThermalPicker.field, touptekThermalPicker.missingMessage);
                 return;
             }
             deviceData.cameraIndex = thermalCamera.cameraIndex;
@@ -4707,7 +4917,7 @@ document.getElementById('device-form').addEventListener('submit', async function
         } else if (normalizeDeviceType(deviceData.deviceType) === 'switch') {
             const thermalCamera = playerOneThermalPicker.read();
             if (!thermalCamera) {
-                alert(playerOneThermalPicker.missingMessage);
+                showFieldError(playerOneThermalPicker.field, playerOneThermalPicker.missingMessage);
                 return;
             }
             Object.assign(deviceData, thermalCamera);
@@ -5106,6 +5316,7 @@ function escapeHtml(text) {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    initTabs();
     ensureCatalog();
     loadDevices();
     startDeviceStatusPoll();
@@ -5427,10 +5638,11 @@ async function wifiJoinNew(network, displayCount) {
     const label = wifiSsidLabel(network, displayCount);
     let passphrase = '';
     if (network.Security !== 'Open') {
-        passphrase = prompt('Password for "' + label + '":');
+        passphrase = await promptDialog({ title: 'Join "' + label + '"',
+                                          input: { label: 'Password', type: 'password' }, confirmLabel: 'Join' });
         if (passphrase === null) return;
     }
-    if (!wifiConfirmSwitch('join "' + label + '"')) return;
+    if (!(await wifiConfirmSwitch('join "' + label + '"'))) return;
     try {
         await wifiApi('/profiles', 'PUT', Object.assign(
             network.SsidHex ? { SsidHex: network.SsidHex } : { Ssid: network.Ssid },
@@ -5447,7 +5659,7 @@ async function wifiJoinNew(network, displayCount) {
 
 async function wifiConnectSaved(profile, displayCount) {
     const label = wifiSsidLabel(profile, displayCount);
-    if (!wifiConfirmSwitch('switch to "' + label + '"')) return;
+    if (!(await wifiConfirmSwitch('switch to "' + label + '"'))) return;
     try {
         await wifiApi('/connect', 'PUT', { Uuid: profile.Uuid });
         wifiMessage('Connecting to ' + label + '...');
@@ -5461,7 +5673,9 @@ async function wifiForget(profile, displayCount) {
     const label = wifiSsidLabel(profile, displayCount);
     const connectedNow = wifiClientConnected(wifiState.status || {}) &&
         wifiSsidKey(wifiState.status || {}) === wifiSsidKey(profile);
-    if (!confirm('Forget "' + label + '"?' + (connectedNow ? '\n\nThe device is connected to this network right now and will disconnect from it.' : ''))) return;
+    if (!(await confirmDialog({ title: 'Forget "' + label + '"?',
+                                 body: connectedNow ? 'The device is connected to this network right now and will disconnect from it.' : '',
+                                 confirmLabel: 'Forget', danger: true }))) return;
     try {
         await wifiApi('/profiles/' + encodeURIComponent(profile.Uuid), 'DELETE');
         wifiState.profiles = await wifiApi('/profiles');
@@ -5472,7 +5686,8 @@ async function wifiForget(profile, displayCount) {
 }
 
 // One shared "this may drop your connection" warning, only when it can.
-function wifiConfirmSwitch(action) {
+// Resolves true to go ahead (the in-page dialog, issue #1764).
+async function wifiConfirmSwitch(action) {
     const status = wifiState.status || {};
     // Dual-interface boards keep the hotspot up while the client interface
     // switches, so skip the warning only when the browser is provably ON the
@@ -5481,7 +5696,9 @@ function wifiConfirmSwitch(action) {
     if (status.DeviceCount > 1 && status.ApActive && location.hostname === '172.24.1.1') return true;
     const onWifi = status.Ssid && location.hostname !== 'localhost';
     if (!onWifi) return true;
-    return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection while it switches.');
+    return confirmDialog({ title: 'Change the WiFi connection?',
+                           body: 'The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection while it switches.',
+                           confirmLabel: 'Continue' });
 }
 
 // Warning for changes that take the hotspot or the radio away (hotspot off,
@@ -5489,11 +5706,13 @@ function wifiConfirmSwitch(action) {
 // on-the-hotspot skip: a browser on the hotspot address is exactly the one
 // that loses the page. Ask whenever the page is not local and the hotspot is
 // up or the client is associated, whatever the interface count or Ssid.
-function wifiConfirmDrop(action) {
+async function wifiConfirmDrop(action) {
     const status = wifiState.status || {};
     if (location.hostname === 'localhost') return true;
     if (!status.ApActive && !status.Ssid) return true;
-    return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection.');
+    return confirmDialog({ title: 'Drop the WiFi connection?',
+                           body: 'The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection.',
+                           confirmLabel: 'Continue' });
 }
 
 // 5 GHz needs a regulatory country: under the world domain most 5 GHz
@@ -5504,8 +5723,9 @@ function wifiCountryIsSet() {
     return !!(sel && sel.value);
 }
 
+// Shown inline in the WiFi card next to the country selector (issue #1764).
 function wifiRequireCountryFor5GHz() {
-    alert('Set the regulatory country before using 5 GHz.\n\nWithout it, most 5 GHz channels are blocked and the hotspot may not be visible to your devices.');
+    wifiMessage('Set the regulatory country before using 5 GHz. Without it, most 5 GHz channels are blocked and the hotspot may not be visible to your devices.', true);
     const sel = wifiEl('wifi-country');
     if (sel) sel.focus();
 }
@@ -5553,10 +5773,10 @@ async function wifiApplyAp(enabled, fromToggle, revert) {
         return;
     }
     if (fromToggle) {
-        const ok = enabled ? wifiConfirmSwitch('start the hotspot "' + ssid + '"')
-            : wifiConfirmDrop('turn off the hotspot');
+        const ok = enabled ? await wifiConfirmSwitch('start the hotspot "' + ssid + '"')
+            : await wifiConfirmDrop('turn off the hotspot');
         if (!ok) { undo(); return; }
-    } else if (enabled && !wifiConfirmDrop('restart the hotspot "' + ssid + '" with the new settings')) {
+    } else if (enabled && !(await wifiConfirmDrop('restart the hotspot "' + ssid + '" with the new settings'))) {
         undo();
         return;
     }
@@ -5607,7 +5827,7 @@ function wifiInit() {
     if (radioToggle) {
         radioToggle.addEventListener('change', async () => {
             // Turning the radio on cannot drop a connection; turning it off can.
-            if (!radioToggle.checked && !wifiConfirmDrop('turn WiFi off')) {
+            if (!radioToggle.checked && !(await wifiConfirmDrop('turn WiFi off'))) {
                 radioToggle.checked = true;
                 return;
             }

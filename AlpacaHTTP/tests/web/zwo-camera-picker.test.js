@@ -186,7 +186,7 @@ test('the by-hand ZWO camera index is not auto-numbered from the saved cameras',
 
 // The device form's submit handler for a new ZWO camera whose picker returns `pick`,
 // with the hidden index and ID boxes holding `boxes`. Resolves to the posted bodies
-// and the alerts shown.
+// and the field errors shown (issue #1764: inline, never an alert).
 async function submitZwoCamera(pick, boxes) {
     const fields = { deviceType: 'camera', deviceNumber: '2', vendor: 'zwo', ...boxes };
     class FormData {
@@ -194,7 +194,7 @@ async function submitZwoCamera(pick, boxes) {
         has(name) { return name in fields; }
     }
     const posts = [];
-    const alerts = [];
+    const fieldErrors = [];
     const fetch = async (url, init) => {
         posts.push({ url, body: JSON.parse(init.body) });
         return { json: async () => ({ ErrorNumber: 0, Value: 'Device registered successfully' }) };
@@ -207,12 +207,13 @@ async function submitZwoCamera(pick, boxes) {
     const helpers = ['normalizeDeviceType', 'readOptionalNumber', 'zwoCameraIdentityFields'].map(wholeFunction).join('');
     const scope = {
         ...format, document: { getElementById: id => elements[id] ?? null }, FormData, fetch, API_BASE: '',
-        alert: text => alerts.push(text), resetDeviceForm: () => {}, setTimeout: () => {}, loadDevices: () => {},
+        showFieldError: (field, text) => fieldErrors.push(text), clearFieldErrors: () => {},
+        resetDeviceForm: () => {}, setTimeout: () => {}, loadDevices: () => {},
         showTab: () => {}, zwoCameraPicker: { read: () => pick, missingMessage: 'pick one' },
     };
     const submit = new Function('scope', `with (scope) { ${helpers} return (${handler}); }`)(scope);
     await submit.call({ dataset: { editing: 'false' } }, { preventDefault: () => {} });
-    return { posts, alerts };
+    return { posts, fieldErrors };
 }
 
 test('a picked ZWO camera replaces the index and ID boxes in the saved entry', async () => {
@@ -234,7 +235,7 @@ test('the by-hand ZWO camera choice sends the index and ID boxes, and no pick re
     assert.strictEqual(manual.cameraId, 4);
     assert.ok(!('serialNumber' in manual));
     const refused = await submitZwoCamera(null, { cameraIndex: '0' });
-    assert.deepStrictEqual(refused.alerts, ['pick one']);
+    assert.deepStrictEqual(refused.fieldErrors, ['pick one']);
     assert.strictEqual(refused.posts.length, 0);
 });
 
