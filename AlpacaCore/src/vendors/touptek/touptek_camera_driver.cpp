@@ -116,7 +116,9 @@ std::optional<std::string> read_sdk_version(ToupTekSDK& sdk) {
 
 } // namespace
 
-class ToupTekCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
+// final: the destructor's #1995 test drives a StartExposure while ~ToupTekCameraDriver
+// runs, which is well defined only while this is the most-derived class.
+class ToupTekCameraDriver final : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
@@ -420,8 +422,9 @@ public:
             }
 
             {
-                // Its own leaf lock, never taken with another: a configureddevices
-                // poll does not wait behind mutex_ (driver lifecycle instructions).
+                // Its own independent leaf lock, taken with only transition_mutex_
+                // held and never nested under mutex_: a configureddevices poll does
+                // not wait behind mutex_ (driver lifecycle instructions).
                 // Published before Connected goes true below, so no poll sees a
                 // connected camera without its Firmware row.
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -1566,9 +1569,10 @@ private:
     bool camera_info_valid_;
     std::string serial_number_;
     // The web UI Firmware string (compose_firmware), published by the connect
-    // just before Connected goes true and cleared by the disconnect before the close. Its own leaf mutex,
-    // taken with no other lock held, so get_device_firmware() never waits on
-    // mutex_ or the SDK (driver lifecycle instructions, decision 0016 item 4).
+    // just before Connected goes true and cleared by the disconnect before the close. Its own
+    // independent leaf mutex: the connect and disconnect take it with only transition_mutex_
+    // held, never nested under mutex_, so get_device_firmware() never waits on mutex_ or the
+    // SDK (driver lifecycle instructions, decision 0016 item 4).
     mutable std::mutex firmware_mutex_;
     std::string firmware_;
     const std::optional<std::string> sdk_version_;  // read at construction; fixed
