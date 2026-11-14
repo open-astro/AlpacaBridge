@@ -670,6 +670,8 @@ public:
             // While a restore is owed (ra_stop_unconfirmed_), the cache is the mode the next RA stop sends, and
             // refresh_tracking_mode_locked() keeps it. A write that failed is still the client's latest request: the
             // next stop sends this mode, so a failed Tracking=false cannot leave an older mode to turn tracking on.
+            // The turn is already passed on here, but mutex_ has been held since without_lock() re-took it, so an
+            // owner queued behind this write reads the new mode at its turn. Keep mutex_ held until this write.
             if (ra_stop_unconfirmed_) {
                 set_tracking_mode_cached_locked(mode);
             }
