@@ -32,7 +32,8 @@ namespace alpacacore::test {
  * A park or slew is "in flight" until the driver has polled for it
  * `park_polls_needed` / `slew_polls_needed` times; a poll count of zero makes
  * the first poll report completion. fail_slew_polls > 0 makes that many
- * IsSlewComplete polls answer a TheSkyX error first.
+ * IsSlewComplete polls answer a TheSkyX error first. `slew_complete_queries` counts every IsSlewComplete query,
+ * answered or not, and a SlewToRaDec never resets it (`slew_polls` restarts at each slew).
  *
  * `latency_ms` > 0 delays every reply by that many real milliseconds, and `transactions` counts every command the
  * fake answers (or drops), so a case can tell a getter that asked TheSkyX from one served from memory. `mute`
@@ -69,6 +70,7 @@ public:
     std::atomic<int> slew_commands{0};
     std::atomic<int> park_polls{0};
     std::atomic<int> slew_polls{0};
+    std::atomic<int> slew_complete_queries{0};
     std::atomic<int> position_reads{0};
     std::atomic<int> altaz_reads{0};
     // Models the remote computer clock, not chart JD; this fake does not execute JavaScript.
@@ -157,6 +159,7 @@ private:
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsSlewComplete")) {
+            ++slew_complete_queries;
             if (slew_complete_ms.load() > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(slew_complete_ms.load()));
             }

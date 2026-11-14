@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/hold_window.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/pointing.h>
@@ -290,7 +291,7 @@ public:
             at_home_ = false;
             homing_ = false;
             slewing_cached_ = false;
-            slew_force_until_ = util::TaskClock::clock::time_point::min();
+            slew_hold_.clear();
             slew_poll_error_.clear();
             reset_snapshot_state_locked();
             manual_axis_slewing_[0] = false;
@@ -1092,7 +1093,7 @@ public:
         pulse_guiding_ = false;
         slewing_cached_ = false;
         slew_poll_error_.clear();
-        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        slew_hold_.clear();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         drop_poll_in_flight_locked();
@@ -1265,7 +1266,7 @@ private:
         ++slew_epoch_;
         slewing_cached_ = true;
         slew_poll_error_.clear();
-        slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+        slew_hold_.arm(clock_.now(), std::chrono::seconds(8));
         drop_poll_in_flight_locked();
     }
 
@@ -1365,7 +1366,7 @@ private:
     // True when the poll should ask TheSkyX whether an async slew is complete: one is in flight, its force window
     // is over, and no control-path wait (SlewToCoordinates) is polling it already.
     bool slew_poll_due_locked() const {
-        return slewing_cached_ && clock_.now() >= slew_force_until_ && slew_waiters_ == 0 &&
+        return slewing_cached_ && !slew_hold_.active(clock_.now()) && slew_waiters_ == 0 &&
                !(manual_axis_slewing_[0] || manual_axis_slewing_[1]);
     }
 
@@ -1529,7 +1530,7 @@ private:
 
     bool get_slewing_locked() const {
         // Within the slew-force window, report as slewing without querying.
-        if (slewing_cached_ && clock_.now() < slew_force_until_) {
+        if (slewing_cached_ && slew_hold_.active(clock_.now())) {
             return true;
         }
         // Check manual axis motion.
@@ -1570,7 +1571,7 @@ private:
         if (!slewing_cached_) {
             return false;
         }
-        if (clock_.now() < slew_force_until_) {
+        if (slew_hold_.active(clock_.now())) {
             return true;
         }
         bool complete = false;
@@ -1749,7 +1750,7 @@ private:
     mutable bool homing_ = false;
     mutable bool slewing_cached_ = false;
     uint64_t slew_epoch_ = 0;  // under mutex_; bumped by a slew start and by AbortSlew
-    mutable util::TaskClock::clock::time_point slew_force_until_;
+    util::HoldWindow slew_hold_;  // under mutex_; Slewing's 8 s hold after a slew command (decision 0022)
     mutable bool manual_axis_slewing_[2] = {false, false};
     mutable bool pulse_guiding_ = false;
     std::string pulse_guide_error_;

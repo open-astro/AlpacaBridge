@@ -1484,4 +1484,94 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
     clock.set_before_block(nullptr);
 }
 
+// Decision 0022: the 8 s Slewing hold is a util::HoldWindow, armed when a GOTO starts. The async slew body polls the
+// mount for its landing, not the window (rule 3), and clears the window when it lands (rule 2), so a GOTO the mount
+// reports done after 1.5 s reads Slewing false well before the hold would have ended.
+TEST_CASE("Celestron hold window - an async GOTO reports landed before the 8 s hold ends",
+          "[celestron][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto start = clock.now();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    CHECK(driver->get_slewing());
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
+    REQUIRE(advance_until(clock, [&] { return clock.now() - start >= std::chrono::seconds(4); }));
+    CHECK_FALSE(st->goto_in_progress());
+    // The body lands (its tracking restore and landing read run on real time); virtual time stays at 4 s.
+    CHECK(wait_until([&] { return !driver->get_slewing(); }, 3000));
+    CHECK(clock.now() - start < std::chrono::seconds(8));
+    driver->set_connected(false);
+}
+
+// Rule 2: AbortSlew clears the hold. Once the superseded slew body has ended, nothing else holds Slewing true.
+TEST_CASE("Celestron hold window - AbortSlew inside the hold clears Slewing at once",
+          "[celestron][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
+    clock.advance(std::chrono::seconds(1));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
+    REQUIRE(driver->get_slewing());
+
+    REQUIRE_NOTHROW(driver->abort_slew());
+    // The superseded body wakes from its 250 ms poll sleep, sees the claim and ends; only the paused poll waits then.
+    clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
+    REQUIRE(wait_until([&] { return clock.waiter_count() == 1; }, 2000));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// The cross-axis position hold (pg_hold_) follows the other axis's pulse window (pulse_hold_): a Dec pulse holds RA
+// at its pre-pulse value once an earlier RA pulse's window has closed, and serves RA live while that window is still
+// open, because the running RA pulse moves it. A polled tick publishes the shifted mount position in between.
+TEST_CASE("Celestron hold window - a Dec pulse holds RA only once the RA pulse window has closed",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    for (const bool ra_pulse_running : {false, true}) {
+        CAPTURE(ra_pulse_running);
+        alpacacore::test::FakeTaskClock clock;
+        auto st = std::make_shared<FakeCelestronState>();
+        alpacacore::test::FakeMountServer server(celestron_responder(st));
+        REQUIRE(server.ok());
+        auto driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        REQUIRE(driver->get_can_pulse_guide());
+        alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+        driver->pulse_guide(2, ra_pulse_running ? 5000 : 500);  // East, RA; the window is the pulse plus 1 s
+        clock.advance(std::chrono::milliseconds(1600));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
+        REQUIRE(driver->get_is_pulse_guiding() == ra_pulse_running);
+        (void)driver->get_right_ascension();  // takes the RA pulse's one-shot correction
+        const double before = driver->get_right_ascension();
+        driver->pulse_guide(0, 1500);  // North, Dec
+        st->shifted_position.store(true);
+        REQUIRE(alpacacore::vendor::celestron::poll_status_now_for_testing(*driver));
+        const double during = driver->get_right_ascension();
+        if (ra_pulse_running) {
+            CHECK(std::abs(during - before) > 0.05);  // served live: the mount's RA moved by about 0.094 h
+        } else {
+            CHECK(std::abs(during - before) < 1e-9);  // held at the pre-pulse value
+        }
+        driver->set_connected(false);
+    }
+}
+
 #endif  // _WIN32
