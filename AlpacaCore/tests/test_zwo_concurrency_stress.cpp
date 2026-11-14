@@ -426,10 +426,9 @@ TEST_CASE("ZWO CAA rotator - connected lifecycle stress behind LockedZWOCAASDK",
 // Dew heater switch stress (#271): same shape — the dew heater switch wraps
 // a camera SDK handle (ASIGetControlValue/ASISetControlValue for the heater
 // duty cycle), so it fails fast at camera enumeration on a hardware-free
-// host exactly like the ZWO camera driver above. This is the representative
-// case for the [zwo][switch] pair: the two GPIO-backed ASIAIR switch drivers
-// (zwo_asiair_switch_driver.h, zwo_asiair_plus_switch_driver.h) are a
-// separate seam (libgpiod, not this SDK) and are not covered by this case.
+// host exactly like the ZWO camera driver above. The two GPIO-backed ASIAIR
+// switch drivers have their own connected storms over the libgpiod and ioctl
+// stubs, in test_zwo_asiair_concurrency_stress.cpp (#1862).
 TEST_CASE("ZWO dew heater switch - concurrent connect/disconnect/operate stress", "[zwo][switch][stress]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
 

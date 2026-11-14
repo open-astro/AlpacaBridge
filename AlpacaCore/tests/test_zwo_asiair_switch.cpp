@@ -15,222 +15,30 @@
 #include <alpacacore/vendor/zwo/zwo_asiair_protocol_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/version.h>
-#include <dlfcn.h>
-#include <gpiod.h>
 
-#include <array>
-#include <cerrno>
 #include <chrono>
-#include <cstring>
-#include <functional>
-#include <mutex>
+#include <cmath>
+#include <limits>
+#include <string>
 #include <thread>
-#include <vector>
+#include <variant>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "power_port_test_dir.h"
+#include "zwo_asiair_stubs.h"
 
-// ---------------------------------------------------------------------------
-// libgpiod stub (issue #772). This binary defines the seven libgpiod calls that
-// reach a GPIO chip, so the wrappers linked into it call these instead of the
-// shared library's. For the chip path kStubChip they model a chip in memory: a
-// line's level outlives its request (as on the Pi kernels, persist_gpio_outputs),
-// a request or reconfigure drives only the lines its config sets to output (an
-// as-is line keeps its level), every real level change is counted, and the
-// level each line held when its request was released is recorded (issue #300).
-// For any other chip, request or path they forward to the real libgpiod (found
-// with RTLD_NEXT), so every other test in the binary sees the real library. The
-// settings and config objects are plain user-space structs and stay real.
-// ---------------------------------------------------------------------------
+// The libgpiod calls reach the in-memory chip of zwo_asiair_stubs.h (issues #772, #300) when a case names
+// kStubChip; the default /dev/gpiochip0 still reaches the real library.
 namespace {
 
-constexpr const char* kStubChip = "/dev/gpiochip-asiair-stub";
-constexpr unsigned int kStubLines = 64;
-
-struct GpiodStub {
-    std::mutex m;
-    std::array<int, kStubLines> level{};
-    std::array<int, kStubLines> level_at_release{};
-    std::vector<unsigned int> requested;  // offsets of the live request, in request order
-    int level_changes = 0;                // writes that changed a line's level
-    char chip = 0;                        // identity of the stub chip
-    char request = 0;                     // identity of the stub request
-};
-
-GpiodStub& stub() {
-    static GpiodStub s;
-    return s;
-}
-
-gpiod_chip* stub_chip() { return reinterpret_cast<gpiod_chip*>(&stub().chip); }
-gpiod_line_request* stub_request() { return reinterpret_cast<gpiod_line_request*>(&stub().request); }
-
-template <typename Fn>
-Fn real_gpiod(const char* name) {
-    return reinterpret_cast<Fn>(dlsym(RTLD_NEXT, name));
-}
-
-int stub_level_at_release(unsigned int offset) {
-    std::lock_guard<std::mutex> lock(stub().m);
-    return offset < kStubLines ? stub().level_at_release[offset] : -1;
-}
-
-// Sets every line's level as the boot or a previous session left it, and clears
-// the change count.
-void stub_reset_levels(int level) {
-    std::lock_guard<std::mutex> lock(stub().m);
-    stub().level.fill(level);
-    stub().level_changes = 0;
-}
-
-void stub_set_level(unsigned int offset, int level) {
-    std::lock_guard<std::mutex> lock(stub().m);
-    stub().level[offset] = level;
-}
-
-int stub_level(unsigned int offset) {
-    std::lock_guard<std::mutex> lock(stub().m);
-    return stub().level[offset];
-}
-
-int stub_level_changes() {
-    std::lock_guard<std::mutex> lock(stub().m);
-    return stub().level_changes;
-}
-
-void stub_drive_locked(unsigned int offset, int level) {
-    if (offset < kStubLines && stub().level[offset] != level) {
-        stub().level[offset] = level;
-        ++stub().level_changes;
-    }
-}
-
-// Drives the lines @p cfg sets to output, in its offset order; returns that order.
-std::vector<unsigned int> stub_apply_config_locked(gpiod_line_config* cfg) {
-    std::vector<unsigned int> offsets(::gpiod_line_config_get_num_configured_offsets(cfg));
-    offsets.resize(::gpiod_line_config_get_configured_offsets(cfg, offsets.data(), offsets.size()));
-    for (const unsigned int offset : offsets) {
-        gpiod_line_settings* settings = ::gpiod_line_config_get_line_settings(cfg, offset);
-        if (settings == nullptr) {
-            continue;
-        }
-        if (::gpiod_line_settings_get_direction(settings) == GPIOD_LINE_DIRECTION_OUTPUT) {
-            stub_drive_locked(offset,
-                              ::gpiod_line_settings_get_output_value(settings) == GPIOD_LINE_VALUE_ACTIVE ? 1 : 0);
-        }
-        ::gpiod_line_settings_free(settings);
-    }
-    return offsets;
-}
-
-}  // namespace
-
-extern "C" {
-
-gpiod_chip* gpiod_chip_open(const char* path) {
-    if (path != nullptr && std::strcmp(path, kStubChip) == 0) {
-        return stub_chip();
-    }
-    static const auto real = real_gpiod<gpiod_chip* (*)(const char*)>("gpiod_chip_open");
-    if (real == nullptr) {
-        errno = ENOSYS;
-        return nullptr;
-    }
-    return real(path);
-}
-
-void gpiod_chip_close(gpiod_chip* chip) {
-    if (chip == stub_chip()) {
-        return;
-    }
-    static const auto real = real_gpiod<void (*)(gpiod_chip*)>("gpiod_chip_close");
-    if (real != nullptr) {
-        real(chip);
-    }
-}
-
-gpiod_line_request* gpiod_chip_request_lines(gpiod_chip* chip, gpiod_request_config* req_cfg,
-                                             gpiod_line_config* line_cfg) {
-    if (chip == stub_chip()) {
-        std::lock_guard<std::mutex> lock(stub().m);
-        stub().requested = stub_apply_config_locked(line_cfg);
-        stub().level_at_release.fill(-1);
-        (void)req_cfg;
-        return stub_request();
-    }
-    static const auto real =
-        real_gpiod<gpiod_line_request* (*)(gpiod_chip*, gpiod_request_config*, gpiod_line_config*)>(
-            "gpiod_chip_request_lines");
-    if (real == nullptr) {
-        errno = ENOSYS;
-        return nullptr;
-    }
-    return real(chip, req_cfg, line_cfg);
-}
-
-int gpiod_line_request_set_value(gpiod_line_request* request, unsigned int offset, gpiod_line_value value) {
-    if (request == stub_request()) {
-        std::lock_guard<std::mutex> lock(stub().m);
-        stub_drive_locked(offset, value == GPIOD_LINE_VALUE_ACTIVE ? 1 : 0);
-        return 0;
-    }
-    static const auto real =
-        real_gpiod<int (*)(gpiod_line_request*, unsigned int, gpiod_line_value)>("gpiod_line_request_set_value");
-    if (real == nullptr) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return real(request, offset, value);
-}
-
-int gpiod_line_request_get_values(gpiod_line_request* request, gpiod_line_value* values) {
-    if (request == stub_request()) {
-        std::lock_guard<std::mutex> lock(stub().m);
-        for (std::size_t i = 0; i < stub().requested.size(); ++i) {
-            values[i] = stub().level[stub().requested[i]] != 0 ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
-        }
-        return 0;
-    }
-    static const auto real =
-        real_gpiod<int (*)(gpiod_line_request*, gpiod_line_value*)>("gpiod_line_request_get_values");
-    if (real == nullptr) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return real(request, values);
-}
-
-int gpiod_line_request_reconfigure_lines(gpiod_line_request* request, gpiod_line_config* config) {
-    if (request == stub_request()) {
-        std::lock_guard<std::mutex> lock(stub().m);
-        stub_apply_config_locked(config);
-        return 0;
-    }
-    static const auto real =
-        real_gpiod<int (*)(gpiod_line_request*, gpiod_line_config*)>("gpiod_line_request_reconfigure_lines");
-    if (real == nullptr) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return real(request, config);
-}
-
-void gpiod_line_request_release(gpiod_line_request* request) {
-    if (request == stub_request()) {
-        std::lock_guard<std::mutex> lock(stub().m);
-        stub().level_at_release = stub().level;
-        return;
-    }
-    static const auto real = real_gpiod<void (*)(gpiod_line_request*)>("gpiod_line_request_release");
-    if (real != nullptr) {
-        real(request);
-    }
-}
-
-}  // extern "C"
-
-namespace {
+using alpacacore::test::kStubChip;
+using alpacacore::test::stub_claimed;
+using alpacacore::test::stub_level;
+using alpacacore::test::stub_level_at_release;
+using alpacacore::test::stub_level_changes;
+using alpacacore::test::stub_reset_levels;
+using alpacacore::test::stub_set_level;
 
 using alpacacore::test::require_alpaca_error;
 
@@ -531,4 +339,102 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - a Disconnect before any Connect keeps 
     driver->set_connected(true);
     driver->set_connected(false);
     CHECK(stub_level_at_release(12) == 0);
+}
+
+// Issue #1862: every ISwitchV3 member while connected, each value checked against the stub chip. Port 2 boots
+// off and Port 4 is a PWM port.
+TEST_CASE("ZWO ASIAIR Pro Switch Driver - every ISwitchV3 member answers while connected",
+          "[zwo][switch][asiair][unit][gpio]") {
+    alpacacore::test::TempPowerPortDir dir;
+    stub_reset_levels(1);
+    stub_set_level(13, 0);
+    auto cfg = alpacacore::vendor::zwo::default_asiair_pro_config();
+    cfg.gpio_chip_path = kStubChip;
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_switch(0, cfg);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(stub_claimed());
+
+    REQUIRE(driver->get_max_switch() == 4);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(driver->get_can_write(i));
+        CHECK_FALSE(driver->get_can_async(i));
+        CHECK(driver->get_min_switch_value(i) == 0.0);
+        CHECK(driver->get_max_switch_value(i) == (i == 3 ? 100.0 : 1.0));
+        CHECK(driver->get_switch_step(i) == 1.0);
+        CHECK(driver->get_state_change_complete(i));
+        CHECK(driver->get_switch_name(i) == "Port " + std::to_string(i + 1));
+    }
+    CHECK(driver->get_switch_description(1) == "ASIAIR power port on GPIO 13 (on/off)");
+    CHECK(driver->get_switch_description(3) == "ASIAIR power port on GPIO 18 (PWM 0-100%)");
+
+    // The connect read the lines: Port 2 is off, the others (Port 4 at full duty) on.
+    CHECK(driver->get_switch(0));
+    CHECK_FALSE(driver->get_switch(1));
+    CHECK(driver->get_switch_value(1) == 0.0);
+    CHECK(driver->get_switch_value(3) == 100.0);
+
+    // Writes reach the lines and read back.
+    driver->set_switch(0, false);
+    CHECK(stub_level(12) == 0);
+    CHECK_FALSE(driver->get_switch(0));
+    CHECK(driver->get_switch_value(0) == 0.0);
+    driver->set_switch_value(1, 1.0);
+    CHECK(stub_level(13) == 1);
+    CHECK(driver->get_switch(1));
+    driver->set_switch_value(3, 40.0);
+    CHECK(driver->get_switch_value(3) == 40.0);
+    CHECK(driver->get_switch(3));
+
+    // Out of range while connected: InvalidValue, and nothing written.
+    const int changes = stub_level_changes();
+    require_alpaca_error([&] { driver->set_switch_value(0, 2.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_switch_value(3, 101.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_switch_value(3, std::numeric_limits<double>::quiet_NaN()); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_switch(4, true); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_switch_value(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_switch_name(4, "X"); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(stub_level_changes() == changes);
+    CHECK(driver->get_switch_value(3) == 40.0);
+
+    // Async writes are not implemented on a connected driver.
+    require_alpaca_error([&] { driver->set_async(0, true); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&] { driver->set_async_value(3, 50.0); }, alpacacore::AlpacaError::NotImplemented);
+
+    // DeviceState carries the three members of every port, then TimeStamp.
+    const auto state = driver->get_device_state();
+    REQUIRE(state.size() == 13);
+    CHECK(state[0].name == "GetSwitch0");
+    CHECK(std::get<bool>(state[0].value) == false);
+    CHECK(state[10].name == "GetSwitchValue3");
+    CHECK(std::get<double>(state[10].value) == 40.0);
+    CHECK(state[12].name == "TimeStamp");
+
+    // A name lasts as long as the driver, across a reconnect.
+    driver->set_switch_name(2, "Flat Panel");
+    CHECK(driver->get_switch_name(2) == "Flat Panel");
+
+    // Disconnect releases every line at its steady level: the boolean ports as commanded, the 40 % port high.
+    driver->set_connected(false);
+    CHECK_FALSE(stub_claimed());
+    CHECK(stub_level_at_release(12) == 0);
+    CHECK(stub_level_at_release(13) == 1);
+    CHECK(stub_level_at_release(26) == 1);
+    CHECK(stub_level_at_release(18) == 1);
+    CHECK(driver->get_switch_name(2) == "Flat Panel");
+
+    // A client that turns every port off before it disconnects finds every line released off.
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_switch_name(2) == "Flat Panel");
+    CHECK(driver->get_switch_value(3) == 40.0);  // the reconnect reads the 40 % port's held line back as its duty
+    for (int i = 0; i < 4; ++i) {
+        driver->set_switch(i, false);
+    }
+    driver->set_connected(false);
+    for (const unsigned int line : {12u, 13u, 26u, 18u}) {
+        CHECK(stub_level_at_release(line) == 0);
+    }
 }

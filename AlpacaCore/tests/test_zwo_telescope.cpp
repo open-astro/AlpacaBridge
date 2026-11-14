@@ -244,7 +244,10 @@ TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][uni
     require_alpaca_error([&]() { (void)driver->get_axis_rate_ranges(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
-TEST_CASE("ZWO Mount Telescope Driver - ConnectionType::Auto and enumeration", "[zwo][telescope][unit]") {
+// Not an enumeration case (#1858): with no mount attached the scan returned nothing, so a loop over its result pinned
+// nothing. The scan is driven over loopback mounts through the candidate seam in test_zwo_mount_network_isolation.cpp
+// and test_zwo_mount_identity.cpp; the Auto connect case below runs the real one.
+TEST_CASE("ZWO Mount Telescope Driver - ConnectionType::Auto and ZWODeviceInfo defaults", "[zwo][telescope][unit]") {
     using alpacacore::vendor::zwo::ConnectionType;
     using alpacacore::vendor::zwo::ZWODeviceInfo;
 
@@ -263,22 +266,6 @@ TEST_CASE("ZWO Mount Telescope Driver - ConnectionType::Auto and enumeration", "
     CHECK(info.tcp_port == 4030);
     CHECK(info.model_name.empty());
     CHECK(info.label.empty());
-
-    // enumerate_zwo_mounts with a short probe timeout must return without
-    // throwing or hanging. On a host with no ZWO device attached (CI runners),
-    // it returns an empty list; with a ZWO device present it returns at least
-    // one entry carrying a non-empty model name (probed via :GVP).
-    std::vector<ZWODeviceInfo> devices;
-    REQUIRE_NOTHROW(devices = alpacacore::vendor::zwo::enumerate_zwo_mounts(100));
-    for (const auto& dev : devices) {
-        CHECK_FALSE(dev.model_name.empty());
-        REQUIRE((dev.type == ConnectionType::Serial || dev.type == ConnectionType::Network));
-        if (dev.type == ConnectionType::Serial) {
-            CHECK_FALSE(dev.port_path.empty());
-        } else {
-            CHECK_FALSE(dev.host.empty());
-        }
-    }
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Auto connect on missing hardware", "[zwo][telescope][unit]") {
@@ -289,17 +276,18 @@ TEST_CASE("ZWO Mount Telescope Driver - Auto connect on missing hardware", "[zwo
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(6, conn);
     REQUIRE(driver != nullptr);
 
-    // With no ZWO mount reachable, connect() must fail cleanly (no crash,
-    // no hang) rather than throwing or leaving a half-open state.
-    try {
-        driver->set_connected(true);
-        // Some platforms (a host with a real ZWO device) may succeed; that is
-        // fine. Only assert that a failure surfaces as NotConnected/DriverException
-        // rather than corrupting the driver.
-    } catch (const alpacacore::AlpacaException&) {
+    // A host with a real ZWO mount attached would connect; this case is about the missing one (#1858).
+    if (!alpacacore::vendor::zwo::enumerate_zwo_mounts(100).empty()) {
+        WARN("a ZWO mount is reachable from this host; the missing-hardware case does not apply");
+        return;
     }
-    // The driver must remain in a well-defined (disconnected) state afterwards.
-    CHECK(driver->get_connecting() == false);
+
+    // With no ZWO mount reachable, the connect must fail (no crash, no hang)
+    // and leave the driver disconnected, never half-open.
+    REQUIRE_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_connecting());
+    require_alpaca_error([&] { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 #ifndef _WIN32
@@ -408,8 +396,15 @@ TEST_CASE(
     // gap hid it from the [stress] case). :GAT "1#" passes the tracking gate,
     // :SMTI "1#" acks the time sync the reconnect path sends (hash-terminated
     // so the wrapper's idle-break wait does not add 100 ms to every refresh),
-    // and "0#" is a validly terminated reply for everything else.
-    alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+    // and "0#" is a validly terminated reply for everything else. Every guide
+    // command (":Mg") is counted, so the tail can tell a dropped queue from one
+    // that drained after the refresh (#1858).
+    std::atomic<int> guide_commands{0};
+    alpacacore::test::FakeMountServer server([&guide_commands](const std::string& chunk) -> std::string {
+        // Every ":Mg" in the chunk, so two guide commands in one read count as two.
+        for (auto at = chunk.find(":Mg"); at != std::string::npos; at = chunk.find(":Mg", at + 3)) {
+            guide_commands.fetch_add(1);
+        }
         if (chunk == ":GVP#") return "AM5#";
         if (chunk == ":GMA#") return "012345ABCDEF#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
@@ -502,13 +497,24 @@ TEST_CASE(
     }
 
     // The real-time storm above exercises scheduling, not a driver deadline.
-    // Rule 3: the redundant refresh drops queued pulses; expire any dequeued pulse and its hold virtually.
-    driver->pulse_guide(0, 500);
+    // Rule 3: the redundant refresh drops queued pulses. Three more queue behind
+    // the one the drain may be running; after the refresh at most the ":Mg" of
+    // a task the drain had already taken (its send can land just after the
+    // count) reaches the mount, however long the clock runs. A queue that
+    // survived the refresh sends at least two more (#1858: one pulse alone left
+    // nothing queued to drop). 3 s of virtual time is the three pulses and the hold.
+    for (int i = 0; i < 3; ++i) {
+        driver->pulse_guide(0, 500);
+    }
     CHECK(driver->get_is_pulse_guiding());
     driver->set_connected(true);
+    const int guides_at_refresh = guide_commands.load();
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    clock.advance(std::chrono::milliseconds(1500));
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    for (int step = 0; step < 30; ++step) {
+        clock.advance(std::chrono::milliseconds(100));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
+    CHECK(guide_commands.load() <= guides_at_refresh + 1);
     CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(driver->get_connected());
 

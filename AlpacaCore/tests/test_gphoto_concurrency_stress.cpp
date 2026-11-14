@@ -56,6 +56,11 @@ TEST_CASE("GPhoto camera - concurrent connect/disconnect/operate stress", "[gpho
     FakeRawDecoder decoder;
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, locked_sdk, decoder);
 
+    // The connect really succeeds over the fake before the storm (#1859): the
+    // storm then reaches the connected open/configure/prime paths and the
+    // exposure, not only a connect that failed at autodetect.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
     // open-astro#326: one guard per call -- before this the callback stopped
     // at the first throw, so only the first operation was ever storm-tested.
     // Connected fake operations may race a lifecycle transition or read metadata before the first image.
@@ -77,6 +82,9 @@ TEST_CASE("GPhoto camera - concurrent connect/disconnect/operate stress", "[gpho
     // right after a storm the last async task may still be in flight, so a
     // single sync disconnect can legitimately no-op against the pending-
     // disconnect machinery and the CHECK below would fail on a correct driver.
+    // The storm left the driver able to connect again, as the ToupTek
+    // registrations check, then it settles down.
+    CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
 
     INFO(guard.report());
