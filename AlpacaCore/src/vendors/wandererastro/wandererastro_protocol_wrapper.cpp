@@ -443,18 +443,21 @@ private:
 #ifndef _WIN32
     // Decision 0009 point 3 (issue #1988): the port is gone. Caller holds
     // mutex_ and connected_ is true. The cached status and firmware date are
-    // cleared before link_lost_ is stored, so a getter that sees the link
-    // alive never reads a cache the loss has emptied as current. The reader
-    // stops and releases the port on its way out (it is the only thread
-    // reading the fd, so a writer never closes it underneath a read).
+    // cleared and link_lost_ is stored in one status_mutex_ section, so a
+    // caller that reads the cache or link_fault() and then finds the link
+    // alive knows the loss had not emptied what it read. The reader re-checks
+    // link_lost_ under that lock before it stores a frame, so a frame that
+    // races the loss never refills the cache.
+    // The reader stops and releases the port on its way out (it is the only
+    // thread reading the fd, so a writer never closes it underneath a read).
     void lose_link_locked(const std::string& reason) {
         {
             std::lock_guard<std::mutex> status_lock(status_mutex_);
             status_ = WandererStatus{};
             firmware_date_.clear();
             loss_reason_ = reason;
+            link_lost_.store(true);
         }
-        link_lost_.store(true);
         running_.store(false);
         ALPACA_LOG_ERROR("WandererAstro",
                          "WandererCover link lost on " + config_.serial_port + ": " + reason + " (port released)");
@@ -462,8 +465,11 @@ private:
 
     // The reader met a hangup or a fault that stood past the staleness bound.
     // Before connect() has published the session nothing latches: connect()
-    // sees connect_hangup_ and fails with NotConnected (rule 4). A loss a
-    // command write already latched is kept as it is: one reason, one log line.
+    // sees connect_hangup_ and fails with NotConnected (rule 4). That covers a
+    // staleness loss too, which can only come first when serial_timeout_s is
+    // over the 40 s a fault needs to go stale; the Connect then fails and
+    // keeps no reason, like a hangup. A loss a command write already latched
+    // is kept as it is: one reason, one log line.
     void end_link_from_reader(const std::string& reason) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!connected_) {
@@ -578,9 +584,13 @@ private:
             }
             if (ch == '\n' || ch == '\r') {
                 WandererStatus parsed;
-                if (parse_status_line(buffer, parsed) && !link_lost_.load()) {
+                if (parse_status_line(buffer, parsed)) {
                     bool restored = false;
                     std::lock_guard<std::mutex> lock(status_mutex_);
+                    if (link_lost_.load()) {
+                        buffer.clear();
+                        continue;  // a write met the loss: the cache stays cleared
+                    }
                     status_ = parsed;
                     restored = link_.on_frame(clock_.now());
                     if (restored) {

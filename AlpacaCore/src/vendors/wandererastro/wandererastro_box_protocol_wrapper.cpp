@@ -535,17 +535,19 @@ private:
 #ifndef _WIN32
     // Decision 0009 point 3 (issue #1988): the port is gone. Caller holds
     // io_mutex_ and connected_ is true. The cached state and firmware date are
-    // cleared before link_lost_ is stored; the reader stops and releases the
-    // port on its way out (it is the only thread reading the fd, so a writer
-    // never closes it underneath a read).
+    // cleared before link_lost_ is stored, both under state_mutex_, where the
+    // reader re-checks link_lost_ before it stores a frame, so a frame that
+    // races the loss never refills the cache. The reader stops and releases
+    // the port on its way out (it is the only thread reading the fd, so a
+    // writer never closes it underneath a read).
     void lose_link_locked(const std::string& reason) {
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
             state_ = BoxState{};
             firmware_date_.clear();
             loss_reason_ = reason;
+            link_lost_.store(true);
         }
-        link_lost_.store(true);
         reader_running_.store(false);
         ALPACA_LOG_ERROR("WandererAstro",
                          "WandererBox link lost on " + config_.serial_port + ": " + reason + " (port released)");
@@ -647,10 +649,13 @@ private:
                 auto state = parse_frame_fields(fields);
                 in_frame = false;
                 fields.clear();
-                if (state.has_value() && !link_lost_.load()) {
+                if (state.has_value()) {
                     bool restored = false;
                     {
                         std::lock_guard<std::mutex> state_lock(state_mutex_);
+                        if (link_lost_.load()) {
+                            continue;  // a write met the loss: the cache stays cleared
+                        }
                         state_ = *state;
                         firmware_date_ = format_firmware_date(state->firmware_version);
                         restored = link_.on_frame(clock_.now());

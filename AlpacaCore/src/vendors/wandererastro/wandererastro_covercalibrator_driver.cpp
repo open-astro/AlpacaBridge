@@ -276,6 +276,8 @@ public:
     CalibratorState get_calibrator_state() const override {
         ensure_connected();
         if (protocol_.link_fault().has_value()) {
+            // A loss, not a fault, is NotConnected (see ensure_link_up()).
+            ensure_connected();
             // The panel is unreachable: the commanded state is no longer
             // known to match it (issue #237). ASCOM has a word for that.
             return CalibratorState::Unknown;
@@ -465,6 +467,10 @@ private:
     // (Connected is still true, so not NotConnected) until frames resume.
     void ensure_link_up() const {
         if (const auto fault = protocol_.link_fault()) {
+            // A loss that latched after ensure_connected() passed: the wrapper
+            // stores its reason and link_lost_ under one lock, so link_alive()
+            // is already false and this is NotConnected (decision 0009 point 3).
+            ensure_connected();
             throw AlpacaException("WandererCover communications compromised: " + *fault, AlpacaError::DriverException);
         }
     }

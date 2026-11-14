@@ -455,6 +455,10 @@ private:
     // frames resume. Static metadata keeps answering.
     void ensure_link_up() const {
         if (const auto fault = protocol_.link_fault()) {
+            // A loss that latched after ensure_connected() passed: the wrapper
+            // stores its reason and link_lost_ under one lock, so link_alive()
+            // is already false and this is NotConnected (decision 0009 point 3).
+            ensure_connected();
             throw AlpacaException("WandererBox communications compromised: " + *fault, AlpacaError::DriverException);
         }
     }
