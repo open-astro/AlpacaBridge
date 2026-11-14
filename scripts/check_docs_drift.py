@@ -2352,10 +2352,17 @@ def _cache_prefix_findings(workflows):
     return failures
 
 
+def _workflow_files(root=ROOT):
+    """{repo-relative path: text} for every workflow file. GitHub runs both
+    `.yml` and `.yaml` files from .github/workflows, so a check that read only
+    one spelling would never see a workflow written with the other."""
+    workflows = Path(root) / ".github/workflows"
+    paths = sorted(p for ext in ("yml", "yaml") for p in glob.glob(str(workflows / ("*." + ext))))
+    return {Path(p).relative_to(root).as_posix(): Path(p).read_text(encoding="utf-8") for p in paths}
+
+
 def check_cache_restore_prefixes_distinct(root=ROOT):
-    paths = sorted(glob.glob(str(Path(root) / ".github/workflows/*.yml")))
-    return _cache_prefix_findings({Path(p).relative_to(root).as_posix(): Path(p).read_text(encoding="utf-8")
-                                   for p in paths})
+    return _cache_prefix_findings(_workflow_files(root))
 
 
 
@@ -2996,9 +3003,7 @@ def _workflow_timeout_findings(workflows):
 
 
 def check_workflow_job_timeouts(root=ROOT):
-    paths = sorted(glob.glob(str(Path(root) / ".github/workflows/*.yml")))
-    return _workflow_timeout_findings({Path(p).relative_to(root).as_posix(): Path(p).read_text(encoding="utf-8")
-                                       for p in paths})
+    return _workflow_timeout_findings(_workflow_files(root))
 
 
 # --- check 28: every NOLINT gives its reason on the same line (issue #2059) ----
@@ -4277,6 +4282,12 @@ def self_test():
     check("job timeouts: a jobs block the reader cannot split is a finding, not a pass",
           len(f) == 1 and "found no job" in f[0])
     check("job timeouts: no workflow at all is a finding", len(_workflow_timeout_findings({})) == 1)
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in ("a.yml", "b.yaml", "notes.txt"):
+            (Path(tmp) / ".github/workflows").mkdir(parents=True, exist_ok=True)
+            (Path(tmp) / ".github/workflows" / name).write_text("jobs:\n", encoding="utf-8")
+        check("workflow files: both .yml and .yaml are read, nothing else (checks 20 and 27)",
+              sorted(_workflow_files(tmp)) == [".github/workflows/a.yml", ".github/workflows/b.yaml"])
 
     # check 28: every NOLINT gives its reason on the same line (issue #2059).
     nl_ok = ("x;  // NOLINT(bugprone-empty-catch): the poll retries\n"
