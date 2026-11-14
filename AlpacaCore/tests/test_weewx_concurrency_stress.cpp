@@ -17,15 +17,23 @@
 // fetch_snapshot().
 
 #include <alpacacore/observingconditions_driver.h>
+#include <alpacacore/util/link_health.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
+#include "fake_task_clock.h"
 #include "fake_weewx_fetcher.h"
 
 using alpacacore::AlpacaDriver;
@@ -187,4 +195,103 @@ TEST_CASE("WeeWX observing conditions - poll survives scripted fetch failures",
     CHECK(std::abs(oc.get_temperature() - 10.0) < 1e-6);
     driver->set_connected(false);
     CHECK(fake.in_flight() == 0);
+}
+
+// Issue #1984: the staleness loss under contention. The poll thread drops Connected and ends its body while
+// lifecycle threads connect and disconnect and readers race the getters; a clock thread pushes the fake task clock a
+// whole bound per step, so a latched fault is stale at the next poll. All but one fetch in 25 fail, so a Connect still
+// lands now and then, and its poll latches and loses the feed again before a good Refresh clears the fault. TSan checks
+// the loss path's writes against the getters, Refresh and set_connected(); the counts check that losses happened and
+// the driver is coherent after. Falsified by: weewx_observingconditions_driver.cpp lose_feed_locked() not storing
+// connected_ false (the undisturbed loss leaves the driver connected).
+TEST_CASE("WeeWX observing conditions - staleness losses race connects, disconnects and reads",
+          "[weewx][observingconditions][stress]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it outlives the driver
+    std::atomic<int> mode{0};               // 0 answers, 1 fails every fetch, 2 answers one in 25
+    std::atomic<int> fetches{0};
+    alpacacore::vendor::weewx::WeeWxFetcher fetcher = [&](const std::string&, std::chrono::milliseconds) {
+        const int n = fetches.fetch_add(1);
+        const int m = mode.load();
+        if (m == 1 || (m == 2 && n % 25 != 0)) {
+            throw alpacacore::AlpacaException("scripted WeeWX fetch failure", alpacacore::AlpacaError::DriverException);
+        }
+        return alpacacore::test::FakeWeeWxFetcher::canned_payload();
+    };
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fetcher, clock);
+
+    std::atomic<int> losses{0};
+    // Restores the previous sink on every exit, a failed REQUIRE included, so no later log line reaches `losses`
+    // after it is gone.
+    struct LossCounter {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        explicit LossCounter(std::atomic<int>& count) {
+            alpacacore::logging::set_log_sink(
+                [&count](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                    if (level == alpacacore::logging::LogLevel::Error &&
+                        message.find("WeeWX feed lost") != std::string_view::npos) {
+                        count.fetch_add(1);
+                    }
+                });
+        }
+        ~LossCounter() { alpacacore::logging::set_log_sink(previous); }
+        LossCounter(const LossCounter&) = delete;
+        LossCounter& operator=(const LossCounter&) = delete;
+    };
+    std::optional<LossCounter> counter(std::in_place, losses);
+
+    // One undisturbed loss first, so the loss coverage check does not depend on the storm's scheduling (#2099).
+    REQUIRE(alpacacore::test::connect_and_park(*driver, clock, std::chrono::seconds(5)));
+    mode.store(1);
+    for (int i = 0; i < 4; ++i) {
+        clock.advance(alpacacore::util::kLinkStalenessBound);
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
+    REQUIRE(losses.load() == 1);
+    REQUIRE_FALSE(driver->get_connected());
+
+    mode.store(2);
+    std::atomic<bool> stop_clock{false};
+    std::thread ager([&] {
+        // A yield, not a sleep: a sleep's timer slack outlasts most sessions of the storm, and none was lost.
+        while (!stop_clock.load()) {
+            clock.advance(alpacacore::util::kLinkStalenessBound);
+            std::this_thread::yield();
+        }
+    });
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::NotImplemented,
+                                            alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(
+        *driver,
+        [&guard](AlpacaDriver& d) {
+            auto& oc = static_cast<alpacacore::ObservingConditionsDriver&>(d);
+            guard([&] { static_cast<void>(oc.get_temperature()); });
+            guard([&] { static_cast<void>(oc.get_humidity()); });
+            guard([&] { static_cast<void>(oc.get_time_since_last_update("temperature")); });
+            guard([&] { static_cast<void>(oc.get_time_since_last_update("")); });
+            guard([&] { static_cast<void>(oc.get_sensor_description("temperature")); });
+            guard([&] { static_cast<void>(oc.get_link_fault()); });
+            guard([&] { static_cast<void>(oc.get_device_state()); });
+            guard([&] { oc.refresh(); });
+        },
+        alpacacore::test::StressOptions{1, 4, std::chrono::milliseconds{750}});
+
+    stop_clock.store(true);
+    ager.join();
+    counter.reset();  // the counted storm is over: restore the previous sink
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(losses.load() > 0);
+
+    // Still coherent afterwards: a healthy feed connects and serves a fresh reading.
+    mode.store(0);
+    REQUIRE(alpacacore::test::connect_and_park(*driver, clock, std::chrono::seconds(5)));
+    CHECK(driver->get_link_fault().empty());
+    CHECK(std::abs(static_cast<alpacacore::ObservingConditionsDriver&>(*driver).get_temperature() - 10.0) < 1e-6);
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
 }

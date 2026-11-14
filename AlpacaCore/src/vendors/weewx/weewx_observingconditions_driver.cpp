@@ -14,6 +14,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #include <alpacacore/version.h>
@@ -44,6 +45,10 @@ constexpr double kMphToMetersPerSecond = 0.44704;
 constexpr double kInHgToHpa = 33.8638866667;
 
 constexpr const char* kDriverComponent = "WeeWX";
+
+// Decision 0009 rule 1, issue #1984: three failed poll fetches in a row latch the link fault, the count every polled
+// driver in the decision 0009 Adoption table uses.
+constexpr int kFailuresToLatch = 3;
 
 struct SensorSnapshot {
     double temperature_c{std::numeric_limits<double>::quiet_NaN()};
@@ -314,6 +319,7 @@ public:
           device_number_(device_number),
           config_(std::move(config)),
           fetcher_(std::move(fetcher)),
+          clock_(clock),
           connected_(false),
           poll_op_("WeeWX poll", poll_generation_, clock) {
         if (config_.url.empty()) {
@@ -371,6 +377,13 @@ public:
 
     bool get_connecting() const override { return connection_task_active(); }
 
+    // Decision 0009 rule 5: the one fault text. The latched fault while the feed is faulted, kept after a loss until
+    // the next Connect or Disconnect; empty once a fetch has answered.
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        return link_health_.fault();
+    }
+
     void set_connected(bool connected) override {
         // Serialize whole transitions against each other (issue #528): the
         // base's record/consume gates only see an ASYNC connect. With a sync
@@ -391,18 +404,20 @@ public:
             return;
         }
         if (connected) {
+            if (connected_.load()) {
+                return;  // idempotent: connected, and the poll is running
+            }
+            // Decision 0009 rule 4: only this Connect relinks a lost feed. The poll that declared the loss has
+            // returned or is returning; join it so start_polling() below starts a fresh one.
+            stop_polling();
+            {
+                std::lock_guard<std::mutex> lock(data_mutex_);
+                link_health_.reset();  // rule 5: the kept fault text ends at the next Connect
+            }
             SensorSnapshot snapshot = fetch_snapshot();
             {
                 std::lock_guard<std::mutex> lock(data_mutex_);
-                last_snapshot_ = snapshot;
-                rebuild_supported_properties_locked(snapshot);
-                update_property_timestamp_locked("temperature", snapshot.temperature_c);
-                update_property_timestamp_locked("humidity", snapshot.humidity);
-                update_property_timestamp_locked("dewpoint", snapshot.dewpoint_c);
-                update_property_timestamp_locked("windspeed", snapshot.wind_speed_ms);
-                update_property_timestamp_locked("pressure", snapshot.pressure_hpa);
-                update_property_timestamp_locked("skyquality", snapshot.sky_quality);
-                update_property_timestamp_locked("skytemperature", snapshot.sky_temperature_c);
+                commit_snapshot_locked(snapshot);
             }
             connected_.store(true);
             try {
@@ -414,6 +429,8 @@ public:
         } else {
             stop_polling();
             connected_.store(false);
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            link_health_.reset();  // rule 5: the kept fault text ends at the next Disconnect
         }
     }
 
@@ -515,14 +532,14 @@ public:
             throw AlpacaException("Unknown sensor property", AlpacaError::InvalidValue);
         }
         // Parameter validation precedes the connection check (ASCOM contract).
-        if (!get_connected()) {
-            throw AlpacaException("Device not connected", AlpacaError::NotConnected);
-        }
+        require_connected();
         // supported_properties_ is mutated by the poll thread under data_mutex_;
         // every read must hold the same lock.
         std::lock_guard<std::mutex> lock(data_mutex_);
+        require_connected_locked();  // the poll may have lost the feed since the check above
         std::optional<std::chrono::system_clock::time_point> last_update;
         if (key.empty()) {
+            require_not_faulted_locked();
             // An empty name asks for the most recent update of any sensor.
             for (const auto& entry : property_last_update_) {
                 if (!last_update || entry.second > *last_update) {
@@ -533,6 +550,7 @@ public:
             if (!supported_properties_.count(key)) {
                 throw AlpacaException("Sensor not implemented", AlpacaError::PropertyNotImplemented);
             }
+            require_not_faulted_locked();
             auto it = property_last_update_.find(key);
             if (it != property_last_update_.end()) {
                 last_update = it->second;
@@ -565,39 +583,63 @@ public:
         return it->second;
     }
 
+    // Decision 0009 rule 1, issue #1984: a failed Refresh reaches the caller and does not count towards the latch (only
+    // the poll's fetches do); a good one clears a standing fault like a good poll.
     void refresh() override {
-        if (!get_connected()) {
-            throw AlpacaException("Device not connected", AlpacaError::NotConnected);
-        }
+        require_connected();
         SensorSnapshot snapshot = fetch_snapshot();
-        std::lock_guard<std::mutex> lock(data_mutex_);
-        last_snapshot_ = snapshot;
-        rebuild_supported_properties_locked(snapshot);
-        update_property_timestamp_locked("temperature", snapshot.temperature_c);
-        update_property_timestamp_locked("humidity", snapshot.humidity);
-        update_property_timestamp_locked("dewpoint", snapshot.dewpoint_c);
-        update_property_timestamp_locked("windspeed", snapshot.wind_speed_ms);
-        update_property_timestamp_locked("pressure", snapshot.pressure_hpa);
-        update_property_timestamp_locked("skyquality", snapshot.sky_quality);
-        update_property_timestamp_locked("skytemperature", snapshot.sky_temperature_c);
+        bool restored = false;
+        {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            require_connected_locked();  // lost or disconnected during the fetch: serve nothing
+            commit_snapshot_locked(snapshot);
+            restored = link_health_.on_reply();
+        }
+        if (restored) {
+            ALPACA_LOG_INFO(kDriverComponent, "WeeWX feed restored: Refresh answered");
+        }
     }
 
 private:
     // NotConnected before a NotImplemented answer (ASCOM contract precedence).
     void require_connected() const {
         if (!get_connected()) {
-            throw AlpacaException("Device not connected", AlpacaError::NotConnected);
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            throw AlpacaException(not_connected_text_locked(), AlpacaError::NotConnected);
+        }
+    }
+
+    // The re-check under data_mutex_: the poll drops connected_ under this lock when it loses the feed.
+    void require_connected_locked() const {
+        if (!connected_.load()) {
+            throw AlpacaException(not_connected_text_locked(), AlpacaError::NotConnected);
+        }
+    }
+
+    // After a loss the kept fault says why; after a Disconnect (which resets it) the plain text.
+    std::string not_connected_text_locked() const {
+        if (link_health_.faulted()) {
+            return "WeeWX feed lost (" + link_health_.fault() + "); Connect again when it answers";
+        }
+        return "Device not connected";
+    }
+
+    // Decision 0009 rule 1: while the fault is latched the last good values are not served.
+    void require_not_faulted_locked() const {
+        if (link_health_.faulted()) {
+            throw AlpacaException("WeeWX feed communications compromised: " + link_health_.fault(),
+                                  AlpacaError::DriverException);
         }
     }
 
     double get_value_or_nan(double SensorSnapshot::*member, std::string_view property) const {
-        if (!get_connected()) {
-            throw AlpacaException("Device not connected", AlpacaError::NotConnected);
-        }
+        require_connected();
         std::lock_guard<std::mutex> lock(data_mutex_);
+        require_connected_locked();  // the poll may have lost the feed since the check above
         if (!supported_properties_.count(normalize_property_name(property))) {
             throw AlpacaException("Sensor not implemented", AlpacaError::PropertyNotImplemented);
         }
+        require_not_faulted_locked();
         const double value = last_snapshot_.*member;
         if (!std::isfinite(value)) {
             throw AlpacaException("Value not set", AlpacaError::ValueNotSet);
@@ -624,6 +666,18 @@ private:
         property_last_update_[normalize_property_name(property)] = last_snapshot_.timestamp;
     }
 
+    void commit_snapshot_locked(const SensorSnapshot& snapshot) {
+        last_snapshot_ = snapshot;
+        rebuild_supported_properties_locked(snapshot);
+        update_property_timestamp_locked("temperature", snapshot.temperature_c);
+        update_property_timestamp_locked("humidity", snapshot.humidity);
+        update_property_timestamp_locked("dewpoint", snapshot.dewpoint_c);
+        update_property_timestamp_locked("windspeed", snapshot.wind_speed_ms);
+        update_property_timestamp_locked("pressure", snapshot.pressure_hpa);
+        update_property_timestamp_locked("skyquality", snapshot.sky_quality);
+        update_property_timestamp_locked("skytemperature", snapshot.sky_temperature_c);
+    }
+
     SensorSnapshot fetch_snapshot() const {
         std::string payload = fetcher_(config_.url, config_.timeout);
         return parse_snapshot(payload);
@@ -642,31 +696,99 @@ private:
 
     void poll_loop(util::OperationContext& ctx) {
         do {
+            std::optional<SensorSnapshot> snapshot;
+            std::string failure;
             try {
-                SensorSnapshot snapshot = fetch_snapshot();
-                std::lock_guard<std::mutex> lock(data_mutex_);
-                last_snapshot_ = snapshot;
-                rebuild_supported_properties_locked(snapshot);
-                update_property_timestamp_locked("temperature", snapshot.temperature_c);
-                update_property_timestamp_locked("humidity", snapshot.humidity);
-                update_property_timestamp_locked("dewpoint", snapshot.dewpoint_c);
-                update_property_timestamp_locked("windspeed", snapshot.wind_speed_ms);
-                update_property_timestamp_locked("pressure", snapshot.pressure_hpa);
-                update_property_timestamp_locked("skyquality", snapshot.sky_quality);
-                update_property_timestamp_locked("skytemperature", snapshot.sky_temperature_c);
+                snapshot = fetch_snapshot();
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN(kDriverComponent, "Polling failed: " + std::string(e.what()));
+                failure = e.what();
+            } catch (...) {
+                failure = "WeeWX fetch failed";
+            }
+            if (ctx.stop_reason() != util::StopReason::None) {
+                return;  // a Disconnect stopped this poll during the fetch: it changes nothing
+            }
+            if (snapshot) {
+                note_poll_reply(*snapshot);
+            } else if (note_poll_failure(failure)) {
+                return;  // decision 0009 rule 4: a lost feed's poll ends; only the client's Connect starts another
             }
         } while (ctx.wait_for(config_.poll_interval));
+    }
+
+    void note_poll_reply(const SensorSnapshot& snapshot) {
+        bool restored = false;
+        {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            commit_snapshot_locked(snapshot);
+            restored = link_health_.on_reply();
+        }
+        if (restored) {
+            ALPACA_LOG_INFO(kDriverComponent, "WeeWX feed restored: the poll answered again");
+        }
+    }
+
+    // Decision 0009 point 2(b): this driver's staleness bound is longer than util::kLinkStalenessBound. The feed is
+    // fetched once per poll_interval (15 minutes by default), so after the latch no fetch can answer within 30 s: the
+    // default bound would lose the feed at the very next failed poll. Two poll intervals give the feed two more polls
+    // after the latch, and the bound is never shorter than the default (nor than the three-poll latch it follows).
+    std::chrono::nanoseconds loss_bound() const {
+        return std::max<std::chrono::nanoseconds>(util::kLinkStalenessBound, 2 * config_.poll_interval);
+    }
+
+    // Decision 0009 rules 1 to 3, issue #1984: every failed poll fetch (an HTTP error, a status of 400 or more, a body
+    // that does not parse) counts as one failed exchange, none of them a loss by itself; the third in a row latches
+    // the fault, stamped on the task clock, and a fault standing past loss_bound() is a lost feed. Returns true when
+    // this failure lost it.
+    bool note_poll_failure(const std::string& reason) {
+        const auto now = clock_.now();
+        std::optional<std::string> latched;
+        int failures = 0;
+        bool lost = false;
+        std::string fault;
+        {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            latched = link_health_.note_failure(reason, kFailuresToLatch, now);
+            failures = link_health_.consecutive_failures();
+            if (link_health_.fault_stale(now, loss_bound())) {
+                lose_feed_locked();
+                lost = true;
+            }
+            fault = link_health_.fault();
+        }
+        if (lost) {
+            const auto bound_s = std::chrono::duration_cast<std::chrono::seconds>(loss_bound()).count();
+            ALPACA_LOG_ERROR(kDriverComponent, "WeeWX feed lost: no good fetch for " + std::to_string(bound_s) +
+                                                   " s after the fault latched (" + fault +
+                                                   "); Connected is false until the client connects again");
+        } else if (latched) {
+            ALPACA_LOG_ERROR(kDriverComponent, "WeeWX feed faulted: " + *latched);
+        } else {
+            ALPACA_LOG_WARN(kDriverComponent, "Polling failed (" + std::to_string(failures) + " in a row): " + reason);
+        }
+        return lost;
+    }
+
+    // Decision 0009 rule 3: Connected false (every member then throws NotConnected and DeviceState is empty); there is
+    // no transport to close, so the cached snapshot and per-sensor times are dropped and the next Connect starts clean.
+    // The fault text stays for get_link_fault() (rule 5). No LinkLostStamp: the feed has no #521 consumer.
+    void lose_feed_locked() {
+        connected_.store(false);
+        last_snapshot_ = SensorSnapshot{};
+        property_last_update_.clear();
     }
 
     int device_number_;
     WeeWxHttpConfig config_;
     WeeWxFetcher fetcher_;
+    // The fault stamp and the loss bound (decision 0005); the poll waits on it through poll_op_.
+    util::TaskClock& clock_;
 
     std::atomic<bool> connected_;
 
+    // A leaf: guards the snapshot, the sensor sets and link_health_; never held across a fetch.
     mutable std::mutex data_mutex_;
+    util::PolledLinkHealth link_health_;  // decision 0009: the poll's fault latch, stamped on clock_
     SensorSnapshot last_snapshot_{};
     std::unordered_map<std::string, std::chrono::system_clock::time_point> property_last_update_;
     std::unordered_set<std::string> supported_properties_;
@@ -697,10 +819,10 @@ std::optional<WeeWxCurrentValues> parse_weewx_current(std::string_view payload) 
     }
 }
 
-std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(
-    int device_number,
-    const WeeWxHttpConfig& config) {
-    return create_weewx_observingconditions(device_number, config, http_get);
+std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
+                                                                            const WeeWxHttpConfig& config,
+                                                                            util::TaskClock& clock) {
+    return create_weewx_observingconditions(device_number, config, http_get, clock);
 }
 
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,

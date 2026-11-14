@@ -12,6 +12,7 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #include <alpacacore/version.h>
 #include <arpa/inet.h>
@@ -175,6 +176,51 @@ int alpaca_error_of(const std::function<void()>& fn) {
     } catch (const alpacacore::AlpacaException& ex) {
         return ex.error_code();
     }
+}
+
+std::string alpaca_message_of(const std::function<void()>& fn) {
+    try {
+        fn();
+        return {};
+    } catch (const alpacacore::AlpacaException& ex) {
+        return ex.what();
+    }
+}
+
+// The link-loss cases (#1984) run the poll on the fake clock: each poll_once() is one poll, and the case waits until
+// the woken poll has parked again or, after a loss, ended (decision 0005 rule 2).
+constexpr std::chrono::milliseconds kRendezvous{5000};
+
+std::unique_ptr<alpacacore::ObservingConditionsDriver> make_fake_driver(
+    alpacacore::test::FakeWeeWxFetcher& fake, alpacacore::test::FakeTaskClock& clock,
+    std::chrono::seconds poll = std::chrono::seconds(1)) {
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+    config.poll_interval = poll;
+    return alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fake.fetcher(), clock);
+}
+
+void connect_parked(alpacacore::AlpacaDriver& driver, alpacacore::test::FakeTaskClock& clock) {
+    REQUIRE(alpacacore::test::connect_and_park(driver, clock, kRendezvous));
+    REQUIRE(driver.get_connected());
+}
+
+void poll_once(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds by = std::chrono::seconds(1)) {
+    clock.advance(by);
+    REQUIRE(clock.wait_for_woken_settled(kRendezvous));
+}
+
+// Three failed polls `period` apart: the third latches the fault. The fetcher must be failing.
+void latch_fault(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds period = std::chrono::seconds(1)) {
+    for (int i = 0; i < 3; ++i) {
+        poll_once(clock, period);
+    }
+}
+
+// Latches the fault, then one failed poll past the 30 s bound loses the feed (a 1 s poll interval).
+void lose_feed(alpacacore::test::FakeTaskClock& clock) {
+    latch_fault(clock);
+    poll_once(clock, alpacacore::util::kLinkStalenessBound);
 }
 
 }  // namespace
@@ -511,54 +557,450 @@ TEST_CASE("WeeWX ObservingConditions Driver - connect refuses a non-HTTP feed UR
 }
 
 // The poll interval is waited out on the fake clock (decision 0005 rule 2): each advance() is one poll.
-TEST_CASE("WeeWX ObservingConditions Driver - feed stalls after connect: values go stale, Connected holds", "[weewx]") {
+// Falsified by: weewx_observingconditions_driver.cpp note_poll_failure() never latching (kFailuresToLatch raised to
+// 1000): the third failed poll serves the last value instead of refusing it, and Connected never drops.
+TEST_CASE(
+    "WeeWX ObservingConditions Driver - feed stalls after connect: the third failure latches a fault that refuses "
+    "reads, the staleness bound drops Connected",
+    "[weewx]") {
     alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
     alpacacore::test::FakeWeeWxFetcher fake;
-    alpacacore::vendor::weewx::WeeWxHttpConfig config;
-    config.url = "http://localhost:9999/dummy";
-    config.poll_interval = std::chrono::seconds(1);
-    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fake.fetcher(), clock);
-    driver->set_connected(true);
-    REQUIRE(driver->get_connected());
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the poll is waiting out its interval
+    auto driver = make_fake_driver(fake, clock);
+    connect_parked(*driver, clock);
     const double before = driver->get_time_since_last_update("Temperature");
     const double temp = driver->get_temperature();
-    const auto poll_once = [&] {
-        clock.advance(config.poll_interval);
-        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
-    };
 
     fake.fail_next(1000);
 
-    // The poll keeps trying and failing; the last good reading is kept and its age is not reset, so a
-    // client can tell it is stale.
+    // Fewer than three failed polls: the last good reading is served and its age is not reset, so a client can
+    // tell it is stale.
     const int calls = fake.calls();
-    poll_once();
-    poll_once();
+    poll_once(clock);
+    poll_once(clock);
     CHECK(fake.calls() == calls + 2);
     const double after = driver->get_time_since_last_update("Temperature");
     INFO("before=" << before << " after=" << after);
     CHECK(after >= before);
     CHECK(driver->get_connected());
     CHECK(driver->get_temperature() == temp);
-    // An explicit Refresh against the failing feed throws and keeps the last reading.
+    CHECK(driver->get_link_fault().empty());
+    // An explicit Refresh against the failing feed throws, keeps the last reading and does not count.
     CHECK_THROWS(driver->refresh());
     CHECK(driver->get_temperature() == temp);
+    CHECK(driver->get_link_fault().empty());
 
-    // Recovery needs no reconnect: the next poll fetches again and succeeds.
-    fake.fail_next(0);
-    poll_once();
-    CHECK(fake.calls() == calls + 4);
+    // The third failed poll latches: Connected holds, reads refuse with the fault text.
+    poll_once(clock);
     CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == alpacacore::AlpacaError::DriverException);
+
+    // A feed that comes back before the bound restores fresh data with no reconnect.
+    fake.fail_next(0);
+    poll_once(clock);
+    CHECK(fake.calls() == calls + 5);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
     CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
 
-    // Disconnect does not wait on a stalled request beyond the request itself.
+    // Stalled again past the bound: the feed is lost.
+    fake.fail_next(1000);
+    latch_fault(clock);
+    poll_once(clock, alpacacore::util::kLinkStalenessBound);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == alpacacore::AlpacaError::NotConnected);
+
+    // Disconnect and destruction do not wait on a stalled request beyond the request itself.
+    fake.fail_next(0);
+    connect_parked(*driver, clock);
     fake.set_delay(std::chrono::milliseconds(300));
-    clock.advance(config.poll_interval);
+    clock.advance(std::chrono::seconds(1));
     const auto t0 = std::chrono::steady_clock::now();
     driver->set_connected(false);
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3));
     CHECK(driver->get_connected() == false);
+}
+
+// Decision 0009 rule 1 (#1984): no HTTP failure is positive evidence the feed is gone. A connection the server drops
+// (a libcurl error), a 500 and a body that does not parse each count as one failed exchange, through the real
+// libcurl fetch; three in a row of any kind latch, and one good fetch in between starts the count again.
+// Falsified by: weewx_observingconditions_driver.cpp http_get() refusing only a status above 500 (the 500 replies
+// never count, so they never latch); also note_poll_reply() not calling link_health_.on_reply() (a good fetch in
+// between does not reset the count).
+TEST_CASE("WeeWX ObservingConditions Driver - every kind of failed poll fetch counts as one failed exchange",
+          "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the feed outlive the driver
+    FakeWeeWxFeed feed;
+    feed.set_body(full_payload());
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = feed.url();
+    config.timeout = std::chrono::milliseconds(300);
+    config.poll_interval = std::chrono::seconds(1);
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, clock);
+    connect_parked(*driver, clock);
+
+    using Mode = FakeWeeWxFeed::Mode;
+    const auto fail_by = [&](int kind) {
+        feed.set_mode(Mode::Normal);
+        feed.set_body(full_payload());
+        if (kind == 0) {
+            feed.set_mode(Mode::DropAfterAccept);  // libcurl: "HTTP request failed: ..."
+        } else if (kind == 1) {
+            feed.set_mode(Mode::ServerError);  // "HTTP request returned status 500"
+        } else {
+            feed.set_body("<html>not json</html>");  // "WeeWX payload missing lcd_datasheet"
+        }
+    };
+    const auto heal = [&] {
+        feed.set_mode(Mode::Normal);
+        feed.set_body(full_payload());
+        poll_once(clock);
+        REQUIRE(driver->get_link_fault().empty());
+    };
+    const char* const texts[] = {"HTTP request failed", "HTTP request returned status 500", "lcd_datasheet"};
+
+    // Each kind alone: two failures are not a fault, the third is, and its text names the failure.
+    for (int kind = 0; kind < 3; ++kind) {
+        INFO("kind=" << kind);
+        fail_by(kind);
+        poll_once(clock);
+        poll_once(clock);
+        CHECK(driver->get_link_fault().empty());
+        CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
+        poll_once(clock);
+        CHECK(driver->get_connected());
+        const std::string fault = driver->get_link_fault();
+        INFO("fault=" << fault);
+        CHECK(fault.find(texts[kind]) != std::string::npos);
+        CHECK(fault.find("(3 consecutive failures)") != std::string::npos);
+        heal();
+    }
+
+    // A mix of the three latches after three in a row.
+    for (int kind = 0; kind < 3; ++kind) {
+        fail_by(kind);
+        poll_once(clock);
+    }
+    CHECK(driver->get_link_fault().find("lcd_datasheet") != std::string::npos);
+    heal();
+
+    // One good fetch between two pairs of failures resets the count: four failures, no fault.
+    for (int pair = 0; pair < 2; ++pair) {
+        fail_by(1);
+        poll_once(clock);
+        poll_once(clock);
+        if (pair == 0) {
+            heal();
+        }
+    }
+    CHECK(driver->get_link_fault().empty());
+    CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
+    feed.set_mode(Mode::Normal);
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 1 (#1984): only the poll's fetches count towards the latch; a failed Refresh reports its own
+// error to the caller, and a good one clears a standing fault like a good poll.
+// Falsified by: weewx_observingconditions_driver.cpp refresh() not calling link_health_.on_reply() after a good fetch
+// (the standing fault survives the good Refresh).
+TEST_CASE("WeeWX ObservingConditions Driver - a failed Refresh does not count, a good one clears the fault",
+          "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    auto driver = make_fake_driver(fake, clock);
+    connect_parked(*driver, clock);
+
+    fake.fail_next(3);
+    for (int i = 0; i < 3; ++i) {
+        CHECK_THROWS(driver->refresh());
+    }
+    CHECK(driver->get_link_fault().empty());
+    CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
+    // The count did not move either: two failed polls after them are still no fault.
+    fake.fail_next(2);
+    poll_once(clock);
+    poll_once(clock);
+    CHECK(driver->get_link_fault().empty());
+
+    fake.fail_next(1);
+    poll_once(clock);
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    driver->refresh();
+    CHECK(driver->get_link_fault().empty());
+    CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 1 (#1984): the third failed poll in a row latches; while it stands Connected stays true and
+// the sensor reads and TimeSinceLastUpdate throw DriverException with the fault text, static metadata still answers,
+// and the first good poll clears it with no reconnect. A Connect while connected (faulted) changes nothing.
+// Falsified by: weewx_observingconditions_driver.cpp get_value_or_nan() without require_not_faulted_locked() (a
+// latched fault still serves the last good temperature); also set_connected(true) without its connected_ early
+// return (the Connect stops the poll, fetches the failing feed and throws).
+TEST_CASE("WeeWX ObservingConditions Driver - three consecutive failed polls latch a fault that refuses reads",
+          "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    auto driver = make_fake_driver(fake, clock);
+    connect_parked(*driver, clock);
+    const int driver_exception = alpacacore::AlpacaError::DriverException;
+
+    fake.fail_next(1000);
+    poll_once(clock);
+    poll_once(clock);
+    CHECK(driver->get_link_fault().empty());
+    CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
+    CHECK(driver->get_time_since_last_update("Temperature") >= 0.0);
+
+    poll_once(clock);
+    CHECK(driver->get_connected());
+    const std::string fault = driver->get_link_fault();
+    CHECK(fault == "scripted WeeWX fetch failure (3 consecutive failures)");
+    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == driver_exception);
+    CHECK(alpaca_error_of([&] { (void)driver->get_humidity(); }) == driver_exception);
+    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == driver_exception);
+    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update(""); }) == driver_exception);
+    CHECK(alpaca_message_of([&] { (void)driver->get_temperature(); }).find(fault) != std::string::npos);
+    CHECK(alpaca_message_of([&] { (void)driver->get_time_since_last_update(""); }).find(fault) != std::string::npos);
+    // The parameter checks and the sensors the station does not serve keep their own answers.
+    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("NoSuchSensor"); }) ==
+          alpacacore::AlpacaError::InvalidValue);
+    CHECK(alpaca_error_of([&] { (void)driver->get_pressure(); }) == alpacacore::AlpacaError::PropertyNotImplemented);
+    CHECK(driver->get_sensor_description("Temperature") == "Outdoor temperature (WeeWX outTemp)");
+    CHECK(driver->get_device_state().empty());  // every operational read refuses (the ASCOM read-all FAQ)
+
+    // Connect while connected is a no-op: it neither fetches nor stops the poll, and the fault stands.
+    const int calls = fake.calls();
+    CHECK_NOTHROW(driver->set_connected(true));
+    CHECK(fake.calls() == calls);
+    CHECK(driver->get_link_fault() == fault);
+    REQUIRE(clock.waiter_count() == 1);  // the poll is still parked on its interval
+
+    fake.fail_next(0);
+    poll_once(clock);
+    CHECK(fake.calls() == calls + 1);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
+    CHECK_FALSE(driver->get_device_state().empty());
+    driver->set_connected(false);
+}
+
+// Decision 0009 rules 2 and 3 (#1984): with a 1 s poll the bound is util::kLinkStalenessBound, measured on the task
+// clock from the latch. Failures alone never lose the feed: 29 s of failed polls after the latch leave it connected;
+// the poll exactly 30 s after the latch loses it.
+// Falsified by: weewx_observingconditions_driver.cpp note_poll_failure() losing the feed on a failure count
+// (link_health_.consecutive_failures() >= 10) instead of link_health_.fault_stale().
+TEST_CASE("WeeWX ObservingConditions Driver - the feed is lost only at the staleness bound", "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    auto driver = make_fake_driver(fake, clock);
+    connect_parked(*driver, clock);
+
+    fake.fail_next(1000);
+    latch_fault(clock);
+    for (int i = 0; i < 29; ++i) {
+        poll_once(clock);
+    }
+    CHECK(driver->get_connected());
+    const int calls = fake.calls();
+    clock.advance(std::chrono::milliseconds(999));  // 29.999 s after the latch: no poll is due
+    CHECK(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK(fake.calls() == calls);
+    CHECK(driver->get_connected());
+    poll_once(clock, std::chrono::milliseconds(1));  // the poll 30 s after the latch
+    CHECK(fake.calls() == calls + 1);
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Decision 0009 point 2(b) (#1984): the bound is max(30 s, 2 x poll_interval), so a slowly polled feed is not lost at
+// its first failed poll after the latch.
+// Falsified by: weewx_observingconditions_driver.cpp loss_bound() returning util::kLinkStalenessBound alone (a 20 s
+// poll loses the feed 39.999 s after the latch).
+TEST_CASE("WeeWX ObservingConditions Driver - the staleness bound grows with the poll interval", "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    auto driver = make_fake_driver(fake, clock, std::chrono::seconds(20));
+    connect_parked(*driver, clock);
+
+    fake.fail_next(1000);
+    latch_fault(clock, std::chrono::seconds(20));
+    poll_once(clock, std::chrono::milliseconds(39999));  // one late poll, 39.999 s after the latch
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());
+    poll_once(clock, std::chrono::seconds(20));  // 59.999 s: past the 40 s bound
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Decision 0009 rules 3 and 4 (#1984): a lost feed reads Connected false, every member throws NotConnected (Refresh
+// and TimeSinceLastUpdate included, with the kept fault in the message), DeviceState is empty, and the poll has ended:
+// no fetch follows however far the clock moves.
+// Falsified by: weewx_observingconditions_driver.cpp poll_loop() going on after note_poll_failure() returns true
+// (the poll keeps fetching after the loss).
+TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops Connected and its poll ends", "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    auto driver = make_fake_driver(fake, clock);
+    connect_parked(*driver, clock);
+    const int not_connected = alpacacore::AlpacaError::NotConnected;
+
+    fake.fail_next(1000);
+    lose_feed(clock);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_connecting());
+    const std::string fault = driver->get_link_fault();
+    CHECK(fault.find("scripted WeeWX fetch failure") != std::string::npos);
+    CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == not_connected);
+    CHECK(alpaca_error_of([&] { (void)driver->get_humidity(); }) == not_connected);
+    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
+    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update(""); }) == not_connected);
+    CHECK(alpaca_error_of([&] { (void)driver->get_sensor_description("Temperature"); }) == not_connected);
+    CHECK(alpaca_error_of([&] { (void)driver->get_cloud_cover(); }) == not_connected);
+    CHECK(alpaca_message_of([&] { (void)driver->get_temperature(); }).find(fault) != std::string::npos);
+    const int calls = fake.calls();
+    CHECK(alpaca_error_of([&] { driver->refresh(); }) == not_connected);
+    CHECK(driver->get_device_state().empty());
+
+    CHECK(clock.waiter_count() == 0);  // the poll body has returned
+    for (int i = 0; i < 5; ++i) {
+        clock.advance(std::chrono::seconds(60));
+    }
+    CHECK(fake.calls() == calls);  // Refresh did not fetch, and no poll did
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Decision 0009 rule 4 (#1984): nothing reopens a lost feed but the client's Connect, which re-runs the connect fetch:
+// it fails with DriverException while the feed is down and reconnects with a fresh value once it answers. A
+// Disconnect over a lost feed completes, through either entry point.
+// Falsified by: weewx_observingconditions_driver.cpp set_connected(true) without link_health_.reset() (the failed
+// Connect over the lost feed still reports the old fault text).
+TEST_CASE("WeeWX ObservingConditions Driver - only the client's Connect relinks a lost feed", "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    auto driver = make_fake_driver(fake, clock);
+    connect_parked(*driver, clock);
+
+    fake.fail_next(1000);
+    lose_feed(clock);
+    REQUIRE_FALSE(driver->get_connected());
+
+    // The feed is still down: Connect re-runs the connect fetch, fails with its error (the scripted fetcher throws a
+    // plain std::runtime_error; libcurl's fetch throws DriverException, "connect refuses a feed that never answers")
+    // and leaves the driver down.
+    const int before_connect = fake.calls();
+    CHECK_THROWS_WITH(driver->set_connected(true), "scripted WeeWX fetch failure");
+    CHECK(fake.calls() == before_connect + 1);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // rule 5: the Connect ended the kept text; its own error is the reason
+
+    // The feed is back: Connect reconnects, serves a fresh value and polls again.
+    fake.fail_next(0);
+    connect_parked(*driver, clock);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
+    const int calls = fake.calls();
+    poll_once(clock);
+    CHECK(fake.calls() == calls + 1);
+
+    // Disconnect over a lost feed completes (sync), and so does the async Disconnect.
+    fake.fail_next(1000);
+    lose_feed(clock);
+    REQUIRE_FALSE(driver->get_connected());
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+
+    fake.fail_next(0);
+    connect_parked(*driver, clock);
+    fake.fail_next(1000);
+    lose_feed(clock);
+    REQUIRE_FALSE(driver->get_connected());
+    driver->disconnect();
+    // The async Disconnect runs on the connection thread, which waits on nothing of the fake clock (real time).
+    for (int i = 0; i < 200 && driver->get_connecting(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK_FALSE(driver->get_connecting());
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+}
+
+// Decision 0009 rule 5 (#1984): get_link_fault() is the one fault text: empty on a healthy feed, the PolledLinkHealth
+// text while faulted, the same text after the loss, and empty again after a Disconnect and after a good Connect.
+// Falsified by: weewx_observingconditions_driver.cpp lose_feed_locked() calling link_health_.reset() (the text is gone
+// once the feed is lost).
+TEST_CASE("WeeWX ObservingConditions Driver - the link fault text is kept until the next Connect or Disconnect",
+          "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
+    alpacacore::test::FakeWeeWxFetcher fake;
+    auto driver = make_fake_driver(fake, clock);
+    connect_parked(*driver, clock);
+    CHECK(driver->get_link_fault().empty());
+
+    fake.fail_next(1000);
+    latch_fault(clock);
+    const std::string fault = driver->get_link_fault();
+    CHECK(fault == "scripted WeeWX fetch failure (3 consecutive failures)");
+    poll_once(clock, alpacacore::util::kLinkStalenessBound);
+    REQUIRE_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault() == fault);
+    clock.advance(std::chrono::minutes(10));
+    CHECK(driver->get_link_fault() == fault);
+
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+
+    fake.fail_next(0);
+    connect_parked(*driver, clock);
+    fake.fail_next(1000);
+    lose_feed(clock);
+    REQUIRE(driver->get_link_fault() == fault);
+    fake.fail_next(0);
+    connect_parked(*driver, clock);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 3 (#1984): there is no transport to close, so a loss drops the cached snapshot and the per-sensor
+// update times; the next Connect starts clean. A sensor the reconnected feed no longer reports has no update time
+// (TimeSinceLastUpdate -1), not the age of a reading taken before the loss.
+// Falsified by: weewx_observingconditions_driver.cpp lose_feed_locked() not clearing property_last_update_ (Humidity
+// keeps its pre-loss update time after the reconnect).
+TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops its cached sensor times", "[weewx]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher state outlive the driver
+    std::atomic<bool> failing{false};
+    std::atomic<bool> humidity{true};
+    alpacacore::vendor::weewx::WeeWxFetcher fetcher = [&](const std::string&, std::chrono::milliseconds) {
+        if (failing.load()) {
+            throw std::runtime_error("scripted WeeWX fetch failure");
+        }
+        const std::string now = std::to_string(static_cast<long long>(std::time(nullptr)));
+        const std::string rh = humidity.load() ? R"("outHumidity":{"value":40.0},)" : "";
+        return R"({"lcd_datasheet":{"current":{"outTemp":{"value":50.0},)" + rh + R"("dateTime":{"value":)" + now +
+               "}}}}";
+    };
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+    config.poll_interval = std::chrono::seconds(1);
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fetcher, clock);
+    connect_parked(*driver, clock);
+    REQUIRE(driver->get_time_since_last_update("Humidity") >= 0.0);
+
+    failing.store(true);
+    lose_feed(clock);
+    REQUIRE_FALSE(driver->get_connected());
+
+    // The feed answers again, without its humidity sensor.
+    humidity.store(false);
+    failing.store(false);
+    connect_parked(*driver, clock);
+    CHECK(driver->get_time_since_last_update("Temperature") >= 0.0);
+    CHECK(driver->get_time_since_last_update("Humidity") == -1.0);
+    CHECK(alpaca_error_of([&] { (void)driver->get_humidity(); }) == alpacacore::AlpacaError::ValueNotSet);
+    driver->set_connected(false);
 }
 
 TEST_CASE("WeeWX ObservingConditions Driver - malformed reply after connect keeps last good values", "[weewx]") {

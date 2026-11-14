@@ -61,11 +61,12 @@ std::optional<WeeWxCurrentValues> parse_weewx_current(std::string_view payload);
  *
  * @param device_number Alpaca device number
  * @param config HTTP configuration for WeeWX JSON feed
+ * @param clock The poll's wait, the link-fault stamp and the loss bound (decision 0005; a test seam, the
+ *              clock must outlive the driver)
  * @return Unique pointer to observing conditions driver
  */
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(
-    int device_number,
-    const WeeWxHttpConfig& config);
+    int device_number, const WeeWxHttpConfig& config, util::TaskClock& clock = util::default_task_clock());
 
 /**
  * @brief As above, but fetching the feed through `fetcher` instead of libcurl.
@@ -77,7 +78,8 @@ std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int 
                                                                             WeeWxFetcher fetcher);
 
 /**
- * @brief As above, with the poll waiting on `clock` (a test seam; the clock must outlive the driver).
+ * @brief As above, with the poll, the link-fault stamp and the loss bound on `clock` (a test seam; the clock must
+ *        outlive the driver).
  */
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
                                                                             const WeeWxHttpConfig& config,
