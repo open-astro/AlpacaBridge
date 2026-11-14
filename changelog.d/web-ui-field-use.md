@@ -8,4 +8,4 @@
 - **Host check warning** (AlpacaHTTP web UI, issue #1764): the "Restrict Host names" toggle now says that other clients (NINA, a phone, a second browser) that use a name that is not allowed will be refused, so every name they use should be added first.
 
 ### Added (tests)
-- **Client activity and web UI field-use cases** (issue #1764): two `test_routing` cases over an injectable registry clock (`Router::set_client_clock_for_test`) and eleven `field_use.test.js` cases for the status dot, dialogs, tab semantics, focus ring, empty state, header clock and Host check note.
+- **Client activity and web UI field-use cases** (issue #1764): two `test_routing` cases over an injectable registry clock (`Router::set_client_clock_for_test`) eleven `field_use.test.js` cases for the status dot, dialogs, tab semantics, focus ring, empty state, header clock and Host check note, and ten `ui_dialog.test.js` cases that run the real dialog, toast and field-error code of `app.js` (Cancel and Esc resolve no, a destructive dialog opens on Cancel, a success toast closes on its timer and an error toast stays, a field error clears and restores `aria-describedby`).
