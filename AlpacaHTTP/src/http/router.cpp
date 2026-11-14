@@ -774,6 +774,13 @@ constexpr const char* kAnonymousClientKey = "<anonymous>";
 // device refreshes its registration, so ordinary polling keeps it alive.
 constexpr std::chrono::minutes kClientConnectionStaleAfter{10};
 
+// Issue #1764: the web UI marks its own device requests (the Celestron
+// calibration action) with this header, so they never refresh a client's
+// registration and the Devices dot shows only real client activity. Kept in
+// step with WEB_UI_CLIENT_HEADER in web/format.js (tests/web/field_use.test.js).
+constexpr const char* kWebUiClientHeader = "X-AlpacaBridge-Client";
+constexpr const char* kWebUiClientValue = "web-ui";
+
 // The caller's registry identity plus whether it actually supplied a
 // ClientID — GET connected falls back to raw device state for ClientID-less
 // probes, which can't be told from the key alone once the peer address is
@@ -2160,6 +2167,14 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             // disconnected). Firmware and SdkVersion are distinct: Firmware is
             // the device's own firmware, SdkVersion is the vendor library version.
             if (auto driver = registry.get_device(cap.type, cap.device_number)) {
+                // Issue #1764: client activity for the web UI status dot, read
+                // from the router's per-client registry only (no driver call,
+                // no hardware). The web UI's own requests never refresh it.
+                const auto activity = client_activity(driver.get());
+                device["ActiveClients"] = activity.active_clients;
+                if (activity.last_request_age) {
+                    device["LastClientRequestAgeMs"] = activity.last_request_age->count();
+                }
                 // Connected feeds the web UI status dot (green/yellow). Omitted
                 // when the call throws, so the UI shows "unknown" (red).
                 // get_connecting() is lock-free; a driver mid-connect can hold its
@@ -2396,8 +2411,10 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
 
         // Any request from a registered client refreshes its Connected
         // registration so routine polling keeps it from expiring as stale
-        // (issue #160).
-        touch_client_connection(device.get(), extract_client_key(request).key);
+        // (issue #160). The web UI's own requests do not (issue #1764).
+        if (request.get_header(kWebUiClientHeader) != kWebUiClientValue) {
+            touch_client_connection(device.get(), extract_client_key(request).key);
+        }
 
         // open-astro#547: the single device-dispatch choke point for the
         // client-silence motion watchdog. Any request addressed to this
@@ -2478,8 +2495,9 @@ void set_wrong_verb_text(Response& response, const char* what) {
 }  // namespace
 
 namespace {
-void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
-    const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
+void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients,
+                                    std::chrono::steady_clock::time_point now) {
+    const auto cutoff = now - kClientConnectionStaleAfter;
     for (auto it = clients.begin(); it != clients.end();) {
         if (it->second < cutoff) {
             it = clients.erase(it);
@@ -2494,8 +2512,9 @@ void prune_stale_client_connections(std::unordered_map<std::string, std::chrono:
 std::size_t Router::register_client_connection(const void* device, const std::string& client_key) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
     auto& clients = client_connections_[device];
-    prune_stale_client_connections(clients);
-    clients[client_key] = std::chrono::steady_clock::now();
+    const auto now = client_clock_();
+    prune_stale_client_connections(clients, now);
+    clients[client_key] = now;
     return clients.size();
 }
 
@@ -2506,7 +2525,7 @@ std::size_t Router::unregister_client_connection(const void* device, const std::
         return 0;
     }
     it->second.erase(client_key);
-    prune_stale_client_connections(it->second);
+    prune_stale_client_connections(it->second, client_clock_());
     if (it->second.empty()) {
         client_connections_.erase(it);
         return 0;
@@ -2525,7 +2544,7 @@ bool Router::client_connection_registered(const void* device, const std::string&
         return false;
     }
     // A lookup is client activity: refresh so steady polling never goes stale.
-    client_it->second = std::chrono::steady_clock::now();
+    client_it->second = client_clock_();
     return true;
 }
 
@@ -2537,8 +2556,37 @@ void Router::touch_client_connection(const void* device, const std::string& clie
     }
     auto client_it = it->second.find(client_key);
     if (client_it != it->second.end()) {
-        client_it->second = std::chrono::steady_clock::now();
+        client_it->second = client_clock_();
     }
+}
+
+Router::ClientActivity Router::client_activity(const void* device) const {
+    std::lock_guard<std::mutex> lock(client_connections_mutex_);
+    ClientActivity activity;
+    auto it = client_connections_.find(device);
+    if (it == client_connections_.end()) {
+        return activity;
+    }
+    // Read-only: an entry past the stale window is skipped here and left for
+    // the next register/unregister to prune, as the disconnect rule does.
+    const auto now = client_clock_();
+    const auto cutoff = now - kClientConnectionStaleAfter;
+    std::optional<std::chrono::steady_clock::time_point> newest;
+    for (const auto& entry : it->second) {
+        const auto seen = entry.second;
+        if (seen < cutoff) {
+            continue;
+        }
+        ++activity.active_clients;
+        if (!newest || seen > *newest) {
+            newest = seen;
+        }
+    }
+    if (newest) {
+        activity.last_request_age = std::max(std::chrono::milliseconds{0},
+                                             std::chrono::duration_cast<std::chrono::milliseconds>(now - *newest));
+    }
+    return activity;
 }
 
 void Router::clear_client_connections(const void* device) {

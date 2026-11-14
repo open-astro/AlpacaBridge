@@ -813,7 +813,7 @@ TEST_CASE("OnStep link loss - a loss found during an exchange closes the fd once
     std::thread exchange([&] {
         try {
             (void)protocol.send_command(":GRa#");
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): only the held link matters
         }
     });
     JoinOnExit join_exchange{exchange};

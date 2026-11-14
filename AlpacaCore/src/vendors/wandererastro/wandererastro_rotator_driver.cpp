@@ -99,7 +99,14 @@ public:
     // Connecting and DeviceState, all of which this driver implements.
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (decision 0009, issue #1989): once a
+    // command write or the move monitor has met a hangup, the wrapper has
+    // released the port. Both reads are lock-free.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
+
+    // Decision 0009 point 5: the loss reason, kept after the link is lost
+    // until the next Connect or Disconnect; empty on a healthy link.
+    std::string get_link_fault() const override { return protocol_.link_fault(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -120,20 +127,31 @@ public:
         // Serialize the whole connect/disconnect transition (see the cover
         // driver for the race this prevents).
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        const bool live = get_connected();
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
-        // newer pending disconnect by staying down.
+        // newer pending disconnect by staying down. The disconnect gate reads
+        // the raw flag, so a lost link still runs the teardown; the connect
+        // gate reads the link-aware value, so Connect over a lost link
+        // reconnects (decision 0009 point 4).
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown().
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
         if (connected) {
+            if (connected_.load()) {
+                teardown();  // a lost link: join the monitor and drop it before reconnecting
+            }
             // Resolve an auto-detect request here (on the background connection
             // thread), not at registration: enumerate the ports and pick the
             // requested match. A local copy keeps config_ as the durable intent
@@ -181,8 +199,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("WandererAstro", "Rotator connected");
         } else {
-            protocol_.disconnect();  // joins the move monitor, clears cached firmware
-            connected_.store(false);
+            teardown();
             ALPACA_LOG_INFO("WandererAstro", "Rotator disconnected");
         }
     }
@@ -335,10 +352,24 @@ public:
     }
 
 private:
+    // NotConnected while disconnected and once the link is lost (decision
+    // 0009 point 3, issue #1989).
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Rotator not connected", AlpacaError::NotConnected);
         }
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("WandererRotator link lost; Connect again once the rotator is back",
+                                  AlpacaError::NotConnected);
+        }
+    }
+
+    // Driver state first, then the wrapper teardown (joins the move monitor,
+    // clears the cached state, firmware date and loss reason, closes the port
+    // if the loss has not already released it). Caller holds transition_mutex_.
+    void teardown() {
+        connected_.store(false);
+        protocol_.disconnect();
     }
 
     static void validate_angle(double position) {

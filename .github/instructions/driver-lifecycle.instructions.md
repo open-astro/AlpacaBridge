@@ -68,7 +68,7 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
-  the exposure workers of cameras not yet on `util::CaptureSession` (Player One and ZWO are; decision 0020)
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO and SVBONY are; decision 0020)
   and the GPIO soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
     writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
@@ -359,12 +359,15 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   an empty list without `TimeStamp` through the base class's per-id try/catch when no
   operational values remain (the ASCOM read-all FAQ).
 - **Recovery is automatic**: keep polling/reading at the normal cadence while faulted so the
-  first frame clears the latch without a reconnect (a re-plugged hub on the same node).
+  first frame clears the latch without a reconnect (a hub that answers again; on a driver that
+  adopted decision 0009, the Gemini PDH, a re-plugged adapter is a hangup and a lost link instead).
 - **Test it hardware-free** with the pty fakes: `set_muted(true)` (hung MCU, healthy fd) and
   `sever_link()` (master closed: writes fail with EIO, reads return 0 at once) — `tests/fake_serial_streamer.h` for any
   streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
   threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
-  and the next frame restores service.
+  and the next frame restores service. On a driver that adopted decision 0009 (the Gemini PDH and the
+  WandererAstro streaming drivers) only `set_muted(true)` faults; `sever_link()` is a lost link instead
+  (`Connected` false at once; the exception below).
 - **Exception: a removed device node is a lost connection, not a fault (issue #445,
   Sky-Watcher direct driver).** A quiet link can come back on the same fd; a node that is gone
   cannot (the fd's link count is 0, writes fail `EIO`, and the held fd keeps the kernel from
@@ -387,13 +390,22 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   exposure retry stops at the first one), and on a generic failure from a camera the SDK no longer enumerates (a bare
   cable pull, which ASI SDK 1.41 answers with no removal code), with no staleness bound; its dew heater switch drops
   `Connected` on its next call. The QHY integrated filter wheel drops it on `QHYCCD_ERROR_DEVICELOSE` from its own call since #1985
-  ([QHY](qhy.instructions.md)). A second owner of a shared open whose close counts opens, not owners (the QHY
+  ([QHY](qhy.instructions.md)), and the SVBONY camera on `SVB_ERROR_CAMERA_REMOVED` or `SVB_ERROR_CAMERA_CLOSED` from a
+  device call since #1986, its exposure body included (`SVB_ERROR_INVALID_ID` is not evidence; unverified on hardware,
+  [SVBONY](svbony.instructions.md)). A second owner of a shared open whose close counts opens, not owners (the QHY
   wrapper's `close_camera()`), releases its reference exactly once, at the loss or the Disconnect, whichever comes first:
   a second release drops the other owner's reference. The Astroasis focuser follows it since #1756
   (`AstroasisProtocolWrapper::link_alive()`, a lock-free latch set by a HID write or read error on the next transaction, which is the
-  state poll; `test_astroasis_focuser.cpp`, `a removed transport drops Connected at once`). The #237 drivers still treat a
-  removed node as a fault; that has not been changed. Tests: `sever_link()` on
-  `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
+  state poll; `test_astroasis_focuser.cpp`, `a removed transport drops Connected at once`). The Gemini PDH follows it since
+  #1987 (`GeminiPdhProtocolWrapper::link_alive()`: a hangup on the reader's read or `EIO`/`ENXIO`/`ENODEV` on a poll or
+  command write, and a #237 fault standing past `util::kLinkStalenessBound` on the task clock; the reader, the one thread
+  that reads the fd, releases the port; the `[link-lost]` cases in `test_gemini_pdh_switch.cpp`). The WandererAstro cover, SFW
+  wheel and box follow it since #1988 (`link_alive()`: a hangup on the reader's read or `EIO`/`ENXIO`/`ENODEV` on a
+  write is a lost link at once, and a stream fault standing past `util::kLinkStalenessBound` is one too,
+  `StreamLinkHealth::fault_stale()`; the reader clears the cache, stops and releases the port, and a writer that meets
+  the loss leaves the close to it), and the WandererRotator since #1989 (a hangup on a command write or a move monitor
+  read; no latch, request/response). Tests: `sever_link()` on
+  `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`; `fake_serial_streamer.h`, `[wandererastro][link-lost]`.
 
 ### Reconnect must not self-deadlock: `disconnect_locked()`
 

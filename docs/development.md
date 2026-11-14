@@ -427,7 +427,7 @@ The Debian package is built from the `debian/` directory. It installs:
 
 ## Scheduled run failures
 
-`.github/workflows/scheduled-failure.yml` runs after each scheduled or manually dispatched run of Nightly Build, CodeQL, OSV scan, Dependency updates, Link check, APT install check and ConformU fake Sky-Watcher on `main` (issue #1352). A failed, timed-out or never-started run opens one issue for its workflow (`Scheduled run failing: <workflow>`, labels `bug` and `P3`), or adds a comment with the run link when that issue is already open; the next successful run of that workflow closes it, unless one of that run's jobs was skipped (a Nightly Build run whose `check` job found the tag already at `HEAD` skips the build and the suite, so it does not show that the failure is fixed). A cancelled run changes nothing. The issue is found by the `<!-- scheduled-run: ... -->` marker in its body, so it can be retitled or relabelled. The rules are in `scripts/scheduled_run_issue.py`; to see what it would do for a run: `WORKFLOW_NAME="Nightly Build" CONCLUSION=failure RUN_URL=<url> HEAD_SHA=<sha> EVENT=schedule GH_REPO=open-astro/AlpacaBridge python3 scripts/scheduled_run_issue.py --dry-run`.
+`.github/workflows/scheduled-failure.yml` runs after each scheduled or manually dispatched run of Nightly Build, CodeQL, OSV scan, Dependency updates, Link check, APT install check, ConformU fake Sky-Watcher, Lock closed threads, Stale and OpenSSF Scorecard on `main` (issue #1352). A failed, timed-out or never-started run opens one issue for its workflow (`Scheduled run failing: <workflow>`, labels `bug` and `P3`), or adds a comment with the run link when that issue is already open; the next successful run of that workflow closes it, unless one of that run's jobs was skipped (a Nightly Build run whose `check` job found the tag already at `HEAD` skips the build and the suite, so it does not show that the failure is fixed). A cancelled run changes nothing. The issue is found by the `<!-- scheduled-run: ... -->` marker in its body, so it can be retitled or relabelled. The rules are in `scripts/scheduled_run_issue.py`; to see what it would do for a run: `WORKFLOW_NAME="Nightly Build" CONCLUSION=failure RUN_URL=<url> HEAD_SHA=<sha> EVENT=schedule GH_REPO=open-astro/AlpacaBridge python3 scripts/scheduled_run_issue.py --dry-run`.
 
 ## Link check
 
@@ -450,6 +450,25 @@ The Debian package is built from the `debian/` directory. It installs:
 ## Locked closed threads
 
 `.github/workflows/lock-threads.yml` locks every issue and pull request that has been closed with no activity for 14 days, so a new report goes into a new issue rather than a comment on an old merged PR (a 5.0.2 regression was reported on merged PR #1100). It runs every six hours and on dispatch, through `dessant/lock-threads`, with the lock reason `resolved`; collaborators can still comment on a locked thread. Threads closed from 2026-11-10 on get a comment pointing at a new issue; the backlog closed before that date is locked without a comment, so its subscribers are not notified. `scheduled-failure.yml` watches it by workflow name. To unlock one thread: `gh api -X DELETE repos/open-astro/AlpacaBridge/issues/<n>/lock`; a comment on it afterwards resets the 14 days.
+
+## Stale issues and pull requests
+
+`.github/workflows/stale.yml` runs every day (04:37 UTC) and on dispatch, through `actions/stale` (issue #1363). The policy for contributors:
+
+- An issue with no activity for 90 days is labelled `stale` with a comment, and closed 30 days later.
+- A pull request with no activity for 30 days is labelled `stale` with a comment, and closed 14 days later. A draft pull request is labelled but never closed.
+- Any comment, push or label change removes the `stale` label and starts the count again, so a comment saying the thread still matters is enough to keep it open.
+- Issues and pull requests labelled `P1`, `P2`, `on hold`, `testing` or `safe-to-review` are never marked.
+
+It starts as a dry run (`debug-only: 'true'` in both steps): the run log lists what it would mark and close, and nothing is changed. The maintainer creates the `stale` label, reads two weeks of logs, and turns it on in a later PR. `scheduled-failure.yml` watches it by workflow name.
+
+## OpenSSF Scorecard
+
+`.github/workflows/scorecard.yml` runs [OpenSSF Scorecard](https://github.com/ossf/scorecard-action) every Monday (06:29 UTC), on every push to `main` and on dispatch from `main` (issue #1364). It scores the repository's supply-chain practices (branch protection, pinned actions, token permissions, signed releases, dangerous workflows and more) and uploads the result as SARIF to the Security tab's Code scanning, next to CodeQL. Results are not published to the public Scorecard API (`publish_results: false`), so there is no public score badge; turning that on needs `publish_results: true` and `id-token: write` on the job. It runs on `ubuntu-latest` because the action's Docker image is built for amd64 only. It does not gate merges. `scheduled-failure.yml` watches it by workflow name.
+
+## Authored code badge
+
+The README's `Authored code` badge reads its number from `authored-lines.json` on the `badges` branch, through the [shields.io endpoint badge](https://shields.io/badges/endpoint-badge) (issue #2079). `.github/workflows/authored-lines-badge.yml` writes that file on every push to `main` with `python3 scripts/check_docs_drift.py --badge-json`, which counts the non-blank lines of tracked first-party code with the rules docs-drift check 25 owns; `--badge` prints the count, the JSON and the README line. The README holds no number, so a pull request never has to update it, and check 25 fails only when the README line stops pointing at the endpoint or the count falls below its floor. The `badges` branch holds that one file; the workflow creates it on its first run.
 
 ## Releases
 

@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/version.h>
 
 #include <atomic>
 #include <chrono>
@@ -74,6 +75,22 @@ TEST_CASE("ZWO Mount Telescope Driver - Defaults", "[zwo][telescope][unit]") {
     REQUIRE(driver->get_can_set_park());
     REQUIRE(driver->get_can_pulse_guide());
     REQUIRE(driver->get_can_set_guide_rates());
+}
+
+// Required case 2 (issue #1863). Before a connect has read the mount, the fallback UniqueID is the device number's.
+TEST_CASE("ZWO Mount Telescope Driver - Device metadata", "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(3, conn);
+
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_description() == "ZWO AM Mount Driver (Serial/TCP LX200-compatible protocol)");
+    CHECK(driver->get_driver_info() == "AlpacaCore ZWO Mount Driver");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
+    CHECK(driver->get_interface_version() == 4);
+    CHECK(driver->get_unique_id() == "ZWO_MOUNT_3");
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Target Validation", "[zwo][telescope][unit]") {
@@ -993,6 +1010,72 @@ TEST_CASE("ZWO Mount Telescope Driver - connected unsupported members keep their
     require_alpaca_error([&] { driver->slew_to_alt_az(180.0, 45.0); }, AlpacaError::NotImplemented);
     require_alpaca_error([&] { driver->slew_to_alt_az_async(180.0, 45.0); }, AlpacaError::NotImplemented);
     require_alpaca_error([&] { driver->sync_to_alt_az(180.0, 45.0); }, AlpacaError::NotImplemented);
+    driver->set_connected(false);
+}
+
+// Issue #1866: the tracking, rate and equatorial-system members on a connected driver. Each listed TrackingRate is
+// accepted, sent as its own command and read back; the driver applies no rate offset, so both rates read 0.0.
+TEST_CASE("ZWO Mount Telescope Driver - connected tracking rate members and equatorial system",
+          "[zwo][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+    require_alpaca_error([&] { (void)driver->get_declination_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_right_ascension_rate(); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    CHECK(driver->get_can_set_tracking());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK(driver->get_equatorial_system() == alpacacore::EquatorialSystem::Topocentric);
+    CHECK(driver->get_declination_rate() == 0.0);
+    CHECK(driver->get_right_ascension_rate() == 0.0);
+
+    // DriveRates: 0 sidereal, 1 lunar, 2 solar; the AM mount has no King rate.
+    REQUIRE(driver->get_tracking_rates() == std::vector<int>{0, 1, 2});
+    const char* const commands[] = {":TQ", ":TL", ":TS"};
+    for (const int rate : {2, 1, 0}) {
+        INFO("TrackingRate " << rate);
+        const int sent = mount.count(commands[rate]);
+        driver->set_tracking_rate(rate);
+        // A blind command: the fake records it on its own thread, so wait for it in real time.
+        CHECK(mount.wait_for_count(commands[rate], sent + 1, std::chrono::seconds(2)));
+        CHECK(driver->get_tracking_rate() == rate);
+    }
+    require_alpaca_error([&] { driver->set_tracking_rate(3); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_tracking_rate() == 0);
+    driver->set_connected(false);
+}
+
+// Issue #1866: SetPark records the current position as the park position (":Sp01") and does not park; a refusal
+// from the mount is InvalidOperation.
+TEST_CASE("ZWO Mount Telescope Driver - SetPark sends the park-here command and leaves AtPark false",
+          "[zwo][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeZwoMount mount(clock);
+    REQUIRE(mount.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = mount.port();
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
+    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    CHECK(mount.count(":Sp01") == 0);
+
+    REQUIRE_NOTHROW(driver->set_park());
+    CHECK(mount.count(":Sp01") == 1);
+    CHECK(mount.count(":hP") == 0);
+    CHECK_FALSE(driver->get_at_park());
+
+    mount.override_reply(":Sp01", "0", 1);
+    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(mount.count(":Sp01") == 2);
     driver->set_connected(false);
 }
 

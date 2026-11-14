@@ -78,6 +78,10 @@ public:
     /// another with set_system_status(). Off by default: a pulse then changes no status, as before.
     void set_pulse_reports_guiding(bool on) { pulse_reports_guiding_.store(on); }
 
+    /// Tracking-rate digit of the ":GLS" reply (0 sidereal, 1 lunar, 2 solar, 3 King, 4 custom), as the firmware
+    /// reports the rate the mount tracks at. A ":RTn#" command sets it to n, as the firmware does. Default 0.
+    void set_tracking_rate_digit(int rate) { tracking_rate_digit_.store(rate); }
+
     /// Where the ":GEP" read says the mount points, until a GOTO or a trim pulse moves it.
     void set_position(double ra_hours, double dec_degrees) {
         ra_units_.store(std::llround(ra_hours * 15.0 * 3600.0 * 100.0));
@@ -199,7 +203,7 @@ private:
             std::snprintf(site, sizeof(site), "%c%08lld%08lld", lon < 0 ? '-' : '+', lon < 0 ? -lon : lon,
                           latitude_field_.load());
             return std::string(site) + std::to_string(gps_status_.load()) + std::to_string(system_status_.load()) +
-                   "0001#";
+                   std::to_string(tracking_rate_digit_.load()) + "001#";
         }
         if (cmd == ":GUT#") {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -258,6 +262,10 @@ private:
         if (pulse_reports_guiding_.load() && cmd.rfind(":Z", 0) == 0) {
             system_status_.store(3);  // auto-guiding, for the whole of the pulse (issue #2186)
         }
+        if (cmd.size() == 5 && cmd.rfind(":RT", 0) == 0 && cmd[3] >= '0' && cmd[3] <= '4') {
+            tracking_rate_digit_.store(cmd[3] - '0');
+            return "1";
+        }
         if (cmd.rfind(":ZQ", 0) == 0 || cmd.rfind(":ZS", 0) == 0) {
             // A pulse-guide trim closes the residual exactly.
             ra_units_.store(pending_ra_);
@@ -271,6 +279,7 @@ private:
     }
 
     std::atomic<int> system_status_{1};
+    std::atomic<int> tracking_rate_digit_{0};
     std::atomic<int> gps_status_{0};
     std::atomic<long long> longitude_units_{0};
     std::atomic<long long> latitude_field_{0};

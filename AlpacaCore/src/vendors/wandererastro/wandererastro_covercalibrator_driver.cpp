@@ -98,8 +98,14 @@ public:
     // Connecting and DeviceState, all of which this driver implements.
     int get_interface_version() const override { return 2; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (decision 0009, issue #1988): once the
+    // wrapper has lost the link (a hangup, or a fault standing past
+    // util::kLinkStalenessBound) it has released the port. Both reads are
+    // lock-free.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
 
+    // Decision 0009 point 5: the fault text while faulted, the loss reason
+    // after a loss until the next Connect or Disconnect.
     std::string get_link_fault() const override {
         const auto fault = protocol_.link_fault();
         return fault ? *fault : std::string{};
@@ -128,20 +134,31 @@ public:
         // object (undefined behavior). Holding this for the duration also makes
         // the guard check-then-act atomic w.r.t. other transitions.
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        const bool live = get_connected();
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
-        // newer pending disconnect by staying down.
+        // newer pending disconnect by staying down. The disconnect gate reads
+        // the raw flag, so a lost link still runs the teardown; the connect
+        // gate reads the link-aware value, so Connect over a lost link
+        // reconnects (decision 0009 point 4, as the Gemini flat panel).
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown().
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
         if (connected) {
+            if (connected_.load()) {
+                teardown();  // a lost link: drop it before reconnecting, never reopen it as it was
+            }
             // Resolve an auto-detect request here (on the background connection
             // thread), not at registration: enumerate the ports and pick the
             // requested match. A local copy keeps config_ as the durable intent
@@ -203,11 +220,17 @@ public:
                 protocol_.disconnect();
                 throw;
             }
+            if (!protocol_.link_alive()) {
+                // The port died before the session was published: fail this
+                // connect. disconnect() also clears the loss reason, so a
+                // connect that never completed leaves get_link_fault() empty.
+                protocol_.disconnect();
+                throw AlpacaException("WandererCover link lost during connect", AlpacaError::NotConnected);
+            }
             connected_.store(true);
             ALPACA_LOG_INFO("WandererAstro", "Cover connected");
         } else {
-            protocol_.disconnect();  // clears the wrapper's cached firmware date
-            connected_.store(false);
+            teardown();
             ALPACA_LOG_INFO("WandererAstro", "Cover disconnected");
         }
     }
@@ -253,6 +276,8 @@ public:
     CalibratorState get_calibrator_state() const override {
         ensure_connected();
         if (protocol_.link_fault().has_value()) {
+            // A loss, not a fault, is NotConnected (see ensure_link_up()).
+            ensure_connected();
             // The panel is unreachable: the commanded state is no longer
             // known to match it (issue #237). ASCOM has a word for that.
             return CalibratorState::Unknown;
@@ -415,10 +440,24 @@ public:
     }
 
 private:
+    // NotConnected while disconnected and once the link is lost (decision
+    // 0009 point 3), before any cache or fault check is reached.
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("WandererCover not connected", AlpacaError::NotConnected);
         }
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("WandererCover link lost; Connect again once the cover is back",
+                                  AlpacaError::NotConnected);
+        }
+    }
+
+    // Driver state first, then the wrapper teardown (joins the reader, clears
+    // the cached status, firmware date and loss reason, closes the port if the
+    // loss has not already released it). Caller holds transition_mutex_.
+    void teardown() {
+        connected_.store(false);
+        protocol_.disconnect();
     }
 
     // Issue #237: the status cache the reads are served from is only as good
@@ -428,6 +467,10 @@ private:
     // (Connected is still true, so not NotConnected) until frames resume.
     void ensure_link_up() const {
         if (const auto fault = protocol_.link_fault()) {
+            // A loss that latched after ensure_connected() passed: the wrapper
+            // stores its reason and link_lost_ under one lock, so link_alive()
+            // is already false and this is NotConnected (decision 0009 point 3).
+            ensure_connected();
             throw AlpacaException("WandererCover communications compromised: " + *fault, AlpacaError::DriverException);
         }
     }

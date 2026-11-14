@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/serial_by_id_scan.h>
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -94,6 +96,20 @@ std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports();
 /// Test seam: probes exactly these paths instead of scanning the host.
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports(const std::vector<std::string>& candidate_paths);
 
+namespace detail {
+/**
+ * @brief Why the raw /dev/ttyUSBn pass of enumerate_wanderer_rotator_ports()
+ *        skips a node whose USB descriptor read gave @p descriptor, or
+ *        std::nullopt to probe it (issue #2212).
+ *
+ * "USB descriptor unreadable" when sysfs gave none, else "not a CH340/CH341
+ * device (vendor <id>, product "<product>")" for an adapter of another
+ * class. The scan logs the reason at DEBUG, so a log shows whether a node
+ * existed and why it was not probed.
+ */
+std::optional<std::string> raw_rotator_skip_reason(const std::optional<util::UsbTtyDescriptor>& descriptor);
+}  // namespace detail
+
 /**
  * @brief Protocol wrapper for the WandererRotator Mini (V1/V2).
  *
@@ -129,6 +145,22 @@ public:
 
     /** @brief Check if connected. */
     bool is_connected() const;
+
+    /**
+     * @brief False once the link is lost (decision 0009, issue #1989).
+     *
+     * EIO, ENXIO or ENODEV on a command write, or on a read of the move
+     * monitor, loses the link at once: the wrapper resets its cached state
+     * and firmware date, keeps the reason and releases the port. There is no
+     * silence latch and no staleness bound (request/response, silent between
+     * moves), so an idle pull is found by the next command. Lock-free.
+     * Cleared by the next connect() or disconnect().
+     */
+    bool link_alive() const;
+
+    /// The loss reason ("Serial link lost (errno N)") after a loss, empty on a
+    /// healthy link; kept until the next connect() or disconnect().
+    std::string link_fault() const;
 
     /** @brief Get the most recent rotator state (never blocks on serial I/O). */
     RotatorState get_state() const;

@@ -44,7 +44,7 @@ Symbol: `transition_mutex_`
 | Celestron focuser |  | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted |  |  |
 | Celestron telescope |  | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted |  |  |
 | Gemini flat panel |  | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted |  |  |
-| Gemini focuser |  | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | partial | #1840 | rule 3: MaxStep is a live `:08#` read |
+| Gemini focuser |  | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1840 | served from `PolledState`; MaxStep read once at connect; `TempComp` stays a live read under the wrapper lock, which Rule 1 allows because it needs device access |
 | Gemini PDH switch |  | `AlpacaCore/src/vendors/gemini/gemini_pdh_switch_driver.cpp` | adopted |  |  |
 | gphoto camera |  | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | adopted |  |  |
 | iOptron filter wheel |  | `AlpacaCore/src/vendors/ioptron/ioptron_filterwheel_driver.cpp` | adopted |  |  |

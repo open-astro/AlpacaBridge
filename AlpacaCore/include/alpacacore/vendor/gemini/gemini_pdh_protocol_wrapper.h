@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -220,13 +222,18 @@ std::string format_pdh_firmware(int version);
  * than kStatusPollMs, so Switch reads are always served from cache and never
  * block on serial I/O. Cache validity is tied to link health: consecutive
  * unanswered polls latch a link fault (link_fault()) that invalidates the
- * cache until frames resume. TODO(hardware): confirm whether the firmware streams
+ * cache until frames resume, and a fault that stands for
+ * util::kLinkStalenessBound, or a hangup on the port, loses the link
+ * (link_alive(), decision 0009). TODO(hardware): confirm whether the firmware streams
  * >G frames on its own -- the vendor's sensor window reads whatever arrives
  * every 3 s without sending anything, which suggests it does.
  */
 class GeminiPdhProtocolWrapper {
 public:
-    GeminiPdhProtocolWrapper();
+    /// The fault stamp of the link-health latch (the decision 0009 staleness
+    /// bound) reads @p clock; tests pass a FakeTaskClock. The poll cadence and
+    /// the read windows stay on steady_clock (decision 0005 rule 6).
+    explicit GeminiPdhProtocolWrapper(util::TaskClock& clock = util::default_task_clock());
     ~GeminiPdhProtocolWrapper();
 
     GeminiPdhProtocolWrapper(const GeminiPdhProtocolWrapper&) = delete;
@@ -234,12 +241,20 @@ public:
 
     /**
      * @brief Connect: handshake, firmware gate, first status frame.
+     *
+     * A hangup on the port during the connect (a read, or EIO/ENXIO/ENODEV
+     * on a write) fails it with NotConnected "Gemini power hub link lost
+     * during connect" and latches nothing: link_fault() stays empty.
      * @param config Connection configuration
      * @return Firmware version integer reported by >V# (e.g. 308)
      */
     int connect(const PdhConnectionConfig& config);
 
-    /** @brief Disconnect: stop the reader thread and close the serial port. */
+    /**
+     * @brief Disconnect: stop the reader thread and close the serial port.
+     *
+     * Also clears a lost link and its kept reason (decision 0009 rule 5).
+     */
     void disconnect();
 
     /**
@@ -252,8 +267,21 @@ public:
      */
     void clear_firmware();
 
-    /** @brief Check if connected. */
+    /** @brief Check if connected (false once the link is lost). */
     bool is_connected() const;
+
+    /**
+     * @brief False once the link is lost (decision 0009), until the next
+     * connect() or disconnect(). Lock-free; never waits on the wire.
+     *
+     * Lost: a hangup on a read, EIO/ENXIO/ENODEV on a command or poll write,
+     * or a link fault that has stood for util::kLinkStalenessBound on the
+     * task clock. The cached state and firmware are cleared before this
+     * turns false, the reader stops and the port is released (by the reader,
+     * the only thread that reads the fd); nothing reopens it until the next
+     * connect().
+     */
+    bool link_alive() const noexcept;
 
     /**
      * @brief Get the most recent hub state (never blocks on serial I/O).
@@ -268,14 +296,19 @@ public:
      * @brief Why the serial link is currently considered dead, if it is.
      *
      * Reads are served from a cache the reader thread fills; when the hub
-     * stops answering (USB re-enumeration, unplugged cable, port stolen by
-     * another process) the cache would otherwise be served unchanged forever
-     * (issue #237). After kLinkFaultPolls consecutive >G# polls with no
-     * status frame -- a failed poll write counts the same -- the link is
+     * stops answering (a hung MCU, port retuned by another process) the
+     * cache would otherwise be served unchanged forever (issue #237). After
+     * kLinkFaultPolls consecutive >G# polls with no status frame -- a poll
+     * write that fails with anything but a hangup errno counts the same; a
+     * hangup loses the link at once (link_alive()) -- the link is
      * latched faulted and this returns the reason; the driver turns that
      * into a DriverException on every value read and write. It clears on
-     * its own when a status frame arrives again. Connected stays true: the
-     * client decides whether to reconnect.
+     * its own when a status frame arrives again. Connected stays true while
+     * the fault is younger than util::kLinkStalenessBound; past it the link
+     * is lost (link_alive()). After a loss this returns the loss reason
+     * ("Serial link lost (errno N)", or the fault text the bound ended) and
+     * keeps it until the next connect() or disconnect() (decision 0009
+     * rule 5).
      */
     std::optional<std::string> link_fault() const;
 

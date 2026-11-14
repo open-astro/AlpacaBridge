@@ -156,16 +156,9 @@ int main(int argc, char* argv[]) {
     alpacahttp::util::log_info("HTTP port: " + std::to_string(config.http_port()));
     alpacahttp::util::log_info("Discovery enabled: " + std::string(config.discovery_enabled() ? "yes" : "no"));
 
-    // TODO: Register devices with AlpacaCore DeviceRegistry
-    // Example:
-    // auto& registry = alpacacore::management::DeviceRegistry::instance();
-    // auto camera = std::make_shared<YourCameraDriver>(...);
-    // registry.register_device(camera);
-    
-    // TODO: Create and set ManagementDriver
-    // Example:
-    // auto mgmt_driver = std::make_shared<YourManagementDriver>(config);
-    // server.set_management_driver(mgmt_driver);
+    // Nothing is registered here: the server's Router restores the saved devices from
+    // config/registered_devices.json when it is built, and answers the management
+    // description itself, so no ManagementDriver is set.
 
     // Start discovery service
     std::unique_ptr<alpacahttp::Discovery> discovery;

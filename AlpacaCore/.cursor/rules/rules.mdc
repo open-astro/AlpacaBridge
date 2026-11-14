@@ -119,7 +119,6 @@ AlpacaCore/
 |       |-- switch_driver.h
 |       |-- util/
 |       |   |-- logging.h
-|       |   |-- threading.h
 |       |   |-- error_handling.h
 |       |   `-- units.h
 |       `-- vendor/                  # Vendor wrappers API
@@ -130,7 +129,6 @@ AlpacaCore/
 |   |   |-- alpaca_defs.cpp
 |   |   `-- util/
 |   |       |-- logging.cpp
-|   |       |-- threading.cpp
 |   |       |-- error_handling.cpp
 |   |       `-- units.cpp
 |   |
@@ -229,7 +227,9 @@ Higher layers override using `set_log_sink`.
 - No global mutable state.
 - Device instances manage their own internal locking.
 - Higher layers manage concurrency.
-- Use primitives from `util/threading.h`.
+- Use the standard library mutexes, `AsyncConnectable` and `util::AsyncOperation`
+  (`include/alpacacore/util/async_operation.h`); the rules are in
+  `.github/instructions/driver-lifecycle.instructions.md`.
 
 ---
 

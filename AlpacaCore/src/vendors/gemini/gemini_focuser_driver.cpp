@@ -241,7 +241,17 @@ public:
             // full serial timeout: Connect stays inside the 5 s Connecting budget and a Disconnect waits
             // behind at most two short exchanges (#2064). Normal polls keep the full timeout.
             protocol_.set_exchange_timeout_s(kConnectProbeTimeoutS);
-            const bool started = state_.start();
+            // MaxStep (and MaxIncrement, and the Move clamp) is a limit, read
+            // once here and published with the connect (decision 0016 rule 3,
+            // #1840): a getter never sends :08#. A failed read fails the
+            // connect, like a first poll that never answers.
+            std::optional<int> max_step;
+            try {
+                max_step = protocol_.get_max_position();
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("Gemini", "Focuser maximum position query failed: " + std::string(e.what()));
+            }
+            const bool started = max_step.has_value() && state_.start();
             protocol_.set_exchange_timeout_s(0);
             const bool lost = !protocol_.link_alive();
             if (!started) {
@@ -255,9 +265,14 @@ public:
                 if (lost) {
                     throw AlpacaException("Gemini focuser link lost during connect", AlpacaError::NotConnected);
                 }
+                if (!max_step.has_value()) {
+                    throw AlpacaException("Gemini focuser did not report its maximum position",
+                                          AlpacaError::DriverException);
+                }
                 throw AlpacaException("Gemini focuser did not answer the first state poll",
                                       AlpacaError::DriverException);
             }
+            max_step_.store(*max_step);
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
@@ -280,6 +295,9 @@ public:
             firmware_.clear();
         }
         connected_.store(false);
+        // max_step_ keeps its value: every reader checks Connected first, and a
+        // Move that passed that check just before this store must clamp against
+        // the real limit, never 0 (the next connect publishes a fresh one).
         poll_cancelled_.store(true);  // the poll in flight ends after its current exchange
         // Join the poll before the transport closes; its body takes no
         // lock this thread holds (transition_mutex_, firmware_mutex_).
@@ -323,9 +341,10 @@ public:
 
     bool get_is_moving() const override { return served_frame().moving; }
 
+    // Published at connect (decision 0016 rule 3, #1840); never waits on the wire.
     int get_max_step() const override {
         ensure_connected();
-        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_max_position();
+        return max_step_.load();
     }
 
     int get_max_increment() const override {
@@ -384,7 +403,7 @@ public:
 
     void move(int position) override {
         (void)served_frame();  // refused while the link is faulted or lost
-        int max_step = protocol_.get_max_position();
+        const int max_step = max_step_.load();  // the limit published at connect (#1840)
         // ConformU requires graceful clamping, not exceptions
         if (position < 0) {
             position = 0;
@@ -495,6 +514,7 @@ private:
     util::ConnectionResolver<ConnectionConfig> connection_resolver_;
     bool connection_resolved_ = false;
     std::atomic<bool> connected_;
+    std::atomic<int> max_step_{0};             // :08# read at each connect, served by MaxStep/MaxIncrement/Move (#1840)
     std::atomic<bool> poll_cancelled_{false};  // set by teardown before the poll join; probe() stops between exchanges
     GeminiProtocolWrapper protocol_;
     // Poll thread, and connect before it starts; never concurrent.

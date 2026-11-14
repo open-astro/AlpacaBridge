@@ -18,6 +18,7 @@
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/version.h>
@@ -29,6 +30,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -69,9 +71,54 @@ std::pair<int, int> bayer_offsets(ToupBayerPattern pattern) {
     }
 }
 
+// Toupcam_get_ProductionDate writes YYYYMMDD; shown as YYYY-MM-DD. Anything
+// else is shown as the SDK wrote it.
+std::string format_production_date(const std::string& date) {
+    if (date.size() == 8 && std::all_of(date.begin(), date.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        return date.substr(0, 4) + "-" + date.substr(4, 2) + "-" + date.substr(6, 2);
+    }
+    return date;
+}
+
+// The web UI's one Firmware string (issue #1997): the firmware version, then the
+// hardware version, FPGA version and production date in parentheses. A value
+// the model does not report (empty) is left out; empty when none is reported.
+std::string compose_firmware(const std::string& firmware, const std::string& hardware, const std::string& fpga,
+                             const std::string& production_date) {
+    std::string details;
+    const auto add = [&details](const std::string& label, const std::string& value) {
+        if (value.empty()) return;
+        if (!details.empty()) details += ", ";
+        details += label + " " + value;
+    };
+    add("hardware", hardware);
+    add("FPGA", fpga);
+    add("production date", production_date.empty() ? production_date : format_production_date(production_date));
+    if (firmware.empty()) return details;
+    if (details.empty()) return firmware;
+    return firmware + " (" + details + ")";
+}
+
+// The SDK (library) version for the web UI, read once: Toupcam_Version() is a
+// static string, so it is known before any connect. "unknown" is no version.
+std::optional<std::string> read_sdk_version(ToupTekSDK& sdk) {
+    std::string version;
+    try {
+        version = sdk.get_sdk_version();
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    if (version.empty() || version == "unknown") {
+        return std::nullopt;
+    }
+    return util::normalize_dotted_version(version);
+}
+
 } // namespace
 
-class ToupTekCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
+// final: the destructor's #1995 test drives a StartExposure while ~ToupTekCameraDriver
+// runs, which is well defined only while this is the most-derived class.
+class ToupTekCameraDriver final : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
@@ -88,7 +135,7 @@ public:
           camera_info_(),
           camera_info_valid_(false),
           serial_number_(),
-          firmware_version_(),
+          sdk_version_(read_sdk_version(sdk)),
           connected_(false),
           bin_(1),
           start_x_(0),
@@ -107,17 +154,22 @@ public:
         shutdown_connection();
         // The SDK stop first, then the join: the body must be gone before the camera closes (decision 0020 rule 5).
         session_.set_stopping(true);  // the broken frame wait is not kept as a failure
+        std::function<void()> gap_hook;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             closing_ = true;
             stop_unclean_stream_locked();
+            gap_hook = disconnect_gap_hook_;
         }
+        if (gap_hook) gap_hook();  // test seam: the window closing_ guards
         session_.disconnect_and_join();
         stop_thermal_poller();
         pulse_slot_.cancel_all_and_join();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Qualified: virtual dispatch is gone in a destructor anyway;
+                // saying so explicitly keeps clang-analyzer's VirtualCall happy.
+                ToupTekCameraDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(branding_.label, "Error during destruction: " + std::string(e.what()));
             }
@@ -149,6 +201,22 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
+    // The camera's own firmware, with its hardware and FPGA versions and its
+    // production date, for the web UI only (never DriverInfo; issue #1997). Read
+    // at connect and cleared at disconnect, so it is empty (no firmware) while
+    // disconnected; served from firmware_mutex_, never the SDK.
+    std::optional<std::string> get_device_firmware() const override {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (firmware_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_;
+    }
+
+    // The SDK (library) version, for the web UI only, read once when the driver
+    // is built, so the getter makes no SDK call (e.g. "60.31488.20260519").
+    std::optional<std::string> get_device_sdk_version() const override { return sdk_version_; }
+
     bool get_connected() const override { return connected_.load(); }
 
     void connect() override { start_connection_task(true); }
@@ -177,10 +245,12 @@ public:
             // closing the handle: the body runs Toupcam_WaitImageV4 on a raw handle
             // snapshot, so closing under it is a use-after-close (decision 0020 rule
             // 5). The stop wakes that wait; a body failure it causes is dropped, not
-            // kept. disconnect_and_join() closes the session first, so a
-            // StartExposure that passed its connection check raises NotConnected and
-            // runs no body; it joins without mutex_ (the body takes mutex_).
+            // kept. closing_, set with the stop, is what refuses a StartExposure that
+            // passed its connection check before disconnect_and_join() closes the
+            // session: it raises NotConnected and runs no body. The join runs
+            // without mutex_ (the body takes mutex_).
             session_.set_stopping(true);
+            std::function<void()> gap_hook;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 closing_ = true;  // set with the stop: no StartExposure parks a body after it
@@ -188,7 +258,9 @@ public:
                     format_dirty_ = true;
                     roi_dirty_ = true;
                 }
+                gap_hook = disconnect_gap_hook_;
             }
+            if (gap_hook) gap_hook();  // test seam: the window closing_ guards
             session_.disconnect_and_join();
             // The poller takes mutex_ on every tick, so stop and join its slot
             // out here too -- before mutex_ is taken and the handle closed.
@@ -235,7 +307,7 @@ public:
             // end, so no getter sees a half-configured camera (item 3).
             ToupCameraInfo info = cameras[static_cast<std::size_t>(camera_index_)];
 
-            ALPACA_LOG_INFO(branding_.label, "SDK version: " + sdk.get_sdk_version());
+            ALPACA_LOG_INFO(branding_.label, "SDK version: " + sdk_version_.value_or("unknown"));
             ALPACA_LOG_INFO(branding_.label,
                             "Opening camera index " + std::to_string(camera_index_) + ": " + info.name);
 
@@ -272,6 +344,9 @@ public:
             // the next reconnect. Guard the whole post-open configuration in one try.
             std::string serial;
             std::string firmware;
+            std::string hardware;
+            std::string fpga;
+            std::string production_date;
             try {
                 sdk.put_trigger_mode(handle, 1);  // software trigger
 
@@ -321,6 +396,20 @@ public:
 
                 serial = sdk.get_serial_number(handle);
                 firmware = sdk.get_firmware_version(handle);
+                // Shown beside the firmware in the web UI only (issue #1997); a
+                // model that cannot answer one leaves it out, and never fails the
+                // connect over it.
+                const auto best_effort = [&](const char* what, auto read) {
+                    try {
+                        return read();
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_DEBUG(branding_.label, std::string(what) + " failed: " + e.what());
+                        return std::string();
+                    }
+                };
+                hardware = best_effort("get_HwVersion", [&] { return sdk.get_hw_version(handle); });
+                fpga = best_effort("get_FpgaVersion", [&] { return sdk.get_fpga_version(handle); });
+                production_date = best_effort("get_ProductionDate", [&] { return sdk.get_production_date(handle); });
 
                 sdk.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
             } catch (const AlpacaException&) {
@@ -333,13 +422,21 @@ public:
             }
 
             {
+                // Its own independent leaf lock, taken with only transition_mutex_
+                // held and never nested under mutex_: a configureddevices poll does
+                // not wait behind mutex_ (driver lifecycle instructions).
+                // Published before Connected goes true below, so no poll sees a
+                // connected camera without its Firmware row.
+                std::lock_guard<std::mutex> lock(firmware_mutex_);
+                firmware_ = compose_firmware(firmware, hardware, fpga, production_date);
+            }
+            {
                 // Publish under mutex_ (the short state lock) only now: identity,
                 // limits and the handle appear together.
                 std::lock_guard<std::mutex> lock(mutex_);
                 camera_info_ = std::move(info);
                 camera_info_valid_ = true;
                 serial_number_ = std::move(serial);
-                firmware_version_ = std::move(firmware);
                 handle_ = handle;
                 bin_ = 1;
                 start_x_ = 0;
@@ -376,13 +473,16 @@ public:
         // waits on readout_mutex_ (decision 0016 item 6). The exposure body is
         // already joined (disconnect_and_join() above), which also cleared the
         // image, the kept failure and LastExposure*.
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
+        }
         std::unique_lock<std::mutex> state_lock(mutex_);
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         HToupcam handle = std::exchange(handle_, nullptr);
         // camera_info_ stays: no getter asks the SDK for it again, which a second
         // ToupTek device's open can hold (decision 0016 rule 1); connect overwrites it.
         serial_number_.clear();
-        firmware_version_.clear();
         reset_connection_state_locked();
         connected_.store(false);
         state_lock.unlock();
@@ -1255,7 +1355,7 @@ public:
                 if (dirty_format) {
                     try {
                         sdk_local.stop(handle);
-                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): already stopped is harmless
                         // Stopping an already-stopped stream is harmless; ignore.
                     }
                     sdk_local.put_binning(handle, active_bin);
@@ -1448,6 +1548,11 @@ public:
         }
     }
 
+    void set_disconnect_gap_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        disconnect_gap_hook_ = std::move(hook);
+    }
+
 private:
     // Injected SDK seam (issue #104): production passes the singleton
     // wrapper; tests pass a scripted fake. Reference outlives the driver
@@ -1463,7 +1568,14 @@ private:
     ToupCameraInfo camera_info_;
     bool camera_info_valid_;
     std::string serial_number_;
-    std::string firmware_version_;
+    // The web UI Firmware string (compose_firmware), published by the connect
+    // just before Connected goes true and cleared by the disconnect before the close. Its own
+    // independent leaf mutex: the connect and disconnect take it with only transition_mutex_
+    // held, never nested under mutex_, so get_device_firmware() never waits on mutex_ or the
+    // SDK (driver lifecycle instructions, decision 0016 item 4).
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_;
+    const std::optional<std::string> sdk_version_;  // read at construction; fixed
 
     std::atomic<bool> connected_;
     // Bumped with every stream stop (stop_unclean_stream_locked, under mutex_). The
@@ -1513,6 +1625,10 @@ private:
     // would otherwise run a body that parks in Toupcam_WaitImageV4 and holds the
     // join (decision 0020 rule 5).
     bool closing_{false};
+    // Guarded by mutex_. Test seam (set_disconnect_gap_hook_for_testing): runs on the
+    // disconnecting thread after closing_ is set and before disconnect_and_join(),
+    // with no driver lock held; empty in production.
+    std::function<void()> disconnect_gap_hook_;
 
     // Thermal cache fed by thermal_poll_loop (all guarded by mutex_).
     static constexpr std::chrono::milliseconds kThermalPollInterval{1000};
@@ -1723,7 +1839,7 @@ private:
         if (handle_) {
             try {
                 sdk_.stop(handle_);
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): treated as stopped
             }
         }
         return true;
@@ -1898,6 +2014,12 @@ std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camer
 std::unique_ptr<CameraDriver> create_toupcam_family_camera(int device_number, int camera_index, ToupTekSDK& sdk,
                                                            ToupCameraBranding branding, util::TaskClock& clock) {
     return std::make_unique<ToupTekCameraDriver>(device_number, camera_index, sdk, std::move(branding), clock);
+}
+
+void set_disconnect_gap_hook_for_testing(CameraDriver& driver, std::function<void()> hook) {
+    if (auto* camera = dynamic_cast<ToupTekCameraDriver*>(&driver)) {
+        camera->set_disconnect_gap_hook_for_testing(std::move(hook));
+    }
 }
 
 } // namespace alpacacore::vendor::touptek

@@ -173,10 +173,23 @@ public:
      * unplugged cable, port stolen) the link is latched faulted, the cache is
      * invalidated and this returns the reason (naming the last read error if
      * there was one); the driver turns that into a DriverException on every
-     * value read and write. Clears on its own when frames resume. Connected
-     * stays true: the client decides whether to reconnect.
+     * value read and write. Clears on its own when frames resume. Once the
+     * link is lost (link_alive() false) this returns the loss reason and
+     * keeps it until the next connect() or disconnect() (decision 0009
+     * point 5).
      */
     std::optional<std::string> link_fault() const;
+
+    /**
+     * @brief False once the link is lost (decision 0009, issue #1988).
+     *
+     * A hangup (EIO, ENXIO or ENODEV on a read or a write) loses the link at
+     * once, and so does a silence fault that has stood for
+     * util::kLinkStalenessBound. The wrapper then clears its cached state
+     * and firmware date, releases the port and stops reading. Lock-free.
+     * Cleared by the next connect() or disconnect().
+     */
+    bool link_alive() const;
 
     /**
      * @brief Get the device firmware date (YYYY-MM-DD), if known.

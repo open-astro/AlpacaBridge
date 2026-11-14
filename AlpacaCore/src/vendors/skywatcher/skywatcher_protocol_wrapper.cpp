@@ -1566,8 +1566,8 @@ private:
                 setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                 char buf[64] = {};
                 // Serialized transport: bounded by SO_RCVTIMEO.
-                ssize_t n =
-                    recv(socket_fd_, buf, sizeof(buf) - 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+                // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- SO_RCVTIMEO bounds the wait
+                ssize_t n = recv(socket_fd_, buf, sizeof(buf) - 1, 0);
                 if (n > 0) {
                     exchange_saw_frame_ = true;  // open-astro#505: the board is talking
                     std::string reply(buf, static_cast<std::size_t>(n));
@@ -1620,8 +1620,8 @@ private:
         char buf[64];
         while (true) {
             // MSG_DONTWAIT: non-blocking drain, never actually blocks.
-            ssize_t n =
-                recv(socket_fd_, buf, sizeof(buf), MSG_DONTWAIT);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- MSG_DONTWAIT, returns at once
+            ssize_t n = recv(socket_fd_, buf, sizeof(buf), MSG_DONTWAIT);
             if (n <= 0) {
                 break;
             }
@@ -1685,8 +1685,8 @@ private:
             tv.tv_usec = static_cast<long>(100) * 1000;
             setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             char buf[64] = {};
-            ssize_t n =
-                recv(socket_fd_, buf, sizeof(buf) - 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- 100 ms SO_RCVTIMEO bounds the wait
+            ssize_t n = recv(socket_fd_, buf, sizeof(buf) - 1, 0);
             if (n <= 0) {
                 continue;
             }
@@ -1711,8 +1711,9 @@ private:
             tv.tv_sec = 0;
             tv.tv_usec = static_cast<long>(50) * 1000;
             setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            if (recv(socket_fd_, buf, sizeof(buf), 0) > 0) {  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-                exchange_saw_frame_ = true;                   // open-astro#505: still answering
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- 50 ms SO_RCVTIMEO bounds the wait
+            if (recv(socket_fd_, buf, sizeof(buf), 0) > 0) {
+                exchange_saw_frame_ = true;  // open-astro#505: still answering
             }
         }
     }

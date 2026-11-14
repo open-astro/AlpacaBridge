@@ -53,7 +53,7 @@ public:
         int count = 0;
         try {
             count = get_max_switch();
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): no MaxSwitch, no members
             // MaxSwitch itself unavailable -- no operational values can be collected.
         }
         // One allocation for every field (three per id and TimeStamp): GCC 14 -O2 reports -Werror=stringop-overflow
@@ -72,7 +72,7 @@ public:
                 state.push_back({"GetSwitch" + std::to_string(id), on});
                 state.push_back({"GetSwitchValue" + std::to_string(id), value});
                 state.push_back({"StateChangeComplete" + std::to_string(id), complete});
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): this id's members are omitted
                 // Omit this id's members per the DeviceState contract.
             }
         }

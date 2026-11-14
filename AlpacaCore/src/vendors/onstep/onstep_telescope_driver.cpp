@@ -562,8 +562,8 @@ public:
                 // OnStepTelescopeDriver is the most-derived class (no further
                 // override exists to miss), so the analyzer's "bypasses
                 // virtual dispatch" warning doesn't apply here.
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
-            } catch (...) {            // NOLINT(bugprone-empty-catch)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
+            } catch (...) {            // NOLINT(bugprone-empty-catch): best-effort teardown
                 // Best-effort teardown during destruction.
             }
         }
@@ -764,7 +764,7 @@ public:
                 std::string product = protocol.get_product_name();
                 firmware_version = protocol.get_version_number();
                 firmware = product + (firmware_version.empty() ? "" : (" " + firmware_version));
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): the firmware name stays empty
                 firmware.clear();
             }
             {
@@ -781,7 +781,7 @@ public:
                     std::string description = util::without_qualifiers(protocol.get_product_description());
                     if (const auto comma = description.find(','); comma != std::string::npos) description.resize(comma);
                     if (!description.empty() && description != "0") model = util::branded_name("OnStep", description);
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                } catch (...) {  // NOLINT(bugprone-empty-catch): the default name stays
                     // Unknown: the name stays "OnStep Telescope".
                 }
             }
@@ -796,7 +796,7 @@ public:
                     if (const auto mode = protocol.get_mount_coords_mode()) {
                         refraction_from_firmware_ = (*mode != 0);
                     }
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                } catch (...) {  // NOLINT(bugprone-empty-catch): DoesRefraction keeps the local flag
                     // Unknown: DoesRefraction keeps the settable local flag.
                 }
                 // The pier-side settings (#2179): a mount that does not answer them leaves them unknown, which
@@ -871,7 +871,7 @@ public:
                 // whatever slew rate the firmware currently has selected;
                 // pin it to max on connect so MoveAxis completes promptly.
                 protocol.select_max_slew_rate();
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): MoveAxis keeps the current rate
             }
 
             // The first frame, so the first property reads, status flags included,
@@ -2907,7 +2907,7 @@ private:
                                               " s ago; the mount is parking, so the park is left to finish");
                 return;
             }
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unread status stops anyway
             // unknown state: stop, as before
         }
         ALPACA_LOG_WARN("OnStep", std::string("Serial link was last seen alive ") + seconds +

@@ -1,0 +1,86 @@
+# Publish the README "Authored code" badge's number (issue #2079). On every
+# push to main it counts the authored lines with
+# `scripts/check_docs_drift.py --badge-json` (the same count and path rules
+# docs-drift check 25 owns) and commits the shields.io endpoint JSON to
+# `authored-lines.json` on the `badges` branch; the README badge reads that
+# file through img.shields.io/endpoint. The README holds no number, so no PR
+# can fail docs drift on lines another PR merged.
+#
+# The `badges` branch holds this one file and nothing else; the first run
+# creates it as an orphan branch. The commit goes through the Git data API
+# with the job's GITHUB_TOKEN: no checkout credentials are kept, and a
+# GITHUB_TOKEN commit starts no workflow. `contents: write` cannot be scoped
+# to one branch, so the step writes only refs/heads/badges, and the ref update
+# is a fast-forward (force=false), so a concurrent writer fails the run rather
+# than losing a commit. If a ruleset covers every branch, it must let
+# GitHub Actions push to `badges`.
+#
+# To go back to a static badge: delete this workflow and the `badges` branch,
+# and restore check 25's number comparison from the history of
+# scripts/check_docs_drift.py (issue #1465).
+
+name: Authored lines badge
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: authored-lines-badge
+  cancel-in-progress: true   # only the newest count matters
+
+jobs:
+  publish:
+    name: Publish the authored-line count
+    # main only: a dispatch on another branch would publish that branch's count.
+    if: github.repository == 'open-astro/AlpacaBridge' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: write   # commit authored-lines.json to the badges branch
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Count the authored lines
+        run: |
+          set -euo pipefail
+          python3 scripts/check_docs_drift.py --badge-json > authored-lines.json
+          cat authored-lines.json
+
+      - name: Commit the endpoint JSON to the badges branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          file=authored-lines.json
+          parent="$(gh api "repos/${GH_REPO}/git/matching-refs/heads/badges" \
+            --jq '.[] | select(.ref == "refs/heads/badges") | .object.sha')"
+          if [ -n "${parent}" ]; then
+            current="$(gh api "repos/${GH_REPO}/contents/${file}?ref=${parent}" --jq .content | base64 -d || true)"
+            if [ "${current}" = "$(cat "${file}")" ]; then
+              echo "The badges branch already has this count."
+              exit 0
+            fi
+          fi
+          tree="$(jq -n --arg path "${file}" --rawfile content "${file}" \
+            '{tree: [{path: $path, mode: "100644", type: "blob", content: $content}]}' \
+            | gh api "repos/${GH_REPO}/git/trees" --input - --jq .sha)"
+          commit="$(jq -n --arg tree "${tree}" --arg parent "${parent}" \
+            --arg message "Authored-line count at ${SOURCE_SHA}" \
+            '{message: $message, tree: $tree, parents: (if $parent == "" then [] else [$parent] end)}' \
+            | gh api "repos/${GH_REPO}/git/commits" --input - --jq .sha)"
+          if [ -n "${parent}" ]; then
+            gh api -X PATCH "repos/${GH_REPO}/git/refs/heads/badges" -f sha="${commit}" -F force=false > /dev/null
+          else
+            gh api "repos/${GH_REPO}/git/refs" -f ref=refs/heads/badges -f sha="${commit}" > /dev/null
+          fi
+          echo "badges now at ${commit}: $(cat "${file}")" | tee -a "${GITHUB_STEP_SUMMARY}"

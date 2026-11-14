@@ -81,7 +81,6 @@ set(ALPACACORE_CORE_SOURCES
     src/core/alpaca_defs.cpp
     src/core/device_capabilities.cpp
     src/core/util/logging.cpp
-    src/core/util/threading.cpp
     src/core/util/error_handling.cpp
     src/core/util/host_clock.cpp
     src/core/util/units.cpp

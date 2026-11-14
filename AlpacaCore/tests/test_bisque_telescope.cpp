@@ -168,6 +168,27 @@ TEST_CASE("Bisque ApertureArea follows the diameter and returns to 0 (#2057)", "
     CHECK(driver->get_aperture_area() == 0.0);
 }
 
+// Issue #1865: the optics and rate members on a connected driver. Aperture and focal length are the configured
+// values, read back as written; the driver applies no rate offset, so both rates read 0.0. None asks TheSkyX.
+TEST_CASE("Bisque Telescope Driver - connected optics and rate members", "[bisque][telescope][unit]") {
+    ClockedBisque rig;
+    const int before = rig.mount.transactions.load();
+
+    rig.driver->set_aperture_diameter(0.25);
+    rig.driver->set_focal_length(1.6);
+    CHECK(rig.driver->get_aperture_diameter() == 0.25);
+    CHECK(rig.driver->get_aperture_area() == Catch::Approx(0.0490873852).epsilon(1e-6));
+    CHECK(rig.driver->get_focal_length() == 1.6);
+    rig.driver->set_focal_length(2.0);
+    CHECK(rig.driver->get_focal_length() == 2.0);
+
+    CHECK_FALSE(rig.driver->get_can_set_right_ascension_rate());
+    CHECK_FALSE(rig.driver->get_can_set_declination_rate());
+    CHECK(rig.driver->get_right_ascension_rate() == 0.0);
+    CHECK(rig.driver->get_declination_rate() == 0.0);
+    CHECK(rig.mount.transactions.load() == before);
+}
+
 TEST_CASE("Bisque Telescope Driver - Defaults", "[bisque][telescope][unit]") {
     alpacacore::vendor::bisque::ConnectionInfo conn;
     conn.host = "localhost";
@@ -261,6 +282,41 @@ TEST_CASE("Bisque Telescope Driver - Unsupported actions", "[bisque][telescope][
                          alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { (void)driver->command_string("test", false); },
                          alpacacore::AlpacaError::MethodNotImplemented);
+}
+
+// Required case 7 (issue #1863). Disconnected, every state member is NotConnected; connected and idle, the mount is
+// not slewing, parked, guiding or at home; Park ends with AtPark true and Slewing false, and Unpark clears AtPark.
+TEST_CASE("Bisque Telescope Driver - State machine", "[bisque][telescope][unit]") {
+    {
+        alpacacore::vendor::bisque::ConnectionInfo conn;
+        conn.host = "localhost";
+        conn.tcp_port = 3040;
+        auto disconnected = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+        require_alpaca_error([&] { (void)disconnected->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)disconnected->get_at_park(); }, alpacacore::AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)disconnected->get_at_home(); }, alpacacore::AlpacaError::NotConnected);
+        require_alpaca_error([&] { (void)disconnected->get_is_pulse_guiding(); },
+                             alpacacore::AlpacaError::NotConnected);
+    }
+
+    ClockedBisque rig;
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_at_home());
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+
+    rig.mount.park_polls_needed = 1;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    REQUIRE(advance_until(rig.clock, [&] { return ready(parked); }));
+    REQUIRE_NOTHROW(parked.get());
+    CHECK(rig.mount.park_commands.load() == 1);
+    CHECK(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_slewing());
+
+    REQUIRE_NOTHROW(rig.driver->unpark());
+    CHECK(rig.mount.unpark_commands.load() == 1);
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK_FALSE(rig.driver->get_slewing());
 }
 
 TEST_CASE("Bisque Telescope Driver - Target Range Validation", "[bisque][telescope][unit]") {
@@ -1332,6 +1388,41 @@ TEST_CASE("Bisque async slew - Slewing is held for 8 task-clock seconds without 
     CHECK(rig.mount.slew_polls.load() == 1);
     CHECK_FALSE(rig.driver->get_slewing());
     CHECK(rig.mount.slew_polls.load() == 1);
+}
+
+// Decision 0022: the 8 s Slewing hold is a util::HoldWindow armed by every slew command. Inside it the status poll
+// leaves IsSlewComplete alone and Slewing reads true; at the exact 8 s mark the poll asks TheSkyX again.
+TEST_CASE("Bisque hold window - the status poll asks TheSkyX nothing until 8 s after a slew command",
+          "[bisque][telescope][hold-window]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 1000;  // TheSkyX keeps reporting the slew in flight
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(poll_now(*rig.driver));
+    rig.clock.advance(std::chrono::milliseconds(7999));
+    CHECK(poll_now(*rig.driver));
+    CHECK(rig.mount.slew_complete_queries.load() == 0);
+    CHECK(rig.driver->get_slewing());
+    rig.clock.advance(std::chrono::milliseconds(1));
+    CHECK(poll_now(*rig.driver));
+    CHECK(rig.mount.slew_complete_queries.load() == 1);
+    CHECK(rig.driver->get_slewing());
+}
+
+// A retarget inside the hold is the driver's own slew in flight: it is not refused for Tracking and asks TheSkyX
+// nothing about the first slew. Past the retarget's own hold, the next retarget asks.
+TEST_CASE("Bisque hold window - a retarget inside the hold asks TheSkyX nothing about the slew in flight",
+          "[bisque][telescope][hold-window]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 1000;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    rig.clock.advance(std::chrono::milliseconds(7999));
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 25.0));
+    CHECK(rig.mount.slew_commands.load() == 2);
+    CHECK(rig.mount.slew_complete_queries.load() == 0);
+    rig.clock.advance(std::chrono::seconds(8));
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.5, 25.0));
+    CHECK(rig.mount.slew_commands.load() == 3);
+    CHECK(rig.mount.slew_complete_queries.load() == 1);
 }
 
 // Decision 0010 replaces the 2 s position cache: a read is served from the snapshot however old it is (stale is

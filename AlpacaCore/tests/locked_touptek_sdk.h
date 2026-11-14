@@ -200,6 +200,15 @@ public:
     std::string get_firmware_version(HToupcam h) override {
         return locked([&] { return inner_.get_firmware_version(h); });
     }
+    std::string get_hw_version(HToupcam h) override {
+        return locked([&] { return inner_.get_hw_version(h); });
+    }
+    std::string get_fpga_version(HToupcam h) override {
+        return locked([&] { return inner_.get_fpga_version(h); });
+    }
+    std::string get_production_date(HToupcam h) override {
+        return locked([&] { return inner_.get_production_date(h); });
+    }
     void get_pixel_size(HToupcam h, unsigned idx, float& x, float& y) override {
         locked([&] { inner_.get_pixel_size(h, idx, x, y); });
     }

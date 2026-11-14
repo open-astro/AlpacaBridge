@@ -262,7 +262,6 @@ set(ALPACAHTTP_SOURCES
     src/http/image_payload.cpp
     src/http/server.cpp
     src/http/thread_join.cpp
-    src/util/threading.cpp
     src/util/logging_adapter.cpp
     src/util/error_mapping.cpp
     src/util/host_timezone.cpp

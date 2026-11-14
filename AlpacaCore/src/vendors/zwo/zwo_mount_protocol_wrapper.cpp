@@ -454,7 +454,7 @@ private:
     };
     static Registry& registry() {
         // Static wrappers may release their claims at process exit.
-        static auto* reg = new Registry();  // NOLINT(cppcoreguidelines-owning-memory)
+        static auto* reg = new Registry();  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
         return *reg;
     }
 };
@@ -541,7 +541,7 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
         spec.max_len = 4096;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): poll() bounded by the deadline
         const auto reply = util::read_until(fd, spec, deadline);
         const std::size_t hash = reply.bytes.find('#');
         if (hash == std::string::npos) return std::nullopt;

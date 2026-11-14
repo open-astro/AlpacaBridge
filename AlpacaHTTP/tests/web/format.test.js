@@ -354,9 +354,9 @@ test('the header clock takes a failed fetch through serverClockAfterRefresh, fro
     assert.match(body, /serverClockOffsetMs = next\.offsetMs;\s*serverClockErrorText = next\.errorText;/);
     // app.js now calls a format.js function the cached format.js lacks: a browser
     // holding the old copy would throw a ReferenceError on every refresh.
-    assert.ok(Number(html.match(/src="\/web\/format\.js\?v=(\d+)"/)[1]) > 17,
+    assert.ok(Number(html.match(/src="\/web\/format\.js\?v=(\d+)"/)[1]) > 18,
         'invalidate the cached format.js that lacks serverClockAfterRefresh');
-    assert.ok(Number(html.match(/src="\/web\/app\.js\?v=(\d+)"/)[1]) > 50,
+    assert.ok(Number(html.match(/src="\/web\/app\.js\?v=(\d+)"/)[1]) > 51,
         'invalidate the cached app.js that keeps a stale clock error');
 });
 

@@ -32,7 +32,8 @@ namespace alpacacore::test {
  * A park or slew is "in flight" until the driver has polled for it
  * `park_polls_needed` / `slew_polls_needed` times; a poll count of zero makes
  * the first poll report completion. fail_slew_polls > 0 makes that many
- * IsSlewComplete polls answer a TheSkyX error first.
+ * IsSlewComplete polls answer a TheSkyX error first. `slew_complete_queries` counts every IsSlewComplete query,
+ * answered or not, and a SlewToRaDec never resets it (`slew_polls` restarts at each slew).
  *
  * `latency_ms` > 0 delays every reply by that many real milliseconds, and `transactions` counts every command the
  * fake answers (or drops), so a case can tell a getter that asked TheSkyX from one served from memory. `mute`
@@ -48,6 +49,8 @@ namespace alpacacore::test {
  * default: most cases read the fixed position).
  *
  * A DirectGuide pulse adds `guide_ra_step_hours` to the reported RA.
+ *
+ * Unpark clears `parked`, so IsParked reads false after it, as TheSkyX's does (issue #1863).
  *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
@@ -66,9 +69,11 @@ public:
     std::atomic<bool> parked{false};
     std::atomic<bool> slewing{false};
     std::atomic<int> park_commands{0};
+    std::atomic<int> unpark_commands{0};
     std::atomic<int> slew_commands{0};
     std::atomic<int> park_polls{0};
     std::atomic<int> slew_polls{0};
+    std::atomic<int> slew_complete_queries{0};
     std::atomic<int> position_reads{0};
     std::atomic<int> altaz_reads{0};
     // Models the remote computer clock, not chart JD; this fake does not execute JavaScript.
@@ -140,6 +145,11 @@ private:
             }
             return parked ? "|No error. Error = 0.true#" : "|No error. Error = 0.false#";
         }
+        if (has(command, "sky6RASCOMTele.Unpark()")) {
+            ++unpark_commands;
+            parked = false;
+            return "|No error. Error = 0.OK#";
+        }
         if (has(command, "Sync(")) {
             double ra = 0.0, dec = 0.0;
             if (std::sscanf(command.c_str() + command.find("Sync("), "Sync(%lf, %lf", &ra, &dec) == 2) {
@@ -157,6 +167,7 @@ private:
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsSlewComplete")) {
+            ++slew_complete_queries;
             if (slew_complete_ms.load() > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(slew_complete_ms.load()));
             }

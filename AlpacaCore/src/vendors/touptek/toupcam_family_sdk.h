@@ -76,6 +76,9 @@
     X(get_Temperature)                         \
     X(get_SerialNumber)                        \
     X(get_FwVersion)                           \
+    X(get_HwVersion)                           \
+    X(get_FpgaVersion)                         \
+    X(get_ProductionDate)                      \
     X(get_PixelSize)                           \
     X(ST4PlusGuide)                            \
     X(ST4PlusGuideState)                       \
@@ -640,13 +643,46 @@ public:
         return std::string(sn);
     }
 
+    // The SDK writes at most fwver[16], hwver[16], fpgaver[16] and pdate[10] (the
+    // parameter sizes of Toupcam_get_FwVersion, _HwVersion, _FpgaVersion and
+    // _ProductionDate in toupcam.h, and of the Altaircam_ ones in altaircam.h); one
+    // byte more than that stays zero, so the text is terminated whatever the SDK
+    // writes. A refusal (a model without the value) is an empty string, never the
+    // buffer.
     std::string get_firmware_version(HToupcam handle) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        char fw[16] = {};
+        char fw[17] = {};
         if (Api::get_FwVersion(handle, fw) < 0) {
             return "";
         }
         return std::string(fw);
+    }
+
+    std::string get_hw_version(HToupcam handle) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        char text[17] = {};
+        if (Api::get_HwVersion(handle, text) < 0) {
+            return "";
+        }
+        return std::string(text);
+    }
+
+    std::string get_fpga_version(HToupcam handle) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        char text[17] = {};
+        if (Api::get_FpgaVersion(handle, text) < 0) {
+            return "";
+        }
+        return std::string(text);
+    }
+
+    std::string get_production_date(HToupcam handle) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        char text[11] = {};
+        if (Api::get_ProductionDate(handle, text) < 0) {
+            return "";
+        }
+        return std::string(text);
     }
 
     void get_pixel_size(HToupcam handle, unsigned resolution_index, float& x, float& y) override {

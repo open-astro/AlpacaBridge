@@ -1344,7 +1344,7 @@ TEST_CASE("ZWO async - Connected=false returns while a Park holds the initiator 
     auto park = std::async(std::launch::async, [&] {
         try {
             driver->park();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): the link closed under it
             // The link closed under it: NotConnected or a failed send, both fine here.
         }
     });
@@ -1758,7 +1758,7 @@ TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO
     const std::function<void()> abort = [&] {
         try {
             driver->abort_slew();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): NotConnected is fine
             // NotConnected once the disconnect won the race.
         }
     };

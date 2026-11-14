@@ -468,12 +468,13 @@ std::vector<std::string> list_dev_nodes_with_prefix(const std::string& prefix) {
 // Never destroyed: the wrapper singleton can disconnect from its destructor at
 // exit, after function-local statics built later than it are gone.
 std::mutex& link_loss_hook_mutex() {
-    static auto* m = new std::mutex;  // NOLINT(cppcoreguidelines-owning-memory)
+    static auto* m = new std::mutex;  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
     return *m;
 }
 
 std::function<void(detail::LinkLossHookPoint)>& link_loss_hook() {
-    static auto* hook = new std::function<void(detail::LinkLossHookPoint)>;  // NOLINT(cppcoreguidelines-owning-memory)
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): never destroyed (exit order)
+    static auto* hook = new std::function<void(detail::LinkLossHookPoint)>;
     return *hook;
 }
 

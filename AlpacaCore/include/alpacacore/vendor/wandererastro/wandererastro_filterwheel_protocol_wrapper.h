@@ -131,7 +131,7 @@ public:
     FilterWheelStatus get_status() const;
 
     /**
-     * @brief Why the serial link is currently considered dead, if it is.
+     * @brief Why the serial link is faulted or lost, if it is.
      *
      * The wheel streams its status frame unprompted, so silence is the
      * fault signal: after 10 s without a frame (issue #237 -- USB
@@ -139,9 +139,22 @@ public:
      * faulted, the cache is invalidated (`valid` cleared) and this returns
      * the reason; the driver turns that into a DriverException on Position
      * reads and moves rather than reporting a slot the wheel may no longer
-     * be at. Clears on its own when frames resume. Connected stays true.
+     * be at. Clears on its own when frames resume. Once the link is lost
+     * (link_alive() false) this returns the loss reason and keeps it until
+     * the next connect() or disconnect() (decision 0009 point 5).
      */
     std::optional<std::string> link_fault() const;
+
+    /**
+     * @brief False once the link is lost (decision 0009, issue #1988).
+     *
+     * A hangup (EIO, ENXIO or ENODEV on a read or a write) loses the link at
+     * once, and so does a silence fault that has stood for
+     * util::kLinkStalenessBound. The wrapper then clears its cached status
+     * and firmware date, releases the port and stops reading. Lock-free.
+     * Cleared by the next connect() or disconnect().
+     */
+    bool link_alive() const;
 
     /**
      * @brief Get the device firmware date (YYYY-MM-DD), if known.

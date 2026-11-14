@@ -1402,7 +1402,7 @@ public:
                             double guide_fraction = kDefaultGuideRateFraction;
                             try {
                                 guide_fraction = protocol.get_guide_rates().first;
-                            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the default is kept
                                 // Unreadable guide rate — fall back to the default fraction.
                             }
                             if (guide_fraction < 0.1 || guide_fraction > 1.0) {
@@ -2142,7 +2142,7 @@ private:
             if (!device_faulted_ && fresh()) {
                 try {
                     return body();
-                } catch (const RefillNeedsOperationLock&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const RefillNeedsOperationLock&) {  // NOLINT(bugprone-empty-catch): the body reruns below
                     // Lapsed between `fresh` and the body's own check, on a read that needs the exchange: the
                     // body runs again below, under the operation lock.
                 }

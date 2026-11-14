@@ -51,12 +51,18 @@ public:
         : pty_("SilentMotorRotator"), move_reply_(std::move(move_reply)) {
         th_ = std::thread([this] { run(); });
     }
-    ~SilentMotorRotator() {
-        stop_ = true;
-        th_.join();
-    }
+    ~SilentMotorRotator() { sever_link(); }
     std::string slave_path() const { return pty_.slave_path(); }
     int keepalive_fd() const { return pty_.keepalive_fd(); }
+    /// Pull the cable (idempotent): stop the worker, then close both pty ends, so the driver's writes fail with
+    /// EIO and its reads return 0 at once from here on. slave_path() is empty afterwards.
+    void sever_link() {
+        stop_ = true;
+        if (th_.joinable()) {
+            th_.join();
+        }
+        pty_.sever();
+    }
     /// Write raw bytes to the driver (a test that must unpark a reader).
     void send(const std::string& bytes) {
         alpacacore::test::pty_write_bounded(pty_.master_fd(), bytes.data(), bytes.size(), stop_);
@@ -649,3 +655,206 @@ TEST_CASE("WandererRotator - a handshake from another product is refused (#2204)
     CHECK_FALSE(driver->get_connected());
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// Decision 0009 (issue #1989): the rotator is request/response and silent
+// between moves, so it has no silence latch and no staleness bound; EIO, ENXIO
+// or ENODEV on a command write or a move monitor read is a lost link at once.
+// ---------------------------------------------------------------------------
+
+#include <alpacacore/util/serial_port_registry.h>
+
+namespace {
+
+template <typename Pred>
+bool wait_until_rotator(Pred pred, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
+// Every operational member answers NotConnected over a lost link; the static
+// capabilities keep answering, and DeviceState is the empty list.
+void require_rotator_lost(alpacacore::RotatorDriver& driver) {
+    CHECK_FALSE(driver.get_connected());
+    require_alpaca_error([&]() { (void)driver.get_position(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_mechanical_position(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_reverse(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.halt(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.move_absolute(10.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.sync(10.0); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver.get_can_reverse());
+    CHECK(driver.get_device_state().empty());
+}
+
+}  // namespace
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_protocol_wrapper.cpp write_command_locked
+// throwing DriverException "Serial write failed" for every errno (dropping the is_hangup_errno branch).
+TEST_CASE("WandererAstro Rotator Driver - a write to a pulled adapter loses the link at once (#1989)",
+          "[wandererastro][rotator][serial][unit][link-lost]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string port = rotator.slave_path();  // emptied by the cut
+
+    // Real time: an idle rotator says nothing between moves, and that is not a fault or a loss.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+
+    rotator.sever_link();
+    // Idle: nothing reads the port, so the next command is the one that finds the pull.
+    require_alpaca_error([&]() { driver->set_reverse(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(port));  // no monitor runs: released at once
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    require_rotator_lost(*driver);
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_protocol_wrapper.cpp read_section not
+// reporting the errno of a failing read (the old back-off), so monitor_move waits out its budget.
+TEST_CASE("WandererAstro Rotator Driver - a cable pulled during a move loses the link at once (#1989)",
+          "[wandererastro][rotator][serial][unit][link-lost]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    SilentMotorRotator replugged;
+    alpacacore::test::ReplugPort path(rotator);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, path.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string port = rotator.slave_path();
+
+    // 90 degrees: the monitor's own budget is about 48 s and the fake never reports, so only the hangup can end it.
+    driver->move_absolute(90.0);
+    REQUIRE(driver->get_is_moving());
+    rotator.sever_link();
+    CHECK(wait_until_rotator([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    require_rotator_lost(*driver);  // its move_absolute: a Move right after the loss neither waits nor deadlocks
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    CHECK(wait_until_rotator([&] { return !alpacacore::util::is_serial_port_in_use(port); },
+                             std::chrono::milliseconds(2000)));
+
+    // A loss is not the missing-report fault: after a reconnect IsMoving answers.
+    path.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(driver->get_is_moving());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_protocol_wrapper.cpp disconnect not
+// clearing loss_reason_, so the reason outlives the Disconnect.
+TEST_CASE("WandererAstro Rotator Driver - the loss reason stays until the next Disconnect or Connect (#1989)",
+          "[wandererastro][rotator][serial][unit][link-lost]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    SilentMotorRotator replugged;
+    alpacacore::test::ReplugPort path(rotator);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, path.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_link_fault().empty());
+
+    rotator.sever_link();
+    require_alpaca_error([&]() { driver->set_reverse(true); }, alpacacore::AlpacaError::NotConnected);
+    const std::string reason = driver->get_link_fault();
+    CHECK(reason.find("Serial link lost") != std::string::npos);
+    require_alpaca_error([&]() { driver->halt(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_link_fault() == reason);  // a later call does not replace or clear it
+
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+
+    path.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_driver.cpp set_connected keeping the
+// idempotency check `connected == connected_.load()`, so a Connect over a lost link returns as already connected.
+TEST_CASE("WandererAstro Rotator Driver - a Connect over a lost link reopens without a Disconnect (#1989)",
+          "[wandererastro][rotator][serial][unit][link-lost]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    SilentMotorRotator replugged;
+    alpacacore::test::ReplugPort path(rotator);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, path.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    rotator.sever_link();
+    require_alpaca_error([&]() { driver->set_reverse(true); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_connected());
+
+    // No Disconnect: a Connect while the raw flag is still set must not be taken as already connected.
+    path.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_NOTHROW(driver->set_reverse(true));  // the replugged rotator takes commands
+    CHECK(driver->get_link_fault().empty());
+
+    // A Disconnect over a lost link completes and clears the reason.
+    const std::string replugged_port = replugged.slave_path();
+    replugged.sever_link();
+    require_alpaca_error([&]() { driver->set_reverse(false); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(replugged_port));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_protocol_wrapper.cpp read_handshake_section
+// retrying a LinkDead read, so the Connect waits out its handshake windows.
+TEST_CASE("WandererAstro Rotator Driver - a Connect that fails by hangup keeps no loss reason (#1989)",
+          "[wandererastro][rotator][serial][unit][link-lost]") {
+    // A rotator that never answers; the pty is severed 300 ms into the Connect.
+    alpacacore::test::PtyPair pty("HangupRotator");
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, pty.slave_path());
+    std::thread severer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));  // real time: the cut lands mid-handshake
+        pty.sever();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    severer.join();
+    CHECK(elapsed < std::chrono::milliseconds(2500));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // a connect that never completed is not a lost session
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_protocol_wrapper.cpp raw_rotator_skip_reason
+// returning std::nullopt for an unreadable descriptor, so the scan would probe the node.
+TEST_CASE("WandererRotator auto-detect names why it skips a raw node (#2212)", "[wandererastro][rotator][autodetect]") {
+    using alpacacore::util::UsbTtyDescriptor;
+    using alpacacore::vendor::wandererastro::detail::raw_rotator_skip_reason;
+
+    // No descriptor in sysfs: skipped, and the log says so.
+    const auto unreadable = raw_rotator_skip_reason(std::nullopt);
+    REQUIRE(unreadable.has_value());
+    CHECK(*unreadable == "USB descriptor unreadable");
+
+    // Another adapter class: skipped, naming its vendor and product.
+    const auto ftdi = raw_rotator_skip_reason(UsbTtyDescriptor{"0403", "FTDI", "FT232R USB UART"});
+    REQUIRE(ftdi.has_value());
+    CHECK(*ftdi == "not a CH340/CH341 device (vendor 0403, product \"FT232R USB UART\")");
+
+    // The rotator's CH340 (raw sysfs spelling, with its space): probed, so no reason.
+    CHECK_FALSE(raw_rotator_skip_reason(UsbTtyDescriptor{"1a86", "", "USB Serial"}).has_value());
+    CHECK_FALSE(raw_rotator_skip_reason(UsbTtyDescriptor{"0000", "", "USB2.0-Serial CH340"}).has_value());
+}

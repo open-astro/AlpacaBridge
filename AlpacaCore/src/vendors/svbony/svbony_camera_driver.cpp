@@ -11,10 +11,11 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
-#include <alpacacore/util/last_exposure.h>
+#include <alpacacore/util/link_epoch.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
@@ -31,7 +32,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <thread>
+#include <string>
 #include <unordered_map>
 
 namespace alpacacore::vendor::svbony {
@@ -61,6 +62,18 @@ bool supports_bin(const std::vector<int>& bins, int bin) {
     return std::find(bins.begin(), bins.end(), bin) != bins.end();
 }
 
+// CWE-117: an SDK error text reaches the log and a client-facing NotConnected message; no control characters.
+std::string printable(std::string text) {
+    std::replace_if(
+        text.begin(), text.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f; }, '?');
+    return text;
+}
+
+// The text an unconfirmed SDK capture stop keeps: the session's failure (ImageReady, ImageArray) and the refusal of
+// the settings writers while capture_stop_failed_ is set.
+constexpr const char* kCaptureStopNotConfirmed =
+    "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before changing settings";
+
 } // namespace
 
 class SVBONYCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
@@ -80,7 +93,6 @@ public:
           camera_info_(),
           camera_info_valid_(false),
           control_caps_(),
-          connected_(false),
           image_type_(SVBImageType::Raw8),
           bin_x_(1),
           bin_y_(1),
@@ -92,16 +104,8 @@ public:
           roi_start_y_effective_(0),
           start_x_(0),
           start_y_(0),
-          image_ready_(false),
-          image_cached_(false),
-          last_image_(),
-          last_exposure_duration_(0.0),
-          last_exposure_start_(),
-          last_exposure_valid_(false),
-          exposure_active_(false),
           pulse_guiding_(false),
-          pulse_guiding_end_(std::chrono::steady_clock::time_point{}),
-          exposure_failure_() {
+          pulse_guiding_end_(std::chrono::steady_clock::time_point{}) {
         preload_camera_info_locked();
     }
 
@@ -109,10 +113,14 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        (void)stop_exposure_thread();
-        if (connected_.load()) {
+        // The SDK stop first, then the join: the exposure body is gone before the camera closes (decision 0020
+        // rules 5 and 8).
+        (void)stop_and_join_exposure();
+        if (link_.is_open() || opened_.load()) {
             try {
-                set_connected(false);
+                // Qualified: virtual dispatch is gone in a destructor anyway; saying so explicitly keeps
+                // clang-analyzer's VirtualCall happy. Also tears down a camera whose link was lost.
+                SVBONYCameraDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SVBONY", "Error during destruction: " + std::string(e.what()));
             }
@@ -182,8 +190,14 @@ public:
         return 4;  // ICameraV4 (Platform 7)
     }
 
-    bool get_connected() const override {
-        return connected_.load();
+    // Lock-free: one atomic load of the link word (check_docs_drift.py classifies get_connected() by its body).
+    bool get_connected() const override { return util::LinkEpoch::is_open(link_.load()); }
+
+    // Decision 0009 rule 5: the SDK error text of the call that lost the link, kept until the next Connect or
+    // Disconnect.
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lost(lost_mutex_);
+        return lost_reason_;
     }
 
     void connect() override {
@@ -197,47 +211,65 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::shared_ptr<const ImageArray> retired_image;
         // Serialize the synchronous ASCOM setter across the complete SDK
         // transition. AsyncConnectable coordinates async requests, but it
         // cannot see a sync disconnect that arrives while this slow open runs.
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
-        std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
+        // A disconnect that leaves the camera connected (a gate below) must not leave the session closed: a
+        // StartExposure would raise NotConnected on a connected camera (decision 0020 rule 8).
+        struct ReopenIfConnected {
+            SVBONYCameraDriver& driver;
+            bool closed = false;
+            ~ReopenIfConnected() {
+                if (closed && driver.link_.is_open()) {
+                    try {
+                        driver.session_.open();
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("SVBONY", "Could not reopen the exposure session: " + std::string(e.what()));
+                    }
+                }
+            }
+        } reopen{*this};
         if (!connected) {
-            // Join the exposure thread BEFORE taking mutex_ and closing the camera,
-            // so the disconnect never tears down the SDK session under a live
-            // exposure loop (deterministic shutdown on both the sync path and the
-            // async connection task, which calls set_connected directly). Must be
-            // outside mutex_: the thread takes mutex_ to publish its results, so
-            // joining under the lock would deadlock. Hold exposure_lifecycle_mutex_
-            // from before the join through the close, so a concurrent start_exposure
-            // can neither spawn a fresh thread in the join→close gap nor race this
-            // join with its thread-assignment (join vs operator= on the same
-            // std::thread is UB). Lock order: transition_mutex_ ->
-            // exposure_lifecycle_mutex_ -> mutex_.
-            lifecycle_lock.lock();
-            stop_exposure_thread();
+            // Decision 0020 rules 5, 6 and 8: stop the SDK capture, then join the exposure body, both BEFORE
+            // mutex_ is taken and before the close, so the disconnect never tears down the SDK session under a
+            // live body (the sync path and the async connection task both come here). The join runs even when
+            // this call then returns as idempotent. disconnect_and_join() closes the session, so a StartExposure
+            // that passed its connection check before this disconnect raises NotConnected and runs no body. A
+            // stop that fails is kept for ImageReady (session fail) and the disconnect goes on to close the camera.
+            (void)stop_and_join_exposure();
+            reopen.closed = true;
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        // A connect whose link was lost still holds driver state and possibly the dead handle until a Disconnect or
+        // Connect tears it down (decision 0009 rule 4).
+        const bool held = link_.is_open() || opened_.load();
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
         // newer pending disconnect by staying down.
-        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+        if (!connected && record_disconnect_if_connect_in_flight(held)) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        if (connected && consume_pending_disconnect(link_.is_open())) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? link_.is_open() : !held) {
             // Idempotent (ASCOM): a redundant Connect/Disconnect is a no-op and must
             // NOT reset exposure state. The Platform-7 `connect` endpoint calls
             // connect() unconditionally, so wiping here would abort an in-flight
             // exposure or discard a just-completed image. Matches the QHY driver.
+            if (!connected) {
+                std::lock_guard<std::mutex> lost(lost_mutex_);
+                lost_reason_.clear();
+            }
             return;
         }
 
         auto& sdk = sdk_;
+        // A new epoch first: from here a call that captured the old link can no longer drop the new one, and a
+        // Connect after a loss reads as disconnected until it publishes (decision 0009 rule 3).
+        link_.begin_transition();
 
         // Decision 0016 rule 4: the SDK handshake and close run under transition_mutex_ with mutex_
         // released, so Name and the other identity getters answer while they run. Set before mutex_ is
@@ -252,13 +284,27 @@ public:
             // Everything the handshake learns lands in locals and is published under mutex_ at the end,
             // so a failed connect publishes nothing.
             lock.unlock();
+            // A Connect after a lost link (decision 0009 rule 4) opens the camera afresh: the body the loss left is
+            // joined (with mutex_ released, decision 0020 rule 6), which also clears its kept failure and the last
+            // exposure, and the dead handle is closed before the new open. After a Disconnect the session is
+            // already closed and cleared.
+            if (opened_.load()) {
+                session_.disconnect_and_join();
+            }
+            release_open(/*swallow_all=*/true);
+            opened_.store(false);
+            {
+                std::lock_guard<std::mutex> lost(lost_mutex_);
+                lost_reason_.clear();
+            }
             SVBCameraInfo info = resolve_camera();
             const int resolved_id = info.camera_id;
             ALPACA_LOG_INFO("SVBONY", "SDK version: " + sdk.get_sdk_version());
             sdk.open_camera(resolved_id);
-            // Everything from here until connected_ is set true must close the
-            // freshly opened camera on failure: the destructor only closes when
-            // connected_, so an unguarded throw (set_camera_mode_normal,
+            open_id_.store(resolved_id);
+            // Everything from here until the link is published must close the
+            // freshly opened camera on failure: the destructor only closes a
+            // connected camera, so an unguarded throw (set_camera_mode_normal,
             // get_control_caps, set_roi_format, get_serial_number all
             // propagate) would leak the SDK open — the ref-counted open never
             // balances — and leave the camera busy for the next connect. Guard
@@ -329,7 +375,7 @@ public:
                 try {
                     float px = sdk.get_sensor_pixel_size(resolved_id);
                     info.pixel_size_um = static_cast<double>(px);
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): enumeration may have set it
                     // pixel size may have been set during enumeration
                 }
 
@@ -349,14 +395,19 @@ public:
                     firmware_ = std::move(fw);
                 }
             } catch (const AlpacaException&) {
-                close_after_failed_connect(sdk, resolved_id);
+                close_after_failed_connect();
                 throw;
             } catch (const std::exception& e) {
-                close_after_failed_connect(sdk, resolved_id);
+                close_after_failed_connect();
                 throw AlpacaException(std::string("Failed to configure SVBONY camera: ") + e.what(),
                                       AlpacaError::DriverException);
             }
 
+            {
+                std::lock_guard<std::mutex> lost(lost_mutex_);
+                unit_label_ = serial.empty() ? "SVBONY camera id " + std::to_string(resolved_id)
+                                             : "SVBONY camera " + printable(serial);
+            }
             lock.lock();
             camera_id_ = resolved_id;
             camera_info_ = std::move(info);
@@ -375,8 +426,11 @@ public:
             roi_height_effective_ = roi_height;
             roi_dirty_ = false;
             serial_number_ = std::move(serial);
-            reset_exposure_state_locked(retired_image);
-            connected_.store(true);
+            record_capture_stop_locked(/*failed=*/false);
+            reset_pulse_guide_state_locked();
+            session_.open();
+            opened_.store(true);
+            link_.publish_open();
             return;
         }
 
@@ -385,9 +439,9 @@ public:
         // connection check instead of hitting a just-closed camera, and a
         // throwing close can't trap the driver half-connected — same order as
         // the switch/EFW siblings, per the driver-lifecycle.instructions.md disconnect rule (#116).
-        // The exposure worker is already joined, and exposure_lifecycle_mutex_ stays held across the
-        // close, so no exposure can start in the gap; the close then runs with mutex_ released.
-        const int close_id = camera_id_;
+        // The exposure body is already joined and the session closed (stop_and_join_exposure() above), so no
+        // exposure can start in the gap; the close then runs with mutex_ released. A camera whose link was lost
+        // comes here too: its Disconnect completes (decision 0009 rule 4).
         camera_id_ = -1;
         camera_info_ = {};
         camera_info_valid_ = false;
@@ -400,14 +454,26 @@ public:
             std::lock_guard<std::mutex> fwlock(firmware_mutex_);
             firmware_.clear();
         }
-        reset_exposure_state_locked(retired_image);
-        connected_.store(false);
-        if (close_id < 0) {
-            return;
-        }
+        reset_pulse_guide_state_locked();
+        opened_.store(false);
         // Operational members fail ensure_connected_locked() from here on, so none reaches the SDK
         // while the camera closes; capture_stop_failed_ is still written under mutex_.
         lock.unlock();
+        struct ClearLossReason {
+            SVBONYCameraDriver& driver;
+            // Decision 0009 rule 5: a Disconnect clears the loss reason, also when the close below throws.
+            ~ClearLossReason() {
+                std::lock_guard<std::mutex> lost(driver.lost_mutex_);
+                driver.lost_reason_.clear();
+            }
+        } clear_loss_reason{*this};
+        const int close_id = open_id_.load();
+        if (close_id < 0) {
+            // Nothing open: never opened, or the handle a lost link left was closed already.
+            std::lock_guard<std::mutex> relock(mutex_);
+            record_capture_stop_locked(/*failed=*/false);
+            return;
+        }
         bool stop_failed = false;
         try {
             sdk.stop_video_capture(close_id);
@@ -415,16 +481,16 @@ public:
             stop_failed = true;
             ALPACA_LOG_WARN("SVBONY", "stop_video_capture during disconnect failed: " + std::string(e.what()));
         }
-        // While the close runs, capture_stop_failed_ can be true with connected_ already false, as
-        // before this change. Its readers (get_camera_state, get_percent_completed) sit behind
+        // While the close runs, capture_stop_failed_ can be true with the link already closed, as
+        // before this change. Its readers (StartExposure, the settings writers) sit behind
         // ensure_connected(), so no client sees it; it is reset after the close.
         {
             std::lock_guard<std::mutex> relock(mutex_);
-            capture_stop_failed_ = stop_failed;
+            record_capture_stop_locked(stop_failed);
         }
-        sdk.close_camera(close_id);
+        release_open(/*swallow_all=*/false);
         std::lock_guard<std::mutex> relock(mutex_);
-        capture_stop_failed_ = false;
+        record_capture_stop_locked(/*failed=*/false);
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -492,13 +558,11 @@ public:
         set_bin_locked(bin_y, bin_y);
     }
 
+    // Decision 0020 rule 3: a failed exposure (an unconfirmed capture stop included) reads Idle; ImageReady and
+    // ImageArray raise its message.
     CameraState get_camera_state() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        latch_exposure_timeout_locked();
-        if (capture_stop_failed_) return CameraState::Error;
-        ensure_capture_stop_confirmed_locked();
-        return exposure_active_.load() ? CameraState::Exposing : CameraState::Idle;
+        return session_.camera_state();
     }
 
     int get_camera_x_size() const override {
@@ -679,16 +743,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
-            latch_exposure_timeout_locked();
-            ensure_capture_stop_confirmed_locked();
-            throw_exposure_failure_locked();
-            if (!last_exposure_valid_) {
-                throw AlpacaException::asked_too_early("Image not ready");
-            }
-            if (!image_ready_ || !image_cached_ || !last_image_) {
-                throw AlpacaException::asked_too_early("Image not ready");
-            }
-            image = last_image_;
+            image = session_.image();
         }
         // Keep the published image alive with a cheap immutable snapshot, then
         // copy its payload for the Alpaca return value outside the state lock.
@@ -703,13 +758,7 @@ public:
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
-        latch_exposure_timeout_locked();
-        ensure_capture_stop_confirmed_locked();
-        throw_exposure_failure_locked();
-        if (!last_exposure_valid_) {
-            return false;
-        }
-        return image_ready_ && image_cached_;
+        return session_.image_ready();
     }
 
     bool get_is_pulse_guiding() const override {
@@ -732,14 +781,14 @@ public:
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
-        return published_exposure_.duration();
+        return session_.last_exposure_duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
-        return published_exposure_.start_time();
+        return session_.last_exposure_start_time();
     }
 
     int get_max_adu() const override {
@@ -747,8 +796,8 @@ public:
         if (!camera_info_valid_ || camera_info_.bit_depth <= 0) {
             return 0;
         }
-        if (connected_.load() && (image_type_ == SVBImageType::Raw8 || image_type_ == SVBImageType::Y8 ||
-                                  image_type_ == SVBImageType::Rgb24)) {
+        if (link_.is_open() && (image_type_ == SVBImageType::Raw8 || image_type_ == SVBImageType::Y8 ||
+                                image_type_ == SVBImageType::Rgb24)) {
             return std::numeric_limits<std::uint8_t>::max();
         }
         return static_cast<int>((1ULL << camera_info_.bit_depth) - 1ULL);
@@ -810,25 +859,10 @@ public:
         throw AlpacaException("Offset descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
+    // On the TaskClock from the SDK capture start (CaptureControl::exposure_started), after the deferred writes.
     double get_percent_completed() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        latch_exposure_timeout_locked();
-        if (capture_stop_failed_) return 0.0;
-        ensure_capture_stop_confirmed_locked();
-        if (!exposure_active_.load()) return image_ready_ ? 100.0 : 0.0;
-        if (last_exposure_duration_ <= 0.0 || !exposure_integration_start_) {
-            return 0.0;
-        }
-        auto elapsed = std::chrono::duration<double>(clock_.now() - *exposure_integration_start_).count();
-        double percent = (elapsed / last_exposure_duration_) * 100.0;
-        if (percent < 0.0) {
-            return 0.0;
-        }
-        if (percent > 100.0) {
-            return 100.0;
-        }
-        return percent;
+        return session_.percent_completed();
     }
 
     double get_pixel_size_x() const override {
@@ -946,10 +980,36 @@ public:
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
+    // Decision 0020 rules 3 and 5. An idle AbortExposure changes nothing (a kept failure stays), except that it
+    // retries an SDK capture stop that an earlier abort or exposure could not confirm.
     void abort_exposure() override {
         ensure_connected();
-        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-        abort_exposure_locked_lifecycle();
+        bool exposing = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
+            const CameraState state = session_.camera_state();
+            exposing = state == CameraState::Exposing || state == CameraState::Download;
+            if (!exposing && !capture_stop_failed_) return;
+            // The check, the stopping mark and the SDK stop in one hold of mutex_, which the body's capture start
+            // also takes: the stop meets the exposure that was checked, never one a racing StartExposure began.
+            if (exposing) session_.set_stopping(true);  // a read the stop breaks is not a failure (#1745)
+            try {
+                on_link(LinkCaller::StateLocked, [&] { sdk_.stop_video_capture(camera_id_); });
+                record_capture_stop_locked(/*failed=*/false);
+            } catch (const std::exception& e) {
+                if (!link_.is_open()) throw;  // the stop met a removed camera: NotConnected with the loss reason
+                record_capture_stop_locked(/*failed=*/true);
+                if (exposing) {
+                    session_.set_stopping(false);  // the exposure is not stopped: fail it with the stop's text
+                    session_.fail(kCaptureStopNotConfirmed);
+                }
+                throw AlpacaException(std::string("AbortExposure could not stop SVBONY video capture: ") + e.what(),
+                                      AlpacaError::DriverException);
+            }
+        }
+        // Cancels and joins the body, with mutex_ released; bounded by one 500 ms SVBGetVideoData read.
+        if (exposing) session_.abort();
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -1008,11 +1068,12 @@ public:
         // SVBPulseGuide blocks on the camera side for the full pulse — it
         // must NOT hold mutex_ (it would stall every status poll for the
         // duration), so this keeps the bare id snapshot like the exposure
-        // worker. The disconnect path publishes disconnected before closing,
+        // body. The disconnect path publishes disconnected before closing,
         // so the worst case is an SDK error on a closed id, not a
         // use-after-free (issue #116).
         try {
-            sdk_.pulse_guide(camera_id_value(), guide_direction, duration);
+            const int id = camera_id_value();
+            on_link(LinkCaller::Unlocked, [&] { sdk_.pulse_guide(id, guide_direction, duration); });
         } catch (...) {
             pulse_guiding_.store(false);
             throw;
@@ -1033,13 +1094,6 @@ public:
         ensure_connected();
         (void)light; // SVBONY SDK does not have a dark frame parameter
 
-        // Held through the thread spawn at the end: serialises the spawn against
-        // the joins in stop_exposure and the disconnect's join→close (a spawn
-        // slipping into that gap would run the exposure loop against a closed
-        // camera; and join racing the thread-assignment is UB on std::thread).
-        // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
-        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-
         auto caps = get_control_caps_or_throw(SVBControlType::Exposure);
         long exposure_us = std::lround(requested_exposure_us);
         // Clamp to SDK minimum (ASCOM allows duration=0 meaning minimum exposure)
@@ -1050,289 +1104,235 @@ public:
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
 
-        // Validate the request fully before stopping a previous exposure.
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            validate_exposure_roi_locked();
-        }
-
-        // The old worker must be fully reaped before changing the camera's
-        // exposure control. Its public watchdog state may already be Idle
-        // while it is still inside SVBGetVideoData.
-        if (!stop_exposure_thread()) {
-            throw AlpacaException(
-                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before another "
-                "exposure",
-                AlpacaError::DriverException);
-        }
-
         int active_camera_id = -1;
         FrameConfig frame_config;
-        std::shared_ptr<const ImageArray> retired_image;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
-            ensure_settings_safe_locked();
             validate_exposure_roi_locked();
+            if (exposure_starting_) {
+                throw AlpacaException("SVBONY: an exposure is already starting", AlpacaError::InvalidOperation);
+            }
+            if (capture_stop_failed_) {
+                throw AlpacaException(
+                    "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before "
+                    "another exposure",
+                    AlpacaError::DriverException);
+            }
             active_camera_id = camera_id_;
-            sdk_.set_control_value(active_camera_id, SVBControlType::Exposure, exposure_us, false);
-
             frame_config = frame_config_locked();
-            last_exposure_duration_ = static_cast<double>(exposure_us) / 1'000'000.0;
-            last_exposure_start_ = {};
-            exposure_integration_start_.reset();
-            last_exposure_valid_ = true;
-            image_ready_ = false;
-            image_cached_ = false;
-            retired_image = std::move(last_image_);
-            exposure_failure_.clear();
-            // Watchdog deadline: exposure time + a generous margin for SDK
-            // overhead, deferred ROI / FrameSpeedMode writes, and the
-            // SVBGetVideoData poll loop. If the exposure thread is still
-            // hung past this point, get_camera_state forces Idle so the
-            // client can recover instead of polling Exposing forever.
-            exposure_deadline_ = clock_.now() + std::chrono::microseconds(exposure_us) + std::chrono::seconds(15);
-            exposure_deadline_valid_ = true;
-            exposure_worker_running_ = true;
-            exposure_active_.store(true);
+            // Holds the settings (ensure_not_exposing_locked) from this snapshot until session_.start() has
+            // published Exposing, so a gain/offset/geometry write cannot slip in between (M15).
+            exposure_starting_ = true;
         }
+        struct StartingDone {
+            SVBONYCameraDriver& driver;
+            ~StartingDone() {
+                std::lock_guard<std::mutex> lock(driver.mutex_);
+                driver.exposure_starting_ = false;
+            }
+        } starting_done{*this};
 
-        // Start video capture and grab one frame in a background thread.
-        // Deferred SDK writes (ROI, FrameSpeedMode) happen here so that
-        // start_exposure returns quickly and ConformU sees fast API timing.
-        try {
-            exposure_thread_ = std::thread([this, active_camera_id, exposure_us, frame_config]() {
-                auto finish_worker = [this](void*) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    exposure_worker_running_ = false;
-                };
-                std::unique_ptr<void, decltype(finish_worker)> worker_guard(this, finish_worker);
-                std::shared_ptr<const ImageArray> retired_image;
-                auto& sdk = sdk_;
-                // Deferred-write bookkeeping lives outside the try so the catch can
-                // re-mark ONLY the stage that did not apply (M16): clearing the
-                // dirty flags at snapshot time and never restoring them meant one
-                // transient SVBSetROIFormat/FrameSpeedMode failure silently broke
-                // every later exposure (stale ROI / speed never re-applied).
-                bool need_roi_update = false;
-                bool need_speed_update = false;
-                bool roi_applied = false;
-                bool speed_applied = false;
-                bool capture_start_attempted = false;
-                try {
-                    // Apply deferred SDK writes outside the mutex so
-                    // get_image_ready() polls are not blocked.
-                    {
-                        long speed_value;
-                        {
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            need_roi_update = roi_dirty_;
-                            need_speed_update = frame_speed_dirty_;
-                            speed_value = pending_frame_speed_;
-                        }
-                        if (need_roi_update && frame_config.roi_width > 0 && frame_config.roi_height > 0) {
-                            sdk.set_roi_format(active_camera_id, frame_config.roi_start_x, frame_config.roi_start_y,
-                                               frame_config.roi_width, frame_config.roi_height, frame_config.bin_x);
-                            sdk.set_output_image_type(active_camera_id, frame_config.image_type);
-                            roi_applied = true;
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            roi_dirty_ = false;
-                        }
-                        {
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            if (!exposure_active_.load() || !connected_.load() || camera_id_ != active_camera_id) {
-                                exposure_worker_running_ = false;
-                                return;
-                            }
-                        }
-                        if (need_speed_update) {
-                            long cur_speed = 0;
-                            bool cur_auto = false;
-                            if (!sdk.get_control_value(active_camera_id, SVBControlType::FrameSpeedMode, cur_speed,
-                                                       cur_auto) ||
-                                cur_speed != speed_value) {
-                                sdk.set_control_value(active_camera_id, SVBControlType::FrameSpeedMode, speed_value,
-                                                      false);
-                            }
-                            speed_applied = true;
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            frame_speed_dirty_ = false;
-                        }
-                    }
-
-                    std::size_t buffer_size = 0;
-                    {
-                        const auto frame_roi = sdk.get_roi_format(active_camera_id);
-                        const auto frame_type = sdk.get_output_image_type(active_camera_id);
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        if (frame_roi.width <= 0 || frame_roi.height <= 0 || frame_roi.bin <= 0 ||
-                            frame_roi.start_x < 0 || frame_roi.start_y < 0) {
-                            util::throw_invalid_camera_image("SVBONY SDK returned invalid ROI metadata");
-                        }
-                        if (frame_roi.start_x != frame_config.roi_start_x ||
-                            frame_roi.start_y != frame_config.roi_start_y ||
-                            frame_roi.width != frame_config.roi_width || frame_roi.height != frame_config.roi_height ||
-                            frame_roi.bin != frame_config.bin_x) {
-                            util::throw_invalid_camera_image(
-                                "SVBONY SDK ROI readback does not match the requested frame");
-                        }
-                        if (frame_type != frame_config.image_type || !is_supported_output_type(frame_type)) {
-                            util::throw_invalid_camera_image("SVBONY SDK returned an unsupported image format");
-                        }
-                        buffer_size = required_frame_storage(frame_config.roi_width, frame_config.roi_height,
-                                                             frame_config.image_type);
-                        if (buffer_size > static_cast<std::size_t>(std::numeric_limits<long>::max())) {
-                            util::throw_invalid_camera_image("SVBONY frame storage exceeds SDK buffer-size range");
-                        }
-                    }
-
-                    if (buffer_size == 0) {
-                        util::throw_invalid_camera_image("SVBONY SDK frame has no storage");
-                    }
-                    {
-                        // Serialize the final cancellation check with Abort,
-                        // replacement and disconnect before starting capture.
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        if (!exposure_active_.load() || !connected_.load() || camera_id_ != active_camera_id) {
-                            exposure_worker_running_ = false;
-                            return;
-                        }
-                        if (capture_stop_failed_) {
-                            throw AlpacaException(
-                                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and "
-                                "reconnect",
-                                AlpacaError::DriverException);
-                        }
-                        capture_start_attempted = true;
-                        // ICameraV4: the time the camera started to collect photons, not the StartExposure call;
-                        // the deferred FrameSpeedMode write above can take about a second (issue #1477).
-                        last_exposure_start_ = std::chrono::system_clock::now();
-                        exposure_integration_start_ = clock_.now();
-                        sdk.start_video_capture(active_camera_id);
-                    }
-
-                    std::vector<std::uint8_t> buffer(buffer_size);
-
-                    // SVBGetVideoData reports no image before its finite wait as
-                    // TIMEOUT; retry that result while the sensor integrates and
-                    // surface every other SDK error without spinning.
-                    // TODO: verify on hardware that start/stop flushes queued video frames; the SDK exposes
-                    // neither a frame timestamp nor a sequence here, and documents no queue-reset guarantee.
-                    const long exposure_wait_ms = exposure_us / 1000;
-                    const int total_wait_ms = exposure_wait_ms > std::numeric_limits<int>::max() - 10000L
-                                                  ? std::numeric_limits<int>::max()
-                                                  : std::max(10000, static_cast<int>(exposure_wait_ms + 10000L));
-                    auto deadline = clock_.now() + std::chrono::milliseconds(total_wait_ms);
-                    bool got_frame = false;
-                    int attempts = 0;
-                    while (exposure_active_.load() && clock_.now() < deadline) {
-                        try {
-                            if (sdk.get_video_data(active_camera_id, buffer.data(), static_cast<long>(buffer.size()),
-                                                   500) == SVBVideoDataResult::Frame) {
-                                got_frame = true;
-                                break;
-                            }
-                            ++attempts;
-                        } catch (const std::exception& e) {
-                            publish_exposure_failure(e.what());
-                            throw;
-                        }
-                    }
-
+        // Decision 0020: the exposure body, run by the session's one slot, so the previous body has returned before
+        // this one writes the exposure register or starts a capture. Deferred SDK writes (Exposure, ROI,
+        // FrameSpeedMode) happen here so that StartExposure returns quickly and ConformU sees fast API timing.
+        auto body = [this, active_camera_id, exposure_us, frame_config](util::CaptureControl& c) {
+            const auto cancelled = [&c] { return c.stop_reason() != util::StopReason::None; };
+            // Every SDK call of the body is a device call: a removal code from one is a lost link (decision 0009).
+            const auto call = [this](auto&& fn) { return on_link(LinkCaller::Body, fn); };
+            // A body that meets a lost link closes the dead handle on its way out, after its last SDK call.
+            struct CloseIfLost {
+                SVBONYCameraDriver& driver;
+                ~CloseIfLost() {
+                    // A destructor must not throw: a failed lock or close leaves the handle to the next
+                    // Disconnect or Connect, as a loss that lands just as the body returns does.
                     try {
-                        sdk.stop_video_capture(active_camera_id);
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        capture_stop_failed_ = false;
-                    } catch (const std::exception& e) {
-                        {
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            capture_stop_failed_ = true;
-                        }
-                        throw AlpacaException(std::string("SVBONY could not stop video capture: ") + e.what(),
-                                              AlpacaError::DriverException);
+                        driver.close_handle_after_body();
+                    } catch (...) {  // NOLINT(bugprone-empty-catch): a destructor must not throw
                     }
+                }
+            } close_if_lost{*this};
+            const int id = active_camera_id;
+            auto& sdk = sdk_;
+            // Deferred-write bookkeeping lives outside the try so the catch can
+            // re-mark ONLY the stage that did not apply (M16): clearing the
+            // dirty flags at snapshot time and never restoring them meant one
+            // transient SVBSetROIFormat/FrameSpeedMode failure silently broke
+            // every later exposure (stale ROI / speed never re-applied).
+            bool need_roi_update = false;
+            bool need_speed_update = false;
+            bool roi_applied = false;
+            bool speed_applied = false;
+            bool capture_start_attempted = false;
+            bool capture_stopped = false;
+            try {
+                if (cancelled()) return;
+                long speed_value = 0;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    need_roi_update = roi_dirty_;
+                    need_speed_update = frame_speed_dirty_;
+                    speed_value = pending_frame_speed_;
+                }
+                call([&] { sdk.set_control_value(id, SVBControlType::Exposure, exposure_us, false); });
+                // Apply deferred SDK writes outside the mutex so
+                // get_image_ready() polls are not blocked.
+                if (need_roi_update && frame_config.roi_width > 0 && frame_config.roi_height > 0) {
+                    call([&] {
+                        sdk.set_roi_format(id, frame_config.roi_start_x, frame_config.roi_start_y,
+                                           frame_config.roi_width, frame_config.roi_height, frame_config.bin_x);
+                    });
+                    call([&] { sdk.set_output_image_type(id, frame_config.image_type); });
+                    roi_applied = true;
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    roi_dirty_ = false;
+                }
+                if (cancelled()) return;
+                if (need_speed_update) {
+                    long cur_speed = 0;
+                    bool cur_auto = false;
+                    if (!call([&] {
+                            return sdk.get_control_value(id, SVBControlType::FrameSpeedMode, cur_speed, cur_auto);
+                        }) ||
+                        cur_speed != speed_value) {
+                        call([&] { sdk.set_control_value(id, SVBControlType::FrameSpeedMode, speed_value, false); });
+                    }
+                    speed_applied = true;
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    frame_speed_dirty_ = false;
+                }
 
-                    if (!exposure_active_.load()) {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        exposure_worker_running_ = false;
-                        return;
+                const auto frame_roi = call([&] { return sdk.get_roi_format(id); });
+                const auto frame_type = call([&] { return sdk.get_output_image_type(id); });
+                if (frame_roi.width <= 0 || frame_roi.height <= 0 || frame_roi.bin <= 0 || frame_roi.start_x < 0 ||
+                    frame_roi.start_y < 0) {
+                    util::throw_invalid_camera_image("SVBONY SDK returned invalid ROI metadata");
+                }
+                if (frame_roi.start_x != frame_config.roi_start_x || frame_roi.start_y != frame_config.roi_start_y ||
+                    frame_roi.width != frame_config.roi_width || frame_roi.height != frame_config.roi_height ||
+                    frame_roi.bin != frame_config.bin_x) {
+                    util::throw_invalid_camera_image("SVBONY SDK ROI readback does not match the requested frame");
+                }
+                if (frame_type != frame_config.image_type || !is_supported_output_type(frame_type)) {
+                    util::throw_invalid_camera_image("SVBONY SDK returned an unsupported image format");
+                }
+                const std::size_t buffer_size =
+                    required_frame_storage(frame_config.roi_width, frame_config.roi_height, frame_config.image_type);
+                if (buffer_size > static_cast<std::size_t>(std::numeric_limits<long>::max())) {
+                    util::throw_invalid_camera_image("SVBONY frame storage exceeds SDK buffer-size range");
+                }
+                if (buffer_size == 0) {
+                    util::throw_invalid_camera_image("SVBONY SDK frame has no storage");
+                }
+                {
+                    // The final cancellation check and the capture start under mutex_, which AbortExposure holds
+                    // from its state check through its SDK stop.
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (cancelled()) return;
+                    if (capture_stop_failed_) {
+                        throw AlpacaException(
+                            "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and "
+                            "reconnect",
+                            AlpacaError::DriverException);
                     }
-                    if (!got_frame) {
-                        ALPACA_LOG_WARN("SVBONY",
-                                        "Exposure failed: no frame after " + std::to_string(attempts) + " attempts");
-                        publish_exposure_failure("SVBONY camera did not deliver a frame before the timeout");
-                        {
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            exposure_worker_running_ = false;
-                        }
-                        return;
-                    }
+                    capture_start_attempted = true;
+                    // ICameraV4: the time the camera started to collect photons, not the StartExposure call;
+                    // the deferred FrameSpeedMode write above can take about a second (issue #1477).
+                    c.exposure_started();
+                    call([&] { sdk.start_video_capture(id); });
+                }
 
-                    // Convert and validate locally; publish neither data nor ready
-                    // until the entire frame has passed validation.
-                    ImageArray image = build_image_array(buffer, frame_config);
-                    auto published_image = std::make_shared<const ImageArray>(std::move(image));
+                std::vector<std::uint8_t> buffer(buffer_size);
+
+                // SVBGetVideoData reports no image before its finite wait as
+                // TIMEOUT; retry that result while the sensor integrates and
+                // surface every other SDK error without spinning. Each 500 ms
+                // read is the poll step (decision 0020 rule 4); the body makes no
+                // sleep of its own, and AbortExposure's SDK stop ends the read.
+                // TODO: verify on hardware that start/stop flushes queued video frames; the SDK exposes
+                // neither a frame timestamp nor a sequence here, and documents no queue-reset guarantee.
+                const long exposure_wait_ms = exposure_us / 1000;
+                const int total_wait_ms = exposure_wait_ms > std::numeric_limits<int>::max() - 10000L
+                                              ? std::numeric_limits<int>::max()
+                                              : std::max(10000, static_cast<int>(exposure_wait_ms + 10000L));
+                const auto deadline = clock_.now() + std::chrono::milliseconds(total_wait_ms);
+                bool got_frame = false;
+                int attempts = 0;
+                while (!cancelled() && clock_.now() < deadline) {
+                    if (call([&] {
+                            return sdk.get_video_data(id, buffer.data(), static_cast<long>(buffer.size()), 500);
+                        }) == SVBVideoDataResult::Frame) {
+                        got_frame = true;
+                        break;
+                    }
+                    ++attempts;
+                }
+
+                const std::uint64_t stop_seen = capture_stop_epoch();
+                try {
+                    call([&] { sdk.stop_video_capture(id); });
+                    capture_stopped = true;
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    record_body_capture_stop_locked(/*failed=*/false, stop_seen);
+                } catch (const std::exception& e) {
+                    if (!link_.is_open()) throw;  // a removal: NotConnected with the loss reason
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
-                        latch_exposure_timeout_locked();
-                        if (!exposure_active_.load()) {
-                            exposure_worker_running_ = false;
-                            return;
-                        }
-                        last_image_ = std::move(published_image);
-                        image_cached_ = true;
-                        image_ready_ = true;
-                        published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
-                        exposure_failure_.clear();
-                        exposure_deadline_valid_ = false;
-                        exposure_active_.store(false);
-                        exposure_worker_running_ = false;
+                        record_body_capture_stop_locked(/*failed=*/true, stop_seen);
                     }
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("SVBONY", "Exposure failed: " + std::string(e.what()));
-                    bool stopped = !capture_start_attempted;
-                    if (capture_start_attempted) {
-                        try {
-                            sdk.stop_video_capture(active_camera_id);
-                            stopped = true;
-                        } catch (const std::exception& stop_error) {
-                            // Preserve uncertain capture state until Stop succeeds
-                            // or disconnect closes and reopens the physical handle.
-                            ALPACA_LOG_WARN("SVBONY", "stop_video_capture after exposure failure failed: " +
-                                                          std::string(stop_error.what()));
-                        }
+                    throw AlpacaException(std::string("SVBONY could not stop video capture: ") + e.what(),
+                                          AlpacaError::DriverException);
+                }
+
+                if (cancelled()) return;  // an abort, a disconnect or the watchdog: the session holds the state
+                if (!got_frame) {
+                    ALPACA_LOG_WARN("SVBONY",
+                                    "Exposure failed: no frame after " + std::to_string(attempts) + " attempts");
+                    throw AlpacaException("SVBONY camera did not deliver a frame before the timeout",
+                                          AlpacaError::DriverException);
+                }
+
+                // Convert and validate locally; publish neither data nor ready
+                // until the entire frame has passed validation.
+                ImageArray image = build_image_array(buffer, frame_config);
+                static_cast<void>(c.image_ready(std::make_shared<const ImageArray>(std::move(image))));
+            } catch (const std::exception& e) {
+                // Decision 0020 rule 5: a body that ends early stops the SDK capture it started. A lost link makes no
+                // further attempt.
+                bool stopped = !capture_start_attempted || capture_stopped;
+                const std::uint64_t stop_seen = capture_stop_epoch();
+                if (!stopped && link_.is_open()) {
+                    try {
+                        call([&] { sdk.stop_video_capture(id); });
+                        stopped = true;
+                    } catch (const std::exception& stop_error) {
+                        // Preserve uncertain capture state until Stop succeeds
+                        // or disconnect closes and reopens the physical handle.
+                        ALPACA_LOG_WARN("SVBONY", "stop_video_capture after exposure failure failed: " +
+                                                      std::string(stop_error.what()));
                     }
+                }
+                {
                     // Re-mark only the deferred stage that did NOT apply, so the
                     // next exposure retries it instead of running with stale
                     // ROI/speed forever (M16). Re-marking an applied stage would
                     // just cost a redundant re-apply, so the split matters only
                     // for correctness of the failed one.
                     std::lock_guard<std::mutex> lock(mutex_);
-                    if (stopped)
-                        capture_stop_failed_ = false;
-                    else
-                        capture_stop_failed_ = true;
+                    if (link_.is_open()) record_body_capture_stop_locked(/*failed=*/!stopped, stop_seen);
                     if (need_roi_update && !roi_applied) roi_dirty_ = true;
                     if (need_speed_update && !speed_applied) frame_speed_dirty_ = true;
-                    if (exposure_active_.load()) {
-                        exposure_failure_ = e.what();
-                        image_ready_ = false;
-                        image_cached_ = false;
-                        retired_image = std::move(last_image_);
-                        exposure_deadline_valid_ = false;
-                    }
-                    exposure_active_.store(false);
-                    exposure_worker_running_ = false;
                 }
-            });
-        } catch (...) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            exposure_worker_running_ = false;
-            exposure_active_.store(false);
-            exposure_deadline_valid_ = false;
-            last_exposure_valid_ = false;
-            throw;
-        }
+                if (cancelled()) {
+                    ALPACA_LOG_DEBUG("SVBONY", "Exposure body cancelled: " + std::string(e.what()));
+                    return;
+                }
+                ALPACA_LOG_WARN("SVBONY", "Exposure failed: " + std::string(e.what()));
+                throw;  // the session keeps the message for ImageReady and ImageArray (decision 0020 rule 3)
+            }
+        };
+        // The rounded and clamped exposure register is the duration (LastExposureDuration, issue #1477).
+        session_.start(static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
     }
 
     void stop_exposure() override {
@@ -1370,7 +1370,20 @@ private:
 
     std::unordered_map<SVBControlType, SVBControlCaps> control_caps_;
 
-    std::atomic<bool> connected_;
+    // Connected (decision 0009): an epoch word, so a removal captured before a relink never drops the new link.
+    mutable util::LinkEpoch link_;
+    // True from a Connect's publish until a Disconnect or the next Connect tears that connection down; it stays true
+    // across a lost link, whose driver state and dead handle wait for that teardown. Written under transition_mutex_
+    // and mutex_.
+    std::atomic<bool> opened_{false};
+    // The id this driver opened and has not closed (-1 none). Closed once, by whoever exchanges it out: the
+    // Disconnect, the next Connect, or the loss (release_open()).
+    mutable std::atomic<int> open_id_{-1};
+    // Vendor-local leaf under mutex_ (driver lifecycle: shared leaf mutexes): the loss reason and the unit label.
+    // Taken with nothing else acquired under it.
+    mutable std::mutex lost_mutex_;
+    mutable std::string lost_reason_;  // get_link_fault(); empty while the link is open or after a clear
+    std::string unit_label_;           // "SVBONY camera <serial>", set at connect
     // True while set_connected runs its SDK handshake or close with mutex_ released.
     std::atomic<bool> transition_in_flight_{false};
     mutable std::mutex mutex_;
@@ -1391,85 +1404,167 @@ private:
     int start_x_;
     int start_y_;
 
-    mutable bool image_ready_;
-    mutable bool image_cached_;
-    mutable std::shared_ptr<const ImageArray> last_image_;
-    double last_exposure_duration_;
-    std::chrono::system_clock::time_point last_exposure_start_;
-    bool last_exposure_valid_;
-    std::optional<std::chrono::steady_clock::time_point> exposure_integration_start_;
-    // The fields above describe the candidate; only an accepted image replaces the published pair.
-    util::LastExposure published_exposure_;
-
     bool roi_dirty_{true};
     bool frame_speed_dirty_{false};
     long pending_frame_speed_{0};
 
-    mutable std::atomic<bool> exposure_active_;
-    bool exposure_worker_running_{false};      // guarded by mutex_; true until the worker actually exits
     mutable bool capture_stop_failed_{false};  // guarded by mutex_; blocks reuse until a successful stop/close
-    std::thread exposure_thread_;
-    // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
-    // (stop_exposure, set_connected(false)'s pre-close stop). Join racing the
-    // spawn's thread-assignment is UB on std::thread, and a spawn between the
-    // disconnect's join and the SDK close would run the exposure loop against a
-    // closed camera. Lock order: exposure_lifecycle_mutex_ -> mutex_. The
-    // exposure thread itself never takes it, so joins under it can't deadlock.
-    std::mutex exposure_lifecycle_mutex_;
-    // Watchdog deadline: get_camera_state forces Idle once now >= this, even
-    // if the exposure thread is still hung in an SVBONY SDK call. Protected
-    // by mutex_; mutable because get_camera_state (const) clears the flag
-    // after triggering recovery.
-    mutable std::chrono::steady_clock::time_point exposure_deadline_{};
-    mutable bool exposure_deadline_valid_{false};
+    // Bumped by every capture-stop result the driver records outside a body (AbortExposure, Disconnect, Connect),
+    // under mutex_: a body's own stop result, read before a newer one, never overwrites it.
+    mutable std::uint64_t capture_stop_epoch_{0};
+    // True from a StartExposure's settings snapshot until session_.start() has published Exposing (under mutex_).
+    bool exposure_starting_{false};
 
     mutable std::atomic<bool> pulse_guiding_;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
-    mutable std::string exposure_failure_;
     // Serialises pulse_guide against itself (M18 sweep): SVBPulseGuide blocks
     // for the pulse duration, and the flag clear after it must not race a
-    // second in-flight pulse's flag/end-time publish. Never held with mutex_.
+    // second in-flight pulse's flag/end-time publish. Taken before mutex_, never under it: pulse_guide takes
+    // mutex_ under it to publish the flag, and its loss path (note_loss) takes mutex_ too.
     std::mutex pulse_guide_serial_mutex_;
 
+    // Decision 0020: the exposure, its state, the LastExposure* values, the kept failure and the watchdog (the
+    // exposure + 15 s of SDK overhead, deferred writes and the SVBGetVideoData loop). Declared after every member
+    // the exposure body touches: destroyed first, so the body is joined before they die. Mutable because the
+    // loss path of a const getter fails the exposure in flight.
+    mutable util::CaptureSession session_{"SVBONY", clock_, std::chrono::seconds(15)};
+
+    // Which lock a device call's caller holds, so a loss closes the dead handle under mutex_ (on_link()).
+    enum class LinkCaller : std::uint8_t {
+        StateLocked,  // the caller holds mutex_ (with_camera-style short calls)
+        Unlocked,     // the caller holds no driver lock (AbortExposure is StateLocked; PulseGuide is this)
+        Body,         // the exposure body: its own throw ends the exposure, and it closes the handle on its way out
+    };
+
     void ensure_connected() const {
-        if (!connected_.load()) {
-            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        if (!link_.is_open()) {
+            throw_not_connected();
         }
     }
 
-    void reset_exposure_state_locked(std::shared_ptr<const ImageArray>& retired_image) {
+    // NotConnected, with the loss reason once the link was lost (decision 0009 rule 5).
+    [[noreturn]] void throw_not_connected() const {
+        std::lock_guard<std::mutex> lost(lost_mutex_);
+        throw AlpacaException(lost_reason_.empty() ? "Camera not connected" : lost_reason_, AlpacaError::NotConnected);
+    }
+
+    // Runs one device SDK call of the open camera. NotConnected from the call (the wrapper's
+    // SVB_ERROR_CAMERA_REMOVED or SVB_ERROR_CAMERA_CLOSED, and only those) is a lost link at once (decision 0009
+    // rule 2a, issue #1986); every other error, SVB_ERROR_INVALID_ID's InvalidValue and a timeout included, surfaces
+    // as itself and keeps the link. The driver's own NotConnected never comes through here. Takes no driver lock
+    // except as note_loss() says for `caller`.
+    template <typename Fn>
+    auto on_link(LinkCaller caller, Fn&& fn) const -> decltype(fn()) {
+        const auto captured = link_.load();
+        try {
+            return fn();
+        } catch (const std::exception& e) {
+            if (!util::is_link_loss(e)) {
+                throw;
+            }
+            note_loss(captured, e, caller);
+            throw_not_connected();
+        }
+    }
+
+    // Decision 0009 rule 3: Connected reads false, the reason is kept, one WARN, the exposure in flight fails with
+    // the reason and the dead handle is closed. A link that a Disconnect, a relink or another call closed first is
+    // left alone (LinkEpoch), so a loss is applied and logged once.
+    void note_loss(util::LinkEpoch::Word captured, const std::exception& e, LinkCaller caller) const {
+        std::string reason;
+        std::string label;
+        {
+            std::lock_guard<std::mutex> lost(lost_mutex_);
+            if (!link_.mark_lost(captured)) {
+                return;
+            }
+            lost_reason_ = printable(e.what());
+            reason = lost_reason_;
+            label = unit_label_;
+        }
+        ALPACA_LOG_WARN("SVBONY", label + " lost: " + reason);
+        if (caller == LinkCaller::Body) {
+            return;  // the body's own throw ends the exposure with the reason, and it closes the handle on its way out
+        }
+        session_.fail(reason);  // a no-op when nothing is exposing; the body then ends on its next check
+        if (caller == LinkCaller::StateLocked) {
+            close_handle_after_loss_locked();
+        } else {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_handle_after_loss_locked();
+        }
+    }
+
+    // Closes the dead handle at the loss unless an exposure body may still be inside an SDK call on it; that body
+    // closes it on its way out (close_handle_after_body()). A loss that lands just as a body returns leaves the
+    // handle to the next Disconnect or Connect, the best effort decision 0009 point 3 allows. Requires mutex_.
+    void close_handle_after_loss_locked() const {
+        if (session_.busy()) {
+            return;
+        }
+        release_open(/*swallow_all=*/true);
+    }
+
+    // Run by every exposure body on its way out, after its last SDK call.
+    void close_handle_after_body() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!link_.is_open() && opened_.load()) {
+            release_open(/*swallow_all=*/true);
+        }
+    }
+
+    // Closes the id this driver opened, if it has not been closed. A removal-class error (the camera is gone) is
+    // logged and swallowed, so a Disconnect of a lost camera completes (decision 0009 rule 4); any other close error
+    // surfaces unless `swallow_all` (a loss or a Connect tidying up a dead handle).
+    void release_open(bool swallow_all) const {
+        const int id = open_id_.exchange(-1);
+        if (id < 0) {
+            return;
+        }
+        try {
+            sdk_.close_camera(id);
+        } catch (const std::exception& e) {
+            if (!swallow_all && !util::is_link_loss(e)) {
+                throw;
+            }
+            ALPACA_LOG_WARN("SVBONY", "close of camera id " + std::to_string(id) + " failed: " + printable(e.what()));
+        }
+    }
+
+    // Decision 0020 rule 5: AbortExposure's discipline for a Disconnect and the destructor. The SDK stop runs under
+    // mutex_ (one short call, like AbortExposure's) with the exposure marked stopping, so the read the stop breaks
+    // is not kept as a failure; a stop that fails is kept for ImageReady instead. Then the body is cancelled and
+    // joined, and the session closed, with mutex_ released. Returns false when the stop failed.
+    bool stop_and_join_exposure() {
+        bool stopped = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const int id = open_id_.load();
+            if (id >= 0 && session_.busy()) {
+                session_.set_stopping(true);
+                try {
+                    sdk_.stop_video_capture(id);
+                    record_capture_stop_locked(/*failed=*/false);
+                } catch (const std::exception& e) {
+                    stopped = false;
+                    record_capture_stop_locked(/*failed=*/true);
+                    session_.set_stopping(false);
+                    session_.fail(kCaptureStopNotConfirmed);
+                    ALPACA_LOG_WARN("SVBONY",
+                                    "stop_video_capture before the exposure join failed: " + printable(e.what()));
+                }
+            }
+        }
+        session_.abort();
+        session_.disconnect_and_join();
+        return stopped;
+    }
+
+    void reset_pulse_guide_state_locked() {
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
         pulse_guiding_.store(false);
         pulse_guiding_end_ = {};
-        image_ready_ = false;
-        image_cached_ = false;
-        retired_image = std::move(last_image_);
-        exposure_failure_.clear();
-        last_exposure_duration_ = 0.0;
-        last_exposure_start_ = std::chrono::system_clock::time_point{};
-        exposure_integration_start_.reset();
-        last_exposure_valid_ = false;
-        published_exposure_.clear();
-        exposure_active_.store(false);
-        exposure_deadline_valid_ = false;
-    }
-
-    void throw_exposure_failure_locked() const {
-        if (!exposure_failure_.empty()) {
-            throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
-        }
-    }
-
-    void latch_exposure_timeout_locked() const {
-        if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
-            ALPACA_LOG_WARN("SVBONY", "Exposure exceeded its completion deadline; late frame results will be ignored");
-            exposure_failure_ = "SVBONY camera exposure exceeded its completion deadline";
-            image_ready_ = false;
-            image_cached_ = false;
-            exposure_active_.store(false);
-            exposure_deadline_valid_ = false;
-        }
     }
 
     FrameConfig frame_config_locked() const {
@@ -1504,19 +1599,6 @@ private:
         if (num_x_ > max_w - start_x_ || num_y_ > max_h - start_y_) {
             throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
         }
-    }
-
-    void publish_exposure_failure(const std::string& message) {
-        std::shared_ptr<const ImageArray> retired_image;
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (exposure_active_.load()) {
-            exposure_failure_ = message;
-            image_ready_ = false;
-            image_cached_ = false;
-            retired_image = std::move(last_image_);
-            exposure_deadline_valid_ = false;
-        }
-        exposure_active_.store(false);
     }
 
     int align_roi_dimension(int value, int multiple) const {
@@ -1568,81 +1650,6 @@ private:
         roi_start_y_effective_ = sdk_sy;
     }
 
-    bool stop_exposure_thread() {
-        int active_camera_id = -1;
-        bool should_stop = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            exposure_active_.store(false);
-            exposure_deadline_valid_ = false;
-            active_camera_id = camera_id_;
-            should_stop = active_camera_id >= 0 && (exposure_thread_.joinable() || capture_stop_failed_);
-        }
-        bool stopped = !should_stop;
-        if (should_stop) {
-            try {
-                // Stop before joining to wake acquisition where supported;
-                // get_video_data itself has a finite timeout.
-                sdk_.stop_video_capture(active_camera_id);
-                stopped = true;
-                std::lock_guard<std::mutex> lock(mutex_);
-                capture_stop_failed_ = false;
-            } catch (const std::exception& e) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                capture_stop_failed_ = true;
-                ALPACA_LOG_WARN("SVBONY", "stop_video_capture failed: " + std::string(e.what()));
-            }
-        }
-        if (exposure_thread_.joinable()) {
-            exposure_thread_.join();
-        }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            exposure_worker_running_ = false;
-            stopped = stopped && !capture_stop_failed_;
-        }
-        return stopped;
-    }
-
-    void abort_exposure_locked_lifecycle() {
-        int active_camera_id = -1;
-        std::shared_ptr<const ImageArray> retired_image;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!exposure_worker_running_ && !exposure_active_.load() && !capture_stop_failed_) return;
-            active_camera_id = camera_id_;
-            exposure_active_.store(false);
-            exposure_deadline_valid_ = false;
-            image_ready_ = false;
-            image_cached_ = false;
-            retired_image = std::move(last_image_);
-        }
-        if (active_camera_id >= 0) {
-            try {
-                sdk_.stop_video_capture(active_camera_id);
-                std::lock_guard<std::mutex> lock(mutex_);
-                capture_stop_failed_ = false;
-            } catch (const std::exception& e) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                capture_stop_failed_ = true;
-                throw AlpacaException(std::string("AbortExposure could not stop SVBONY video capture: ") + e.what(),
-                                      AlpacaError::DriverException);
-            }
-        }
-        if (exposure_thread_.joinable()) exposure_thread_.join();
-        bool stop_failed = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            exposure_worker_running_ = false;
-            stop_failed = capture_stop_failed_;
-            if (!stop_failed) exposure_failure_.clear();
-        }
-        if (stop_failed) {
-            throw AlpacaException("AbortExposure could not confirm SVBONY video capture stopped",
-                                  AlpacaError::DriverException);
-        }
-    }
-
     // Touches no driver state, so the connect runs it with mutex_ released.
     SVBCameraInfo resolve_camera() {
         auto cameras = sdk_.enumerate_cameras();
@@ -1682,8 +1689,9 @@ private:
 
     void refresh_cached_camera_info_if_needed() {
         // A connect or disconnect in flight owns the SDK: the real wrapper serialises enumerate_cameras
-        // behind its open and close, so the enumerate would wait them out.
-        if (connected_.load() || transition_in_flight_.load()) {
+        // behind its open and close, so the enumerate would wait them out. A lost link keeps its connection's
+        // info until the Disconnect or Connect that tears it down.
+        if (link_.is_open() || opened_.load() || transition_in_flight_.load()) {
             return;
         }
 
@@ -1694,7 +1702,7 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 // A connect ran while the enumerate was out: it owns camera_info_ now (decision 0016
                 // rule 6), and this read may be older than what it published.
-                if (connected_.load() || transition_in_flight_.load()) {
+                if (link_.is_open() || opened_.load() || transition_in_flight_.load()) {
                     return;
                 }
                 if (camera_id_ != info.camera_id) {
@@ -1772,7 +1780,8 @@ private:
         control_caps_or_throw_locked(type);
         bool is_auto = false;
         long value = 0;
-        if (!sdk_.get_control_value(camera_id_, type, value, is_auto)) {
+        if (!on_link(LinkCaller::StateLocked,
+                     [&] { return sdk_.get_control_value(camera_id_, type, value, is_auto); })) {
             throw AlpacaException("Failed to get control value", AlpacaError::DriverException);
         }
         return value;
@@ -1791,10 +1800,14 @@ private:
         ensure_settings_safe_locked();
         long current = 0;
         bool is_auto = false;
-        if (sdk_.get_control_value(camera_id_, SVBControlType::Gain, current, is_auto) && is_auto) {
-            sdk_.set_control_value(camera_id_, SVBControlType::Gain, current, false);
+        if (on_link(LinkCaller::StateLocked,
+                    [&] { return sdk_.get_control_value(camera_id_, SVBControlType::Gain, current, is_auto); }) &&
+            is_auto) {
+            on_link(LinkCaller::StateLocked,
+                    [&] { sdk_.set_control_value(camera_id_, SVBControlType::Gain, current, false); });
         }
-        sdk_.set_control_value(camera_id_, SVBControlType::Gain, value, false);
+        on_link(LinkCaller::StateLocked,
+                [&] { sdk_.set_control_value(camera_id_, SVBControlType::Gain, value, false); });
     }
 
     void set_control_value_or_throw(SVBControlType type, long value, bool reject_during_exposure = false) const {
@@ -1811,45 +1824,79 @@ private:
         if (reject_during_exposure) {
             ensure_not_exposing_locked();
         }
-        sdk_.set_control_value(camera_id_, type, value, false);
+        on_link(LinkCaller::StateLocked, [&] { sdk_.set_control_value(camera_id_, type, value, false); });
     }
 
-    // Reject runtime sensor-register / geometry writes while the exposure
-    // worker is active: it may be applying deferred SDK settings or acquiring
-    // a frame, and those writes must not race it.
-    // Requires mutex_ held — the lock start_exposure publishes
-    // exposure_active_=true under (TOCTOU rule, driver-lifecycle.instructions.md).
+    // Reject runtime sensor-register / geometry writes while an exposure body
+    // may be applying deferred SDK settings or acquiring a frame: those writes
+    // must not race it. Requires mutex_ held — the lock start_exposure sets
+    // exposure_starting_ under (TOCTOU rule, driver-lifecycle.instructions.md;
+    // the Player One form, M15). A cancelled or failed body can still be in the
+    // SDK, so the settings stay locked while the session is busy, except once
+    // the frame is Ready (the body is only returning then).
     void ensure_not_exposing_locked() const {
-        if (exposure_active_.load() || exposure_worker_running_) {
+        const CameraState state = session_.camera_state();
+        bool frame_ready = false;
+        try {
+            frame_ready = session_.image_ready();
+        } catch (const AlpacaException&) {
+            frame_ready = false;  // a kept failure: not ready
+        }
+        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download ||
+            (session_.busy() && !frame_ready)) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
         }
     }
 
     void ensure_connected_locked() const {
-        if (!connected_.load() || camera_id_ < 0) {
+        if (!link_.is_open()) {
+            throw_not_connected();
+        }
+        if (camera_id_ < 0) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
     }
 
+    // The unconfirmed stop first: it is the lasting refusal, while a body that is only returning from a failed
+    // stop keeps the session busy for a moment.
     void ensure_settings_safe_locked() const {
-        ensure_not_exposing_locked();
         ensure_capture_stop_confirmed_locked();
+        ensure_not_exposing_locked();
+    }
+
+    // A capture-stop result from AbortExposure, a Disconnect or a Connect. Requires mutex_.
+    void record_capture_stop_locked(bool failed) const {
+        capture_stop_failed_ = failed;
+        ++capture_stop_epoch_;
+    }
+
+    // A body's own stop result, kept only when no newer result was recorded since `seen`. Requires mutex_.
+    void record_body_capture_stop_locked(bool failed, std::uint64_t seen) const {
+        if (capture_stop_epoch_ == seen) {
+            capture_stop_failed_ = failed;
+        }
+    }
+
+    std::uint64_t capture_stop_epoch() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return capture_stop_epoch_;
     }
 
     void ensure_capture_stop_confirmed_locked() const {
         if (capture_stop_failed_) {
-            throw AlpacaException(
-                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before "
-                "changing settings",
-                AlpacaError::DriverException);
+            throw AlpacaException(kCaptureStopNotConfirmed, AlpacaError::DriverException);
         }
     }
 
     // Balance the SDK open when post-open configuration throws (H9). The
     // close itself must not mask the original error. Runs with mutex_ released.
-    static void close_after_failed_connect(SVBSDK& sdk, int resolved_id) {
+    void close_after_failed_connect() {
+        const int id = open_id_.exchange(-1);
+        if (id < 0) {
+            return;
+        }
         try {
-            sdk.close_camera(resolved_id);
+            sdk_.close_camera(id);
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("SVBONY", "close_camera after failed connect also failed: " + std::string(e.what()));
         }
@@ -1865,7 +1912,7 @@ private:
 
     // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
     // cannot close the camera underneath the SDK call (driver-lifecycle.instructions.md shape (a)).
-    // Fast register/control calls only — the exposure worker and the
+    // Fast register/control calls only — the exposure body and the
     // duration-blocking pulse_guide keep their bare id snapshots. Must NOT
     // be called with mutex_ already held (non-recursive mutex).
     template <typename Fn>
@@ -1887,7 +1934,7 @@ private:
         }
         ensure_connected_locked();
         // Geometry write: rejected mid-exposure, checked under the same
-        // mutex_ hold that start_exposure publishes exposure_active_ (M15).
+        // mutex_ hold that start_exposure sets exposure_starting_ under (M15).
         ensure_settings_safe_locked();
         if (bin_x_ == bin_x && bin_y_ == bin_y) {
             return;

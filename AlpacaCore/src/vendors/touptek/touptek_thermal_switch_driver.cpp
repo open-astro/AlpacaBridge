@@ -562,7 +562,7 @@ private:
             e.min_value = 0;
             e.max_value = 1;
             elements.push_back(std::move(e));
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): no tail light, skipped
             // Camera doesn't support the tail-light option; skip it.
         }
         if (elements.empty()) {

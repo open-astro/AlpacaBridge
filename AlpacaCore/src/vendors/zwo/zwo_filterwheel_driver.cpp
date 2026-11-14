@@ -71,7 +71,7 @@ public:
         shutdown_connection();
         if (link_.is_open()) {
             try {
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Error during EFW destruction: " + std::string(e.what()));
             }

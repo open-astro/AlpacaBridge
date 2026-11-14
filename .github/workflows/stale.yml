@@ -1,0 +1,95 @@
+# Mark issues and pull requests that stop moving, and close them if nothing
+# happens after the mark (issue #1363). Issues go stale after 90 days without
+# activity and close 30 days later; pull requests go stale after 30 days and
+# close 14 days later. A comment, a push or a label change removes the `stale`
+# label (the action's default), and the count starts again.
+#
+# DRY RUN: `debug-only: 'true'` makes both steps log what they would mark and
+# close without touching a thread. The maintainer creates the `stale` label,
+# reads two weeks of these logs, and a later PR sets `debug-only` to
+# 'false' in both steps.
+#
+# Never marked: issues and PRs labelled P1, P2, `on hold`, `testing` or
+# `safe-to-review`. A draft PR is marked but never closed: the first step skips
+# drafts (`exempt-draft-pr`), and the second marks PRs only, drafts included,
+# with closing turned off. A non-draft PR is marked by the first step, so the
+# second finds it marked already and adds nothing. In the dry run the first
+# step labels nothing, so the second step's log also lists the ready PRs it
+# would mark; that is expected until `debug-only` is off.
+#
+# No `actions: write`, though the action's README lists it: it only lets the
+# action keep its resume state in the Actions cache (key `_state`) when a run
+# ends on `operations-per-run`. Without it every run starts from the first
+# thread; 300 operations per step is far more than the repository's open
+# threads need today, and the two steps cannot pick up each other's
+# half-finished state.
+
+name: Stale
+
+on:
+  schedule:
+    - cron: '37 4 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: stale
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    name: Mark and close inactive threads
+    if: github.repository == 'open-astro/AlpacaBridge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      issues: write          # label, comment on and close issues
+      pull-requests: write   # label, comment on and close pull requests
+    steps:
+      - name: Mark and close issues and ready pull requests
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93  # v11.0.0
+        with:
+          debug-only: 'true'
+          operations-per-run: '300'
+          stale-issue-label: stale
+          stale-pr-label: stale
+          days-before-issue-stale: '90'
+          days-before-issue-close: '30'
+          days-before-pr-stale: '30'
+          days-before-pr-close: '14'
+          exempt-issue-labels: 'P1,P2,on hold,testing,safe-to-review'
+          exempt-pr-labels: 'P1,P2,on hold,testing,safe-to-review'
+          exempt-draft-pr: 'true'
+          stale-issue-message: >
+            This issue has had no activity for 90 days and is now marked stale.
+            It will be closed in 30 days unless someone comments or the labels
+            change. If it still matters, a comment saying so is enough.
+          close-issue-message: >
+            Closed after 30 days marked stale. If the problem is still there,
+            reopen this issue or open a
+            [new issue](https://github.com/open-astro/AlpacaBridge/issues/new/choose)
+            that links this one.
+          stale-pr-message: >
+            This pull request has had no activity for 30 days and is now marked
+            stale. It will be closed in 14 days unless someone comments or pushes
+            to it.
+          close-pr-message: >
+            Closed after 14 days marked stale. Reopen it, or open a new pull
+            request, when the work continues.
+
+      - name: Mark draft pull requests (never closed)
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93  # v11.0.0
+        with:
+          debug-only: 'true'
+          operations-per-run: '300'
+          stale-pr-label: stale
+          days-before-issue-stale: '-1'
+          days-before-issue-close: '-1'
+          days-before-pr-stale: '30'
+          days-before-pr-close: '-1'
+          exempt-pr-labels: 'P1,P2,on hold,testing,safe-to-review'
+          stale-pr-message: >
+            This pull request has had no activity for 30 days and is now marked
+            stale. As a draft it is not closed for being stale; a comment or a
+            push removes the label.

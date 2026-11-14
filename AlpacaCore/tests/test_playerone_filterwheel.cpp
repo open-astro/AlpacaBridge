@@ -184,6 +184,31 @@ TEST_CASE("Player One PW Filter Wheel Driver - Position is -1 while the wheel mo
     driver->set_connected(false);
 }
 
+// Required case 7 (issue #1863). Position is NotConnected while disconnected, the wheel's slot while idle, the ASCOM
+// moving sentinel -1 while a move runs and the target once it ends; a reconnect reads the slot the wheel stayed on.
+// The moving window alone is also pinned by "Position is -1 while the wheel moves" above; this case runs the whole
+// cycle across a Disconnect and a Connect.
+TEST_CASE("Player One PW Filter Wheel Driver - State machine", "[playerone][filterwheel][unit][fake-sdk]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 0);
+    fake.set_moving_reads(2);
+    driver->set_position(4);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == 4);
+    CHECK(driver->get_position() == 4);
+
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 4);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One PW Filter Wheel Driver - no wheel detected refuses the connect",
           "[playerone][filterwheel][unit][fake-sdk]") {
     alpacacore::test::FakePlayerOnePWSDK fake;

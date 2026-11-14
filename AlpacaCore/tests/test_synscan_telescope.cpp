@@ -1299,6 +1299,27 @@ TEST_CASE("SynScan Telescope Driver - connected unsupported members keep their N
     require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
     driver->set_connected(false);
 }
+
+// Issue #1867: the driver applies no rate offset, so a connected DeclinationRate and RightAscensionRate read 0.0
+// (their setters are PropertyNotImplemented, above), and Tracking is settable.
+TEST_CASE("SynScan Telescope Driver - connected rate getters read zero and CanSetTracking is true",
+          "[synscan][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    auto driver = make_connected_driver(server);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_can_set_tracking());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK(driver->get_declination_rate() == 0.0);
+    CHECK(driver->get_right_ascension_rate() == 0.0);
+
+    driver->set_connected(false);
+    // Disconnected, both getters check the connection.
+    require_alpaca_error([&] { (void)driver->get_declination_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_right_ascension_rate(); }, alpacacore::AlpacaError::NotConnected);
+}
 #endif
 
 TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",

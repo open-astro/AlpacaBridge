@@ -2495,6 +2495,36 @@ TEST_CASE("Celestron spec audit - DoesRefraction is not implemented", "[celestro
     driver->set_connected(false);
 }
 
+// Issue #1868: the pier-side and rate capabilities and SlewToAltAz, read on a connected driver. The NexStar hand
+// controller has an Alt/Az GOTO ('B'/'b'), but the driver offers none, so a connected SlewToAltAz is
+// MethodNotImplemented and sends no Alt/Az GOTO.
+TEST_CASE("Celestron Telescope Driver - connected pier-side and rate capabilities and SlewToAltAz",
+          "[celestron][telescope][unit][spec-audit]") {
+    std::atomic<int> alt_az_gotos{0};
+    alpacacore::test::FakeMountServer server([&alt_az_gotos](const std::string& command) {
+        if (!command.empty() && (command[0] == 'B' || command[0] == 'b')) ++alt_az_gotos;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 500;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    // Disconnected, the connection check comes first (#1919).
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    CHECK_FALSE(driver->get_can_set_pier_side());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_slew_alt_az());
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    CHECK(alt_az_gotos.load() == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron spec audit - PulseGuide rejects a bad direction or duration before the connection check",
           "[celestron][telescope][unit][spec-audit]") {
     alpacacore::test::FakeMountServer server([](const std::string& command) {
