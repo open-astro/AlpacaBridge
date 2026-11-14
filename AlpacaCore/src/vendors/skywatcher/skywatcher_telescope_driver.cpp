@@ -418,7 +418,7 @@ public:
             try {
                 // Qualified: virtual dispatch is already gone in a destructor.
                 SkyWatcherTelescopeDriver::set_connected(false);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): nothing to do in a destructor
                 // Destructor: nothing useful to do with a disconnect failure.
             }
         }
@@ -697,7 +697,7 @@ public:
                     uint32_t ra_features = protocol.get_feature(kAxisRa, kFeatureInquiry);
                     uint32_t dec_features = protocol.get_feature(kAxisDec, kFeatureInquiry);
                     has_home_indexer_ = (ra_features & 0x04) && (dec_features & 0x04);
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                } catch (...) {  // NOLINT(bugprone-empty-catch): no :q means no AutoHome
                     // ":q" unsupported on this motor board.
                 }
 
@@ -743,7 +743,7 @@ public:
             // ConformU fast-response targets.
             try {
                 seed_snapshot_locked();
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): warm-up only, the poll retries
                 // Warm-up only; the first poll retries.
             }
         } else {
@@ -751,7 +751,7 @@ public:
             try {
                 protocol.stop_motion(kAxisRa);
                 protocol.stop_motion(kAxisDec);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, the poll reports
                 // Best effort; status polling still reports the true state.
             }
             session_open_.store(false);
@@ -2557,7 +2557,7 @@ public:
                 const Wire protocol = wire();
                 protocol.stop_motion(kAxisRa);
                 protocol.stop_motion(kAxisDec);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, the poll reports
                 // Best effort; status polling still reports the true state.
             }
             set_slewing_cached_false_locked();
@@ -2706,7 +2706,7 @@ public:
                             stopped = true;
                             break;
                         }
-                    } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    } catch (...) {  // NOLINT(bugprone-empty-catch): transient, retried to the deadline
                         // Transient poll failure; keep trying until the deadline.
                     }
                     if (!ctx.wait_for(std::chrono::milliseconds(50))) {
@@ -4784,7 +4784,7 @@ private:
                         cmd_axis_rate_deg_s_[i] = rate;
                     }
                 }
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): the next tick re-evaluates
                 // Superseded or transport hiccup; next tick re-evaluates.
             }
             if (!any_rate) {
@@ -4808,7 +4808,7 @@ private:
                     static_cast<void>(stop_axis_and_wait_locked(lock, channel, gen));
                 }
             }
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): best-effort exit stop
         }
     }
 
@@ -4977,7 +4977,7 @@ private:
             uint32_t worm = 0;
             try {
                 worm = protocol.get_steps_per_worm(channel);
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): handled as zero below
                 // Rejected: handled with the zero case below.
             }
             if (worm == 0) {
@@ -6153,7 +6153,7 @@ private:
             protocol.instant_stop(kAxisDec);
             cmd_axis_rate_deg_s_[0] = 0.0;
             cmd_axis_rate_deg_s_[1] = 0.0;
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, already stopped
             // Best effort; the axes were already stopped by the aborter.
         }
     }
@@ -6282,7 +6282,7 @@ private:
             cmd_axis_rate_deg_s_[0] = 0.0;
             cmd_axis_rate_deg_s_[1] = 0.0;
             invalidate_position_cache_locked(false);
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): best effort, link health reports
             // Best effort; a dead link is reported by the link-health path.
         }
         // Same published state as AbortSlew: the drive is stopped, so neither

@@ -115,7 +115,9 @@ author must do. Read the docstring before changing a gate.
   other key starts with; keep `AGENTS.md` under its 15,000-byte budget; keep every error-code
   value written in `AGENTS.md`, the ascom-contract and testing instructions or `driver-build.md`
   equal to `alpaca_errors.h` (check 17); never state a count of the
-  blocking-`get_connected()` drivers, name them; and keep every `std::regex` in `router.cpp` `static`.
+  blocking-`get_connected()` drivers, name them; keep every `std::regex` in `router.cpp` `static`;
+  and give every `NOLINT`, `NOLINTNEXTLINE` and `NOLINTBEGIN` its reason on the same line, after the
+  check list (`// NOLINT(bugprone-empty-catch): the poll retries`; check 28).
 - **Nightly optimized run** (`.github/workflows/nightly-build.yml`, job `test-optimized`, issue
   #1313): `build-vendors-shard` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
   (`-DNDEBUG`) nightly, off the PR path. The nightly `build` job runs only after `test-optimized`
@@ -143,9 +145,23 @@ author must do. Read the docstring before changing a gate.
   `dessant/lock-threads` locks issues and PRs closed with no activity for 14 days; threads closed from
   2026-11-10 on get a comment pointing at a new issue, the older backlog is locked silently.
   `scheduled-failure.yml` watches it by workflow name.
+- **Stale issues and PRs, dry run** (`.github/workflows/stale.yml`, issue #1363): daily, `actions/stale`
+  marks an issue after 90 days without activity and closes it 30 days later, a PR after 30 and 14;
+  P1, P2, `on hold`, `testing` and `safe-to-review` are exempt, and a draft PR is marked but never
+  closed (a second step marks PRs with closing off). It runs with `debug-only: 'true'` until the
+  maintainer has read two weeks of logs; going live is a later PR that flips it in both steps.
+  `scheduled-failure.yml` watches it by workflow name.
+- **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`, issue #1364): weekly, on pushes to `main`
+  and on dispatch, uploads the Scorecard SARIF to code scanning with `publish_results: false` (no
+  public badge). It runs on `ubuntu-latest`, like CodeQL, because the action's Docker image is
+  amd64 only. It does not gate merges; `scheduled-failure.yml` watches it by workflow name.
+- **Authored code badge** (`.github/workflows/authored-lines-badge.yml`, issue #2079): on every push to
+  `main` it writes `scripts/check_docs_drift.py --badge-json` to `authored-lines.json` on the
+  `badges` branch, which the README badge reads through img.shields.io/endpoint. Check 25 holds the
+  README line to that endpoint and never to a number, so never paste a count into the README.
 - **libgpiod and the bundled libgphoto2 are cached** (`deps-gpiod-...` key in `ci.yml`): the jobs that need them (the all-vendors shards, `sanitizers-tsan`, `clang-tidy`) restore one staging tree keyed on the libgpiod pin and `scripts/build_bundled_gphoto.sh`, build both into it only on a miss, and copy it into `/`. Bumping either pin or the script changes the key. `nightly-build.yml` still builds them every run.
-- **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
-  green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
+- **Every job in every workflow has a `timeout-minutes` bound** (issue #363; docs-drift check 27
+  fails a job without one, issue #2059), sized from healthy green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
   6-hour default wasted six hours of runner time first. Give every new job a bound; when a job
   legitimately outgrows it, raise the number rather than trim the work. `claude-review` (90 min:
   up to 45 waiting for CI, then up to 45 for the review) is outlasted by the 95-minute verdict poll in

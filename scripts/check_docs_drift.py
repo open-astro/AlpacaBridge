@@ -16,10 +16,14 @@ Counts (check 15's numbers): python3 scripts/check_docs_drift.py --counts
   word, the brand list and a paste-ready README headline, all computed by
   the same functions check 15 gates with, so the /bump-release recount step
   has one command and no second copy of the row filter (#689).
-Badge (check 25's number): python3 scripts/check_docs_drift.py --badge
-  -- prints the authored-line count, the rounded figure and the paste-ready
-  README badge line, computed by the functions check 25 gates with, so the
-  /bump-release badge step has one command (#1465).
+Badge (check 25's endpoint): python3 scripts/check_docs_drift.py --badge
+  -- prints the authored-line count, the endpoint JSON the badge reads and the
+  README badge line check 25 requires (#1465, #2079).
+Badge JSON: python3 scripts/check_docs_drift.py --badge-json
+  -- prints only the shields.io endpoint JSON for the authored-line badge;
+  .github/workflows/authored-lines-badge.yml publishes it on every push to
+  main. Exits 1 when the count is below the floor or the JSON is not a valid
+  endpoint document.
 
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
@@ -210,18 +214,33 @@ Checks:
      defaults and the "N-minute budget" prose); the two skills agree with each
      other, and the poll budget is greater than the job timeout (a poll that
      ends first reports a healthy run as a stall).
- 25. The README "Authored code" badge (`NNNk lines`) is within
-     AUTHORED_LINES_TOLERANCE (5%) of the authored-line count computed from
-     the git index (issue #1465). Which tracked files count, and why the
-     rest do not, is written at AUTHORED_LINES_ROOTS and
-     AUTHORED_LINES_EXCLUDED_PREFIXES. The badge shows the count rounded to the
-     nearest 1,000, so an ordinary PR that adds or removes lines never trips the
-     check; only a badge that has fallen behind (or a missing badge) does.
-     /bump-release regenerates it with --badge.
+ 25. The README "Authored code" badge is the shields.io endpoint badge that
+     reads AUTHORED_BADGE_ENDPOINT, and the authored-line count computed from
+     the git index is above its floor (issues #1465, #2079). The number is not
+     in the README: .github/workflows/authored-lines-badge.yml writes it to the
+     `badges` branch on every push to main (--badge-json), so a PR never fails
+     on lines another PR merged. A badge that still carries a static `NNNk
+     lines` figure is a finding. Which tracked files count, and why the rest
+     do not, is written at AUTHORED_LINES_ROOTS and
+     AUTHORED_LINES_EXCLUDED_PREFIXES.
+ 26. Every caller that writes the Celestron CGX state frame is pinned in
+     CGX_FRAME_WRITERS with its call count (issue #2035).
+ 27. Every job in every workflow under .github/workflows/ sets
+     `timeout-minutes` (issues #363, #2059). A `[stress]` regression hangs
+     rather than fails, and GitHub's default is six hours. A job that calls a
+     reusable workflow (`uses:` at job level) cannot set one and is skipped. A
+     workflow whose `jobs:` block yields no job is a finding, so a changed
+     indent cannot pass vacuously.
+ 28. Every NOLINT, NOLINTNEXTLINE and NOLINTBEGIN in first-party C/C++
+     (LICENSE_HEADER_PREFIXES) gives its reason on the same line, after the
+     check list: `// NOLINT(bugprone-empty-catch): the poll retries` (issue
+     #2059). A suppression with no reason cannot be reviewed, and `git grep
+     NOLINT` shows only that line. NOLINTEND is exempt.
 """
 
 import glob
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -2755,7 +2774,7 @@ def check_review_budget_agrees(root=ROOT):
         return ["could not read %s: %s" % (e.filename, e.strerror)]
 
 
-# --- check 25: README authored-line badge vs the git index (issue #1465) ------
+# --- check 25: README authored-line endpoint badge (issues #1465, #2079) ------
 
 # What counts as authored code. Tracked files only (`git ls-files`), so a local
 # build tree or an ignored file never moves the number. Roots: the two
@@ -2773,13 +2792,24 @@ AUTHORED_LINES_EXTENSIONS = frozenset((
 # the number. Build directories are untracked, so the index already skips them.
 AUTHORED_LINES_EXCLUDED_PREFIXES = ("AlpacaCore/external/",)
 AUTHORED_LINES_ROUND = 1000
-# Fail only when the badge is further than this fraction of the computed count
-# from it. 5% of ~247k lines is ~12k, i.e. months of ordinary churn.
-AUTHORED_LINES_TOLERANCE = 0.05
 MIN_AUTHORED_LINES = 1000  # floor: fewer means the path filter or git listing broke
 
-AUTHORED_BADGE_RE = re.compile(
-    r"\[!\[Authored code\]\(https://img\.shields\.io/badge/Authored%20code-(?P<k>\d+)k%20lines-[A-Za-z0-9]+\.svg\)\]\([^)]*\)")
+# Where the count lives (#2079): .github/workflows/authored-lines-badge.yml
+# commits the endpoint JSON to the `badges` branch on every push to main, and
+# shields.io reads it from there. A branch of its own, not GitHub Pages: the
+# repository has no Pages site, and the branch holds one file that no PR can
+# write. The README line carries no number, so no PR can fall behind main.
+AUTHORED_BADGE_ENDPOINT = "https://raw.githubusercontent.com/open-astro/AlpacaBridge/badges/authored-lines.json"
+AUTHORED_BADGE_LABEL = "Authored code"
+AUTHORED_BADGE_COLOR = "informational"
+AUTHORED_BADGE_LINE = ("[![Authored code](https://img.shields.io/endpoint?url=%s)](docs/architecture.md#modules)"
+                       % AUTHORED_BADGE_ENDPOINT.replace(":", "%3A").replace("/", "%2F"))
+# The static form #1465 shipped, named in the finding when it comes back.
+AUTHORED_STATIC_BADGE_RE = re.compile(r"\[!\[Authored code\]\(https://img\.shields\.io/badge/Authored%20code-\d+k%20lines")
+# https://shields.io/badges/endpoint-badge: the keys an endpoint document may carry.
+SHIELDS_ENDPOINT_REQUIRED = {"schemaVersion": int, "label": str, "message": str}
+SHIELDS_ENDPOINT_OPTIONAL = {"color": str, "labelColor": str, "isError": bool, "namedLogo": str, "logoSvg": str,
+                             "logoColor": str, "logoWidth": int, "style": str, "cacheSeconds": int}
 
 
 def is_authored_path(path):
@@ -2804,10 +2834,34 @@ def _authored_lines_from_index(root=ROOT):
     return count_authored_lines(files)
 
 
-def authored_badge_line(count):
-    k = int(round(count / AUTHORED_LINES_ROUND))
-    return ("[![Authored code](https://img.shields.io/badge/Authored%%20code-%dk%%20lines-informational.svg)]"
-            "(docs/architecture.md#modules)" % k)
+def authored_badge_json(count):
+    """The shields.io endpoint document for the badge: the count rounded to the nearest 1,000."""
+    return {"schemaVersion": 1, "label": AUTHORED_BADGE_LABEL,
+            "message": "%dk lines" % int(round(count / AUTHORED_LINES_ROUND)), "color": AUTHORED_BADGE_COLOR}
+
+
+def _endpoint_json_findings(doc):
+    """What makes `doc` not a shields.io endpoint document (schemaVersion 1). Pure, for --self-test."""
+    if not isinstance(doc, dict):
+        return ["the endpoint JSON is a %s, not an object" % type(doc).__name__]
+    findings = []
+    for key, kind in SHIELDS_ENDPOINT_REQUIRED.items():
+        # bool is an int in Python; schemaVersion true is not 1.
+        if key not in doc or not isinstance(doc[key], kind) or isinstance(doc[key], bool):
+            findings.append("the endpoint JSON needs `%s` as a %s" % (key, kind.__name__))
+    if doc.get("schemaVersion") != 1:
+        findings.append("the endpoint JSON's schemaVersion must be 1, not %r" % (doc.get("schemaVersion"),))
+    if isinstance(doc.get("message"), str) and not doc["message"].strip():
+        findings.append("the endpoint JSON's message is empty")
+    for key, value in doc.items():
+        if key in SHIELDS_ENDPOINT_REQUIRED:
+            continue
+        kind = SHIELDS_ENDPOINT_OPTIONAL.get(key)
+        if kind is None:
+            findings.append("the endpoint JSON has `%s`, which the endpoint schema does not define" % key)
+        elif not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+            findings.append("the endpoint JSON's `%s` must be a %s" % (key, kind.__name__))
+    return findings
 
 
 def _authored_badge_findings(readme, count):
@@ -2815,15 +2869,12 @@ def _authored_badge_findings(readme, count):
     if count < MIN_AUTHORED_LINES:
         return ["authored-line count is %d, below the floor %d: the path filter or `git ls-files` listing is broken"
                 % (count, MIN_AUTHORED_LINES)]
-    m = AUTHORED_BADGE_RE.search(readme)
-    if not m:
-        return ["could not find the Authored code badge in README.md; paste: %s" % authored_badge_line(count)]
-    shown = int(m.group("k")) * AUTHORED_LINES_ROUND
-    if abs(shown - count) > AUTHORED_LINES_TOLERANCE * count:
-        return ["README Authored code badge says %dk lines but %d lines are authored (more than %d%% apart); "
-                "run `python3 scripts/check_docs_drift.py --badge` and paste: %s"
-                % (shown // 1000, count, round(AUTHORED_LINES_TOLERANCE * 100), authored_badge_line(count))]
-    return []
+    if AUTHORED_BADGE_LINE in readme:
+        return []
+    if AUTHORED_STATIC_BADGE_RE.search(readme):
+        return ["README.md's Authored code badge carries a static line count, which falls behind main (#2079); "
+                "replace it with: %s" % AUTHORED_BADGE_LINE]
+    return ["could not find the Authored code endpoint badge in README.md; paste: %s" % AUTHORED_BADGE_LINE]
 
 
 def check_authored_lines_badge(root=ROOT):
@@ -2832,11 +2883,25 @@ def check_authored_lines_badge(root=ROOT):
 
 def print_badge(root=ROOT):
     count = _authored_lines_from_index(root)
-    m = AUTHORED_BADGE_RE.search(read("README.md", root))
     print("authored lines: %d" % count)
-    print("rounded: %dk" % int(round(count / AUTHORED_LINES_ROUND)))
-    print("README.md now: %s" % (m.group(0) if m else "(badge not found)"))
-    print("badge: %s" % authored_badge_line(count))
+    print("endpoint JSON (published by .github/workflows/authored-lines-badge.yml): %s"
+          % json.dumps(authored_badge_json(count)))
+    print("README badge line: %s" % AUTHORED_BADGE_LINE)
+    return 0
+
+
+def print_badge_json(root=ROOT):
+    """--badge-json: the endpoint document alone, for the badge workflow."""
+    count = _authored_lines_from_index(root)
+    doc = authored_badge_json(count)
+    findings = _endpoint_json_findings(doc)
+    if count < MIN_AUTHORED_LINES:
+        findings.append("authored-line count is %d, below the floor %d" % (count, MIN_AUTHORED_LINES))
+    if findings:
+        for f in findings:
+            print(f, file=sys.stderr)
+        return 1
+    print(json.dumps(doc, sort_keys=True))
     return 0
 
 
@@ -2897,6 +2962,86 @@ def check_cgx_frame_writers(root=ROOT):
     return _cgx_frame_writer_findings(read(CGX_DRIVER, root))
 
 
+# --- check 27: every workflow job has a timeout-minutes (issues #363, #2059) ---
+
+# The block ends at the next top-level key, not at a column-0 comment: YAML
+# allows a `# ----` divider between jobs, and ending there would skip every job
+# after it.
+_WORKFLOW_JOBS_RE = re.compile(r"^jobs:[ \t]*(?:#.*)?\n(.*?)(?=^[^\s#]|\Z)", re.MULTILINE | re.DOTALL)
+_WORKFLOW_JOB_RE = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*(?:#.*)?$", re.MULTILINE)
+_JOB_TIMEOUT_RE = re.compile(r"^    timeout-minutes:[ \t]*\S", re.MULTILINE)
+_JOB_REUSABLE_RE = re.compile(r"^    uses:[ \t]*\S", re.MULTILINE)
+
+
+def _workflow_timeout_findings(workflows):
+    """Check 27 over {workflow path: text}. Pure, so --self-test can drive it."""
+    if not workflows:
+        return ["found no workflow under .github/workflows/: the reader is stale"]
+    findings = []
+    for path, text in sorted(workflows.items()):
+        block = _WORKFLOW_JOBS_RE.search(text)
+        starts = list(_WORKFLOW_JOB_RE.finditer(block.group(1))) if block else []
+        if not starts:
+            findings.append("%s: found no job under `jobs:` (two-space indent): the reader is stale" % path)
+            continue
+        for i, m in enumerate(starts):
+            end = starts[i + 1].start() if i + 1 < len(starts) else len(block.group(1))
+            body = block.group(1)[m.end():end]
+            if _JOB_TIMEOUT_RE.search(body) or _JOB_REUSABLE_RE.search(body):
+                continue
+            findings.append("%s: job `%s` has no `timeout-minutes`; give it a bound sized from its green runtime "
+                            "with wide headroom (ci-gates instructions), or a hang runs for GitHub's six-hour "
+                            "default" % (path, m.group(1)))
+    return findings
+
+
+def check_workflow_job_timeouts(root=ROOT):
+    paths = sorted(glob.glob(str(Path(root) / ".github/workflows/*.yml")))
+    return _workflow_timeout_findings({Path(p).relative_to(root).as_posix(): Path(p).read_text(encoding="utf-8")
+                                       for p in paths})
+
+
+# --- check 28: every NOLINT gives its reason on the same line (issue #2059) ----
+
+_NOLINT_RE = re.compile(r"\bNOLINT(?P<kind>NEXTLINE|BEGIN|END)?\b(?:\([^)]*\))?(?P<rest>.*)$")
+# A floor, not a count: the tree has over a hundred suppressions, so a scan that
+# sees a handful means the listing or the prefixes regressed. Deleting
+# suppressions is welcome; lower the floor when it gets close.
+MIN_NOLINT_SITES = 25
+
+
+def _nolint_reason_findings(files, floor=MIN_NOLINT_SITES):
+    """Check 28 over {path: text}. Pure, so --self-test can drive it."""
+    findings = []
+    sites = 0
+    for path, text in sorted(files.items()):
+        for n, line in enumerate(text.splitlines(), 1):
+            m = _NOLINT_RE.search(line)
+            if not m:
+                continue
+            sites += 1
+            if m.group("kind") == "END":
+                continue
+            reason = m.group("rest").replace("*/", "").strip().lstrip(":-").strip()
+            if not re.search(r"[A-Za-z]", reason):
+                findings.append("%s:%d: a NOLINT with no reason; write why on the same line, after the check list: "
+                                "`// NOLINT(check): reason`" % (path, n))
+    if sites < floor:
+        findings.insert(0, "found only %d NOLINT site(s) in first-party C/C++ (floor %d): the file listing or "
+                           "LICENSE_HEADER_PREFIXES regressed" % (sites, floor))
+    return findings
+
+
+def check_nolint_reasons(root=ROOT):
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files"], root=root).stdout.splitlines()
+    files = {}
+    for f in tracked:
+        if f.startswith(LICENSE_HEADER_PREFIXES) and f.endswith(LICENSE_HEADER_EXTENSIONS) \
+                and (Path(root) / f).is_file():
+            files[f] = read(f, root)
+    return _nolint_reason_findings(files)
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -2924,8 +3069,10 @@ CHECKS = [
     ("Decision record Adoption tables match the code", check_decision_adoption),
     ("Review job timeout, wait and poll budgets agree across the workflow, ci-gates and skills",
      check_review_budget_agrees),
-    ("README Authored code badge is within tolerance of the tracked line count", check_authored_lines_badge),
+    ("README Authored code badge reads the published endpoint", check_authored_lines_badge),
     ("Celestron CGX state-frame writers match the pinned callers", check_cgx_frame_writers),
+    ("Every workflow job sets timeout-minutes", check_workflow_job_timeouts),
+    ("Every NOLINT in first-party C/C++ gives its reason", check_nolint_reasons),
 ]
 
 
@@ -4068,25 +4215,88 @@ def self_test():
     f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))
     check("adoption: a planned row whose source names the symbol only in a comment is clean", f == [])
 
-    # check 25: README authored-line badge (issue #1465).
-    badge = authored_badge_line(150000)
-    ab_readme = "# T\n\n" + badge + "\n"
-    check("authored badge: the generated line is what the extractor reads",
-          AUTHORED_BADGE_RE.search(ab_readme) is not None and "150k%20lines" in badge)
-    check("authored badge: a badge equal to the count is clean", _authored_badge_findings(ab_readme, 150000) == [])
-    check("authored badge: an ordinary PR's churn inside the tolerance is clean",
-          _authored_badge_findings(ab_readme, 150000 + 3000) == [] and _authored_badge_findings(ab_readme, 150000 - 3000) == [])
-    f = _authored_badge_findings(ab_readme, 170000)
-    check("authored badge: a count beyond the tolerance is flagged with the paste-ready line",
-          len(f) == 1 and "says 150k" in f[0] and "170k%20lines" in f[0])
-    f = _authored_badge_findings(ab_readme, 130000)
-    check("authored badge: a count far below the badge is flagged too", len(f) == 1 and "130k%20lines" in f[0])
+    # check 25: README authored-line badge (issues #1465, #2079).
+    ab_readme = "# T\n\n" + AUTHORED_BADGE_LINE + "\n"
+    check("authored badge: the endpoint badge carries no number and reads the badges branch",
+          not re.search(r"\d+k", AUTHORED_BADGE_LINE) and "img.shields.io/endpoint?url=" in AUTHORED_BADGE_LINE
+          and "%2Fbadges%2Fauthored-lines.json" in AUTHORED_BADGE_LINE)
+    check("authored badge: the endpoint badge is clean whatever the count (no PR fails on main's lines)",
+          all(_authored_badge_findings(ab_readme, n) == [] for n in (1000, 150000, 900000)))
+    static = "[![Authored code](https://img.shields.io/badge/Authored%20code-150k%20lines-informational.svg)](x)"
+    f = _authored_badge_findings("# T\n\n" + static + "\n", 150000)
+    check("authored badge: a static NNNk badge is a finding even at the exact count",
+          len(f) == 1 and "static line count" in f[0] and AUTHORED_BADGE_LINE in f[0])
     f = _authored_badge_findings("# T\n", 150000)
     check("authored badge: a missing badge is a finding, not a pass", len(f) == 1 and "could not find" in f[0])
-    f = _authored_badge_findings(ab_readme.replace("Authored%20code", "Code"), 150000)
-    check("authored badge: a renamed badge label is not found", len(f) == 1 and "could not find" in f[0])
+    f = _authored_badge_findings(ab_readme.replace("authored-lines.json", "other.json"), 150000)
+    check("authored badge: an endpoint badge that reads another file is not the badge",
+          len(f) == 1 and "could not find" in f[0])
     f = _authored_badge_findings(ab_readme, 10)
     check("authored badge: a near-zero count is a floor finding", len(f) == 1 and "floor" in f[0])
+    doc = authored_badge_json(301600)
+    check("authored badge JSON: the generator writes a valid shields.io endpoint document",
+          _endpoint_json_findings(doc) == [] and doc["schemaVersion"] == 1 and doc["message"] == "302k lines"
+          and doc["label"] == "Authored code")
+    check("authored badge JSON: it survives a JSON round trip unchanged",
+          _endpoint_json_findings(json.loads(json.dumps(doc))) == [])
+    check("authored badge JSON: a missing schemaVersion is reported",
+          any("schemaVersion" in x for x in _endpoint_json_findings({k: v for k, v in doc.items() if k != "schemaVersion"})))
+    check("authored badge JSON: schemaVersion 2 is reported",
+          any("must be 1" in x for x in _endpoint_json_findings(dict(doc, schemaVersion=2))))
+    check("authored badge JSON: schemaVersion true is not 1",
+          len(_endpoint_json_findings(dict(doc, schemaVersion=True))) >= 1)
+    check("authored badge JSON: a non-string message is reported",
+          any("`message`" in x for x in _endpoint_json_findings(dict(doc, message=302))))
+    check("authored badge JSON: an empty message is reported",
+          any("empty" in x for x in _endpoint_json_findings(dict(doc, message=" "))))
+    check("authored badge JSON: a key outside the schema is reported",
+          any("`colour`" in x for x in _endpoint_json_findings(dict(doc, colour="blue"))))
+    check("authored badge JSON: a list is not an endpoint document", len(_endpoint_json_findings([doc])) == 1)
+
+    # check 27: every workflow job sets timeout-minutes (issue #2059).
+    tw = ("name: X\non:\n  push:\njobs:\n  build:  # the build\n    runs-on: x\n    timeout-minutes: 30\n"
+          "    steps:\n      - run: echo\n  reuse:\n    uses: ./.github/workflows/other.yml\n"
+          "  test:\n    runs-on: x\n    timeout-minutes: ${{ inputs.minutes }}\n    steps:\n      - run: echo\n")
+    check("job timeouts: every job bounded (a reusable call exempt, an expression accepted) is clean",
+          _workflow_timeout_findings({"a.yml": tw}) == [])
+    f = _workflow_timeout_findings({"a.yml": tw.replace("    timeout-minutes: 30\n", "")})
+    check("job timeouts: a job without timeout-minutes is reported by file and job",
+          len(f) == 1 and "a.yml: job `build` has no `timeout-minutes`" in f[0])
+    f = _workflow_timeout_findings({"a.yml": tw.replace("    timeout-minutes: ${{ inputs.minutes }}\n", "")})
+    check("job timeouts: the last job in the file is checked too", len(f) == 1 and "job `test`" in f[0])
+    f = _workflow_timeout_findings({"a.yml": tw.replace("    timeout-minutes: ${{ inputs.minutes }}\n", "")
+                                    .replace("  test:\n", "# ---- tests ----\n  test:\n")})
+    check("job timeouts: a column-0 comment between jobs does not end the jobs block",
+          len(f) == 1 and "job `test`" in f[0])
+    f = _workflow_timeout_findings({"a.yml": tw.replace("    timeout-minutes: 30\n    steps:\n      - run: echo\n",
+                                                        "    steps:\n      - run: echo\n        timeout-minutes: 5\n")})
+    check("job timeouts: a step-level timeout-minutes does not bound the job", len(f) == 1 and "job `build`" in f[0])
+    f = _workflow_timeout_findings({"a.yml": tw, "b.yml": "on:\n  push:\njobs:\n  only:\n    runs-on: x\n"})
+    check("job timeouts: a second workflow file is read", len(f) == 1 and f[0].startswith("b.yml: job `only`"))
+    f = _workflow_timeout_findings({"a.yml": tw.replace("\n  ", "\n   ")})
+    check("job timeouts: a jobs block the reader cannot split is a finding, not a pass",
+          len(f) == 1 and "found no job" in f[0])
+    check("job timeouts: no workflow at all is a finding", len(_workflow_timeout_findings({})) == 1)
+
+    # check 28: every NOLINT gives its reason on the same line (issue #2059).
+    nl_ok = ("x;  // NOLINT(bugprone-empty-catch): the poll retries\n"
+             "// NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- O_NONBLOCK fd\n"
+             "y;  /* NOLINT(cert-err58-cpp): built once */\n"
+             "// NOLINTBEGIN(readability-magic-numbers): protocol table\n// NOLINTEND(readability-magic-numbers)\n")
+    check("nolint reasons: suppressions with a reason (`:`, `--`, block comment) and a bare NOLINTEND are clean",
+          _nolint_reason_findings({"a.cpp": nl_ok}, floor=1) == [])
+    f = _nolint_reason_findings({"a.cpp": nl_ok + "z;  // NOLINT(bugprone-empty-catch)\n"}, floor=1)
+    check("nolint reasons: a NOLINT with no reason is reported by file and line", f == [
+        "a.cpp:6: a NOLINT with no reason; write why on the same line, after the check list: "
+        "`// NOLINT(check): reason`"])
+    f = _nolint_reason_findings({"a.cpp": "// NOLINTNEXTLINE(misc-x):\nz;\n"}, floor=1)
+    check("nolint reasons: a bare colon is not a reason", len(f) == 1 and "a.cpp:1" in f[0])
+    f = _nolint_reason_findings({"a.cpp": "z;  // NOLINT\n"}, floor=1)
+    check("nolint reasons: a NOLINT with no check list and no reason is reported", len(f) == 1)
+    f = _nolint_reason_findings({"a.cpp": "z;  /* NOLINT(misc-x) */\n"}, floor=1)
+    check("nolint reasons: a block-comment NOLINT with no reason is reported", len(f) == 1)
+    f = _nolint_reason_findings({"a.cpp": nl_ok}, floor=10)
+    check("nolint reasons: fewer sites than the floor is a finding", len(f) == 1 and "floor 10" in f[0])
     check("authored paths: first-party code counts",
           all(is_authored_path(p) for p in ("AlpacaCore/src/a.cpp", "AlpacaHTTP/web/app.js", "scripts/x.py",
                                             "AlpacaHTTP/tests/t.cpp", "AlpacaCore/include/alpacacore/a.h")))
@@ -4141,6 +4351,8 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--counts" in sys.argv:
         sys.exit(print_counts())
+    if "--badge-json" in sys.argv:
+        sys.exit(print_badge_json())
     if "--badge" in sys.argv:
         sys.exit(print_badge())
     sys.exit(main())

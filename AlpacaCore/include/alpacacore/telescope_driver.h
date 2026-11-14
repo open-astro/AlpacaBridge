@@ -84,7 +84,7 @@ public:
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown member is omitted
                 // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
             }
         };
@@ -302,12 +302,12 @@ public:
         try {
             abort_slew();
             any_stop_succeeded = true;
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the per-axis stop below still runs
             // The per-axis stop below is the actual backstop (issue #521
             // review: a MoveAxis(axis, 0) alone can be a silent no-op on
             // some vendors, which is why BOTH run) -- swallow so a throwing
             // abort_slew() does not skip it.
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): the per-axis stop below still runs
         }
         for (int axis = 0; axis < 2; ++axis) {
             bool can_move = false;
@@ -324,12 +324,12 @@ public:
             try {
                 move_axis(axis, 0.0);
                 any_stop_succeeded = true;
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a timer thread must not throw
                 // Swallow rather than let it escape from a background timer
                 // thread and terminate the process (driver-lifecycle.instructions.md concurrency
                 // checklist: an async tail that can throw must be caught
                 // inline).
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {  // NOLINT(bugprone-empty-catch): a timer thread must not throw
             }
         }
         if (!any_stop_succeeded) {

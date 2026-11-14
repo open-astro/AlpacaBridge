@@ -439,7 +439,7 @@ std::vector<std::uint8_t> CelestronCgxProtocol::read_frame_locked(std::chrono::s
         wait_for_locked(POLLIN, deadline);
         std::array<std::uint8_t, 128> incoming{};
         // The owned fd stays O_NONBLOCK; the lock serializes whole AUX exchanges.
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): the fd is O_NONBLOCK
         const ssize_t count = ::read(serial_fd_, incoming.data(), incoming.size());
         if (count > 0) {
             receive_buffer_.insert(receive_buffer_.end(), incoming.begin(),

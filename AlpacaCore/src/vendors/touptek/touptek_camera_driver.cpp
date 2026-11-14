@@ -1255,7 +1255,7 @@ public:
                 if (dirty_format) {
                     try {
                         sdk_local.stop(handle);
-                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): already stopped is harmless
                         // Stopping an already-stopped stream is harmless; ignore.
                     }
                     sdk_local.put_binning(handle, active_bin);
@@ -1723,7 +1723,7 @@ private:
         if (handle_) {
             try {
                 sdk_.stop(handle_);
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): treated as stopped
             }
         }
         return true;

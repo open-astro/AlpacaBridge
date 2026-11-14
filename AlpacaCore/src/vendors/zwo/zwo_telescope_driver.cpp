@@ -686,7 +686,7 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     tracking_rate_cached_ = tracking_rate;
                     tracking_rate_valid_ = true;
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): TrackingRate stays unavailable
                     // TrackingRate stays unavailable until a successful client write.
                 }
 
@@ -2229,7 +2229,7 @@ public:
                 std::optional<ParkStatus> park_status;
                 try {
                     park_status = protocol.get_park_status();
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the unpark still succeeds
                     // :Gps unavailable — the unpark is still treated as success below.
                 }
 
@@ -2538,7 +2538,7 @@ private:
             if (!send_goto_locked(lock, claim, ctx, ":GMGE", [&] {
                     try {
                         read = protocol.get_site_info();
-                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the GOTO goes on without a site
                         // No site on the mount: the GOTO goes on without a site write.
                     }
                 })) {
@@ -2800,7 +2800,7 @@ private:
                 frame.pier_side = (direction == 'E' || direction == 'e')   ? 1
                                   : (direction == 'W' || direction == 'w') ? 0
                                                                            : -1;
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): SideOfPier stays unavailable
                 // Optional fallback failure leaves SideOfPier unavailable, not healthy or guessed.
             }
         }
