@@ -1085,6 +1085,80 @@ TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's
     clock.set_before_block(nullptr);
 }
 
+// Decision 0022: the 8 s Slewing hold is a util::HoldWindow, armed when a GOTO starts. A PIN of the type port
+// (#1836): the slew body's landing check still reads the window (rule 3 is open, the 0022 row is partial), so a GOTO
+// the handset reports done after 1.5 s keeps Slewing true until the hold ends. A change that lands on the handset's
+// report updates this case.
+TEST_CASE("SynScan hold window - a GOTO the handset reports done keeps Slewing until the 8 s hold ends (#1836 PIN)",
+          "[synscan][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto start = clock.now();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(advance_until(clock, [&] { return clock.now() - start >= std::chrono::milliseconds(7750); }));
+    CHECK_FALSE(st->goto_in_progress());
+    CHECK(driver->get_slewing());
+    REQUIRE(advance_until(clock, [&] { return !driver->get_slewing(); }));
+    CHECK(clock.now() - start >= std::chrono::seconds(8));
+    driver->set_connected(false);
+}
+
+// Rule 2: AbortSlew clears the hold, so Slewing reads false as soon as it returns.
+TEST_CASE("SynScan hold window - AbortSlew inside the hold clears Slewing at once",
+          "[synscan][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto start = clock.now();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(advance_until(clock, [&] { return clock.now() - start >= std::chrono::seconds(2); }));
+    REQUIRE(driver->get_slewing());
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Rule 4: IsPulseGuiding is a per-axis util::HoldWindow on the task clock, the pulse plus the 1 s completion delay.
+TEST_CASE("SynScan hold window - a pulse keeps its axis while virtual time has not reached its end",
+          "[synscan][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    driver->pulse_guide(0, 500);  // North: Dec, 0.5 s, held until 1.5 s
+    REQUIRE(driver->get_is_pulse_guiding());
+    clock.advance(std::chrono::milliseconds(500));  // the pulse body sends its stop
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
+    clock.advance(std::chrono::milliseconds(999));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(std::chrono::milliseconds(1));  // exact to the tick
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
 
 // The mode a stop restores is the one the handset held when the motion started, not the one cached at connect: a

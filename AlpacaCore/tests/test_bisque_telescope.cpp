@@ -1334,6 +1334,41 @@ TEST_CASE("Bisque async slew - Slewing is held for 8 task-clock seconds without 
     CHECK(rig.mount.slew_polls.load() == 1);
 }
 
+// Decision 0022: the 8 s Slewing hold is a util::HoldWindow armed by every slew command. Inside it the status poll
+// leaves IsSlewComplete alone and Slewing reads true; at the exact 8 s mark the poll asks TheSkyX again.
+TEST_CASE("Bisque hold window - the status poll asks TheSkyX nothing until 8 s after a slew command",
+          "[bisque][telescope][hold-window]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 1000;  // TheSkyX keeps reporting the slew in flight
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(poll_now(*rig.driver));
+    rig.clock.advance(std::chrono::milliseconds(7999));
+    CHECK(poll_now(*rig.driver));
+    CHECK(rig.mount.slew_complete_queries.load() == 0);
+    CHECK(rig.driver->get_slewing());
+    rig.clock.advance(std::chrono::milliseconds(1));
+    CHECK(poll_now(*rig.driver));
+    CHECK(rig.mount.slew_complete_queries.load() == 1);
+    CHECK(rig.driver->get_slewing());
+}
+
+// A retarget inside the hold is the driver's own slew in flight: it is not refused for Tracking and asks TheSkyX
+// nothing about the first slew. Past the retarget's own hold, the next retarget asks.
+TEST_CASE("Bisque hold window - a retarget inside the hold asks TheSkyX nothing about the slew in flight",
+          "[bisque][telescope][hold-window]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 1000;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    rig.clock.advance(std::chrono::milliseconds(7999));
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 25.0));
+    CHECK(rig.mount.slew_commands.load() == 2);
+    CHECK(rig.mount.slew_complete_queries.load() == 0);
+    rig.clock.advance(std::chrono::seconds(8));
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.5, 25.0));
+    CHECK(rig.mount.slew_commands.load() == 3);
+    CHECK(rig.mount.slew_complete_queries.load() == 1);
+}
+
 // Decision 0010 replaces the 2 s position cache: a read is served from the snapshot however old it is (stale is
 // not lost), and only a status tick asks TheSkyX again.
 TEST_CASE("Bisque snapshot - a position read never asks TheSkyX, however old the frame",
