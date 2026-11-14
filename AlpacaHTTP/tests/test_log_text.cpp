@@ -54,7 +54,8 @@ int main() {
     // shift or break how a log line displays, so they are escaped too; their
     // neighbours (U+200D, which joins emoji, U+2010, U+2027, U+061B, U+061D,
     // U+FEFE, U+FF00) and the text around them pass through.
-    {  // case: escape_for_log escapes LRM, RLM, ALM, BOM and the line and paragraph separators
+    {
+        // case: escape_for_log escapes LRM, RLM, ALM, BOM and the line and paragraph separators
         EXPECT(escape_for_log("a\xE2\x80\x8E"
                               "b") == "a\\xe2\\x80\\x8eb");
         EXPECT(escape_for_log("\xE2\x80\x8F") == "\\xe2\\x80\\x8f");
