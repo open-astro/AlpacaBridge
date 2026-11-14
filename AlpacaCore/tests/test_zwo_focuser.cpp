@@ -271,6 +271,32 @@ TEST_CASE("ZWO EAF Focuser Driver - Halt drops the cached frame", "[zwo][focuser
     CHECK(driver->get_is_moving() == false);
 }
 
+// Required case 7 (issue #1863). IsMoving is NotConnected while disconnected, false while idle, true as soon as Move
+// returns while the unit reports motion, and false after Halt; NotConnected again after a Disconnect. The fake task
+// clock never ages the 100 ms status frame, so only the driver's own invalidation lets a read see a new state.
+TEST_CASE("ZWO EAF Focuser Driver - State machine", "[zwo][focuser][unit][fake-sdk]") {
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, std::nullopt, clock);
+    require_alpaca_error([&] { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_is_moving());
+    CHECK(driver->get_position() == 500);
+
+    sdk.moving = true;  // the fake settles a move at once; the unit reports the motion it is still making
+    driver->move(900);
+    CHECK(driver->get_is_moving());
+    CHECK(driver->get_position() == 900);
+
+    driver->halt();
+    CHECK_FALSE(sdk.moving.load());
+    CHECK_FALSE(driver->get_is_moving());
+
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+}
+
 TEST_CASE("ZWO EAF Focuser Driver - The SetZero action makes the current position 0 without moving",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
