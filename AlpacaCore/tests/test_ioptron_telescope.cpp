@@ -1398,7 +1398,8 @@ TEST_CASE("iOptron Telescope Driver - UTCDate stays unset until time is establis
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
         REQUIRE_NOTHROW(driver->get_sidereal_time());
         require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
-        CHECK(server.count(":GUT") == 2 * (session + 1));  // Clock sample and the existing site-metadata read.
+        // One :GUT# per connect: the clock sample and the site metadata share its reply (#1784).
+        CHECK(server.count(":GUT") == session + 1);
         driver->set_utc_date(std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
         CHECK(driver->get_utc_date() == std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)});
         driver->set_connected(false);
@@ -1419,10 +1420,34 @@ TEST_CASE("iOptron Telescope Driver - connect samples mount UTC before backgroun
     REQUIRE(driver->get_connected());
     const auto mount_utc = std::chrono::system_clock::time_point{std::chrono::seconds(946728000)};
     CHECK(driver->get_utc_date() == mount_utc);
-    CHECK(mount.count(":GUT") == 2);  // Clock sample plus the existing site-metadata read.
+    // One :GUT# at connect: the clock sample and the site metadata share its reply (#1784).
+    CHECK(mount.count(":GUT") == 1);
     CHECK(mount.count(":SUT") == 0);
     CHECK(driver->get_utc_date() == mount_utc);
-    CHECK(mount.count(":GUT") == 2);
+    CHECK(mount.count(":GUT") == 1);
+    driver->set_connected(false);
+}
+
+// #1784: the connect reads :GUT# once and the site cache it primes is the same one two reads gave: the :GLS#
+// coordinates, served with no further exchange, and a UTC field the clock sample rejects leaves them usable.
+TEST_CASE("iOptron Telescope Driver - the connect's one :GUT# reply also primes the site",
+          "[ioptron][telescope][unit][utcdate]") {
+    alpacacore::test::FakeIoptronMount mount("0025", 0.0);
+    mount.set_gps(0, -33.856784, 151.215297);  // digit 0: the mount's stored site
+    const std::string utc_reply = GENERATE(std::string("-18010000000000000#"), std::string("+0000xxxxxxxxxxxxx#"));
+    mount.set_utc_reply(utc_reply);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(mount.count(":GUT") == 1);
+    const int gls = mount.count(":GLS");
+    CHECK(driver->get_site_latitude() == Catch::Approx(-33.856784).margin(1e-5));
+    CHECK(driver->get_site_longitude() == Catch::Approx(151.215297).margin(1e-5));
+    CHECK(mount.count(":GLS") == gls);  // served from the cache the connect primed
+    CHECK(mount.count(":GUT") == 1);
     driver->set_connected(false);
 }
 

@@ -134,6 +134,9 @@ private:
         SiteInfo get_site_info() const {
             return call([](auto& p) { return p.get_site_info(); });
         }
+        SiteInfo get_site_info(const std::string& gut_reply) const {
+            return call([&](auto& p) { return p.get_site_info(gut_reply); });
+        }
         SiteInfo get_site_location() const {
             return call([](auto& p) { return p.get_site_location(); });
         }
@@ -142,6 +145,9 @@ private:
         }
         std::chrono::system_clock::time_point get_utc_time() const {
             return call([](auto& p) { return p.get_utc_time(); });
+        }
+        std::string read_utc_reply() const {
+            return call([](auto& p) { return p.read_utc_reply(); });
         }
         void set_target_ra(double ra_hours) const {
             call([&](auto& p) { p.set_target_ra(ra_hours); });
@@ -548,18 +554,27 @@ public:
             sync_offset_ra_hours_ = 0.0;
             sync_offset_dec_degrees_ = 0.0;
             invalidate_slew_error_locked();
-            // The mount clock is sampled once, before Connected is published (the getter makes no exchange).
-            util::UtcOffset mount_time;
+            // The mount clock is sampled once, before Connected is published (the getter makes no exchange). The
+            // one :GUT# reply also gives the site's timezone and DST to the prefetch below, so the connect sends
+            // :GUT# once (#1784). The two fields are judged apart: an unusable UTC still leaves usable site fields.
+            std::optional<std::string> gut_reply;
             try {
-                const auto utc = protocol.get_utc_time();
-                mount_time.set(utc, clock_.now());
+                gut_reply = protocol.read_utc_reply();
             } catch (const std::exception& e) {
                 ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
+            }
+            util::UtcOffset mount_time;
+            if (gut_reply) {
+                try {
+                    mount_time.set(iOptronProtocolWrapper::parse_utc_time(*gut_reply), clock_.now());
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("iOptron", "Mount UTC unavailable on connect: " + std::string(e.what()));
+                }
             }
             utc_offset_ = mount_time;
             // The caches are primed before connected_ is published: a getter that arrives during these reads
             // answers NotConnected at once (check_connected_before_lock()) instead of waiting behind them.
-            prefetch_mount_state_locked();
+            prefetch_mount_state_locked(gut_reply ? &*gut_reply : nullptr);
             try {
                 mount_info_ = protocol.get_mount_info();
             } catch (const std::exception& e) {
@@ -2320,7 +2335,9 @@ private:
         device_fault_count_ = 0;
     }
 
-    void prefetch_mount_state_locked() {
+    // `gut_reply`: the connect's :GUT# reply, for the site's timezone and DST; null when that read failed, and
+    // the site read then sends its own :GUT# as before (#1784).
+    void prefetch_mount_state_locked(const std::string* gut_reply) {
         const Wire protocol = wire();
         auto now = clock_.now();
         try {
@@ -2350,7 +2367,7 @@ private:
             ALPACA_LOG_WARN("iOptron", "Failed to prefetch status cache: " + std::string(e.what()));
         }
         try {
-            SiteInfo site = protocol.get_site_info();
+            SiteInfo site = gut_reply ? protocol.get_site_info(*gut_reply) : protocol.get_site_info();
             site_longitude_cached_ = site.longitude_degrees;
             site_latitude_cached_ = site.latitude_degrees;
             hemisphere_north_ = site.is_northern_hemisphere;

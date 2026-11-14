@@ -53,7 +53,11 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   the socket's `SO_RCVTIMEO`, 200 ms, over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
   is a timeout. The Celestron, iOptron, SynScan and OnStep wrappers set `ReadSpec::late_byte_grace` to their read slice and
   `read_until()` does the wait (#1686). The ZWO mount still reads the late byte itself, because it reads in slices to
-  see `closing_`. For the Celestron and SynScan binary payloads, a `Length`
+  see `closing_`. `ReadSpec::cancel` is the shared form of that check: a flag another thread sets ends the read
+  (between waits of at most `cancel_poll`, 20 ms) with outcome `Cancelled`, and the wrapper decides what it means.
+  The SynScan wrapper points it at its `set_interrupt()` flag, which the driver raises for a disconnect, so a
+  disconnect never waits out a silent handset's response timeout behind the wrapper's lock (#2070); its interrupted
+  read throws `NotConnected` with no fault text and no link loss. For the Celestron and SynScan binary payloads, a `Length`
   read, the same field keeps each payload byte within one read slice of the last, so a payload that starts after the
   timeout is read whole. A wait in `tty_read()`/`read_until()` rounds up to the next whole millisecond, never down
   to a zero `poll()` that spins (#1696). On those five a hangup is not a timeout: the Celestron NexStar, iOptron mount and

@@ -3196,7 +3196,8 @@ TEST_CASE("SkyWatcher async - a sub-floor RA offset written during a pulse resum
     // PR #221 continuity: a deferred RightAscensionRate write pre-arms the RA
     // duty rate with no hardware touch while a pulse owns the RA axis; the
     // duty body idles on the axis-ownership recheck at burst start, and takes
-    // over once the pulse releases the axis.
+    // over once the pulse releases the axis. The pulse's restore stops RA
+    // for it (open-astro#1720), rather than writing the clamped floor rate.
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
@@ -3209,10 +3210,23 @@ TEST_CASE("SkyWatcher async - a sub-floor RA offset written during a pulse resum
     REQUIRE(driver->get_is_pulse_guiding());
     driver->set_right_ascension_rate(0.995);  // deferred; ~0.075 arcsec/s, below the EQM-35 floor
     REQUIRE(driver->get_right_ascension_rate() == 0.995);
+    mount.clear_motion_log();  // the deferred write sent nothing; what follows is the pulse end
 
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(4000)));
-    // The pulse's restore stops the RA axis for the duty regime; the worker
-    // then bursts it on its own period.
+    // open-astro#1720: the pulse's restore goes through the RA drive applier, so the first RA command after the
+    // pulse is the stop that hands the axis to the duty worker (whose bursts then start with a stop of their own).
+    // Writing the sub-floor rate with ":I" clamped it at the floor (":I1FFFFFF") and left RA tracking at the floor
+    // rate until the first burst.
+    std::string first_ra_frame;
+    for (const auto& frame : mount.motion_log()) {
+        if (frame.size() > 2 && frame[2] == '1') {
+            first_ra_frame = frame;
+            break;
+        }
+    }
+    INFO("first RA motion frame after the pulse: " << first_ra_frame);
+    CHECK((first_ra_frame.rfind(":K1", 0) == 0 || first_ra_frame.rfind(":L1", 0) == 0));
+    // The worker then bursts it on its own period.
     const int starts = mount.start_count(1);
     REQUIRE(
         run_clock_until(clock, [&] { return mount.start_count(1) >= starts + 2; }, std::chrono::milliseconds(9000)));
@@ -6113,6 +6127,49 @@ TEST_CASE("SkyWatcher async - a pulse dispatch failure after the live :I restore
     REQUIRE(driver->get_site_latitude() < 0.0);
     CHECK(mount.axis_dir(1) != north_dir);
     CHECK(mount.axis_running(1));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// open-astro#1720, the dispatch-failure sibling of the pulse-end restore: a sub-floor RightAscensionRate written
+// between the failed dispatch and the drive-rate recovery is applied by stopping RA for the duty worker, not by a
+// floor-clamped ":I".
+TEST_CASE("SkyWatcher async - a pulse dispatch failure after the live :I hands a sub-floor RA rate to the duty worker",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    std::atomic<bool> fired{false};
+    std::size_t log_at_recovery = 0;
+    alpacacore::vendor::skywatcher::detail::set_pulse_dispatch_failure_hook([&] {
+        if (!fired.exchange(true)) {
+            // Between the failed dispatch ":J" and the drive-rate recovery: deferred (the pulse owns RA), so the
+            // setter only pre-arms the duty rate and starts the worker, which waits for the pulse to release RA.
+            driver->set_right_ascension_rate(0.995);  // ~0.075 arcsec/s, below the slow-mode floor
+            log_at_recovery = mount.motion_log().size();
+        }
+    });
+    struct HookReset {
+        ~HookReset() { alpacacore::vendor::skywatcher::detail::set_pulse_dispatch_failure_hook(nullptr); }
+    } hook_reset;
+    mount.reject_start_motion(1, 1);  // the dispatch ":J" after the live ":I"
+    driver->pulse_guide(2, 800);
+    REQUIRE(wait_until([&] { return fired.load(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(driver->get_right_ascension_rate() == 0.995);
+
+    // The recovery's first RA command stops the axis; the old path wrote the clamped floor period with ":I".
+    const auto log = mount.motion_log();
+    std::string first_ra_frame;
+    for (std::size_t i = log_at_recovery; i < log.size() && first_ra_frame.empty(); ++i) {
+        if (log[i].size() > 2 && log[i][2] == '1') first_ra_frame = log[i];
+    }
+    INFO("first RA motion frame of the recovery: " << first_ra_frame);
+    CHECK((first_ra_frame.rfind(":K1", 0) == 0 || first_ra_frame.rfind(":L1", 0) == 0));
+    driver->set_right_ascension_rate(0.0);
     driver->set_tracking(false);
     driver->set_connected(false);
 }

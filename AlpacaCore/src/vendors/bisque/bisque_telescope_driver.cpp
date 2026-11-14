@@ -219,6 +219,10 @@ public:
                 published_connected_ = false;
                 connected_ = false;
                 link_lost_ = false;
+                // Retires a Park poll still running, which then leaves parking_ alone: clear it here, as the other
+                // retire paths do, or the next session refuses every slew as parked (open-astro#2062).
+                parking_ = false;
+                ++park_epoch_;
                 ++pulse_request_;
                 pulse_generation_.bump();
                 pulse_guiding_ = false;
@@ -238,6 +242,8 @@ public:
             published_connected_ = false;
             connected_ = false;
             link_lost_ = false;
+            parking_ = false;  // retires a Park poll still running, as the lost-link disconnect above does
+            ++park_epoch_;     // (open-astro#2062)
             ++pulse_request_;
             pulse_generation_.bump();
             pulse_guiding_ = false;
@@ -317,6 +323,7 @@ public:
             target_dec_set_ = false;
             parked_ = false;
             parking_ = false;
+            ++park_epoch_;  // a Park poll still running must not set parked_ in a later session (open-astro#2062)
             at_home_ = false;
             homing_ = false;
             slewing_cached_ = false;
@@ -483,17 +490,27 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
-        }
-        // open-astro#775: 0..1x sidereal, the range the SynScan driver enforces.
-        constexpr double kMaxGuideRateDegPerSec = kSiderealRateArcsecPerSec / 3600.0;
-        if (rate.ra < 0.0 || rate.ra > kMaxGuideRateDegPerSec || rate.dec < 0.0 || rate.dec > kMaxGuideRateDegPerSec) {
-            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
-        }
+        validate_guide_rate(rate.ra);
+        validate_guide_rate(rate.dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_link_locked();
         guide_rate_ = rate;
+    }
+
+    // One axis under one lock: the base default reads the pair through the connection-checking getter first, so an
+    // out-of-range write on a disconnected mount answered NotConnected (open-astro#1786).
+    void set_guide_rate_right_ascension(double value) override {
+        validate_guide_rate(value);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
+        guide_rate_.ra = value;
+    }
+
+    void set_guide_rate_declination(double value) override {
+        validate_guide_rate(value);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_link_locked();
+        guide_rate_.dec = value;
     }
 
     double get_right_ascension() const override {
@@ -722,9 +739,17 @@ public:
             }
             protocol.park();
         }
+        // AbortSlew, Unpark, a newer Park and a disconnect bump park_epoch_: this Park no longer owns the outcome.
+        // A retired Park returns quietly at its next poll boundary and writes neither parked_ nor parking_
+        // (open-astro#2062), as AbortSlew already returned the Park caller promptly.
+        const auto retired = [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return park_epoch_ != guard.epoch;
+        };
         // Poll until parked.
         auto start = clock_.now();
         while (true) {
+            if (retired()) return;
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(clock_.now() - start).count();
             if (elapsed > 120) {
                 throw AlpacaException("Park timed out after 120 seconds");
@@ -734,13 +759,15 @@ public:
             } catch (...) {
             }
             clock_.sleep_for(std::chrono::seconds(1));
+            if (retired()) return;
             // The mount may have been disconnected meanwhile.
             check_connected_now();
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (park_epoch_ != guard.epoch) return;  // retired while its last IsParked was on the wire
             parked_ = true;
-            if (park_epoch_ == guard.epoch) parking_ = false;
+            parking_ = false;
         }
         publish_measurement();
     }
@@ -1010,6 +1037,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         parked_ = false;
         parking_ = false;  // a park poll still running no longer blocks slews
+        ++park_epoch_;     // and no longer sets parked_ when the mount reports parked (open-astro#2062)
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1083,6 +1111,7 @@ public:
         check_connected();
         ++slew_epoch_;
         parking_ = false;  // a park poll still running no longer blocks slews
+        ++park_epoch_;     // and no longer sets parked_ when the mount reports parked (open-astro#2062)
         // Bumping the request id retires a running guide body: under mutex_ it
         // sends and records nothing. It is not cancelled or joined here, because a PulseGuide
         // started while the abort waits on the wrapper owns the slot by then.
@@ -1153,6 +1182,18 @@ public:
     }
 
 private:
+    // One axis of a guide-rate write, checked before the connection so a bad value is InvalidValue even while
+    // disconnected (open-astro#1786). open-astro#775: 0..1x sidereal, the range the SynScan driver enforces.
+    static void validate_guide_rate(double deg_per_sec) {
+        if (!std::isfinite(deg_per_sec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
+        constexpr double kMaxGuideRateDegPerSec = kSiderealRateArcsecPerSec / 3600.0;
+        if (deg_per_sec < 0.0 || deg_per_sec > kMaxGuideRateDegPerSec) {
+            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
+        }
+    }
+
     void check_connected() const {
         if (!connected_ || link_lost_) {
             throw AlpacaException("Not connected to TheSkyX", AlpacaError::NotConnected);
@@ -1743,7 +1784,9 @@ private:
     bool site_info_valid_ = false;
 
     mutable bool parked_ = false;
-    uint64_t park_epoch_ = 0;  // under mutex_; bumped by each Park so a stale Park's exit leaves a newer one's parking_
+    // Under mutex_; bumped by each Park, AbortSlew, Unpark and a disconnect. A Park whose epoch no longer matches is
+    // retired: its exit leaves a newer one's parking_ and never sets parked_ (open-astro#2062).
+    uint64_t park_epoch_ = 0;
     bool parking_ = false;     // under mutex_; a Park is sent and its IsParked poll runs; refuses slews like parked_
     mutable bool at_home_ = false;
     mutable bool homing_ = false;

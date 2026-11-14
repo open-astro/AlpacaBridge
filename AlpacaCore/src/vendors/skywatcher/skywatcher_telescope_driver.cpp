@@ -1908,6 +1908,12 @@ public:
                 for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
                     try {
                         StateLock lock(lock_gate_);
+                        if (ra_drive_needs_duty_locked()) {
+                            // A sub-floor rate written since the dispatch: stop RA and leave the drive to the
+                            // duty worker, never a floor-clamped ":I" (open-astro#1720).
+                            apply_ra_drive_locked(lock);
+                            return;
+                        }
                         const double restore_rate = effective_ra_rate_locked();
                         const Wire proto = wire();
                         if ((restore_rate > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0)) {
@@ -2068,8 +2074,12 @@ public:
             // open-astro#770: cleared when Tracking=false landed during the
             // pulse; the end of the pulse then only stops the axis.
             bool restore_still_wanted = restore_tracking;
+            // open-astro#1720: set when the restore handed RA to apply_ra_drive_locked() (a sub-floor rate written
+            // during the pulse): the axis is stopped for the duty worker, so there is no live rate to verify.
+            bool restored_by_drive_applier = false;
             auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate,
-                              &restore_still_wanted, &stop_ra_if_tracking_off_locked]() {
+                              &restore_still_wanted, &restored_by_drive_applier, &stop_ra_if_tracking_off_locked]() {
+                restored_by_drive_applier = false;  // a retried stop decides afresh
                 const Wire proto = wire();
                 // Re-derived here, NOT the value captured at dispatch: since
                 // the drive direction became hemisphere-dependent, a
@@ -2111,8 +2121,25 @@ public:
                         return;
                     }
                 }
+                // open-astro#1720: a RightAscensionRate written during the pulse can make the drive sub-floor. The
+                // same applier as Tracking=true and the not-restoring branch above stops RA and arms the duty
+                // rate; the duty worker the setter started bursts once the pulse releases the axis. Hands the
+                // axis to the applier from inside a lock scope (also used by the in-place branch below).
+                const auto restore_through_drive_applier = [this, &applied_ra_restore_rate, &restored_by_drive_applier,
+                                                            &stop_ra_if_tracking_off_locked](StateLock& lock) {
+                    restored_by_drive_applier = true;
+                    if (tracking_effectively_on_locked()) {
+                        apply_ra_drive_locked(lock);
+                    }
+                    applied_ra_restore_rate = cmd_axis_rate_deg_s_[0];
+                    stop_ra_if_tracking_off_locked();  // a Tracking=false inside the applier's stop-wait
+                };
                 if (restore) {
                     StateLock lock(lock_gate_);
+                    if (ra_drive_needs_duty_locked()) {
+                        restore_through_drive_applier(lock);
+                        return;
+                    }
                     ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
                     applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
                     // An in-place ":I" changes the PERIOD only; direction is
@@ -2152,6 +2179,11 @@ public:
                     // between left the axis turning the old way. Decide again
                     // under this lock and turn it round if the sense moved.
                     const double fresh_rate = effective_ra_rate_locked();
+                    if (ra_drive_needs_duty_locked()) {
+                        // A sub-floor RightAscensionRate landed between the read above and these writes.
+                        restore_through_drive_applier(lock);
+                        return;
+                    }
                     if ((fresh_rate > 0.0) != (ra_restore_rate_deg_per_sec > 0.0)) {
                         applied_ra_restore_rate = restart_ra_in_current_direction_locked(lock);
                     }
@@ -2235,7 +2267,8 @@ public:
             // the motion, so it costs no pulse distance, but it does hold the
             // pulse task ~450 ms (or more) longer, which the next command's
             // reap must join. Not worth that latency on short guide pulses.
-            if (stopped && restore_still_wanted && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
+            if (stopped && restore_still_wanted && !pulse_restart && !restored_by_drive_applier &&
+                duration >= kMinPulseForRateVerifyMs) {
                 // What stop_axis() RE-DERIVED, not the dispatch-time capture.
                 // The two differ whenever effective_ra_rate_locked() moved
                 // during the pulse -- a RightAscensionRate write (deferred by
@@ -4838,6 +4871,15 @@ private:
         static_cast<void>(stop_axis_and_wait_locked(lock, kAxisRa, gen));
         ra_duty_rate_deg_s_ = eff;  // 0.0 = stay stopped; else the worker bursts
         cmd_axis_rate_deg_s_[0] = eff;
+    }
+
+    // True when the RA drive is not a continuous slow-mode rate: a duty rate is armed (a RightAscensionRate or
+    // SiteLatitude write pre-arms it while a pulse owns RA, and starts the worker), or the effective rate is under
+    // the floor or zero. A pulse-end restore then has to go through apply_ra_drive_locked(): writing the rate with
+    // ":I" clamps it at the floor and leaves RA tracking at the wrong rate (open-astro#1720).
+    bool ra_drive_needs_duty_locked() const {
+        return ra_duty_rate_deg_s_ != 0.0 ||
+               std::abs(effective_ra_rate_locked()) < slow_mode_floor_rate_locked(kAxisRa) * kSlowModeFloorPad;
     }
 
     void apply_ra_tracking_rate_locked(StateLock& lock, double previous_effective) {

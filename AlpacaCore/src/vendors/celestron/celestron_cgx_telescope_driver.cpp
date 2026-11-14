@@ -230,6 +230,8 @@ public:
     void set_focal_length(double meters) override;
     GuideRate get_guide_rate() const override;
     void set_guide_rate(const GuideRate&) override;
+    void set_guide_rate_right_ascension(double value) override;
+    void set_guide_rate_declination(double value) override;
     double get_right_ascension() const override;
     double get_right_ascension_rate() const override {
         require_connected();
@@ -1108,16 +1110,34 @@ GuideRate CelestronCgxTelescopeDriver::get_guide_rate() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return guide_rate_;
 }
-void CelestronCgxTelescopeDriver::set_guide_rate(const GuideRate& rate) {
-    const auto valid = [](double value) {
-        return std::isfinite(value) && value >= kSiderealDegreesPerSecond * 0.1 && value <= kSiderealDegreesPerSecond;
-    };
-    if (!valid(rate.ra) || !valid(rate.dec)) {
+// One axis of a guide-rate write, checked before the connection so a bad value is InvalidValue even while
+// disconnected (open-astro#1786).
+static void validate_cgx_guide_rate(double deg_per_sec) {
+    if (!std::isfinite(deg_per_sec) || deg_per_sec < kSiderealDegreesPerSecond * 0.1 ||
+        deg_per_sec > kSiderealDegreesPerSecond) {
         throw AlpacaException("Guide rates must be between 10% and 100% of sidereal", AlpacaError::InvalidValue);
     }
+}
+void CelestronCgxTelescopeDriver::set_guide_rate(const GuideRate& rate) {
+    validate_cgx_guide_rate(rate.ra);
+    validate_cgx_guide_rate(rate.dec);
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     guide_rate_ = rate;
+}
+// One axis under one lock: the base default reads the pair through the connection-checking getter first, so an
+// out-of-range write on a disconnected mount answered NotConnected (open-astro#1786).
+void CelestronCgxTelescopeDriver::set_guide_rate_right_ascension(double value) {
+    validate_cgx_guide_rate(value);
+    require_connected();
+    std::lock_guard<std::mutex> lock(mutex_);
+    guide_rate_.ra = value;
+}
+void CelestronCgxTelescopeDriver::set_guide_rate_declination(double value) {
+    validate_cgx_guide_rate(value);
+    require_connected();
+    std::lock_guard<std::mutex> lock(mutex_);
+    guide_rate_.dec = value;
 }
 bool CelestronCgxTelescopeDriver::get_is_pulse_guiding() const {
     require_connected();

@@ -276,7 +276,10 @@ public:
         // Cancel + join the status poll and the background slew/pulse task
         // threads before any member they touch is destroyed. Must run WITHOUT
         // mutex_ held (the task threads take mutex_). closing_ first: a probe waiting on the hunt's hold ends at once.
+        // The wrapper interrupt ends a read in flight, so the joins never wait out a silent handset (#2070).
         set_closing(true);
+        const bool interrupt = connected_.load();
+        if (interrupt) SynScanProtocolWrapper::instance().set_interrupt(true);
         cancel_async_tasks();
         polled_.stop_and_join();
         if (connected_) {
@@ -285,6 +288,7 @@ public:
             } catch (...) {
             }
         }
+        if (interrupt) SynScanProtocolWrapper::instance().set_interrupt(false);
     }
 
     int get_device_number() const override {
@@ -373,8 +377,12 @@ public:
         const bool relink = connected && connected_.load() && link_lost();
         if (!connected || relink) {
             // closing_ before the initiator wait: the poll already stops at its next exchange boundary, and a probe
-            // waiting on the hunt's hold wakes, while the disconnect waits for an initiator in flight.
-            closing.begin();
+            // waiting on the hunt's hold wakes, while the disconnect waits for an initiator in flight. A session of
+            // this driver also interrupts the wrapper, so the read in flight (the poll's, a body's or an initiator's)
+            // ends at once instead of after the response timeout (#2070). Only this driver's session: the wrapper is
+            // one per process, and a disconnect of a second, never-connected SynScan device must not cut the
+            // connected one's exchanges.
+            closing.begin(/*interrupt_wire=*/connected_.load());
             ilock.lock();
             {
                 // Supersedes a slew body and ends a synchronous slew's landing, nudge or hunt on the caller's thread.
@@ -2251,7 +2259,8 @@ private:
 
     // The disconnect body, also the first half of a relink: the poll and the bodies are already joined. State is
     // cleared under mutex_ before the close (decision 0016 point 4), and the close runs with no driver mutex: the
-    // wrapper's lock makes it wait for an exchange in flight.
+    // wrapper's lock makes it wait for an exchange in flight, which set_connected()'s wrapper interrupt has already
+    // ended (#2070).
     void teardown_session() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2284,20 +2293,29 @@ private:
         ~ClosingScope() { end(); }
         ClosingScope(const ClosingScope&) = delete;
         ClosingScope& operator=(const ClosingScope&) = delete;
-        void begin() {
+        void begin(bool interrupt_wire) {
             driver_.set_closing(true);
             active_ = true;
+            if (interrupt_wire) {
+                SynScanProtocolWrapper::instance().set_interrupt(true);
+                interrupting_ = true;
+            }
         }
         void end() {
             if (active_) {
                 driver_.set_closing(false);
                 active_ = false;
             }
+            if (interrupting_) {
+                SynScanProtocolWrapper::instance().set_interrupt(false);
+                interrupting_ = false;
+            }
         }
 
     private:
         SynScanTelescopeDriver& driver_;
         bool active_ = false;
+        bool interrupting_ = false;
     };
 
     void check_connected() const {

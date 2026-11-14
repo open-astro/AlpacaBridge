@@ -1107,6 +1107,66 @@ TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with two p
     CHECK(elapsed < seconds(5));
 }
 
+// open-astro#2070: the wrapper holds its lock across a reply read, and the disconnect used to queue behind it, so a
+// silent handset at the default 5 s response timeout held set_connected(false) for the whole timeout (more with the
+// joins behind it). The disconnect now interrupts the read in flight: it returns at once, the aborted read leaves no
+// fault and no loss reason, and a Connect to a handset that answers again works. Both transports.
+namespace {
+
+void disconnect_interrupts_a_silent_read(const std::shared_ptr<Handset>& st, const sc::ConnectionInfo& info) {
+    REQUIRE(info.response_timeout_ms == 5000);  // the default, not a test-shortened one
+    FakeTaskClock clock;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, kSettle));  // the poll is parked on the task clock
+    st->mute = true;
+    const int before = st->transactions.load();
+    clock.advance(kPollPeriod);  // the next tick sends `L`, which the handset never answers
+    const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+    while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() > before);       // the poll is inside its read
+    std::this_thread::sleep_for(milliseconds(100));  // real time: let the read settle into its wait
+    const auto elapsed = timed([&] { driver->set_connected(false); });
+    CHECK(elapsed < seconds(1));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(sc::SynScanProtocolWrapper::instance().link_fault().empty());
+
+    st->mute = false;
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+}  // namespace
+
+TEST_CASE("SynScan snapshot - a disconnect interrupts a read a silent handset never answers (TCP)",
+          "[synscan][telescope][snapshot][connect]") {
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    disconnect_interrupts_a_silent_read(st, info);
+}
+
+TEST_CASE("SynScan snapshot - a disconnect interrupts a read a silent handset never answers (serial)",
+          "[synscan][telescope][snapshot][connect]") {
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::PtyResponder handset([st](const std::string& c) { return reply(*st, c); }, "SynScan handset");
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Serial;
+    info.port_path = handset.slave_path();
+    disconnect_interrupts_a_silent_read(st, info);
+}
+
 // Decision 0009 rule 2a (issue #1723): a pulled cable loses a serial link at once. The handset answers on a pty behind
 // a by-id style link (ReplugPort), so a case pulls the cable mid-exchange (PtyResponder::unplug_on) or while idle
 // (unplug) and plugs a new handset in under the same name. The driver runs on a FakeTaskClock, as above.
