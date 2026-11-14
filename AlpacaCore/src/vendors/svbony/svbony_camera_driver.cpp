@@ -1148,7 +1148,7 @@ public:
                     // Disconnect or Connect, as a loss that lands just as the body returns does.
                     try {
                         driver.close_handle_after_body();
-                    } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    } catch (...) {  // NOLINT(bugprone-empty-catch): a destructor must not throw
                     }
                 }
             } close_if_lost{*this};
