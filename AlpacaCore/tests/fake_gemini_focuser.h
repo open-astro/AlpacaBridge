@@ -135,6 +135,10 @@ public:
     void set_moving(bool moving) { moving_.store(moving); }
     void set_temperature(double celsius) { temperature_.store(celsius); }
     void set_position(int position) { position_.store(position); }
+    /// What ":08#" reports from now on, as a focuser reconfigured behind the driver's back would.
+    void set_max_position(int max_position) { max_position_.store(max_position); }
+    /// ":08#" answers a frame the max position parser rejects ("Mx#"), the other queries stay good.
+    void set_garbage_max_position(bool on) { garbage_max_position_.store(on); }
 
     int position() const { return position_.load(); }
     int max_position() const { return max_position_.load(); }
@@ -230,7 +234,8 @@ private:
             std::snprintf(buf, sizeof(buf), "Z%.1f#", temperature_.load());
             reply = buf;
         } else if (cmd == ":08#") {
-            reply = "M" + std::to_string(max_position_.load()) + "#";
+            reply =
+                garbage_max_position_.load() ? std::string("Mx#") : "M" + std::to_string(max_position_.load()) + "#";
         } else if (cmd == ":11#") {
             reply = "O1#";
         } else if (cmd == ":13#") {
@@ -300,6 +305,7 @@ private:
     std::atomic<bool> garbage_state_{false};
     std::atomic<bool> garbage_temperature_{false};
     std::atomic<bool> garbage_temp_comp_{false};
+    std::atomic<bool> garbage_max_position_{false};
     std::atomic<bool> moving_{false};
     std::atomic<double> temperature_{12.5};
     std::atomic<int> position_{1000};
