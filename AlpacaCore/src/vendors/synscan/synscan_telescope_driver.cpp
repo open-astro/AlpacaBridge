@@ -280,6 +280,7 @@ public:
         set_closing(true);
         const bool interrupt = connected_.load();
         if (interrupt) SynScanProtocolWrapper::instance().set_interrupt(true);
+        run_closing_hook_for_testing();
         cancel_async_tasks();
         polled_.stop_and_join();
         if (connected_) {
@@ -2302,6 +2303,7 @@ private:
                 SynScanProtocolWrapper::instance().set_interrupt(true);
                 interrupting_ = true;
             }
+            driver_.run_closing_hook_for_testing();
         }
         void end() {
             if (active_) {
@@ -2587,6 +2589,22 @@ public:
     void set_wire_turn_wait_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(turn_hook_mutex_);
         turn_wait_hook_ = std::move(hook);
+    }
+
+    // Called by a Disconnect and the destructor right after they decide whether to raise the wrapper interrupt, with no
+    // driver lock held: a case can hold the teardown there to check whose exchanges it cuts. An empty function (the
+    // default) does nothing.
+    void set_closing_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(turn_hook_mutex_);
+        closing_hook_ = std::move(hook);
+    }
+    void run_closing_hook_for_testing() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(turn_hook_mutex_);
+            hook = closing_hook_;
+        }
+        if (hook) hook();
     }
 
     // Replaces the wall time every local-sidereal-time read uses; an empty function restores system_clock.
@@ -3988,6 +4006,7 @@ private:
     std::condition_variable turn_cv_;
     std::mutex turn_hook_mutex_;
     std::function<void()> turn_wait_hook_;  // test seam, see set_wire_turn_wait_hook_for_testing()
+    std::function<void()> closing_hook_;    // test seam, see set_closing_hook_for_testing()
     uint64_t turn_next_ = 0;     // next ticket to hand out
     uint64_t turn_serving_ = 0;  // ticket whose sender may send now
     double park_ra_hours_ = 0.0;
@@ -4085,6 +4104,12 @@ void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std:
 void set_wire_turn_wait_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_wire_turn_wait_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_closing_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_closing_hook_for_testing(std::move(hook));
     }
 }
 

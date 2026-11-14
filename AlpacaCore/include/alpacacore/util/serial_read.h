@@ -35,7 +35,9 @@
 // ReadSpec::cancel lets another thread end a read in flight (a disconnect that
 // must not wait out a silent device's timeout, issue #2070): the loop checks the
 // flag between waits of at most ReadSpec::cancel_poll and reports Cancelled. The
-// caller decides what that means; the helper still never throws or closes.
+// caller decides what that means; the helper still never throws or closes. The
+// late-byte grace wait below checks it too, so a caller that sets cancel must
+// handle Cancelled from a read that already timed out, not only from the main loop.
 //
 // ReadSpec::late_byte_grace keeps the old loops' rule for a reply that is
 // still arriving when its timeout runs out: the byte in flight settles it (a
