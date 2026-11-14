@@ -1064,7 +1064,7 @@ TEST_CASE("ToupTek Camera Driver - a StartExposure during a disconnect is refuse
     std::atomic<int> start_error{-1};
     alpacacore::vendor::touptek::set_disconnect_gap_hook_for_testing(*driver, [&] {
         if (gap_calls.fetch_add(1) != 0) return;
-        start_error = error_of([&] { driver->start_exposure(5.0, true); });
+        start_error = error_of([&] { driver->start_exposure(0.1, true); });
     });
     fake.hold_next_wait_image();  // a body that got through would park in the frame wait
 
@@ -1095,7 +1095,7 @@ TEST_CASE("ToupTek Camera Driver - a StartExposure during the destructor's disco
     // The destructor runs the hook, then its set_connected(false) runs it again; only the first one starts.
     alpacacore::vendor::touptek::set_disconnect_gap_hook_for_testing(*driver, [&] {
         if (gap_calls.fetch_add(1) != 0) return;
-        start_error = error_of([&] { raw->start_exposure(5.0, true); });
+        start_error = error_of([&] { raw->start_exposure(0.1, true); });
     });
     fake.hold_next_wait_image();
 

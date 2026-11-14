@@ -165,7 +165,9 @@ public:
         pulse_slot_.cancel_all_and_join();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Qualified: virtual dispatch is gone in a destructor anyway;
+                // saying so explicitly keeps clang-analyzer's VirtualCall happy.
+                ToupTekCameraDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(branding_.label, "Error during destruction: " + std::string(e.what()));
             }
@@ -241,9 +243,10 @@ public:
             // closing the handle: the body runs Toupcam_WaitImageV4 on a raw handle
             // snapshot, so closing under it is a use-after-close (decision 0020 rule
             // 5). The stop wakes that wait; a body failure it causes is dropped, not
-            // kept. disconnect_and_join() closes the session first, so a
-            // StartExposure that passed its connection check raises NotConnected and
-            // runs no body; it joins without mutex_ (the body takes mutex_).
+            // kept. closing_, set with the stop, is what refuses a StartExposure that
+            // passed its connection check before disconnect_and_join() closes the
+            // session: it raises NotConnected and runs no body. The join runs
+            // without mutex_ (the body takes mutex_).
             session_.set_stopping(true);
             std::function<void()> gap_hook;
             {
@@ -417,6 +420,14 @@ public:
             }
 
             {
+                // Its own leaf lock, never taken with another: a configureddevices
+                // poll does not wait behind mutex_ (driver lifecycle instructions).
+                // Published before Connected goes true below, so no poll sees a
+                // connected camera without its Firmware row.
+                std::lock_guard<std::mutex> lock(firmware_mutex_);
+                firmware_ = compose_firmware(firmware, hardware, fpga, production_date);
+            }
+            {
                 // Publish under mutex_ (the short state lock) only now: identity,
                 // limits and the handle appear together.
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -441,12 +452,6 @@ public:
                 // The disconnect closed the session (decision 0020 rule 8).
                 session_.open();
                 connected_.store(true);
-            }
-            {
-                // Its own leaf lock, never taken with another: a configureddevices
-                // poll does not wait behind mutex_ (driver lifecycle instructions).
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_ = compose_firmware(firmware, hardware, fpga, production_date);
             }
             // Started with mutex_ released (never joined here -- see the top of
             // this function); its first tick primes the caches before the
@@ -1560,8 +1565,8 @@ private:
     ToupCameraInfo camera_info_;
     bool camera_info_valid_;
     std::string serial_number_;
-    // The web UI Firmware string (compose_firmware), published at the end of
-    // connect and cleared by the disconnect before the close. Its own leaf mutex,
+    // The web UI Firmware string (compose_firmware), published by the connect
+    // just before Connected goes true and cleared by the disconnect before the close. Its own leaf mutex,
     // taken with no other lock held, so get_device_firmware() never waits on
     // mutex_ or the SDK (driver lifecycle instructions, decision 0016 item 4).
     mutable std::mutex firmware_mutex_;

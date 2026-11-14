@@ -126,12 +126,14 @@ public:
     std::map<std::pair<int, int>, int> aaf_range_script;
     bool taillight_supported = true;
     // What the version reads answer; set before the driver exists (the connect reads them, the SDK version is read
-    // when the driver is built). An empty string is the wrapper's answer for a value the model refuses.
+    // when the driver is built). An empty string is the wrapper's answer for a value the model refuses, and is the
+    // default for the hardware, FPGA and production-date reads (decision 0015 item 4: the harsher answer; a case
+    // that wants a value sets it). production_date is YYYYMMDD, as Toupcam_get_ProductionDate writes it.
     std::string sdk_version = "fake-1.0";
     std::string firmware_version = "fw-fake";
-    std::string hw_version = "hw-fake";
-    std::string fpga_version = "fpga-fake";
-    std::string production_date = "20260310";  // YYYYMMDD, as Toupcam_get_ProductionDate writes it
+    std::string hw_version;
+    std::string fpga_version;
+    std::string production_date;
     // What AAF ISMOVING answers; set before the driver reads it (the AAF registers are not synchronised).
     void set_aaf_moving(bool moving) { aaf_values_[vendor::touptek::ToupAAF::IsMoving] = moving ? 1 : 0; }
 
