@@ -34,7 +34,9 @@ concurrency:
 jobs:
   analysis:
     name: Scorecard analysis
-    if: github.repository == 'open-astro/AlpacaBridge'
+    # main only: the action scores the default branch and fails on any other,
+    # and scheduled-failure.yml would not see that failed run.
+    if: github.repository == 'open-astro/AlpacaBridge' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

@@ -1,6 +1,6 @@
 ### Added (CI)
 - **Stale issues and pull requests are marked, in a dry run first** (`.github/workflows/stale.yml`, issue #1363): a daily `actions/stale` run marks an issue after 90 days without activity and closes it 30 days later, and a pull request after 30 and 14 days; a draft pull request is marked but never closed, and `P1`, `P2`, `on hold`, `testing` and `safe-to-review` are exempt. It starts with `debug-only` on, so it only logs what it would do until a later PR turns it on. `scheduled-failure.yml` watches it, and `docs/development.md` states the policy for contributors.
-- **OpenSSF Scorecard runs weekly** (`.github/workflows/scorecard.yml`, issue #1364): every Monday, on pushes to `main` and on dispatch, its SARIF goes to code scanning next to CodeQL; results are not published (`publish_results: false`). `scheduled-failure.yml` watches it.
+- **OpenSSF Scorecard runs weekly** (`.github/workflows/scorecard.yml`, issue #1364): every Monday, on pushes to `main` and on dispatch from `main`, its SARIF goes to code scanning next to CodeQL; results are not published (`publish_results: false`). `scheduled-failure.yml` watches it.
 - **The README Authored code badge is dynamic** (`.github/workflows/authored-lines-badge.yml`, issue #2079): on every push to `main` the workflow writes the count from the new `scripts/check_docs_drift.py --badge-json` to `authored-lines.json` on a `badges` branch, and the badge reads it through the shields.io endpoint. `/bump-release` no longer edits the badge.
 
 ### Changed (tooling)

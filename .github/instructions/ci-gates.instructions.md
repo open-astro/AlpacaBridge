@@ -152,9 +152,10 @@ author must do. Read the docstring before changing a gate.
   maintainer has read two weeks of logs; going live is a later PR that flips it in both steps.
   `scheduled-failure.yml` watches it by workflow name.
 - **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`, issue #1364): weekly, on pushes to `main`
-  and on dispatch, uploads the Scorecard SARIF to code scanning with `publish_results: false` (no
-  public badge). It runs on `ubuntu-latest`, like CodeQL, because the action's Docker image is
-  amd64 only. It does not gate merges; `scheduled-failure.yml` watches it by workflow name.
+  and on dispatch from `main`, uploads the Scorecard SARIF to code scanning with
+  `publish_results: false` (no public badge). It runs on `ubuntu-latest`, like CodeQL, because the
+  action's Docker image is amd64 only. It does not gate merges; `scheduled-failure.yml` watches it
+  by workflow name.
 - **Authored code badge** (`.github/workflows/authored-lines-badge.yml`, issue #2079): on every push to
   `main` it writes `scripts/check_docs_drift.py --badge-json` to `authored-lines.json` on the
   `badges` branch, which the README badge reads through img.shields.io/endpoint. Check 25 holds the
