@@ -283,10 +283,19 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   padding, not a request). This also settles the per-request timeout
   question that two review rounds on #233 got wrong in different ways: a
   worker only ever reads a connection whose request has already begun
-  arriving, so every recv runs under the plain 30 s `kSocketTimeoutSeconds`
+  arriving, so every body recv runs under the plain 30 s `kSocketTimeoutSeconds`
   bound set at accept time and there is no idle timeout to restore. Tests:
   the slow-body and pre-carried-headers cases in `test_server_socket.cpp`
   (16 s gap inside request 2's body, in its own write and pre-carried).
+  **The header phase has its own deadline** (issue #1694): the request line
+  and headers of every request, keep-alive ones included, must arrive within
+  `kHeaderDeadlineSeconds` (10 s) of the worker starting to read them; each
+  header recv waits (`poll()`) only for the time left, and expiry is a 408 and
+  a close. Without it a peer trickling one header byte at a time reset the
+  30 s recv bound with every byte and held the worker about 150 s, and the
+  per-address cap is no defence (its default equals the pool size). Test: the
+  header-deadline case in `test_server_socket.cpp`, shortened through
+  `Server::set_header_deadline_for_test()`.
 - **Persistence is opt-in: a connection may only stay open for an exchange we
   framed correctly** (2026-09-08, PR #233 review). Keep-alive turned every
   latent framing gap into a stream desync, because leftover or mis-framed

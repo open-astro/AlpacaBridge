@@ -25,10 +25,13 @@ namespace alpacahttp {
 
 namespace {
 
+// A tab counts as indentation, as the config writer (update_config_values()
+// in router.cpp) reads it: a key a hand edit indented with a tab stays in its
+// section instead of ending it (#2087).
 int count_leading_spaces(const std::string& line) {
     int count = 0;
     for (char ch : line) {
-        if (ch != ' ') {
+        if (ch != ' ' && ch != '\t') {
             break;
         }
         ++count;

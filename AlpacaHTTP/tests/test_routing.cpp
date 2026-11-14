@@ -414,7 +414,7 @@ public:
     bool get_connected() const override {
         get_connected_calls.fetch_add(1);
         if (connected_throws) {
-            throw alpacacore::AlpacaException("link probe failed", alpacacore::AlpacaError::DriverException);
+            throw alpacacore::AlpacaException(connected_error, alpacacore::AlpacaError::DriverException);
         }
         return connected;
     }
@@ -431,6 +431,7 @@ public:
     bool connecting = false;
     mutable std::atomic<int> get_connected_calls{0};
     bool connected_throws = false;
+    std::string connected_error = "link probe failed";
     std::string link_fault;
     bool link_fault_throws = false;
 
@@ -6433,6 +6434,35 @@ int main() {
         EXPECT(seen == 5);
     }
 
+    // A driver's exception text reaches the router's log lines escaped (issue
+    // #2087): a newline in it must not start a forged log line, nor an escape
+    // sequence drive the operator's terminal.
+    {
+        // case: configureddevices logs a throwing driver's message escaped
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto forged = std::make_shared<FirmwareStubDriver>(9518, std::nullopt);
+        forged->connected_throws = true;
+        forged->connected_error = "probe failed\n2026-11-13 [ERROR] forged line\x1b[31m";
+        EXPECT(registry.register_device(forged));
+        std::mutex lines_mutex;
+        std::vector<std::string> lines;
+        auto previous_sink = alpacacore::logging::get_log_sink();
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+                if (message.find("forged line") != std::string_view::npos) {
+                    std::lock_guard<std::mutex> lock(lines_mutex);
+                    lines.emplace_back(message);
+                }
+            });
+        route_request(router, "GET", "/management/v1/configureddevices");
+        alpacacore::logging::set_log_sink(previous_sink);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9518);
+        EXPECT(lines.size() == 1);
+        EXPECT(lines[0].find("Connected query failed") != std::string::npos);
+        EXPECT(lines[0].find("probe failed\\x0a2026-11-13 [ERROR] forged line\\x1b[31m") != std::string::npos);
+        EXPECT(lines[0].find_first_of("\n\x1b") == std::string::npos);
+    }
+
     {
         // case: configureddevices lists each device's Description
         auto& registry = alpacacore::management::DeviceRegistry::instance();
@@ -10374,6 +10404,48 @@ int main() {
             EXPECT(text.find("  allowed_hosts: \".lan\"\n\n# next section\nserver:\n") != std::string::npos);
             std::remove(config_path.c_str());
         }
+    }
+
+    // A key indented with a tab (not valid YAML indentation, but a hand edit
+    // can leave one) stays inside its section (issue #2087). The writer read
+    // the tab as column 0: it ended the section there, appended both keys
+    // above that line and left the old allowed_hosts below it as a duplicate.
+    // The writer and the reader must agree, so the file is read back too.
+    {
+        // case: a tab-indented key stays inside its config section
+        char path_template[] = "/tmp/alpacahttp_test_routing_tab_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "http:\n"
+                   "\thost_check_enabled: false  # tabbed\n"
+                   "  allowed_hosts: \"\"\n"
+                   "server:\n"
+                   "  location: \"Old\"\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt,
+                               R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str() ==
+               "http:\n"
+               "\thost_check_enabled: \"true\"  # tabbed\n"
+               "  allowed_hosts: \".lan\"\n"
+               "server:\n"
+               "  location: \"Old\"\n");
+        alpacahttp::Config reloaded;
+        EXPECT(reloaded.load(config_path));
+        EXPECT(reloaded.host_check_enabled());
+        EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan"}));
+        EXPECT(reloaded.location() == "Old");
+        std::remove(config_path.c_str());
     }
 
     // A key missing from an existing section is added after the section's last

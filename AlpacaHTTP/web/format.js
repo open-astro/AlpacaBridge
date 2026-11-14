@@ -81,6 +81,34 @@ function serverClockError(result) {
     return message || 'Server clock error ' + result.ErrorNumber;
 }
 
+// What the live server clock knows after one GET /management/v1/synctime.
+// `state` is the previous { offsetMs, errorText }; `result` is the parsed
+// reply, or null when the fetch failed (server unreachable, or a body that is
+// not JSON); `midpointMs` is the browser time halfway through the round trip,
+// when the server is assumed to have read its clock (Value is whole seconds).
+//
+// A reply sets errorText from serverClockError() and, when it carries a usable
+// time, the offset. The validity check is not paranoia about our own server
+// (open-astro#389): a non-numeric Value would make the offset NaN, an Invalid
+// Date that throws on every one-second tick; isValidClockSeconds() also rejects
+// a finite but out-of-range Value (#511). Any other bad reply keeps the old
+// offset.
+//
+// A failed fetch keeps the offset, so the clock keeps ticking locally rather
+// than blanking to --:--:--, and clears errorText (issue #2087): an earlier
+// refusal says nothing about the clock now, and its advice to use Sync Time
+// cannot work while the server is unreachable.
+function serverClockAfterRefresh(state, result, midpointMs) {
+    if (result === null) {
+        return { offsetMs: state.offsetMs, errorText: '' };
+    }
+    let offsetMs = state.offsetMs;
+    if (result && result.ErrorNumber === 0 && isValidClockSeconds(result.Value)) {
+        offsetMs = (result.Value * 1000) - midpointMs;
+    }
+    return { offsetMs: offsetMs, errorText: serverClockError(result) };
+}
+
 function formatServerClock(date, timeZone) {
     if (Number.isNaN(date.getTime())) {
         // No time to show; the UTC arm below would throw on toISOString().
@@ -884,7 +912,7 @@ function zwoUsbBandwidth(value) {
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
+    module.exports = { isValidClockSeconds, serverClockError, serverClockAfterRefresh, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
                        channelSelectorState, channelDowngradeNotice, channelSwitchText,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, discoveryPortSetting, settingsSaveError,
