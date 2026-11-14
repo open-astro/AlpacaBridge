@@ -125,6 +125,15 @@ public:
     // return 100000 so range validation is testable per action.
     std::map<std::pair<int, int>, int> aaf_range_script;
     bool taillight_supported = true;
+    // What the version reads answer; set before the driver exists (the connect reads them, the SDK version is read
+    // when the driver is built). An empty string is the wrapper's answer for a value the model refuses, and is the
+    // default for the hardware, FPGA and production-date reads (decision 0015 item 4: the harsher answer; a case
+    // that wants a value sets it). production_date is YYYYMMDD, as Toupcam_get_ProductionDate writes it.
+    std::string sdk_version = "fake-1.0";
+    std::string firmware_version = "fw-fake";
+    std::string hw_version;
+    std::string fpga_version;
+    std::string production_date;
     // What AAF ISMOVING answers; set before the driver reads it (the AAF registers are not synchronised).
     void set_aaf_moving(bool moving) { aaf_values_[vendor::touptek::ToupAAF::IsMoving] = moving ? 1 : 0; }
 
@@ -161,7 +170,7 @@ public:
     }
 
     // --- ToupTekSDK implementation ------------------------------------------
-    std::string get_sdk_version() override { return hit("get_sdk_version"), "fake-1.0"; }
+    std::string get_sdk_version() override { return hit("get_sdk_version"), sdk_version; }
 
     std::vector<ToupCameraInfo> enumerate_cameras() override {
         std::lock_guard<std::mutex> lock(sync_->sdk_mutex);
@@ -478,7 +487,22 @@ public:
     std::string get_firmware_version(HToupcam h) override {
         hit("get_firmware_version");
         require_open(h);
-        return "fw-fake";
+        return firmware_version;
+    }
+    std::string get_hw_version(HToupcam h) override {
+        hit("get_hw_version");
+        require_open(h);
+        return hw_version;
+    }
+    std::string get_fpga_version(HToupcam h) override {
+        hit("get_fpga_version");
+        require_open(h);
+        return fpga_version;
+    }
+    std::string get_production_date(HToupcam h) override {
+        hit("get_production_date");
+        require_open(h);
+        return production_date;
     }
     void get_pixel_size(HToupcam h, unsigned, float& x, float& y) override {
         hit("get_pixel_size");
