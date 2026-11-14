@@ -10,7 +10,8 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Issue #1764: what the in-page dialog resolves to. Every destructive action
+// Issue #1764: what the in-page dialog resolves to, and how toasts and inline
+// field errors behave. Every destructive action
 // (delete a device or the log files, shut down, restart, forget a WiFi
 // network, install an update) waits on confirmDialog(), so Cancel and Esc must
 // resolve "no". Runs the real dialog block of app.js (from the "In-page
@@ -45,6 +46,7 @@ function makeDom() {
             value: '',
             type: '',
             dataset: {},
+            style: {},
             children: [],
             parentNode: null,
             isConnected: true,
@@ -110,9 +112,16 @@ function makeDom() {
     byId['ui-dialog-confirm'].click = () => dialog.close('confirm');  // the method="dialog" submit
     byId['ui-dialog-cancel'].click = () => byId['ui-dialog-cancel'].dispatch('click');
 
+    const form = makeEl('form', 'device-form');
+    form.elements = { namedItem: (name) => form.children.find((c) => c.name === name) || null };
+    form.querySelectorAll = (sel) => {
+        assert.strictEqual(sel, '[data-field-error-id]');
+        return form.children.filter((c) => c.dataset.fieldErrorId);
+    };
+    makeEl('div', 'form-message');
     doc.getElementById = (id) => byId[id] || null;
     doc.createElement = (tag) => makeEl(tag);
-    return { doc, byId, dialog, makeEl };
+    return { doc, byId, dialog, form, makeEl };
 }
 
 function load() {
@@ -237,4 +246,77 @@ test('a second dialog waits for the first to close (#1764)', async () => {
     assert.strictEqual(t.byId['ui-dialog-title'].textContent, 'Second');
     t.byId['ui-dialog-confirm'].click();
     assert.strictEqual(await second, true);
+});
+
+test('a success toast closes after TOAST_MS, an error toast stays until dismissed (#1764)', () => {
+    const t = load();
+    const region = t.byId['toast-region'];
+    t.ui.showToast('Device deleted.');
+    assert.strictEqual(region.children.length, 1);
+    const ok = region.children[0];
+    assert.strictEqual(ok.className, 'toast');
+    assert.strictEqual(ok.getAttribute('role'), 'status');
+    assert.strictEqual(ok.children[0].textContent, 'Device deleted.');
+    assert.strictEqual(t.timers.length, 1);
+    assert.strictEqual(t.timers[0].ms, t.ui.TOAST_MS);
+    assert.strictEqual(t.ui.TOAST_MS, 5000);
+    t.timers[0].fn();
+    assert.strictEqual(region.children.length, 0, 'the success toast did not close on its timer');
+
+    t.ui.showToast('Delete failed: busy', 'error');
+    const err = region.children[0];
+    assert.strictEqual(err.className, 'toast toast-error');
+    assert.strictEqual(err.getAttribute('role'), 'alert');
+    assert.strictEqual(t.timers.length, 1, 'an error toast must not close on a timer');
+    const dismiss = err.children[1];
+    assert.strictEqual(dismiss.getAttribute('aria-label'), 'Dismiss');
+    dismiss.dispatch('click');
+    assert.strictEqual(region.children.length, 0, 'Dismiss did not close the error toast');
+});
+
+test('showFieldError marks the field and clearFieldError restores its aria-describedby (#1764)', () => {
+    const t = load();
+    const input = t.makeEl('input', 'device-number');
+    input.name = 'deviceNumber';
+    t.form.appendChild(input);
+    input.setAttribute('aria-describedby', 'device-number-help');
+    t.ui.showFieldError('deviceNumber', 'Device number must be 0 or more.');
+    const note = t.byId['device-number-error'];
+    assert.ok(note, 'no message was added under the field');
+    assert.strictEqual(note.textContent, 'Device number must be 0 or more.');
+    assert.strictEqual(note.getAttribute('role'), 'alert');
+    assert.strictEqual(input.getAttribute('aria-invalid'), 'true');
+    assert.strictEqual(input.getAttribute('aria-describedby'), 'device-number-help device-number-error');
+    assert.strictEqual(t.doc.activeElement, input);
+
+    // A second error on the same field replaces the first, never stacks.
+    t.ui.showFieldError(input, 'Pick a free number.');
+    assert.strictEqual(t.form.children.filter((c) => c.className === 'field-error').length, 1);
+    assert.strictEqual(input.getAttribute('aria-describedby'), 'device-number-help device-number-error');
+
+    input.dispatch('input');  // typing in the field clears it
+    assert.strictEqual(t.byId['device-number-error'], undefined);
+    assert.strictEqual(input.getAttribute('aria-invalid'), null);
+    assert.strictEqual(input.getAttribute('aria-describedby'), 'device-number-help');
+    assert.strictEqual(input.dataset.fieldErrorId, undefined);
+});
+
+test('clearFieldErrors clears every field, and a field without one falls back to the form message (#1764)', () => {
+    const t = load();
+    const a = t.makeEl('input', 'a');
+    const b = t.makeEl('input', 'b');
+    t.form.append(a, b);
+    t.ui.showFieldError('a', 'bad a');
+    t.ui.showFieldError(b, 'bad b');
+    assert.strictEqual(a.getAttribute('aria-describedby'), 'a-error');
+    t.ui.clearFieldErrors(t.form);
+    assert.strictEqual(t.form.children.filter((c) => c.className === 'field-error').length, 0);
+    assert.strictEqual(a.getAttribute('aria-describedby'), null, 'an empty aria-describedby is left behind');
+    assert.strictEqual(b.getAttribute('aria-invalid'), null);
+
+    t.ui.showFieldError('no-such-field', 'Pick a vendor.');
+    const message = t.byId['form-message'];
+    assert.strictEqual(message.textContent, 'Pick a vendor.');
+    assert.strictEqual(message.className, 'message error');
+    assert.strictEqual(message.style.display, 'block');
 });
