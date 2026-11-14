@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -900,6 +901,16 @@ namespace {
 // large ImageArray responses are unaffected (this bounds the read side only).
 constexpr int kRequestDeadlineSeconds = 120;
 
+// Upper bound on how long the request line and headers of one request may take
+// to arrive once a worker starts reading them, on every request, keep-alive
+// ones included (issue #1694). The worker waits for each header recv only as
+// long as this deadline leaves, so a peer that trickles one byte at a time
+// cannot hold a worker for the whole request deadline plus a final 30 s recv
+// (about 150 s): with every worker pinned that way, NINA and ConformU queue
+// behind it. The per-address connection cap is no mitigation, since its default
+// equals the pool size. A real client sends its headers in one write.
+constexpr int kHeaderDeadlineSeconds = 10;
+
 // Finite whole-response allowance: the greater of 120 s and the serialized
 // header/body bytes at 64 KiB/s, rounded up by util::send_budget. Large images
 // receive more time on slow links; a peer that stops making progress still
@@ -1032,6 +1043,28 @@ bool may_persist(const Request& request, const Response& response) {
     return true;
 }
 
+// Wait until `socket_fd` has bytes to read, or the peer closed or failed (the
+// recv that follows reports which), or `deadline` passed. False only for the
+// deadline.
+bool wait_readable_until(util::SocketHandle socket_fd, std::chrono::steady_clock::time_point deadline) {
+    for (;;) {
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) {
+            return false;
+        }
+        // Rounded up, so a sub-millisecond remainder waits instead of spinning.
+        const auto left_ms = std::chrono::ceil<std::chrono::milliseconds>(left).count();
+        struct pollfd pfd {};
+        pfd.fd = socket_fd;
+        pfd.events = POLLIN;
+        const int ready =
+            ::poll(&pfd, 1, static_cast<int>(std::min<long long>(left_ms, std::numeric_limits<int>::max())));
+        if (ready > 0 || (ready < 0 && errno != EINTR)) {
+            return true;
+        }
+    }
+}
+
 // Read one full HTTP request: loop until the end-of-headers marker, then read
 // exactly Content-Length body bytes (bounded by Request::kMaxBodyBytes).
 // `raw_request` may arrive holding bytes left over from the previous request
@@ -1040,18 +1073,24 @@ bool may_persist(const Request& request, const Response& response) {
 // Returns false after sending an error response where possible (on a dead or
 // timed-out socket nothing can be sent); the caller closes the connection.
 //
-// Every recv here runs under the per-request kSocketTimeoutSeconds bound set
-// at accept time. The wait BETWEEN requests never happens in this function:
-// a worker only reads a connection the reactor has already seen become
-// readable (or one with carried bytes), so by the time we get here the
-// request has begun arriving and deserves the same budget as request 1.
-bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus) {
+// The header phase ends at `header_budget` from entry (kHeaderDeadlineSeconds
+// in production): each header recv waits only for the time that leaves, and
+// the deadline is answered 408. Every body recv runs under the per-request
+// kSocketTimeoutSeconds bound set at accept time. The wait BETWEEN requests
+// never happens in this function: a worker only reads a connection the reactor
+// has already seen become readable (or one with carried bytes), so by the time
+// we get here the request has begun arriving and deserves the same budget as
+// request 1.
+bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus,
+                  std::chrono::milliseconds header_budget) {
     char buffer[8192];
 
     // Total-request wall-clock deadline. SO_RCVTIMEO bounds each individual
     // recv, but a peer trickling one byte per just-under-timeout interval
     // would pass every per-recv check and pin this worker indefinitely.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kRequestDeadlineSeconds);
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(kRequestDeadlineSeconds);
+    const auto header_deadline = std::min(deadline, started + header_budget);
 
     // Skip any empty line(s) before the request line. RFC 7230 §3.5 says a
     // server SHOULD do this, and on a persistent connection it matters:
@@ -1070,9 +1109,9 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
         }
     };
 
-    // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv.
-    // Carried-over bytes may already hold the terminator, so look before the
-    // first recv.
+    // Read until \r\n\r\n (end of headers), each recv waiting no longer than
+    // the header deadline leaves. Carried-over bytes may already hold the
+    // terminator, so look before the first recv.
     strip_leading_crlf();
     std::size_t header_end = raw_request.find("\r\n\r\n");
     while (header_end == std::string::npos) {
@@ -1080,6 +1119,10 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
         // terminator the whole buffer is header so far.
         if (raw_request.size() > kMaxHeaderBytes) {
             send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
+            return false;
+        }
+        if (!wait_readable_until(socket_fd, header_deadline)) {
+            send_error(socket_fd, 408, "Request Timeout", "Request headers took too long to arrive");
             return false;
         }
         int bytes_read = util::socket_recv(socket_fd, buffer, static_cast<int>(sizeof(buffer)));
@@ -1210,7 +1253,10 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
     // read past the end of one request (a pipelining client) seed the next.
     std::string raw_request = std::move(conn.carried);
     conn.carried.clear();
-    if (!read_request(conn.fd, raw_request, conn.carried)) {
+    if (!read_request(conn.fd, raw_request, conn.carried,
+                      header_deadline_.count() > 0
+                          ? header_deadline_
+                          : std::chrono::milliseconds(std::chrono::seconds(kHeaderDeadlineSeconds)))) {
         return ServeResult::Close;
     }
 

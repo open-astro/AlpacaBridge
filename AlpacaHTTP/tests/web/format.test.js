@@ -316,6 +316,50 @@ test('serverClockError surfaces a synctime ErrorMessage and nothing on success (
     });
 });
 
+test('a failed synctime fetch clears the clock error text and keeps the offset (issue #2087)', () => {
+    withFormat(({ serverClockAfterRefresh }) => {
+        const refusal = 'Host clock is outside 2000-01-01..2100-01-01 UTC; set the time with POST ' +
+            '/management/v1/synctime.';
+        // The refusal sets the text the header shows as "clock error"; the offset stays.
+        const refused = serverClockAfterRefresh({ offsetMs: 1500, errorText: '' },
+                                                { ErrorNumber: 1035, ErrorMessage: refusal }, 1000);
+        assert.deepStrictEqual(refused, { offsetMs: 1500, errorText: refusal });
+        // The server then goes away: the stale refusal (and its Sync Time advice) must not stay.
+        assert.deepStrictEqual(serverClockAfterRefresh(refused, null, 2000), { offsetMs: 1500, errorText: '' });
+        // Before any good reply there is no offset to keep.
+        assert.deepStrictEqual(serverClockAfterRefresh({ offsetMs: null, errorText: refusal }, null, 0),
+                               { offsetMs: null, errorText: '' });
+        // A good reply sets the offset from the round-trip midpoint and clears the text.
+        assert.deepStrictEqual(serverClockAfterRefresh(refused, { ErrorNumber: 0, Value: 1700000000 }, 1700000000250),
+                               { offsetMs: -250, errorText: '' });
+        // A reply with no usable time keeps the old offset (open-astro#389, #511).
+        assert.deepStrictEqual(serverClockAfterRefresh({ offsetMs: 7, errorText: '' }, { ErrorNumber: 0, Value: 'x' }, 0),
+                               { offsetMs: 7, errorText: '' });
+        assert.deepStrictEqual(serverClockAfterRefresh({ offsetMs: 7, errorText: '' }, { ErrorNumber: 0, Value: 1e15 }, 0),
+                               { offsetMs: 7, errorText: '' });
+    });
+});
+
+test('the header clock takes a failed fetch through serverClockAfterRefresh, from fresh scripts (issue #2087)', () => {
+    const fs = require('node:fs');
+    const web = path.join(__dirname, '..', '..', 'web');
+    const app = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
+    const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
+    const start = app.search(/^async function refreshServerClockOffset\(/m);
+    assert.ok(start >= 0, 'app.js has no refreshServerClockOffset');
+    const body = app.slice(start, app.indexOf('\n}\n', start) + 2);
+    // The catch arm hands the helper a null result, and both values come back from it.
+    assert.match(body, /catch \(e\) \{\s*result = null;\s*\}/);
+    assert.match(body, /serverClockAfterRefresh\(\{ offsetMs: serverClockOffsetMs, errorText: serverClockErrorText \}/);
+    assert.match(body, /serverClockOffsetMs = next\.offsetMs;\s*serverClockErrorText = next\.errorText;/);
+    // app.js now calls a format.js function the cached format.js lacks: a browser
+    // holding the old copy would throw a ReferenceError on every refresh.
+    assert.ok(Number(html.match(/src="\/web\/format\.js\?v=(\d+)"/)[1]) > 18,
+        'invalidate the cached format.js that lacks serverClockAfterRefresh');
+    assert.ok(Number(html.match(/src="\/web\/app\.js\?v=(\d+)"/)[1]) > 51,
+        'invalidate the cached app.js that keeps a stale clock error');
+});
+
 test('deviceStatus maps Connected, LoadError, LastConnectError and unknown', () => {
     const { deviceStatus } = require('../../web/format.js');
     assert.strictEqual(deviceStatus({ Connected: true }).state, 'connected');

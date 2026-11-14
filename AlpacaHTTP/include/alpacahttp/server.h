@@ -116,6 +116,12 @@ public:
         send_buffer_bytes_ = send_buffer_bytes;
         send_min_bytes_per_second_ = min_bytes_per_second;
     }
+
+    // Test-only: shorten the header-phase deadline of every request (10 s,
+    // kHeaderDeadlineSeconds), so a test can trickle a request's headers past
+    // it without waiting out the production bound (issue #1694). Set before
+    // start().
+    void set_header_deadline_for_test(std::chrono::milliseconds deadline) { header_deadline_ = deadline; }
 #endif
 
     // Wait for server to stop
@@ -297,6 +303,9 @@ private:
     // when the test hook set one; zero keeps the override fixed.
     std::size_t send_min_bytes_per_second_{0};
     int send_buffer_bytes_{0};
+    // Header-phase deadline override; zero means kHeaderDeadlineSeconds
+    // (server.cpp). Only the test hook sets it.
+    std::chrono::milliseconds header_deadline_{0};
 
     void run_server();
     void reactor_loop();

@@ -2715,36 +2715,22 @@ let serverTimeZone = '';
 let serverClockErrorText = '';
 
 async function refreshServerClockOffset() {
+    // serverClockAfterRefresh() in web/format.js decides what the reply, or a
+    // failed fetch (result null), does to the offset and the error text.
+    let result = null;
+    let midpoint = 0;
     try {
         const t0 = Date.now();
         const response = await fetch(API_BASE + '/management/v1/synctime');
-        const result = await response.json();
-        serverClockErrorText = serverClockError(result);
-        if (result && result.ErrorNumber === 0 && isValidClockSeconds(result.Value)) {
-            // Value is whole seconds; assume the server read its clock halfway
-            // through the round trip.
-            //
-            // The type check is not paranoia about our own server (open-astro#389):
-            // without it a non-numeric Value makes serverClockOffsetMs NaN, which
-            // passes the `=== null` guard in updateServerClock(). From
-            // there new Date(NaN) is an Invalid Date, Intl throws, and the catch
-            // arm's own toISOString() throws RangeError in turn, so the whole tick
-            // throws once a second and the drift class is never applied. Leaving
-            // the previous offset in place instead is what the fetch-failure
-            // comment below already promises for every other bad answer.
-            //
-            // isValidClockSeconds() starts with Number.isFinite, which is false for
-            // every non-number, so a `typeof` test in front of it would be
-            // redundant. It also rejects a finite but out-of-range
-            // Value (e.g. 1e15 seconds), which would be an Invalid Date (#511).
-            const midpoint = t0 + (Date.now() - t0) / 2;
-            serverClockOffsetMs = (result.Value * 1000) - midpoint;
-        }
+        result = await response.json();
+        midpoint = t0 + (Date.now() - t0) / 2;
     } catch (e) {
-        // Keep the last known offset on a transient fetch failure - the clock
-        // keeps ticking locally rather than blanking to --:--:--. It only
-        // shows placeholders before the first successful fetch.
+        result = null;
     }
+    const next = serverClockAfterRefresh({ offsetMs: serverClockOffsetMs, errorText: serverClockErrorText },
+                                         result, midpoint);
+    serverClockOffsetMs = next.offsetMs;
+    serverClockErrorText = next.errorText;
     updateServerClock();
 }
 

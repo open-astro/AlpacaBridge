@@ -42,14 +42,35 @@ int main() {
     EXPECT(escape_for_log("\xC2\x80\xC2\x9F") == "\\xc2\\x80\\xc2\\x9f");
     EXPECT(escape_for_log("\xE2\x80\xAA") == "\\xe2\\x80\\xaa");
     EXPECT(escape_for_log("\xE2\x81\xA6\xE2\x81\xA9") == "\\xe2\\x81\\xa6\\xe2\\x81\\xa9");
-    // Neighbours pass through: U+00A0, U+2029, U+202F, U+2065, U+206A.
+    // Neighbours pass through: U+00A0, U+202F, U+2065, U+206A.
     EXPECT(escape_for_log("\xC2\xA0") == "\xC2\xA0");
-    EXPECT(escape_for_log("\xE2\x80\xA9") == "\xE2\x80\xA9");
     EXPECT(escape_for_log("\xE2\x80\xAF") == "\xE2\x80\xAF");
     EXPECT(escape_for_log("\xE2\x81\xA5") == "\xE2\x81\xA5");
     EXPECT(escape_for_log("\xE2\x81\xAA") == "\xE2\x81\xAA");
     // Ordinary non-ASCII text is unchanged.
     EXPECT(escape_for_log("\xC3\xA9\xE4\xB8\xAD\xE6\x96\x87") == "\xC3\xA9\xE4\xB8\xAD\xE6\x96\x87");
+    // The other invisible format controls (issue #2087): LRM U+200E, RLM
+    // U+200F, ALM U+061C, U+FEFF and the separators U+2028 and U+2029 can
+    // shift or break how a log line displays, so they are escaped too; their
+    // neighbours (U+200D, which joins emoji, U+2010, U+2027, U+061B, U+061D,
+    // U+FEFE, U+FF00) and the text around them pass through.
+    {
+        // case: escape_for_log escapes LRM, RLM, ALM, BOM and the line and paragraph separators
+        EXPECT(escape_for_log("a\xE2\x80\x8E"
+                              "b") == "a\\xe2\\x80\\x8eb");
+        EXPECT(escape_for_log("\xE2\x80\x8F") == "\\xe2\\x80\\x8f");
+        EXPECT(escape_for_log("x\xD8\x9Cy") == "x\\xd8\\x9cy");
+        EXPECT(escape_for_log("\xEF\xBB\xBF"
+                              "log") == "\\xef\\xbb\\xbflog");
+        EXPECT(escape_for_log("\xE2\x80\xA8") == "\\xe2\\x80\\xa8");
+        EXPECT(escape_for_log("\xE2\x80\xA9") == "\\xe2\\x80\\xa9");
+        EXPECT(escape_for_log("\xE2\x80\x8D") == "\xE2\x80\x8D");
+        EXPECT(escape_for_log("\xE2\x80\x90") == "\xE2\x80\x90");
+        EXPECT(escape_for_log("\xE2\x80\xA7") == "\xE2\x80\xA7");
+        EXPECT(escape_for_log("\xD8\x9B\xD8\x9D") == "\xD8\x9B\xD8\x9D");
+        EXPECT(escape_for_log("\xEF\xBB\xBE") == "\xEF\xBB\xBE");
+        EXPECT(escape_for_log("\xEF\xBC\x80") == "\xEF\xBC\x80");
+    }
     // A cut never splits an escaped sequence: the 3-byte control would end at 257.
     {  // case: cut does not split an escaped bidi control
         const std::string in = std::string(255, 'a') + "\xE2\x80\xAE";

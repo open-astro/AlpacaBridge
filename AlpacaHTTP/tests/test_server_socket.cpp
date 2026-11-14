@@ -1008,6 +1008,74 @@ int main() {
         cap_server.stop();
     }
 
+    // A client that trickles its request headers one byte at a time cannot hold
+    // a worker past the header deadline (issue #1694), on a fresh connection or
+    // on a keep-alive one's second request. Before the deadline each byte reset
+    // the 30 s per-recv timeout, so the only worker stayed in recv until the
+    // 120 s request deadline. The deadline is shortened to 500 ms; the trickle
+    // (one byte every 50 ms) would take 20 s to finish the headers.
+    {
+        // case: header deadline answers 408 to a trickling client and frees the worker
+        Watchdog watchdog(std::chrono::seconds(40), "header deadline on a trickling client");
+        alpacahttp::Config trickle_config;
+        trickle_config.set_http_port(0);
+        trickle_config.set_discovery_enabled(false);
+        trickle_config.set_thread_pool_size(1);
+        alpacahttp::Server trickle_server(trickle_config);
+        trickle_server.set_header_deadline_for_test(std::chrono::milliseconds(500));
+        trickle_server.start_async();
+        const auto trickle_port = wait_for_bound_port(trickle_server, 2000);
+        EXPECT(trickle_port != 0);
+
+        const std::string slow_head =
+            "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\nX-Slow: " + std::string(400, 'a');
+        timeval five_seconds{};
+        five_seconds.tv_sec = 5;
+        for (const bool after_a_request : {false, true}) {
+            int fd = connect_local(trickle_port);
+            EXPECT(fd >= 0);
+            EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &five_seconds, sizeof(five_seconds)) == 0);
+            std::string carry;
+            if (after_a_request) {
+                send_all(fd, kGet11);
+                EXPECT(read_one_response(fd, carry).find("Connection: keep-alive\r\n") != std::string::npos);
+            }
+            std::atomic<bool> stop_trickle{false};
+            const auto started = std::chrono::steady_clock::now();
+            std::thread trickler([&] {
+                for (char c : slow_head) {
+                    if (stop_trickle.load() || ::send(fd, &c, 1, MSG_NOSIGNAL) != 1) {
+                        return;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            });
+            const std::string answer = read_one_response(fd, carry);
+            const auto waited = std::chrono::steady_clock::now() - started;
+            stop_trickle = true;
+            trickler.join();
+            EXPECT(answer.rfind("HTTP/1.1 408 ", 0) == 0);
+            EXPECT(answer.substr(answer.find("\r\n\r\n") + 4) == "Request headers took too long to arrive");
+            EXPECT(waited >= std::chrono::milliseconds(400));
+            EXPECT(waited < std::chrono::seconds(3));
+            // Closed: EOF, or a reset when a trickled byte landed after the close.
+            char byte = 0;
+            const ssize_t after = ::recv(fd, &byte, 1, 0);
+            EXPECT(after == 0 || (after < 0 && errno == ECONNRESET));
+            ::close(fd);
+
+            // The only worker is free again.
+            int next_fd = connect_local(trickle_port);
+            EXPECT(next_fd >= 0);
+            EXPECT(setsockopt(next_fd, SOL_SOCKET, SO_RCVTIMEO, &five_seconds, sizeof(five_seconds)) == 0);
+            std::string next_carry;
+            send_all(next_fd, kGet11);
+            EXPECT(read_one_response(next_fd, next_carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(next_fd);
+        }
+        trickle_server.stop();
+    }
+
     // A connection is force-closed after kMaxRequestsPerConnection requests,
     // even though every one of them individually asked to keep the
     // connection alive -- the worker-pinning mitigation added in response to

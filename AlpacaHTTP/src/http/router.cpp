@@ -82,6 +82,12 @@ using alpacahttp::to_lower_copy;
 
 const std::filesystem::path kPersistedDevicesFile = std::filesystem::path("config") / "registered_devices.json";
 
+// An exception's text, made safe for a log line (issue #2087). Every log call
+// in this file passes `what()` through here: a message that quotes a decoded
+// client value would otherwise put its raw control bytes in the log and could
+// forge a line (#847). The 4096-byte cap matches the device-call path.
+std::string log_what(const std::exception& e) { return alpacahttp::util::escape_for_log(e.what(), 4096); }
+
 std::string log_level_to_string(LogLevel level) {
     switch (level) {
         case LogLevel::Trace: return "TRACE";
@@ -219,9 +225,12 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         lines.push_back(line);
     }
 
+    // A tab counts as indentation, as Config::load_config_from_yaml() reads
+    // it: a hand-edited key indented with a tab sits inside its section, so
+    // it neither ends the section nor is shadowed by a duplicate (#2087).
     auto leading_spaces = [](const std::string& text) {
         std::size_t count = 0;
-        while (count < text.size() && text[count] == ' ') {
+        while (count < text.size() && (text[count] == ' ' || text[count] == '\t')) {
             ++count;
         }
         return count;
@@ -307,7 +316,7 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
                     if (values[i].first == key) {
                         // Keep the old line's trailing comment, with the
                         // whitespace that sat before the '#'.
-                        std::string replacement(indent, ' ');
+                        std::string replacement = current_line.substr(0, indent);
                         replacement += key;
                         replacement += ": \"";
                         replacement += escape_yaml_string(values[i].second);
@@ -1236,7 +1245,7 @@ void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
             // the loop stays safe if that function ever loses noexcept; the
             // real guard is the try/catch inside the function itself.
             util::log_error("Motion watchdog check failed for telescope #" +
-                            std::to_string(telescope->get_device_number()) + ": " + ex.what());
+                            std::to_string(telescope->get_device_number()) + ": " + log_what(ex));
         }
     }
 }
@@ -1428,7 +1437,7 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
             return handle_device(request, match, server_transaction_id);
         }
     } catch (const std::exception& e) {
-        util::log_error("Router error: " + std::string(e.what()));
+        util::log_error("Router error: " + log_what(e));
         AlpacaResponse alpaca_response = make_error_response(
             0, server_transaction_id,
             util::ErrorCode::DRIVER_ERROR,
@@ -2083,11 +2092,11 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         // write that fails (persist error, management driver) stays HTTP 200.
         // A client can trigger the 400, so it logs at DEBUG (ADR 0007 rule 9).
         if (is_write && error_code == util::ErrorCode::INVALID_VALUE) {
-            util::log_debug("Refused description write: " + util::escape_for_log(e.what()));
+            util::log_debug("Refused description write: " + log_what(e));
             response.set_status(400, "Bad Request");
         } else {
             util::log_error(std::string(is_write ? "Error writing description: " : "Error getting description: ") +
-                            e.what());
+                            log_what(e));
         }
     }
 
@@ -2174,7 +2183,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 try {
                     device["Connected"] = !driver->get_connecting() && driver->get_connected();
                 } catch (const std::exception& e) {
-                    util::log_warning("Connected query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("Connected query failed for " + cap.name + ": " + log_what(e));
                 }
                 // LinkFault: the latched link-health text of a driver that keeps
                 // one. Connected stays true while it stands. Only when non-empty.
@@ -2183,21 +2192,21 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                         device["LinkFault"] = std::move(link_fault);
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("LinkFault query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("LinkFault query failed for " + cap.name + ": " + log_what(e));
                 }
                 try {
                     if (auto firmware = driver->get_device_firmware(); firmware.has_value()) {
                         device["Firmware"] = *firmware;
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("Firmware query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("Firmware query failed for " + cap.name + ": " + log_what(e));
                 }
                 try {
                     if (auto sdk = driver->get_device_sdk_version(); sdk.has_value()) {
                         device["SdkVersion"] = *sdk;
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("SDK version query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("SDK version query failed for " + cap.name + ": " + log_what(e));
                 }
                 // Decision 0024: the name is brand + model only, so the connection path and driver state a
                 // driver used to append to it (the Sky-Watcher EQMOD eps source) reach the web UI here.
@@ -2206,7 +2215,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                         device["Description"] = std::move(description);
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("Description query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("Description query failed for " + cap.name + ": " + log_what(e));
                 }
 
                 // Issue #358, the Platform 7 half. PUT /connect returns success
@@ -2229,7 +2238,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                         device["LastConnectError"] = reason;
                     }
                 } catch (const std::exception& e) {
-                    util::log_warning("Connect-error query failed for " + cap.name + ": " + e.what());
+                    util::log_warning("Connect-error query failed for " + cap.name + ": " + log_what(e));
                 }
             }
             // #1969: what registration said about this entry (a ZWO camera bound by
@@ -2244,7 +2253,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         alpaca_response.value = devices;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting configured devices: " + std::string(e.what()));
+        util::log_error("Error getting configured devices: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -2317,7 +2326,7 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
         alpaca_response.value = devices;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting failed devices: " + std::string(e.what()));
+        util::log_error("Error getting failed devices: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -2444,7 +2453,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         return dispatch_device_method(device, match.method_name, call);
 
     } catch (const std::exception& e) {
-        util::log_error("Device error: " + std::string(e.what()));
+        util::log_error("Device error: " + log_what(e));
         auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, error_code, e.what());
         apply_error_status(response, error_code);
@@ -4468,7 +4477,7 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
         
         util::log_info("API versions response: " + versions.dump());
     } catch (const std::exception& e) {
-        util::log_error("Error getting API versions: " + std::string(e.what()));
+        util::log_error("Error getting API versions: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4502,7 +4511,7 @@ Response Router::handle_build_info(const Request& request, std::uint32_t server_
         alpaca_response.value = info;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting build info: " + std::string(e.what()));
+        util::log_error("Error getting build info: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4535,7 +4544,7 @@ Response Router::handle_device_catalog(const Request& request, std::uint32_t ser
         alpaca_response.value = catalog_json::describe_json(catalog_);
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting device catalog: " + std::string(e.what()));
+        util::log_error("Error getting device catalog: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4588,7 +4597,7 @@ Response Router::handle_thermal_cameras(const Request& request, std::uint32_t se
         alpaca_response.value = std::move(list);
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error listing thermal switch cameras: " + std::string(e.what()));
+        util::log_error("Error listing thermal switch cameras: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -4638,7 +4647,7 @@ Response Router::handle_attached_cameras(const Request& request, std::uint32_t s
         alpaca_response.value = std::move(list);
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error listing attached cameras: " + std::string(e.what()));
+        util::log_error("Error listing attached cameras: " + log_what(e));
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
         response.set_body(alpaca_response);
@@ -5068,7 +5077,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
             log_alpaca_exception("Error configuring device", *alpaca);
         } else {
-            util::log_error("Error configuring device: " + util::escape_for_log(e.what(), 4096));
+            util::log_error("Error configuring device: " + log_what(e));
         }
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
@@ -5212,7 +5221,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
             log_alpaca_exception("Error removing device", *alpaca);
         } else {
-            util::log_error("Error removing device: " + util::escape_for_log(e.what(), 4096));
+            util::log_error("Error removing device: " + log_what(e));
         }
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what());
@@ -5331,7 +5340,7 @@ Response Router::handle_update_device(const Request& request, std::uint32_t serv
         if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
             log_alpaca_exception("Error updating device", *alpaca);
         } else {
-            util::log_error("Error updating device: " + util::escape_for_log(e.what(), 4096));
+            util::log_error("Error updating device: " + log_what(e));
         }
         response.set_body(make_error_response(client_tx_id, server_tx_id, util::exception_to_error_code(e), e.what()));
         return response;
@@ -5442,8 +5451,7 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
                 util::save_runtime_log_level(*parsed_level);
             } catch (const std::exception& save_err) {
                 // Persistence is best-effort; failure must not block the API.
-                util::log_warning(std::string("Failed to persist log level: ") +
-                                  save_err.what());
+                util::log_warning(std::string("Failed to persist log level: ") + log_what(save_err));
             }
             util::log_info("Log level set to " + log_level_to_string(*parsed_level));
             return send_payload(client_tx_id);
@@ -5589,7 +5597,7 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             // Partial deletion is possible — tell the caller exactly how far
             // it got rather than leaving the outcome ambiguous. Details (which
             // can include errno text) go to the server log, not the response.
-            util::log_warning("Delete log files failed: " + std::string(e.what()));
+            util::log_warning("Delete log files failed: " + log_what(e));
             AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
                                                      "Failed to delete log files (deleted " + std::to_string(deleted) +
                                                          " of " + std::to_string(files.size()) +
@@ -6374,8 +6382,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
     } catch (const std::exception& ex) {
         // Unknown device_type_str: answer not supported.
         util::log_debug("register_device_from_config: device type \"" + util::escape_for_log(device_type_str) +
-                        "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
-                        "); the device is answered as not supported");
+                        "\" is not catalog-recognized (" + log_what(ex) + "); the device is answered as not supported");
     }
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
@@ -6476,8 +6483,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                                 (void)catalog_json::config_from_json(single, view->fields);
                             } catch (const std::exception& ex) {
                                 util::log_debug("register_device_from_config: ignoring field " + std::string(f.key) +
-                                                " of a stored " + subject + " as a peer (" +
-                                                util::escape_for_log(ex.what()) + ")");
+                                                " of a stored " + subject + " as a peer (" + log_what(ex) + ")");
                                 neighbour.erase(f.key);
                             }
                         }
@@ -6485,7 +6491,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                             {other_key->device_number, catalog_json::config_from_json(neighbour, view->fields)});
                     } catch (const std::exception& ex) {
                         util::log_debug("register_device_from_config: ignoring a stored " + subject + " as a peer (" +
-                                        util::escape_for_log(ex.what()) + ")");
+                                        log_what(ex) + ")");
                     }
                 }
             }
@@ -6595,8 +6601,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     } catch (const std::exception& ex) {
         // Unknown device_type: only the vendor-agnostic keys below are kept.
         util::log_debug("sanitize_device_config: device type \"" + util::escape_for_log(device_type) +
-                        "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
-                        "); only the vendor-agnostic keys are kept");
+                        "\" is not catalog-recognized (" + log_what(ex) + "); only the vendor-agnostic keys are kept");
     }
 
     copy_if_present("responseTimeoutMs");
@@ -6762,7 +6767,7 @@ bool Router::save_persisted_devices() const {
         alpacacore::util::write_file_atomic(kPersistedDevicesFile, payload.dump(4));
         return true;
     } catch (const std::exception& e) {
-        util::log_error("Failed to persist registered devices: " + std::string(e.what()));
+        util::log_error("Failed to persist registered devices: " + log_what(e));
         return false;
     }
 }
@@ -6815,7 +6820,7 @@ void Router::load_persisted_devices() {
                 std::error_code rename_ec;
                 std::filesystem::rename(kPersistedDevicesFile, aside, rename_ec);
                 util::log_error(
-                    "Registered devices file is unreadable (" + std::string(parse_error.what()) + "); " +
+                    "Registered devices file is unreadable (" + log_what(parse_error) + "); " +
                     (rename_ec ? "could not set it aside: " + rename_ec.message() : "kept as " + aside.string()));
                 persisted_devices_.clear();
                 return;
@@ -6839,7 +6844,7 @@ void Router::load_persisted_devices() {
             }
             live_unique_ids = std::move(taken);
         } catch (const std::exception& e) {
-            util::log_error("Failed to load registered devices: " + std::string(e.what()));
+            util::log_error("Failed to load registered devices: " + log_what(e));
             return;
         }
     }
@@ -6880,7 +6885,7 @@ void Router::load_persisted_devices() {
                 store_learned_config(entry, learned_config, std::string());
             }
         } catch (const std::exception& e) {
-            util::log_error("Failed to load persisted device: " + std::string(e.what()));
+            util::log_error("Failed to load persisted device: " + log_what(e));
         }
     }
 
@@ -6896,7 +6901,7 @@ void Router::load_persisted_devices() {
             try {
                 device->adopt_legacy_state();
             } catch (const std::exception& e) {
-                util::log_warning("Could not move the saved state of " + device->get_unique_id() + ": " + e.what());
+                util::log_warning("Could not move the saved state of " + device->get_unique_id() + ": " + log_what(e));
             }
         }
     }
@@ -6908,7 +6913,7 @@ void Router::load_persisted_devices() {
         try {
             device->apply_power_on_state(new_boot);
         } catch (const std::exception& e) {
-            util::log_warning("Could not apply the power-on state of " + device->get_unique_id() + ": " + e.what());
+            util::log_warning("Could not apply the power-on state of " + device->get_unique_id() + ": " + log_what(e));
         }
     }
 }
