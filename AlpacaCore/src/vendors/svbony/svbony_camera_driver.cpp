@@ -118,7 +118,9 @@ public:
         (void)stop_and_join_exposure();
         if (link_.is_open() || opened_.load()) {
             try {
-                set_connected(false);  // also tears down a camera whose link was lost
+                // Qualified: virtual dispatch is gone in a destructor anyway; saying so explicitly keeps
+                // clang-analyzer's VirtualCall happy. Also tears down a camera whose link was lost.
+                SVBONYCameraDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SVBONY", "Error during destruction: " + std::string(e.what()));
             }
@@ -1146,7 +1148,7 @@ public:
                     // Disconnect or Connect, as a loss that lands just as the body returns does.
                     try {
                         driver.close_handle_after_body();
-                    } catch (...) {
+                    } catch (...) {  // NOLINT(bugprone-empty-catch)
                     }
                 }
             } close_if_lost{*this};
