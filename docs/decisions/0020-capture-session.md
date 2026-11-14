@@ -35,7 +35,7 @@ Symbol: `CaptureSession`
 | Player One camera | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1605 | pilot; no `detach()` left |
 | ZWO camera | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | partial | #1981 | the exposure runs in a session; rule 5: `ASIGetDataAfterExp` has no timeout, so a disconnect waits for one whole transfer |
 | ToupTek camera | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | partial | #1973 | the exposure runs in a session; the body still waits in `Toupcam_WaitImageV4` (the SDK stop wakes it), not `CaptureControl::wait_for` (rule 4), until the wrapper has a non-blocking pull; Altair rides this driver |
-| SVBONY camera | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | planned | | |
+| SVBONY camera | `AlpacaCore/src/vendors/svbony/svbony_camera_driver.cpp` | adopted | #1980 | |
 | gphoto camera | `AlpacaCore/src/vendors/gphoto/gphoto_camera_driver.cpp` | planned | | adds the actual exposure length (rule 7) |
 | QHY camera | `AlpacaCore/src/vendors/qhy/qhy_camera_driver.cpp` | planned | | last: `GetQHYCCDSingleFrame` has no timeout, and its `detach()` sites go with the slice |
 

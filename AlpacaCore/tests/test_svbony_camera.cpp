@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #include <alpacacore/version.h>
 
@@ -21,11 +22,14 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "driver_rig.h"
 #include "fake_svbony_sdk.h"
+#include "fake_task_clock.h"
 #include "getter_stall_probe.h"
 #include "locked_svbony_sdk.h"
 
@@ -514,7 +518,8 @@ TEST_CASE("SVBONY Camera - PercentCompleted only while Exposing", "[svbony][came
         REQUIRE(sdk.wait_for_video_data(2s));
         alpacacore::test::require_percent_completed_available(*camera);
     }
-    SECTION("in the Error state after an unconfirmed capture stop") {
+    // Decision 0020 rule 3: the failed exposure reads Idle; ImageReady raises the stop's message.
+    SECTION("idle after an unconfirmed capture stop") {
         sdk.block_video_data();
         camera->start_exposure(0.001, true);
         REQUIRE(sdk.wait_for_video_data(2s));
@@ -523,12 +528,7 @@ TEST_CASE("SVBONY Camera - PercentCompleted only while Exposing", "[svbony][came
         const int reads = sdk.completed_video_data_reads();
         sdk.release_video_data();
         REQUIRE(sdk.wait_for_completed_video_data(reads + 1, 2s));
-        const auto deadline = std::chrono::steady_clock::now() + 2s;
-        while (camera->get_camera_state() != alpacacore::CameraState::Error &&
-               std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(1ms);
-        }
-        REQUIRE(camera->get_camera_state() == alpacacore::CameraState::Error);
+        REQUIRE(camera->get_camera_state() == alpacacore::CameraState::Idle);
         alpacacore::test::require_percent_completed_unavailable(*camera);
     }
 }
@@ -575,4 +575,530 @@ TEST_CASE("SVBONY Camera Driver - an unknown SensorName is empty", "[svbony][cam
     fake.set_camera_present(false);
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
     CHECK(driver->get_sensor_name().empty());
+}
+
+// --- Decision 0020: the exposure runs in a util::CaptureSession (issue #1980) ---------------------------------
+
+namespace {
+
+using namespace std::chrono_literals;
+
+// Real time: each waits for a driver thread (the exposure body or the connection task), bounded at 2 s.
+template <typename Pred>
+bool eventually(Pred pred, std::chrono::milliseconds bound = 2000ms) {
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    while (!pred()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(1ms);
+    }
+    return true;
+}
+
+void wait_ready(alpacacore::CameraDriver& camera) {
+    REQUIRE(eventually([&] { return camera.get_image_ready(); }));
+}
+
+// Polls ImageReady until it raises and returns the exception's code and text; {0, ""} when it never does.
+std::pair<int, std::string> wait_for_raise(const alpacacore::CameraDriver& camera) {
+    std::pair<int, std::string> raised{0, ""};
+    static_cast<void>(eventually([&] {
+        try {
+            static_cast<void>(camera.get_image_ready());
+            return false;
+        } catch (const alpacacore::AlpacaException& ex) {
+            raised = {ex.error_code(), ex.what()};
+            return true;
+        }
+    }));
+    return raised;
+}
+
+std::pair<int, std::string> error_of(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        return {ex.error_code(), ex.what()};
+    }
+    return {0, ""};
+}
+
+std::unique_ptr<alpacacore::CameraDriver> svbony_camera_on_clock(alpacacore::test::FakeSVBSDK& sdk,
+                                                                 alpacacore::test::FakeTaskClock& clock) {
+    auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk, clock);
+    camera->set_connected(true);
+    REQUIRE(camera->get_connected());
+    return camera;
+}
+
+// Declared after the camera, so it runs first: a held read is released before the driver joins its body.
+struct ReleaseReadOnExit {
+    alpacacore::test::FakeSVBSDK& sdk;
+    ~ReleaseReadOnExit() {
+        sdk.set_persistent_failure("stop_video_capture", false);
+        sdk.release_video_data();
+    }
+};
+
+}  // namespace
+
+// Decision 0020 rule 3: the SDK text is kept on ImageReady and ImageArray, CameraState reads Idle, an idle
+// AbortExposure clears nothing, and the next StartExposure clears it.
+TEST_CASE("SVBONY Camera Driver - a failed frame read keeps its message until the next StartExposure",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_next("get_video_data");
+    camera->start_exposure(0.001, true);
+
+    const auto [code, text] = wait_for_raise(*camera);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(text.find("scripted one-shot SVBONY failure: get_video_data") != std::string::npos);
+    const auto array_error = error_of([&] { static_cast<void>(camera->get_image_array()); });
+    CHECK(array_error.first == alpacacore::AlpacaError::DriverException);
+    CHECK(array_error.second == text);
+    CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
+
+    camera->abort_exposure();  // nothing is exposing: a no-op
+    CHECK(error_of([&] { static_cast<void>(camera->get_image_ready()); }).second == text);
+
+    camera->start_exposure(0.001, true);
+    wait_ready(*camera);
+    CHECK(camera->get_image_array().data.size() == 128);
+}
+
+// Decision 0020 rules 3 and 8: a reconnect clears the kept failure and LastExposure*.
+TEST_CASE("SVBONY Camera Driver - reconnect clears a kept exposure failure and the last exposure",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    camera->start_exposure(0.001, true);
+    wait_ready(*camera);
+    REQUIRE(camera->get_last_exposure_duration() == 0.001);
+    sdk.fail_next("get_video_data");
+    camera->start_exposure(0.001, true);
+    REQUIRE(wait_for_raise(*camera).first == alpacacore::AlpacaError::DriverException);
+
+    camera->set_connected(false);
+    camera->set_connected(true);
+    alpacacore::test::require_last_exposure_unset(*camera);
+    CHECK_FALSE(camera->get_image_ready());
+}
+
+// Decision 0020 rule 2: one body per camera; the running exposure is not replaced.
+TEST_CASE("SVBONY Camera Driver - StartExposure during an exposure is refused and the exposure finishes",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    ReleaseReadOnExit release{sdk};
+    sdk.block_video_data();
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+
+    require_alpaca_error([&] { camera->start_exposure(0.002, true); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(sdk.call_count("start_video_capture") == 1);
+    CHECK(camera->get_camera_state() == alpacacore::CameraState::Exposing);
+    sdk.release_video_data();
+    wait_ready(*camera);
+    CHECK(camera->get_last_exposure_duration() == 0.001);
+    CHECK(sdk.call_count("start_video_capture") == 1);
+}
+
+// Decision 0020 rules 3 and 5: an SDK stop that fails keeps its text for ImageReady while CameraState reads Idle;
+// StartExposure and the settings writers refuse until a later stop works.
+TEST_CASE("SVBONY Camera Driver - an unconfirmed capture stop keeps the stop message and reads Idle",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    ReleaseReadOnExit release{sdk};
+    sdk.block_video_data();
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+    sdk.set_persistent_failure("stop_video_capture");
+    const auto abort_error = error_of([&] { camera->abort_exposure(); });
+    CHECK(abort_error.first == alpacacore::AlpacaError::DriverException);
+    CHECK(abort_error.second.find("AbortExposure could not stop SVBONY video capture") != std::string::npos);
+    const int reads = sdk.completed_video_data_reads();
+    sdk.release_video_data();
+    REQUIRE(sdk.wait_for_completed_video_data(reads + 1, 2s));
+
+    CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
+    const auto [code, text] = wait_for_raise(*camera);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(text.find("capture stop was not confirmed") != std::string::npos);
+    require_alpaca_error([&] { camera->start_exposure(0.001, true); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { camera->set_gain(30); }, alpacacore::AlpacaError::DriverException);
+
+    sdk.set_persistent_failure("stop_video_capture", false);
+    camera->abort_exposure();  // retries the stop the camera could not confirm
+    camera->start_exposure(0.001, true);
+    wait_ready(*camera);
+    CHECK(camera->get_image_array().data.size() == 128);
+}
+
+// Decision 0020 rule 4 and issue #1477: PercentCompleted runs on the task clock from the capture start.
+TEST_CASE("SVBONY Camera Driver - PercentCompleted follows the task clock while exposing",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_on_clock(sdk, clock);
+    ReleaseReadOnExit release{sdk};
+    sdk.set_max_read_wait(5s);  // real-time bound for the held read, released below
+    sdk.block_video_data();
+    camera->start_exposure(10.0, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+
+    CHECK(camera->get_percent_completed_checked() == 0.0);
+    clock.advance(5s);
+    CHECK(camera->get_percent_completed_checked() == Catch::Approx(50.0).margin(0.01));
+    CHECK(camera->get_camera_state() == alpacacore::CameraState::Exposing);
+    camera->abort_exposure();
+}
+
+// svbony.instructions.md (issue #1477): the duration is the rounded and clamped exposure register.
+TEST_CASE("SVBONY Camera Driver - LastExposureDuration is the clamped exposure register",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    camera->start_exposure(0.0, true);  // below the SDK minimum of 1 us
+    wait_ready(*camera);
+    CHECK(camera->get_last_exposure_duration() == 0.000001);
+    camera->start_exposure(0.0010004, true);  // rounds to 1000 us
+    wait_ready(*camera);
+    CHECK(camera->get_last_exposure_duration() == 0.001);
+}
+
+// Decision 0020 rule 8: the connect reopens the session the disconnect closed.
+TEST_CASE("SVBONY Camera Driver - a StartExposure after a reconnect runs",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    camera->set_connected(false);
+    camera->set_connected(true);
+    camera->start_exposure(0.001, true);
+    wait_ready(*camera);
+    CHECK(camera->get_image_array().data.size() == 128);
+}
+
+// Decision 0020 rule 8: a StartExposure that passed its checks and waits in the session for an earlier body (one the
+// watchdog failed, still in the SDK) is refused with NotConnected by a Disconnect and runs no body. The earlier
+// body's own capture stop is held until the refused start has returned, so it cannot leave the session idle before
+// the Disconnect closes it.
+TEST_CASE("SVBONY Camera Driver - a StartExposure that raced a disconnect raises NotConnected and runs no body",
+          "[svbony][camera][unit][fake-sdk][capture-session]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_on_clock(sdk, clock);
+    ReleaseReadOnExit release{sdk};
+    sdk.set_max_read_wait(5s);
+    sdk.block_video_data();
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+    clock.advance(16s);  // past exposure + 15 s: the watchdog fails the exposure; its body is still in the read
+    REQUIRE(camera->get_camera_state() == alpacacore::CameraState::Idle);
+
+    const auto test_thread = std::this_thread::get_id();
+    std::atomic<bool> start_returned{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call == "stop_video_capture" && std::this_thread::get_id() != test_thread) {
+            alpacacore::test::hold_until(start_returned);  // the body's own stop
+        }
+    };
+    std::atomic<int> start_code{-1};
+    std::thread starter([&] {
+        start_code = error_of([&] { camera->start_exposure(0.001, true); }).first;
+        start_returned = true;
+    });
+    struct JoinStarter {
+        std::thread& thread;
+        std::atomic<bool>& returned;
+        ~JoinStarter() {
+            returned = true;
+            if (thread.joinable()) thread.join();
+        }
+    } join_starter{starter, start_returned};
+    REQUIRE(clock.wait_for_waiters(1, 2s));  // the start waits in the session for the earlier body
+
+    camera->set_connected(false);
+    starter.join();
+    CHECK(start_code.load() == alpacacore::AlpacaError::NotConnected);
+    CHECK(sdk.call_count("start_video_capture") == 1);
+    CHECK(sdk.open_count() == 0);
+    sdk.before_call = nullptr;
+}
+
+// --- Decision 0009: a removal code from the SDK is a lost link (issue #1986) ---------------------------------
+
+// Rule 1 and rule 2: a removal from a control read drops Connected, members answer NotConnected with the SDK
+// text, DeviceState is empty and the dead handle is closed.
+TEST_CASE("SVBONY Camera Driver - a removal error on a control read drops Connected",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_with_removal("get_control_value");
+
+    const auto [code, text] = error_of([&] { static_cast<void>(camera->get_gain()); });
+    CHECK(code == alpacacore::AlpacaError::NotConnected);
+    CHECK(text.find("SVB_ERROR_CAMERA_REMOVED") != std::string::npos);
+    CHECK_FALSE(camera->get_connected());
+    CHECK(camera->get_device_state().empty());
+    CHECK(sdk.call_count("close_camera") == 1);
+    CHECK(sdk.open_count() == 0);
+    CHECK(camera->get_link_fault() == text);
+    for (const auto& member : std::vector<std::function<void()>>{
+             [&] { static_cast<void>(camera->get_gain()); },
+             [&] { camera->start_exposure(0.001, true); },
+             [&] { static_cast<void>(camera->get_image_ready()); },
+             [&] { static_cast<void>(camera->get_camera_state()); },
+             [&] { camera->abort_exposure(); },
+         }) {
+        const auto error = error_of(member);
+        CHECK(error.first == alpacacore::AlpacaError::NotConnected);
+        CHECK(error.second == text);
+    }
+    const int reads = sdk.call_count("get_control_value");
+    static_cast<void>(error_of([&] { static_cast<void>(camera->get_gain()); }));
+    CHECK(sdk.call_count("get_control_value") == reads);  // nothing reaches the SDK while lost
+}
+
+// Rule 1: the control-write call-site group.
+TEST_CASE("SVBONY Camera Driver - a removal error on a control write drops Connected",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_with_removal("set_control_value");
+
+    require_alpaca_error([&] { camera->set_gain(20); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(camera->get_connected());
+    CHECK(sdk.open_count() == 0);
+    CHECK(camera->get_link_fault().find("set_control_value: SVB_ERROR_CAMERA_REMOVED") != std::string::npos);
+}
+
+// Rule 1: the pulse-guide call-site group (a call made without the driver mutex).
+TEST_CASE("SVBONY Camera Driver - a removal error from a pulse guide drops Connected",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_with_removal("pulse_guide");
+
+    require_alpaca_error([&] { camera->pulse_guide(0, 10); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(camera->get_connected());
+    CHECK_FALSE(camera->get_is_pulse_guiding());
+    CHECK(sdk.open_count() == 0);
+}
+
+// Rule 2 with decision 0020 rule 3: the body ends at the removal with no further read, Connected reads false, the
+// session getters answer NotConnected with the SDK text, and the body closes the dead handle on its way out.
+TEST_CASE("SVBONY Camera Driver - an exposure in flight when the camera goes fails and ends the body",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    ReleaseReadOnExit release{sdk};
+    sdk.block_video_data();
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+    sdk.remove_during_held_read();
+    sdk.release_video_data();
+
+    REQUIRE(eventually([&] { return sdk.call_count("close_camera") == 1; }));  // the body's way out
+    const int reads = sdk.call_count("get_video_data");
+    CHECK_FALSE(camera->get_connected());
+    CHECK(camera->get_link_fault() == "SVBGetVideoData: SVB_ERROR_CAMERA_REMOVED");
+    for (const auto& member : std::vector<std::function<void()>>{
+             [&] { static_cast<void>(camera->get_image_ready()); },
+             [&] { static_cast<void>(camera->get_image_array()); },
+             [&] { static_cast<void>(camera->get_camera_state()); },
+         }) {
+        const auto error = error_of(member);
+        CHECK(error.first == alpacacore::AlpacaError::NotConnected);
+        CHECK(error.second == "SVBGetVideoData: SVB_ERROR_CAMERA_REMOVED");
+    }
+    CHECK(sdk.call_count("get_video_data") == reads);  // no retry after the loss
+    CHECK(reads == 1);
+    CHECK(sdk.open_count() == 0);
+}
+
+// Rule 1 negatives: only NotConnected from a device call (the wrapper's CAMERA_REMOVED or CAMERA_CLOSED) is a loss.
+// SVB_ERROR_INVALID_ID (InvalidValue), a generic error, a run of them past the staleness bound and a read timeout
+// keep the link.
+TEST_CASE("SVBONY Camera Driver - only a removal code is a lost link", "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_on_clock(sdk, clock);
+
+    SECTION("an invalid-id error is not a loss") {
+        sdk.fail_next_with("get_control_value", alpacacore::AlpacaError::InvalidValue,
+                           "SVBGetControlValue: SVB_ERROR_INVALID_ID");
+        require_alpaca_error([&] { static_cast<void>(camera->get_gain()); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("a generic SDK error is not a loss") {
+        sdk.fail_next("get_control_value");
+        require_alpaca_error([&] { static_cast<void>(camera->get_gain()); }, alpacacore::AlpacaError::DriverException);
+    }
+    SECTION("repeated failures past the staleness bound are not a loss") {
+        for (int i = 0; i < 10; ++i) {
+            sdk.fail_next("get_control_value");
+            require_alpaca_error([&] { static_cast<void>(camera->get_gain()); },
+                                 alpacacore::AlpacaError::DriverException);
+        }
+        clock.advance(alpacacore::util::kLinkStalenessBound + 1s);
+    }
+    SECTION("a frame-read timeout is not a loss") {
+        sdk.timeout_next_video_data(3);
+        camera->start_exposure(0.001, true);
+        wait_ready(*camera);
+    }
+    CHECK(camera->get_connected());
+    CHECK(camera->get_link_fault().empty());
+    CHECK(sdk.call_count("close_camera") == 0);
+    CHECK(camera->get_gain() == 10);
+}
+
+// Rule 1: the driver's own NotConnected (a member called while disconnected) is not evidence and sets no fault.
+TEST_CASE("SVBONY Camera Driver - the driver's own NotConnected is not a loss",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+    require_alpaca_error([&] { static_cast<void>(camera->get_gain()); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(camera->get_link_fault().empty());
+    camera->set_connected(true);
+    camera->set_connected(false);
+    const auto error = error_of([&] { static_cast<void>(camera->get_gain()); });
+    CHECK(error.first == alpacacore::AlpacaError::NotConnected);
+    CHECK(error.second == "Camera not connected");
+    CHECK(camera->get_link_fault().empty());
+    camera->set_connected(true);
+    CHECK(camera->get_connected());
+}
+
+// Rule 4: only the client relinks; a Connect after a loss opens the camera afresh, the kept loss failure and the
+// last exposure are gone, and an exposure runs.
+TEST_CASE("SVBONY Camera Driver - a Connect after a loss reconnects and exposes",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    ReleaseReadOnExit release{sdk};
+    camera->start_exposure(0.001, true);
+    wait_ready(*camera);
+    sdk.block_video_data();
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+    sdk.remove_during_held_read();
+    sdk.release_video_data();
+    REQUIRE(eventually([&] { return sdk.call_count("close_camera") == 1; }));
+    REQUIRE_FALSE(camera->get_connected());
+    CHECK(sdk.call_count("open_camera") == 1);  // no autonomous reopen
+
+    camera->set_connected(true);
+    CHECK(camera->get_connected());
+    CHECK(sdk.call_count("open_camera") == 2);
+    CHECK(sdk.open_count() == 1);
+    CHECK(camera->get_link_fault().empty());
+    CHECK_FALSE(camera->get_image_ready());
+    alpacacore::test::require_last_exposure_unset(*camera);
+    camera->start_exposure(0.001, true);
+    wait_ready(*camera);
+    CHECK(camera->get_image_array().data.size() == 128);
+}
+
+// Rule 5: get_link_fault() keeps the SDK text after the loss, on the task clock too, until a Disconnect or a
+// Connect clears it.
+TEST_CASE("SVBONY Camera Driver - LinkFault keeps the loss reason until the next Connect or Disconnect",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_camera_on_clock(sdk, clock);
+    sdk.fail_with_removal("get_control_value");
+    require_alpaca_error([&] { static_cast<void>(camera->get_gain()); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(camera->get_link_fault() == "get_control_value: SVB_ERROR_CAMERA_REMOVED");
+    clock.advance(1h);
+    CHECK(camera->get_link_fault() == "get_control_value: SVB_ERROR_CAMERA_REMOVED");
+
+    SECTION("a Disconnect clears it") {
+        camera->set_connected(false);
+        CHECK(camera->get_link_fault().empty());
+        CHECK_FALSE(camera->get_connected());
+    }
+    SECTION("a Connect clears it") {
+        camera->set_connected(true);
+        CHECK(camera->get_link_fault().empty());
+        CHECK(camera->get_connected());
+    }
+}
+
+// Rule 4: the close of the dead handle (at the loss, with no exposure body running) that meets a removal error is
+// logged and swallowed, the Disconnect of the lost camera completes and clears what the connect published, and the
+// next Connect opens the camera.
+TEST_CASE("SVBONY Camera Driver - a Disconnect of a lost camera completes when the close meets a removal error",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_with_removal("close_camera");
+    sdk.fail_with_removal("get_control_value");
+    const auto [code, text] = error_of([&] { static_cast<void>(camera->get_gain()); });
+    CHECK(code == alpacacore::AlpacaError::NotConnected);
+    CHECK(text == "get_control_value: SVB_ERROR_CAMERA_REMOVED");  // the loss, not the close
+    CHECK(sdk.call_count("close_camera") == 1);
+    CHECK(camera->get_device_firmware().has_value());  // what the connect read stays until the Disconnect
+
+    camera->set_connected(false);
+    CHECK_FALSE(camera->get_connected());
+    CHECK(camera->get_link_fault().empty());
+    CHECK_FALSE(camera->get_device_firmware().has_value());
+    camera->set_connected(true);
+    CHECK(camera->get_connected());
+    CHECK(camera->get_gain() == 10);
+}
+
+// Rule 4: a camera pulled at idle answers no call until the client's Disconnect, whose own SDK stop and close then
+// meet the removal codes. The Disconnect completes (the close's removal is logged and swallowed), and the next
+// Connect opens the camera.
+TEST_CASE("SVBONY Camera Driver - a Disconnect completes when its own close reports the camera removed",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_with_removal("stop_video_capture");
+    sdk.fail_with_removal("close_camera");
+
+    const auto error = error_of([&] { camera->set_connected(false); });
+    CHECK(error.first == 0);
+    CHECK(error.second.empty());
+    CHECK_FALSE(camera->get_connected());
+    CHECK(camera->get_link_fault().empty());
+    CHECK(sdk.call_count("close_camera") == 1);
+    camera->set_connected(true);
+    CHECK(camera->get_connected());
+    CHECK(camera->get_gain() == 10);
+}
+
+// Rule 4 (#1289): with the link lost, a Disconnect queued against the client's Connect in flight still reaches the
+// driver, so the reopened camera is closed again.
+TEST_CASE("SVBONY Camera Driver - a Disconnect queued against a Connect in flight reaches the driver",
+          "[svbony][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    sdk.fail_with_removal("get_control_value");
+    require_alpaca_error([&] { static_cast<void>(camera->get_gain()); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE_FALSE(camera->get_connected());
+
+    std::atomic<bool> open_entered{false};
+    std::atomic<bool> release_open{false};
+    sdk.before_call = [&](const std::string& call) {
+        if (call != "open_camera") return;
+        open_entered = true;
+        alpacacore::test::hold_until(release_open);
+    };
+    struct ReleaseOpenOnExit {
+        std::atomic<bool>& release;
+        ~ReleaseOpenOnExit() { release = true; }
+    } release_on_exit{release_open};
+    camera->connect();
+    REQUIRE(alpacacore::test::wait_for_flag(open_entered));  // the relink is inside the SDK open
+    camera->disconnect();
+    release_open = true;
+    REQUIRE(eventually([&] { return !camera->get_connecting(); }, 5000ms));
+    CHECK_FALSE(camera->get_connected());
+    CHECK(sdk.call_count("open_camera") == 2);
+    CHECK(sdk.open_count() == 0);
+    CHECK(sdk.call_count("close_camera") == 2);  // the loss, then the queued Disconnect
+    sdk.before_call = nullptr;
 }

@@ -90,7 +90,7 @@ struct SVBROIFormat {
  * through the factory overload in svbony_camera_driver.h, so the driver runs
  * without the vendor SDK. The destructor is protected and non-virtual: nothing
  * owns an SVBSDK*, the driver holds a reference. The seam must outlive every
- * driver (and its joined exposure worker).
+ * driver (and the exposure body its CaptureSession joins).
  */
 class SVBSDK {
 public:
