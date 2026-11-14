@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -302,6 +303,85 @@ TEST_CASE("Gemini Focuser Driver - a failed TempComp read raises DriverException
     }
     CHECK(code == alpacacore::AlpacaError::DriverException);
 
+    driver->set_connected(false);
+}
+
+// Decision 0016 rule 3 (#1840): MaxStep is a limit, read once at the end of connect and published; MaxStep and
+// MaxIncrement never wait on the wire.
+// Falsified by: gemini_focuser_driver.cpp get_max_step() returns protocol_.get_max_position() again (every MaxStep
+//   and MaxIncrement read sends :08#).
+TEST_CASE("Gemini Focuser Driver - MaxStep is read once at connect and served without the wire (#1840)",
+          "[gemini][focuser][unit][fake]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(fake.count(":08#") == 1);
+
+    for (int i = 0; i < 3; ++i) {
+        CHECK(driver->get_max_step() == 50000);
+        CHECK(driver->get_max_increment() == 50000);
+    }
+    CHECK(fake.count(":08#") == 1);
+
+    // A reconnect reads it again, once.
+    driver->set_connected(false);
+    require_alpaca_error([&]() { (void)driver->get_max_step(); }, alpacacore::AlpacaError::NotConnected);
+    fake.set_max_position(42000);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_max_step() == 42000);
+    CHECK(fake.count(":08#") == 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: gemini_focuser_driver.cpp move() reads protocol_.get_max_position() again for its clamp (the move
+//   then stops at the focuser's new 30000 and sends a second :08#).
+TEST_CASE("Gemini Focuser Driver - Move clamps to the MaxStep published at connect (#1840)",
+          "[gemini][focuser][unit][fake]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    fake.set_max_position(30000);  // behind the driver's back: the published limit stays 50000
+
+    driver->move(60000);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (fake.position() != 50000 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));  // real time: the fake's reader applies the :05
+    }
+    CHECK(fake.position() == 50000);
+    CHECK(fake.count(":0550000#") == 1);
+    CHECK(fake.count(":08#") == 1);
+    driver->set_connected(false);
+}
+
+// A connect that cannot read the limit cannot publish it, so it fails and releases the port.
+// Falsified by: gemini_focuser_driver.cpp set_connected() catch around get_max_position() sets max_step = 0 (the
+//   connect then succeeds and serves a MaxStep the focuser never reported).
+TEST_CASE("Gemini Focuser Driver - A connect whose MaxStep read fails is refused (#1840)",
+          "[gemini][focuser][unit][fake]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    fake.set_garbage_max_position(true);
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+    std::string what;
+    int code = 0;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        what = e.what();
+        code = e.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(what == "Gemini focuser did not report its maximum position");
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
+    CHECK(fake.count(":00#") == 0);  // no state poll was started
+
+    fake.set_garbage_max_position(false);
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
     driver->set_connected(false);
 }
 

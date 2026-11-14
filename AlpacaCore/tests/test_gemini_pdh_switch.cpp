@@ -306,6 +306,7 @@ TEST_CASE("Gemini PDH Protocol Wrapper - Status frame parsing", "[gemini][switch
 // ---------------------------------------------------------------------------
 
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <time.h>
 
 #include <atomic>
@@ -315,10 +316,13 @@ TEST_CASE("Gemini PDH Protocol Wrapper - Status frame parsing", "[gemini][switch
 #include <thread>
 
 #include "fake_gemini_pdh.h"
+#include "fake_task_clock.h"
 
 namespace {
 
 using alpacacore::test::FakeGeminiPdh;
+using alpacacore::test::FakeTaskClock;
+using alpacacore::test::ReplugPort;
 
 std::unique_ptr<alpacacore::SwitchDriver> connect_fake_hub(const FakeGeminiPdh& hub) {
     auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, hub.slave_path(), 19200);
@@ -327,6 +331,9 @@ std::unique_ptr<alpacacore::SwitchDriver> connect_fake_hub(const FakeGeminiPdh& 
     return driver;
 }
 
+// Polls in real time: what it waits for is wire activity (the fake's reader,
+// the driver's reader thread and its steady_clock poll cadence and read
+// windows, decision 0005 rule 6), never a driver timer on the task clock.
 template <typename Pred>
 bool wait_until(Pred pred, std::chrono::milliseconds limit) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -512,8 +519,9 @@ TEST_CASE("Gemini PDH Switch Driver - Stale cache is re-polled when the hub does
 
 // Issue #237: a hub that stops answering must not be served from the cache
 // forever. Three silent polls (~6 s) latch a link fault: value reads and
-// writes throw DriverException while Connected stays true, and the first
-// frame to arrive again clears it without a reconnect.
+// writes throw DriverException while Connected stays true (for up to
+// util::kLinkStalenessBound, decision 0009), and the first frame to arrive
+// again clears it without a reconnect.
 TEST_CASE("Gemini PDH Switch Driver - Silent hub faults the link, and frames restore it",
           "[gemini][switch][unit][fake]") {
     FakeGeminiPdh hub;
@@ -531,7 +539,7 @@ TEST_CASE("Gemini PDH Switch Driver - Silent hub faults the link, and frames res
         }
     };
     CHECK(wait_until(value_read_throws, std::chrono::milliseconds(12000)));
-    CHECK(driver->get_connected());  // the client decides whether to reconnect
+    CHECK(driver->get_connected());  // a young fault keeps Connected (decision 0009 rule 1)
     CHECK_FALSE(driver->get_link_fault().empty());
     require_alpaca_error([&]() { (void)driver->get_switch_value(19); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { (void)driver->get_switch(0); }, alpacacore::AlpacaError::DriverException);
@@ -554,36 +562,298 @@ TEST_CASE("Gemini PDH Switch Driver - Silent hub faults the link, and frames res
     CHECK(driver->get_link_fault().empty());
 }
 
-TEST_CASE("Gemini PDH Switch Driver - Dead serial link (EIO) faults the link instead of serving stale status",
-          "[gemini][switch][unit][fake]") {
+// Decision 0009 point 2a (#1987): a hangup on the port is a lost link at once, with no clock advance and no
+// wait for the poll: Connected false, members NotConnected, DeviceState empty, firmware gone, port released.
+// Falsified by: gemini_pdh_protocol_wrapper.cpp reader_loop() calls read_frame() without &hangup (the reader
+//   backs off as before), so only the next >G# poll write finds the hangup, about 2 s later.
+TEST_CASE("Gemini PDH Switch Driver - A cable pulled with the hub streaming loses the link at once",
+          "[gemini][switch][unit][fake][link-lost]") {
     FakeGeminiPdh hub;
+    hub.set_stream_interval(std::chrono::milliseconds(30));  // frames flowing, so no poll is due
     auto driver = connect_fake_hub(hub);
-    driver->set_switch_value(0, 0.0);  // a commanded value that must NOT survive the fault
+    driver->set_switch_value(0, 0.0);  // a commanded value that must NOT survive the loss
     CHECK(driver->get_switch_value(0) == 0.0);
+    const std::string port = hub.slave_path();  // sever_link() clears it
+    REQUIRE(alpacacore::util::is_serial_port_in_use(port));
 
     hub.sever_link();  // master side closed: writes on the slave are EIO, reads return 0
-    auto value_read_throws = [&] {
-        try {
-            (void)driver->get_switch_value(0);
-            return false;
-        } catch (const alpacacore::AlpacaException&) {
-            return true;
-        }
-    };
-    CHECK(wait_until(value_read_throws, std::chrono::milliseconds(12000)));
-    CHECK(driver->get_connected());
-    // Commanded values are gated the same way as live telemetry.
-    require_alpaca_error([&]() { (void)driver->get_switch_value(0); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_switch_value(18); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { driver->set_switch(1, true); }, alpacacore::AlpacaError::DriverException);
+    CHECK(wait_until([&] { return !driver->get_connected(); }, std::chrono::milliseconds(1000)));
+    require_alpaca_error([&]() { (void)driver->get_switch_value(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_switch_value(18); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_switch(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_switch(1, true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_switch_name(0); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_device_state().empty());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    CHECK(wait_until([&] { return !alpacacore::util::is_serial_port_in_use(port); }, std::chrono::milliseconds(1000)));
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 5)");
     // Disconnect is still clean with a dead fd.
     CHECK_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
 }
 
+// Decision 0009 point 2a on the write path (#1987): a set command to a pulled adapter is NotConnected, never the
+// old DriverException "Serial write failed". Over a pty the reader sees the same hangup within microseconds, so
+// this case pins what a client sees, whichever thread finds the loss first.
+// Falsified by: gemini_pdh_switch_driver.cpp ensure_connected() drops its protocol_.link_alive() check (the write
+//   then reaches ensure_link_up() and throws DriverException with the kept loss reason).
+TEST_CASE("Gemini PDH Switch Driver - A write to a pulled adapter is NotConnected and drops Connected",
+          "[gemini][switch][unit][fake][link-lost]") {
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+    hub.sever_link();
+    require_alpaca_error([&]() { driver->set_switch(1, true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(wait_until([&] { return !driver->get_connected(); }, std::chrono::milliseconds(1000)));
+    require_alpaca_error([&]() { driver->set_switch_value(11, 10.0); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->set_connected(false));
+}
+
+namespace {
+
+// Waits until the reader has run at least one full pass on the clock's current time: it reads now() once per pass
+// for the staleness check (and once per poll), so two more calls after an advance() include one such check.
+void reader_pass(FakeTaskClock& clock) {
+    const auto calls = clock.now_calls();
+    REQUIRE(clock.wait_for_now_calls(calls + 2, std::chrono::seconds(3)));
+}
+
+bool value_read_refused(const alpacacore::SwitchDriver& driver) {
+    try {
+        (void)driver.get_switch_value(19);
+        return false;
+    } catch (const alpacacore::AlpacaException&) {
+        return true;
+    }
+}
+
+}  // namespace
+
+// Decision 0009 point 2b (#1987): the #237 latch is stamped on the task clock, and a fault that has stood for
+// util::kLinkStalenessBound is a lost link. Before the bound it is only a fault.
+// Falsified by: gemini_pdh_protocol_wrapper.cpp reader_loop() drops its lose_link_if_fault_stale() call (the fault
+//   stands for ever and Connected stays true).
+TEST_CASE("Gemini PDH Switch Driver - A fault that stands past the staleness bound drops Connected",
+          "[gemini][switch][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    FakeGeminiPdh hub;
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, hub.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string port = hub.slave_path();
+
+    hub.set_muted(true);
+    // Three unanswered >G# polls on the steady_clock cadence (about 6 s of real time) latch the fault.
+    REQUIRE(wait_until([&] { return value_read_refused(*driver); }, std::chrono::milliseconds(12000)));
+    CHECK(hub.count(">G#") >= 4);  // the connect's request plus the three polls
+    require_alpaca_error([&]() { (void)driver->get_switch_value(19); }, alpacacore::AlpacaError::DriverException);
+    CHECK(driver->get_connected());
+
+    clock.advance(std::chrono::seconds(29));
+    reader_pass(clock);
+    CHECK(driver->get_connected());  // still only faulted
+    require_alpaca_error([&]() { (void)driver->get_switch_value(19); }, alpacacore::AlpacaError::DriverException);
+
+    clock.advance(std::chrono::seconds(1));
+    CHECK(wait_until([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    require_alpaca_error([&]() { (void)driver->get_switch_value(19); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_switch(0, false); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_device_state().empty());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    CHECK(wait_until([&] { return !alpacacore::util::is_serial_port_in_use(port); }, std::chrono::milliseconds(1000)));
+    // The fault text the bound ended is the loss reason.
+    CHECK(driver->get_link_fault().find("no status frame after a >G# poll (3 consecutive failures)") !=
+          std::string::npos);
+    driver->set_connected(false);
+}
+
+// Falsified by: gemini_pdh_protocol_wrapper.cpp dispatch_frame() drops its health_.on_reply() call (a frame no longer
+//   clears the latch, so the fault keeps standing).
+TEST_CASE("Gemini PDH Switch Driver - A frame before the staleness bound clears the fault and keeps Connected",
+          "[gemini][switch][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    FakeGeminiPdh hub;
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, hub.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    hub.set_muted(true);
+    REQUIRE(wait_until([&] { return value_read_refused(*driver); }, std::chrono::milliseconds(12000)));
+    clock.advance(std::chrono::seconds(29));
+    reader_pass(clock);
+    REQUIRE(driver->get_connected());
+
+    hub.set_input_voltage(12.4);
+    hub.set_muted(false);  // the next poll is answered
+    CHECK(wait_until([&] { return !value_read_refused(*driver); }, std::chrono::milliseconds(6000)));
+    clock.advance(std::chrono::seconds(5));  // 34 s after the stamp: a fault that was cleared does not age
+    reader_pass(clock);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(driver->get_switch_value(15) == 12.4);
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 3 (#1987): the wrapper clears the firmware before link_alive() turns false, so the management
+// listing never shows a disconnected hub beside a firmware string.
+// Falsified by: gemini_pdh_protocol_wrapper.cpp latch_loss_locked() drops its firmware_.clear() (the string stays
+//   until the next Disconnect).
+TEST_CASE("Gemini PDH Switch Driver - A lost link is never observed beside a firmware string",
+          "[gemini][switch][unit][fake][link-lost]") {
+    FakeGeminiPdh hub;
+    hub.set_stream_interval(std::chrono::milliseconds(30));
+    auto driver = connect_fake_hub(hub);
+    REQUIRE(driver->get_device_firmware().has_value());
+
+    std::atomic<bool> done{false};
+    std::atomic<int> stale{0};
+    std::atomic<int> lost_samples{0};
+    std::thread sampler([&] {
+        while (!done.load()) {
+            const bool connected = driver->get_connected();
+            const auto firmware = driver->get_device_firmware();
+            if (!connected) {
+                lost_samples.fetch_add(1);
+                if (firmware.has_value()) stale.fetch_add(1);
+            }
+        }
+    });
+    hub.sever_link();
+    CHECK(wait_until([&] { return lost_samples.load() > 100; }, std::chrono::milliseconds(2000)));
+    done.store(true);
+    sampler.join();
+
+    CHECK(stale.load() == 0);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    driver->set_connected(false);
+}
+
+// Decision 0009 (#1987): a hangup while the connect still runs fails that connect with NotConnected and latches
+// nothing, long before the handshake retry ladder (about 10 s) would have run out.
+// Falsified by: gemini_pdh_protocol_wrapper.cpp request() waits only for pending_reply_ (drop the
+//   connect_hangup_errno_ term), so the >H# request runs its whole 2.5 s timeout first.
+TEST_CASE("Gemini PDH Switch Driver - A cable pulled during the handshake fails the Connect with NotConnected",
+          "[gemini][switch][unit][fake][link-lost]") {
+    FakeGeminiPdh hub;
+    const std::string port = hub.slave_path();
+    hub.hold_next_reply(std::chrono::milliseconds(500));  // the fake sits on the >H# reply while the cable is pulled
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, port, 19200);
+    std::thread pull([&] {
+        // Real time: the fake's reader records the >H# the connect sends.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (hub.count(">H#") == 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        hub.sever_link();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::string what;
+    int code = 0;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        what = e.what();
+        code = e.error_code();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    pull.join();
+    CHECK(code == alpacacore::AlpacaError::NotConnected);
+    CHECK(what == "Gemini power hub link lost during connect");
+    CHECK(elapsed < std::chrono::seconds(2));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // a connect that never completed keeps no reason
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(port));
+}
+
+// A hub that does not answer with the cable in is not a lost link: the connect keeps its handshake refusal (today
+// NotConnected "handshake failed after 3 attempts") and latches nothing.
+// Falsified by: gemini_pdh_protocol_wrapper.cpp request() stores connect_hangup_errno_ on a reply timeout (a silent
+//   hub then reads as a pulled cable).
+TEST_CASE("Gemini PDH Switch Driver - A hub that times out the handshake with the cable in is not a lost link",
+          "[gemini][switch][unit][fake][link-lost]") {
+    FakeGeminiPdh hub;
+    hub.set_muted(true);
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, hub.slave_path(), 19200);
+    std::string what;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        what = e.what();
+    }
+    CHECK(what == "Gemini power hub handshake failed after 3 attempts");
+    CHECK(hub.count(">H#") == 3);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(hub.slave_path()));
+}
+
+// Decision 0009 rule 5 (#1987): get_link_fault() keeps the loss reason, whatever the clock does, until the next
+// Disconnect; a Disconnect over the lost link completes and clears it.
+// Falsified by: gemini_pdh_protocol_wrapper.cpp teardown_locked_free() drops lost_reason_.clear() (the reason
+//   outlives the Disconnect).
+TEST_CASE("Gemini PDH Switch Driver - A Disconnect over a lost link completes and clears the kept reason",
+          "[gemini][switch][unit][fake][link-lost]") {
+    FakeTaskClock clock;
+    FakeGeminiPdh hub;
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, hub.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string port = hub.slave_path();
+
+    hub.sever_link();
+    REQUIRE(wait_until([&] { return !driver->get_connected(); }, std::chrono::milliseconds(1000)));
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 5)");
+    clock.advance(std::chrono::minutes(5));
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 5)");
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(1));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(driver->get_device_state().empty());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(port));
+    require_alpaca_error([&]() { (void)driver->get_switch_value(15); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Decision 0009 rule 4 (#1987): only the client relinks, and its Connect over a lost link reopens the port and
+// re-runs the handshake without a Disconnect first; the kept reason goes with the new session.
+// Falsified by: gemini_pdh_switch_driver.cpp set_connected() idempotency check back to
+//   `connected == connected_.load()` (a Connect over the lost link returns at once and Connected stays false).
+TEST_CASE("Gemini PDH Switch Driver - A Connect over a lost link reopens without a Disconnect first",
+          "[gemini][switch][unit][fake][link-lost]") {
+    auto hub = std::make_unique<FakeGeminiPdh>();
+    ReplugPort port(*hub);
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, port.path.string(), 19200);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    hub->sever_link();
+    REQUIRE(wait_until([&] { return !driver->get_connected(); }, std::chrono::milliseconds(1000)));
+    CHECK_FALSE(driver->get_link_fault().empty());
+
+    // Nothing reopens the port on its own.
+    auto replugged = std::make_unique<FakeGeminiPdh>();
+    replugged->set_input_voltage(12.2);
+    port.replug(*replugged);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));  // real time: more than one reader read window
+    CHECK_FALSE(driver->get_connected());
+    CHECK(replugged->commands().empty());
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(replugged->received(">H#"));  // the connect probe ran again
+    CHECK(driver->get_link_fault().empty());
+    CHECK(driver->get_switch_value(15) == 12.2);
+    CHECK(driver->get_device_firmware().has_value());
+    driver->set_connected(false);
+}
+
 // Issue #772 (CC-18): once the master side is gone the slave is hung up, and
-// a read on it returns 0 at once instead of waiting out VTIME. The reader
-// thread must back off on that early 0 rather than spin a full core.
+// a read on it returns at once instead of waiting out VTIME. The reader
+// thread must not spin a full core on it: since #1987 the connected reader
+// ends on the hangup (a lost link), and the probe backs off.
 TEST_CASE("Gemini PDH Switch Driver - Reader does not spin on a hung-up serial link", "[gemini][switch][unit][fake]") {
     FakeGeminiPdh hub;
     auto driver = connect_fake_hub(hub);
