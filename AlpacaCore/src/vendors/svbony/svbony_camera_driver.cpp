@@ -1419,7 +1419,8 @@ private:
     std::chrono::steady_clock::time_point pulse_guiding_end_;
     // Serialises pulse_guide against itself (M18 sweep): SVBPulseGuide blocks
     // for the pulse duration, and the flag clear after it must not race a
-    // second in-flight pulse's flag/end-time publish. Never held with mutex_.
+    // second in-flight pulse's flag/end-time publish. Taken before mutex_, never under it: pulse_guide takes
+    // mutex_ under it to publish the flag, and its loss path (note_loss) takes mutex_ too.
     std::mutex pulse_guide_serial_mutex_;
 
     // Decision 0020: the exposure, its state, the LastExposure* values, the kept failure and the watchdog (the
