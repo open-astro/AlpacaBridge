@@ -59,8 +59,10 @@ std::unique_ptr<CameraDriver> create_toupcam_family_camera(int device_number, in
 /// ToupTek-family camera (set_connected(false) and the destructor) after the
 /// disconnect has stopped the stream and marked the camera closing, and before
 /// it closes the capture session, with no driver lock held, so a case can drive
-/// a StartExposure into that window. Pass an empty function to clear it; a
-/// driver that is not a ToupTek-family camera ignores it.
+/// a StartExposure into that window. On the destructor path it runs twice: once
+/// in the destructor, then again in the set_connected(false) the destructor makes
+/// while still connected. Pass an empty function to clear it; a driver that is
+/// not a ToupTek-family camera ignores it.
 void set_disconnect_gap_hook_for_testing(CameraDriver& driver, std::function<void()> hook);
 
 } // namespace alpacacore::vendor::touptek

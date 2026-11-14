@@ -1251,6 +1251,14 @@ TEST_CASE("ToupTek Camera Driver - a version the camera does not report is left 
     driver->set_connected(false);
     fake.throw_from.clear();
 
+    // No firmware version, but a hardware and FPGA version: the details alone, with no parentheses.
+    fake.firmware_version = "";
+    fake.fpga_version = "4.34";
+    driver->set_connected(true);
+    CHECK(driver->get_device_firmware() == std::optional<std::string>("hardware 4.0, FPGA 4.34"));
+    driver->set_connected(false);
+    fake.fpga_version = "";
+
     // Nothing reported: no Firmware row at all.
     fake.firmware_version = "";
     fake.hw_version = "";

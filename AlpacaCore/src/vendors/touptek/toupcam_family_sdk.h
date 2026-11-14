@@ -643,7 +643,9 @@ public:
         return std::string(sn);
     }
 
-    // The SDK writes at most fwver[16], hwver[16], fpgaver[16] and pdate[10]; one
+    // The SDK writes at most fwver[16], hwver[16], fpgaver[16] and pdate[10] (the
+    // parameter sizes of Toupcam_get_FwVersion, _HwVersion, _FpgaVersion and
+    // _ProductionDate in toupcam.h, and of the Altaircam_ ones in altaircam.h); one
     // byte more than that stays zero, so the text is terminated whatever the SDK
     // writes. A refusal (a model without the value) is an empty string, never the
     // buffer.
