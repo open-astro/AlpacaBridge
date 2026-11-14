@@ -85,14 +85,14 @@ TEST_CASE("driver_rig - time_stamp_of picks the TimeStamp entry", "[driver_rig]"
 
 namespace {
 
-// A poll body on the fake clock: it wakes every period and counts the laps.
+// A poll body on the fake clock: it wakes every period and counts the laps, except while paused.
 class ToyPoller {
 public:
     ToyPoller(FakeTaskClock& clock, std::chrono::nanoseconds period)
         : clock_(clock), period_(period), thread_([this] {
               while (!stop_.load()) {
                   clock_.sleep_for(period_);
-                  ++laps_;
+                  if (!paused_.load()) ++laps_;
               }
           }) {}
     // The poll body is parked on the clock: one last advance() lets it see stop_ and exit.
@@ -103,11 +103,15 @@ public:
         thread_.join();
     }
     int laps() const { return laps_.load(); }
+    // A paused poller keeps waking on the clock and counts nothing; poll_now() counts one lap on the calling thread.
+    void pause(bool on) { paused_.store(on); }
+    void poll_now() { ++laps_; }
 
 private:
     FakeTaskClock& clock_;
     std::chrono::nanoseconds period_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> paused_{false};
     std::atomic<int> laps_{0};
     std::thread thread_;
 };
@@ -125,6 +129,14 @@ public:
         connected_ = connected;
     }
     bool get_connected() const override { return connected_; }
+    // The poll seams a PolledRig forwards to.
+    void pause(bool on) {
+        if (poller_) poller_->pause(on);
+    }
+    void poll_now() {
+        if (poller_) poller_->poll_now();
+    }
+    int laps() const { return poller_ ? poller_->laps() : 0; }
     int get_device_number() const override { return 0; }
     std::string get_name() const override { return "stub"; }
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Focuser; }
@@ -225,6 +237,21 @@ TEST_CASE("driver_rig - PolledRig tick(3) makes three laps", "[driver_rig]") {
     rig.tick(3);
     CHECK(rig.clock().now() - before == 3 * kRigTiming.period);
     CHECK(rig.clock().waiter_count() == 1);
+}
+
+// Falsified by: PolledRig::pause() not calling its seam (the tick counts a lap) or PolledRig::poll_now() not calling
+// its seam (laps() stays 0).
+TEST_CASE("driver_rig - PolledRig pause and poll_now forward to the driver's seams", "[driver_rig]") {
+    StubRig rig(
+        kRigTiming, [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, true); },
+        [](PollingStub& d, bool on) { d.pause(on); }, [](PollingStub& d) { d.poll_now(); });
+    REQUIRE(rig.connect());
+    rig.pause(true);
+    rig.tick();
+    CHECK(rig.driver().laps() == 0);  // the clock moved, no cycle counted
+    rig.poll_now();
+    CHECK(rig.driver().laps() == 1);         // the cycle ran on the test thread
+    CHECK(rig.clock().waiter_count() == 1);  // and the poller is still parked
 }
 
 // Falsified by: PolledRig::expect_error() swapping code and fn or dropping the code check.

@@ -117,12 +117,17 @@ struct RigTiming {
 // A fake clock, a fake and the driver under test, built in that order and destroyed in reverse (the driver goes
 // first). A thin wrapper over connect_and_park(), tick() and require_alpaca_error(): it adds no rendezvous logic.
 // The factory builds the driver without connecting it, so a case can set up the fake before connect().
+// pause() and poll_now() forward to the driver's own poll seams, which a rig of a driver that has them passes in; a
+// call to one the rig was not given fails the test case.
 template <typename Fake, typename Driver>
 class PolledRig {
 public:
     using Factory = std::function<std::unique_ptr<Driver>(Fake&, FakeTaskClock&)>;
+    using PauseSeam = std::function<void(Driver&, bool)>;
+    using PollNowSeam = std::function<void(Driver&)>;
 
-    PolledRig(RigTiming timing, Factory make) : timing_(timing), driver_(make(fake_, clock_)) {}
+    PolledRig(RigTiming timing, Factory make, PauseSeam pause = {}, PollNowSeam poll_now = {})
+        : timing_(timing), pause_(std::move(pause)), poll_now_(std::move(poll_now)), driver_(make(fake_, clock_)) {}
 
     PolledRig(const PolledRig&) = delete;
     PolledRig& operator=(const PolledRig&) = delete;
@@ -141,6 +146,17 @@ public:
         for (int i = 0; i < n; ++i) alpacacore::test::tick(clock_, timing_.period, timing_.bound);
     }
 
+    // The pause seam: a paused poll skips its cycles but keeps waiting on the clock.
+    void pause(bool on) {
+        if (!pause_) FAIL("PolledRig: no pause seam");
+        pause_(*driver_, on);
+    }
+    // The poll-now seam: one poll cycle on the calling thread.
+    void poll_now() {
+        if (!poll_now_) FAIL("PolledRig: no poll_now seam");
+        poll_now_(*driver_);
+    }
+
     void expect_error(int code, const std::function<void()>& fn) { require_alpaca_error(fn, code); }
 
     Fake& fake() { return fake_; }
@@ -149,6 +165,8 @@ public:
 
 private:
     RigTiming timing_;
+    PauseSeam pause_;
+    PollNowSeam poll_now_;
     FakeTaskClock clock_;
     Fake fake_;
     std::unique_ptr<Driver> driver_;
