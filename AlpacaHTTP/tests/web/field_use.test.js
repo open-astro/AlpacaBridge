@@ -133,6 +133,21 @@ test('headerClockText drops the seconds only on a narrow screen (#1764)', () => 
         'el.textContent = headerClockText(formatServerClock(serverNow, serverTimeZone), narrow);'));
 });
 
+test('headerClockText drops the seconds from real formatServerClock output in every zone tier (#1764)', () => {
+    // headerClockText matches formatServerClock's exact layout; a change to that
+    // layout would otherwise bring the seconds back on a phone with no error.
+    const { formatServerClock, headerClockText } = format;
+    const date = new Date(Date.UTC(2026, 8, 11, 11, 30, 48));
+    for (const zone of ['Pacific/Auckland', 'UTC', 'Not/A_Zone', '']) {
+        const wide = formatServerClock(date, zone);
+        const narrow = headerClockText(wide, true);
+        assert.match(wide, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:48 \(.+\)$/, `zone ${zone || '(viewer)'}: ${wide}`);
+        assert.strictEqual(narrow, wide.replace(':48 (', ' ('), `zone ${zone || '(viewer)'} kept its seconds: ${narrow}`);
+        assert.strictEqual(headerClockText(wide, false), wide);
+    }
+    assert.strictEqual(headerClockText(formatServerClock(new Date(NaN), 'UTC'), true), '--:--:--');
+});
+
 test('the empty Devices state is an Add device button that opens Configure (#1764)', () => {
     const app = read('app.js');
     const empty = app.slice(app.indexOf('<div class="empty-state">'), app.indexOf('updateAutoNumbering();'));
