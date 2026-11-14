@@ -284,8 +284,10 @@ public:
         polled_.stop_and_join();
         if (connected_) {
             try {
-                set_connected(false);
-            } catch (...) {
+                // Qualified: virtual dispatch is already gone in a destructor.
+                SynScanTelescopeDriver::set_connected(false);
+            } catch (...) {  // NOLINT(bugprone-empty-catch): nothing to do in a destructor
+                // Destructor: nothing useful to do with a disconnect failure.
             }
         }
         if (interrupt) SynScanProtocolWrapper::instance().set_interrupt(false);
