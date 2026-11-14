@@ -158,15 +158,12 @@ TEST_CASE("Bisque UTCDate - writes are explicitly unsupported without a transact
 }
 
 TEST_CASE("Bisque ApertureArea follows the diameter and returns to 0 (#2057)", "[bisque][telescope][unit]") {
-    alpacacore::vendor::bisque::ConnectionInfo conn;
-    conn.host = "localhost";
-    conn.tcp_port = 3040;
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
-
-    driver->set_aperture_diameter(0.2);
-    CHECK(driver->get_aperture_area() == Catch::Approx(0.0314159265).epsilon(1e-6));
-    driver->set_aperture_diameter(0.0);
-    CHECK(driver->get_aperture_area() == 0.0);
+    // Connected: ApertureArea is an ASCOM member and answers NotConnected while disconnected.
+    ClockedBisque rig;
+    rig.driver->set_aperture_diameter(0.2);
+    CHECK(rig.driver->get_aperture_area() == Catch::Approx(0.0314159265).epsilon(1e-6));
+    rig.driver->set_aperture_diameter(0.0);
+    CHECK(rig.driver->get_aperture_area() == 0.0);
 }
 
 // Issue #1865: the optics and rate members on a connected driver. Aperture and focal length are the configured
@@ -439,8 +436,10 @@ TEST_CASE("Bisque Telescope Driver - Telescope Properties", "[bisque][telescope]
     auto rates = driver->get_tracking_rates();
     CHECK_FALSE(rates.empty());
 
-    CHECK(driver->get_slew_settle_time() >= 0);
+    // Disconnected: SlewSettleTime is NotConnected, after the write's InvalidValue check.
+    require_alpaca_error([&]() { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_slew_settle_time(1); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Bisque Telescope Driver - ASCOM Error Codes", "[bisque][telescope][unit]") {

@@ -237,8 +237,10 @@ TEST_CASE("ZWO Mount Telescope Driver - Telescope Properties", "[zwo][telescope]
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
 
     CHECK(driver->get_interface_version() >= 3);
-    CHECK(driver->get_slew_settle_time() >= 0);
+    // Disconnected: SlewSettleTime is NotConnected, after the write's InvalidValue check.
+    require_alpaca_error([&]() { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_slew_settle_time(1); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][unit]") {

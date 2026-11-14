@@ -486,7 +486,12 @@ public:
         return served_altaz_locked().second;
     }
 
+    // The optics and SlewSettleTime are the client's values, not the mount's: lock-free, no fault refusal, but
+    // NotConnected while disconnected or lost like every other member (ASCOM contract precedence). The optics setters
+    // are not ASCOM members: the catalog and updatedevice (#2057) inject the configured values with them, connected
+    // or not.
     double get_aperture_diameter() const override {
+        check_connected();
         return aperture_diameter_m_;
     }
 
@@ -498,6 +503,7 @@ public:
     }
 
     double get_aperture_area() const override {
+        check_connected();
         // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
         const double d = aperture_diameter_m_;
         return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
@@ -655,9 +661,23 @@ public:
             mode = alignment == AlignmentMode::AltAz ? 1 : 2;
         }
         // The cache is written after the send: a motion owner ahead in the queue restores the mode it found.
-        if (!send_in_turn(
+        bool sent = false;
+        try {
+            sent = send_in_turn(
                 lock, [this] { return connected_ && !link_lost(); },
-                [&protocol, mode] { protocol.set_tracking_mode(mode); })) {
+                [&protocol, mode] { protocol.set_tracking_mode(mode); });
+        } catch (...) {
+            // While a restore is owed (ra_stop_unconfirmed_), the cache is the mode the next RA stop sends, and
+            // refresh_tracking_mode_locked() keeps it. A write that failed is still the client's latest request: the
+            // next stop sends this mode, so a failed Tracking=false cannot leave an older mode to turn tracking on.
+            // The turn is already passed on here, but mutex_ has been held since without_lock() re-took it, so an
+            // owner queued behind this write reads the new mode at its turn. Keep mutex_ held until this write.
+            if (ra_stop_unconfirmed_) {
+                set_tracking_mode_cached_locked(mode);
+            }
+            throw;
+        }
+        if (!sent) {
             check_connected();
             return;
         }
@@ -668,6 +688,7 @@ public:
     }
 
     double get_focal_length() const override {
+        check_connected();
         return focal_length_m_;
     }
 
@@ -783,6 +804,7 @@ public:
     }
 
     int get_slew_settle_time() const override {
+        check_connected();
         return slew_settle_time_seconds_;
     }
 
@@ -790,6 +812,7 @@ public:
         if (seconds < 0) {
             throw AlpacaException("Slew settle time must be >= 0 seconds", AlpacaError::InvalidValue);
         }
+        check_connected();  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_seconds_ = seconds;
     }
 
@@ -3384,6 +3407,14 @@ private:
         if (!tracking_mode_valid_ && slew_.running()) {
             seed_tracking_mode_from_frame_locked();
         }
+        // After a restore that did not land, the cache is the mode still owed to the handset and the handset's own
+        // answer is the driver's unfinished stop: the RA rate command replaced tracking and the `T` never arrived, so
+        // it reads 0. Reading it here would make that 0 the mode to restore, and the next RA pulse, MoveAxis stop or
+        // AbortSlew would leave the mount untracked. The flag clears with a landed restore, a landed Tracking write,
+        // Park, an RA MoveAxis, AbortSlew or a reconnect; a Tracking write that fails puts its mode in the cache.
+        if (tracking_mode_valid_ && ra_stop_unconfirmed_) {
+            return;
+        }
         if (tracking_mode_valid_ && (slew_.running() || ra_motion_active_locked(lock))) {
             return;
         }
@@ -3935,9 +3966,10 @@ private:
     mutable uint64_t tracking_mode_generation_ = 0;  // bumped on every control-path write of tracking_mode_cached_
     mutable bool tracking_mode_valid_;
     // A pulse-guide end whose tracking restore failed: the RA motor may be off while the cache still holds the mode.
-    // Only the public Tracking read consults it. A GOTO is refused while it is set; a pulse end that fails while a
-    // GOTO reaps it sets the flag after the Tracking gate, and it stays set across the GOTO because that T never
-    // landed.
+    // The public Tracking read reports false while it is set, and refresh_tracking_mode_locked() keeps the cached
+    // mode instead of the handset's 0, so the next RA stop restores it. A GOTO is refused while it is set; a pulse end
+    // that fails while a GOTO reaps it sets the flag after the Tracking gate, and it stays set across the GOTO because
+    // that T never landed.
     mutable bool ra_stop_unconfirmed_ = false;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw

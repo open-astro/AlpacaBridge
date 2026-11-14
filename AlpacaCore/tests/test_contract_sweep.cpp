@@ -218,6 +218,7 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(d);
             p.push_back({"get_can_move_axis(-1)", [&] { (void)t.get_can_move_axis(-1); }});
             p.push_back({"get_can_move_axis(3)", [&] { (void)t.get_can_move_axis(3); }});
+            p.push_back({"set_slew_settle_time(-1)", [&] { t.set_slew_settle_time(-1); }});
             break;
         }
         case DeviceType::Switch: {
@@ -294,6 +295,13 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_target_declination", [&] { (void)t.get_target_declination(); }});
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
+            // The client's own values are ASCOM members too: NotConnected while disconnected (the optics setters are
+            // config injection, not ASCOM members, and are not probed; SlewSettleTime's setter is a member).
+            p.push_back({"get_aperture_diameter", [&] { (void)t.get_aperture_diameter(); }});
+            p.push_back({"get_aperture_area", [&] { (void)t.get_aperture_area(); }});
+            p.push_back({"get_focal_length", [&] { (void)t.get_focal_length(); }});
+            p.push_back({"get_slew_settle_time", [&] { (void)t.get_slew_settle_time(); }});
+            p.push_back({"set_slew_settle_time(1)", [&] { t.set_slew_settle_time(1); }});
             break;
         }
         case DeviceType::Switch: {

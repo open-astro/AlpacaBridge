@@ -177,7 +177,7 @@ TEST_CASE("OnStep Telescope Driver - Device-specific behavior", "[onstep][telesc
 
     // Telescope-wide static properties.
     CHECK(driver->get_tracking_rates() == std::vector<int>{0});
-    CHECK(driver->get_slew_settle_time() >= 0);
+    require_alpaca_error([&]() { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_equatorial_system() == alpacacore::EquatorialSystem::Topocentric);
 }
 

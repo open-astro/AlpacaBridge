@@ -832,7 +832,15 @@ public:
         return alt;
     }
 
-    double get_aperture_diameter() const override { return aperture_diameter_m_; }
+    // The optics and SlewSettleTime are the client's values, not the mount's: the state lock alone and no fault
+    // refusal, but NotConnected while disconnected, connecting or lost like every other member (ASCOM contract
+    // precedence). The optics setters are not ASCOM members: the catalog and updatedevice (#2057) inject the
+    // configured values with them, connected or not.
+    double get_aperture_diameter() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
+        return aperture_diameter_m_;
+    }
 
     void set_aperture_diameter(double meters) override {
         if (meters < 0.0) {
@@ -842,6 +850,8 @@ public:
     }
 
     double get_aperture_area() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
         const double d = aperture_diameter_m_;
         return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
     }
@@ -1077,7 +1087,11 @@ public:
         }
     }
 
-    double get_focal_length() const override { return focal_length_m_; }
+    double get_focal_length() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
+        return focal_length_m_;
+    }
 
     void set_focal_length(double meters) override {
         if (meters < 0.0) {
@@ -1239,12 +1253,18 @@ public:
         throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    int get_slew_settle_time() const override { return slew_settle_time_seconds_; }
+    int get_slew_settle_time() const override {
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();
+        return slew_settle_time_seconds_;
+    }
 
     void set_slew_settle_time(int seconds) override {
         if (seconds < 0) {
             throw AlpacaException("Slew settle time must be >= 0 seconds", AlpacaError::InvalidValue);
         }
+        StateLock lock(lock_gate_, StateLock::Mode::State);
+        check_connected();  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_seconds_ = seconds;
     }
 
@@ -6516,6 +6536,10 @@ public:
         return pulse_hold_[axis - 1].active(clock_.now());
     }
 
+    std::pair<double, double> optics_for_testing() const {
+        return {aperture_diameter_m_.load(), focal_length_m_.load()};
+    }
+
     void set_status_poll_paused_for_testing(bool paused) { status_poll_paused_for_testing_.store(paused); }
 
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
@@ -7031,6 +7055,11 @@ void set_pulse_spawn_for_testing(TelescopeDriver& driver, int axis,
 bool pulse_hold_active_for_testing(TelescopeDriver& driver, int axis) {
     auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver);
     return sw != nullptr && sw->pulse_hold_active_for_testing(axis);
+}
+
+std::pair<double, double> optics_for_testing(const TelescopeDriver& driver) {
+    const auto* sw = dynamic_cast<const SkyWatcherTelescopeDriver*>(&driver);
+    return sw != nullptr ? sw->optics_for_testing() : std::pair<double, double>{-1.0, -1.0};
 }
 
 void set_duty_before_exit_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {

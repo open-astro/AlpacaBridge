@@ -747,14 +747,20 @@ public:
                                           return cached_alt_degrees_;
                                       });
     }
-    
+
+    // The optics and SlewSettleTime are the client's values, not the mount's: no lock, no fault refusal, but
+    // NotConnected while disconnected, connecting or lost like every other member (ASCOM contract precedence). The
+    // optics setters are not ASCOM members: the catalog and updatedevice (#2057) inject the configured values with
+    // them, connected or not.
     double get_aperture_diameter() const override {
+        check_connected_lock_free();
         return aperture_diameter_m_;
     }
 
     void set_aperture_diameter(double meters) override { aperture_diameter_m_ = meters; }
 
     double get_aperture_area() const override {
+        check_connected_lock_free();
         // Derived from the atomic diameter so a live updatedevice cannot leave a stale area (#2057).
         const double d = aperture_diameter_m_;
         return d > 0.0 ? std::numbers::pi * (d / 2.0) * (d / 2.0) : 0.0;
@@ -949,6 +955,7 @@ public:
     }
     
     double get_focal_length() const override {
+        check_connected_lock_free();
         return focal_length_m_;
     }
     
@@ -1122,6 +1129,7 @@ public:
     }
 
     int get_slew_settle_time() const override {
+        check_connected_lock_free();
         return slew_settle_time_seconds_;
     }
 
@@ -1132,6 +1140,7 @@ public:
                 AlpacaError::InvalidValue
             );
         }
+        check_connected_lock_free();  // an ASCOM member: InvalidValue first, then NotConnected
         slew_settle_time_seconds_ = seconds;
     }
     
@@ -2126,6 +2135,13 @@ private:
         if (!connected_) {
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
         }
+    }
+
+    // NotConnected while disconnected or connecting and once the link is lost (decision 0009 rule 3), with no lock
+    // and no fault refusal: for the members that serve the client's own values (the optics, SlewSettleTime).
+    void check_connected_lock_free() const {
+        check_connected_before_lock();
+        throw_if_link_lost();
     }
 
     // Signalled by a refill helper that, under the state lock alone, finds the cache it would serve was never

@@ -153,9 +153,10 @@ TEST_CASE("SkyWatcher Telescope Driver - Target and site members while disconnec
     driver->set_site_elevation(35.0);
     CHECK(driver->get_site_elevation() == 35.0);
 
-    CHECK(driver->get_slew_settle_time() == 0);
-    driver->set_slew_settle_time(2);
-    CHECK(driver->get_slew_settle_time() == 2);
+    // SlewSettleTime is an ASCOM member: NotConnected while disconnected (the optics too).
+    require_alpaca_error([&] { (void)driver->get_slew_settle_time(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_slew_settle_time(2); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_focal_length(); }, alpacacore::AlpacaError::NotConnected);
 
     CHECK_FALSE(driver->get_tracking_rates().empty());
     require_alpaca_error([&] { (void)driver->get_tracking_rate(); }, alpacacore::AlpacaError::NotConnected);
