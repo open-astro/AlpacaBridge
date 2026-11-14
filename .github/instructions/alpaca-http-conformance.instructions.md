@@ -150,7 +150,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `web/format.js`) skips the per-request refresh in `handle_device`; a
   `Connected` GET or PUT still registers or refreshes as before, and the web
   UI sends neither (its only device request is the Celestron calibration
-  action). The registry clock is
+  action). The header is the web UI's alone: an Alpaca client that copies it
+  stops refreshing its own registration, which then expires after 10 minutes.
+  The registry clock is
   injectable (`set_client_clock_for_test`); the 10 minute window is unchanged.
 - **Connections are persistent (HTTP keep-alive) — never emit
   `Connection: close` on a normal response** (2026-09-07). `Response::to_string()`

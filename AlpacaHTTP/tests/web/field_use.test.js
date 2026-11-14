@@ -21,6 +21,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const WEB = path.join(__dirname, '..', '..', 'web');
 const read = (name) => fs.readFileSync(path.join(WEB, name), 'utf8');
@@ -91,6 +92,80 @@ test('nextTabIndex wraps the arrow keys and jumps Home and End (#1764)', () => {
     assert.strictEqual(nextTabIndex(0, 'End', 3), 2);
     assert.strictEqual(nextTabIndex(0, 'Enter', 3), null);
     assert.strictEqual(nextTabIndex(0, 'ArrowRight', 0), null);
+});
+
+test('the arrow keys, Home and End open and focus the next tab (#1764)', () => {
+    // Runs the real initTabs and showTab from app.js (the "Tab management"
+    // block) against stub tabs and panels.
+    const src = read('app.js');
+    const block = src.slice(src.indexOf('// Tab management'), src.indexOf('// Refresh whatever the active tab shows.'));
+    assert.ok(block.includes('function initTabs()') && block.includes('function showTab('));
+    const doc = { activeElement: null };
+    const classSet = () => {
+        const set = new Set();
+        return { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c),
+                 toggle: (c, on) => (on ? set.add(c) : set.delete(c)) };
+    };
+    const names = ['devices', 'configure', 'server'];
+    const panels = names.map((name) => ({ id: name + '-tab', classList: classSet() }));
+    const tabs = names.map((name) => {
+        const attrs = {};
+        const tab = { dataset: { tab: name }, classList: classSet(), tabIndex: -1, listeners: {},
+                      setAttribute: (k, v) => { attrs[k] = v; }, attr: (k) => attrs[k],
+                      addEventListener: (type, fn) => { tab.listeners[type] = fn; },
+                      focus: () => { doc.activeElement = tab; } };
+        return tab;
+    });
+    doc.querySelectorAll = (sel) => {
+        if (sel === '.tabs [role="tab"]' || sel === '.tab') return tabs;
+        if (sel === '.tab-content') return panels;
+        throw new Error('unexpected selector ' + sel);
+    };
+    doc.getElementById = (id) => panels.find((p) => p.id === id) || null;
+    const resets = [];
+    const ctx = { document: doc, nextTabIndex: format.nextTabIndex, resetDeviceForm: () => resets.push(1) };
+    vm.createContext(ctx);
+    vm.runInContext(block + '\n;initTabs();', ctx);
+    const press = (from, key) => {
+        let prevented = false;
+        tabs[from].listeners.keydown({ key, preventDefault: () => { prevented = true; } });
+        return prevented;
+    };
+    const open = () => names.filter((_, i) => panels[i].classList.contains('active'));
+    assert.strictEqual(press(0, 'ArrowRight'), true);
+    assert.deepStrictEqual(open(), ['configure']);
+    assert.strictEqual(doc.activeElement, tabs[1]);
+    assert.deepStrictEqual(tabs.map((t) => t.attr('aria-selected')), ['false', 'true', 'false']);
+    assert.deepStrictEqual(tabs.map((t) => t.tabIndex), [-1, 0, -1]);
+    assert.strictEqual(resets.length, 1, 'opening Configure from the keyboard did not reset the form');
+    press(1, 'End');
+    assert.deepStrictEqual(open(), ['server']);
+    assert.strictEqual(doc.activeElement, tabs[2]);
+    press(2, 'ArrowRight');
+    assert.deepStrictEqual(open(), ['devices'], 'ArrowRight on the last tab does not wrap');
+    press(0, 'ArrowLeft');
+    assert.deepStrictEqual(open(), ['server'], 'ArrowLeft on the first tab does not wrap');
+    press(2, 'Home');
+    assert.deepStrictEqual(open(), ['devices']);
+    assert.strictEqual(doc.activeElement, tabs[0]);
+    assert.strictEqual(press(0, 'Enter'), false, 'a key the tablist does not use was swallowed');
+    assert.deepStrictEqual(open(), ['devices']);
+});
+
+test('the ASIAIR duplicate GPIO error goes under the port that repeats a line (#1764)', () => {
+    const { asiairRepeatedGpioPort, asiairDuplicateGpioError } = format;
+    assert.strictEqual(asiairRepeatedGpioPort([12, 13, 26, 18]), -1);
+    assert.strictEqual(asiairRepeatedGpioPort([12, 13, 12, 18]), 2);
+    assert.strictEqual(asiairRepeatedGpioPort([12, 13, 13, 12]), 2, 'the first repeat wins');
+    assert.strictEqual(asiairRepeatedGpioPort([NaN, NaN, 26, 18]), -1, 'blank ports never repeat');
+    assert.strictEqual(asiairRepeatedGpioPort([NaN, 18, NaN, 18]), 3);
+    // The port it picks is the second one the error message names.
+    for (const gpios of [[12, 13, 12, 18], [12, 13, 13, 12], [NaN, 18, NaN, 18]]) {
+        const port = asiairRepeatedGpioPort(gpios);
+        assert.match(asiairDuplicateGpioError(gpios), new RegExp(`for ports \\d and ${port + 1}\\.`));
+    }
+    assert.ok(read('app.js').includes(
+        "showFieldError('asiairPortGpio' + Math.max(asiairRepeatedGpioPort(asiairGpios), 0), duplicateGpio);"));
 });
 
 test('the tab bar is a tablist whose tabs control their panels (#1764)', () => {

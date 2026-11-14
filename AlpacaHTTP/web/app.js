@@ -4604,9 +4604,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 const duplicateGpio = asiairDuplicateGpioError(asiairGpios);
                 if (duplicateGpio) {
                     // Shown at the later of the two ports, the one that repeats a line.
-                    const repeated = asiairGpios.findIndex(
-                        (gpio, i) => !Number.isNaN(gpio) && asiairGpios.indexOf(gpio) !== i);
-                    showFieldError('asiairPortGpio' + Math.max(repeated, 0), duplicateGpio);
+                    showFieldError('asiairPortGpio' + Math.max(asiairRepeatedGpioPort(asiairGpios), 0), duplicateGpio);
                     return;
                 }
                 const ports = [];

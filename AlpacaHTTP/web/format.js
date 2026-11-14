@@ -929,6 +929,20 @@ function zwoUsbBandwidth(value) {
     return bandwidth;
 }
 
+// The ASIAIR port (0-based) whose GPIO line repeats an earlier port's, the
+// second port asiairDuplicateGpioError names, or -1 when no line repeats. The
+// form shows the duplicate error under that port's field (issue #1764).
+function asiairRepeatedGpioPort(gpios) {
+    const seen = new Set();
+    for (let i = 0; i < gpios.length; i += 1) {
+        const gpio = gpios[i];
+        if (Number.isNaN(gpio)) continue;
+        if (seen.has(gpio)) return i;
+        seen.add(gpio);
+    }
+    return -1;
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
@@ -936,7 +950,7 @@ if (typeof module !== 'undefined' && module.exports) {
                        updateStatusText, installerStateText, renderReleaseNotes,
                        channelSelectorState, channelDowngradeNotice, channelSwitchText,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, discoveryPortSetting, settingsSaveError,
-                        wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
+                        wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError, asiairRepeatedGpioPort,
                         normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
                         zwoCameraOptions, zwoCameraSelection, zwoCameraHint, configureWarning,
