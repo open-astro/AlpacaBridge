@@ -71,6 +71,11 @@ public:
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    /// A disconnect is coming (issue #2070): while set, a reply read in flight ends at once and every exchange that
+    /// reads fails with NotConnected, with no fault text and no link loss, so the driver's teardown never waits out a
+    /// silent handset's response timeout behind the wrapper's lock. Lock-free; cleared by passing false or by the
+    /// next connect().
+    void set_interrupt(bool interrupt) noexcept;
     /// Why the last connect() returned false, written for the operator (a port
     /// another device holds, a failed open); empty when no reason is known.
     std::string last_connect_error() const;

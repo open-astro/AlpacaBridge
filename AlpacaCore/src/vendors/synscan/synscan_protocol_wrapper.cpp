@@ -394,6 +394,7 @@ public:
         connection_info_ = info;
         last_connect_error_.clear();
         link_lost_.store(false);
+        interrupt_.store(false);
         set_fault("");
 
         bool success = false;
@@ -439,6 +440,8 @@ public:
     }
 
     bool link_alive() const noexcept { return !link_lost_.load(); }
+
+    void set_interrupt(bool interrupt) noexcept { interrupt_.store(interrupt); }
 
     std::string link_fault() const {
         std::lock_guard<std::mutex> lock(fault_mutex_);
@@ -1199,6 +1202,12 @@ private:
         throw AlpacaException(reason, AlpacaError::NotConnected);
     }
 
+    // A read that set_interrupt(true) ended (#2070): the disconnect that raised it owns the link, so this is not a
+    // fault and not a loss. NotConnected, the code of an exchange on a closing link; no fault text, no latch.
+    [[noreturn]] static void throw_interrupted() {
+        throw AlpacaException("SynScan exchange interrupted: the link is closing", AlpacaError::NotConnected);
+    }
+
     void set_fault(const std::string& text) {
         std::lock_guard<std::mutex> lock(fault_mutex_);
         fault_ = text;
@@ -1223,6 +1232,7 @@ private:
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         util::ReadSpec spec;
         spec.max_len = kMaxReplyLen;
+        spec.cancel = &interrupt_;  // a disconnect ends the read at once (#2070)
         // When binary_bytes > 0, read exactly that many raw bytes first
         // (no CR/LF filtering, no '#' detection) then drain the '#' terminator.
         // This prevents binary values like 0x23 ('#') or 0x0A/0x0D from being
@@ -1237,6 +1247,7 @@ private:
             spec.late_byte_grace = read_slice();
             const auto r = read_reply(spec, deadline);
             if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
+            if (r.outcome == util::ReadOutcome::Cancelled) throw_interrupted();
             if (r.outcome != util::ReadOutcome::Length) {
                 if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for SynScan response");
@@ -1262,6 +1273,8 @@ private:
                 throw_link_lost(r.err);
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("SynScan response too long");
+            case util::ReadOutcome::Cancelled:
+                throw_interrupted();
             case util::ReadOutcome::Timeout:
                 if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for SynScan response");
@@ -1277,6 +1290,7 @@ private:
         spec.stop = util::ReadSpec::Stop::Length;
         spec.length = 1;
         spec.skip.clear();
+        spec.cancel = &interrupt_;  // a cancelled drain leaves the payload valid, like a missing '#'
         const auto r = read_reply(spec, deadline);
         if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
     }
@@ -1301,6 +1315,9 @@ private:
     mutable std::mutex mutex_;
     bool connected_;
     std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect()
+    // set_interrupt(): read without mutex_ by every reply read (ReadSpec::cancel), so a disconnect ends one in flight
+    // without waiting for the lock that read holds (#2070). Cleared by set_interrupt(false) and the next connect().
+    std::atomic<bool> interrupt_{false};
     // The loss reason for the driver's get_link_fault() (decision 0009 rule 5), cleared by the next connect(). Its own
     // leaf mutex, never held across an exchange, so a getter never waits on the wire.
     mutable std::mutex fault_mutex_;
@@ -1334,6 +1351,8 @@ bool SynScanProtocolWrapper::connect(const ConnectionInfo& info) {
 void SynScanProtocolWrapper::disconnect() {
     pimpl_->disconnect();
 }
+
+void SynScanProtocolWrapper::set_interrupt(bool interrupt) noexcept { pimpl_->set_interrupt(interrupt); }
 
 bool SynScanProtocolWrapper::is_connected() const {
     return pimpl_->is_connected();

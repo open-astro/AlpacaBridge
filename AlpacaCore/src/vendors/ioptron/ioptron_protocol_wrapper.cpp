@@ -1883,18 +1883,25 @@ SiteInfo iOptronProtocolWrapper::get_site_location() {
 
 SiteInfo iOptronProtocolWrapper::get_site_info() {
     SiteInfo site = get_site_location();
-    std::string gut_response = strip_status_prefix(send_command(":GUT"));
+    apply_gut_site_fields(site, strip_status_prefix(send_command(":GUT")));
+    return site;
+}
 
+SiteInfo iOptronProtocolWrapper::get_site_info(const std::string& gut_reply) {
+    SiteInfo site = get_site_location();
+    apply_gut_site_fields(site, gut_reply);
+    return site;
+}
+
+// Timezone and DST from a :GUT# reply (status prefix stripped). Only the first 17 characters must be there: the
+// UTC field after them is parse_utc_time()'s to judge, so an unusable UTC still leaves usable site fields.
+void iOptronProtocolWrapper::apply_gut_site_fields(SiteInfo& site, const std::string& gut_response) {
     if (gut_response.length() < 17) {
         throw AlpacaException("Invalid site info response from mount");
     }
-
-    // Timezone and DST from :GUT#
     std::string tz_str = gut_response.substr(0, 4);  // Sign + 3 digits
     site.timezone_offset_minutes = static_cast<int>(pimpl_->parse_signed_int(tz_str));
     site.dst_observed = (gut_response[4] == '1');
-
-    return site;
 }
 
 AltAz iOptronProtocolWrapper::get_park_position() {
@@ -2135,10 +2142,16 @@ void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point 
 }
 
 std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {
+    return parse_utc_time(read_utc_reply());
+}
+
+std::string iOptronProtocolWrapper::read_utc_reply() {
     // Some mounts reply to :GUT without a trailing '#', so allow responses
     // that omit the terminator.
-    std::string response = send_command(":GUT", false);
-    response = strip_status_prefix(std::move(response));
+    return strip_status_prefix(send_command(":GUT", false));
+}
+
+std::chrono::system_clock::time_point iOptronProtocolWrapper::parse_utc_time(const std::string& response) {
     if (response.length() != 18 || (response[0] != '+' && response[0] != '-') ||
         (response[4] != '0' && response[4] != '1') ||
         !std::all_of(response.begin() + 1, response.end(), [](char c) { return c >= '0' && c <= '9'; })) {

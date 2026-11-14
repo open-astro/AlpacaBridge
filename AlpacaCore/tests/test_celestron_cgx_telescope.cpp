@@ -1299,6 +1299,53 @@ TEST_CASE("Celestron CGX USB Telescope Driver - error codes and input precedence
                          alpacacore::AlpacaError::MethodNotImplemented);
 }
 
+// open-astro#1786: the base class's individual guide-rate setters read the pair through the connection-checking
+// getter first, so an out-of-range GuideRateRightAscension or GuideRateDeclination write on a disconnected CGX
+// answered NotConnected instead of InvalidValue.
+TEST_CASE("Celestron CGX USB Telescope Driver - individual guide-rate range errors precede NotConnected",
+          "[celestron][cgx][telescope][unit]") {
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, test_info());
+    constexpr double kSidereal = 15.0411 / 3600.0;
+    for (const double bad : {kSidereal * 1.5, kSidereal * 0.05, -kSidereal, std::numeric_limits<double>::quiet_NaN()}) {
+        require_alpaca_error([&] { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    // An in-range value still reaches the connection check.
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(kSidereal * 0.5); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(kSidereal * 0.5); },
+                         alpacacore::AlpacaError::NotConnected);
+}
+
+// open-astro#1786: the CGX stores one rate per axis, so writing one axis keeps the other, and a refused write keeps
+// both.
+TEST_CASE("Celestron CGX USB Telescope Driver - individual guide-rate writes keep the other axis",
+          "[celestron][cgx][telescope][integration]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
+    driver->set_connected(true);
+    constexpr double kSidereal = 15.0411 / 3600.0;
+
+    driver->set_guide_rate({kSidereal * 0.25, kSidereal * 0.75});
+    driver->set_guide_rate_right_ascension(kSidereal * 0.5);
+    CHECK(driver->get_guide_rate().ra == kSidereal * 0.5);
+    CHECK(driver->get_guide_rate().dec == kSidereal * 0.75);
+    driver->set_guide_rate_declination(kSidereal * 0.9);
+    CHECK(driver->get_guide_rate().ra == kSidereal * 0.5);
+    CHECK(driver->get_guide_rate().dec == kSidereal * 0.9);
+
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(kSidereal * 2.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_guide_rate().ra == kSidereal * 0.5);
+    CHECK(driver->get_guide_rate().dec == kSidereal * 0.9);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - UTCDate, SiderealTime and pointing read one time source",
           "[celestron][cgx][telescope][unit]") {
     struct ProbeGuard {

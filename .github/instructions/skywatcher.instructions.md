@@ -165,7 +165,11 @@ datagrams before each send so replies cannot get off-by-one.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period
   in-place (`:I` is legal during slow-mode motion), then restoring the sidereal preset —
   the axis never stops. Dec pulses (and RA while not tracking) are software-timed
-  speed-mode nudges. Position override accumulation as per the SynScan lessons.
+  speed-mode nudges. Position override accumulation as per the SynScan lessons. A pulse-end restore (and the
+  dispatch-failure recovery) whose RA drive is in the duty regime (`ra_drive_needs_duty_locked()`: a duty rate
+  pre-armed by a `RightAscensionRate` or `SiteLatitude` write during the pulse, or a sub-floor or zero effective
+  rate) goes through `apply_ra_drive_locked()`, which stops RA for the duty worker, and skips the post-stop rate
+  verify; a `:I` write there clamps at the floor rate (#1720).
 - **A live `:I` on a running axis is not always applied** (EQM-35 Pro, MC firmware 3.39,
   2026-09-06): the board stores the preset (`:i` reads it back) but the motor keeps its old
   rate. Every live in-place `:I` is therefore followed by a `:J` re-latch (INDI does the

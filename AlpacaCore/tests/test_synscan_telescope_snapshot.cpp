@@ -1107,6 +1107,119 @@ TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with two p
     CHECK(elapsed < seconds(5));
 }
 
+// open-astro#2070: the wrapper holds its lock across a reply read, and the disconnect used to queue behind it, so a
+// silent handset at the default 5 s response timeout held set_connected(false) for the whole timeout (more with the
+// joins behind it). The disconnect now interrupts the read in flight: it returns at once, the aborted read leaves no
+// fault and no loss reason, and a Connect to a handset that answers again works. Both transports.
+namespace {
+
+void disconnect_interrupts_a_silent_read(const std::shared_ptr<Handset>& st, const sc::ConnectionInfo& info) {
+    REQUIRE(info.response_timeout_ms == 5000);  // the default, not a test-shortened one
+    FakeTaskClock clock;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, kSettle));  // the poll is parked on the task clock
+    st->mute = true;
+    const int before = st->transactions.load();
+    clock.advance(kPollPeriod);  // the next tick sends `L`, which the handset never answers
+    const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+    while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() > before);       // the poll is inside its read
+    std::this_thread::sleep_for(milliseconds(100));  // real time: let the read settle into its wait
+    const auto elapsed = timed([&] { driver->set_connected(false); });
+    CHECK(elapsed < seconds(1));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK(sc::SynScanProtocolWrapper::instance().link_fault().empty());
+
+    st->mute = false;
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+}  // namespace
+
+TEST_CASE("SynScan snapshot - a disconnect interrupts a read a silent handset never answers (TCP)",
+          "[synscan][telescope][snapshot][connect]") {
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    disconnect_interrupts_a_silent_read(st, info);
+}
+
+TEST_CASE("SynScan snapshot - a disconnect interrupts a read a silent handset never answers (serial)",
+          "[synscan][telescope][snapshot][connect]") {
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::PtyResponder handset([st](const std::string& c) { return reply(*st, c); }, "SynScan handset");
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Serial;
+    info.port_path = handset.slave_path();
+    disconnect_interrupts_a_silent_read(st, info);
+}
+
+// The wrapper is one per process: only a driver with a session of its own raises its interrupt (#2070). A second
+// SynScan device that never connected, disconnected or destroyed while the first one's exchange is on the wire, must
+// leave that exchange to finish, or the connected mount takes a failed read for another device's teardown. The
+// exchange is a direct wrapper call, the same read the connected driver's poll and bodies make.
+TEST_CASE("SynScan snapshot - a never-connected second device's teardown leaves the connected one's read alone",
+          "[synscan][telescope][snapshot][connect]") {
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    FakeTaskClock clock;
+    auto connected = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297,
+                                                            42.0, false, sc::SynScanAlignmentSetting::Auto, clock);
+    connected->set_connected(true);
+    REQUIRE(connected->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, kSettle));  // the poll is parked on the task clock and sends nothing
+    auto never_connected = sc::create_synscan_telescope_with_site(
+        1, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0, false, sc::SynScanAlignmentSetting::Auto, clock);
+    // A raised interrupt would last only as long as this teardown, far less than one read slice: hold the teardown
+    // where it has decided, so a wrongly raised interrupt is still up while the read below waits.
+    sc::set_closing_hook_for_testing(*never_connected, [] { std::this_thread::sleep_for(milliseconds(300)); });
+
+    st->latency_ms = 800;  // the exchange below is on the wire for 800 ms
+    const int before = st->transactions.load();
+    std::atomic<bool> threw{false};
+    std::thread exchange([&threw] {
+        try {
+            (void)sc::SynScanProtocolWrapper::instance().is_goto_in_progress();
+        } catch (const std::exception&) {
+            threw = true;
+        }
+    });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+    while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() > before);       // the read is waiting for the slow reply
+    std::this_thread::sleep_for(milliseconds(100));  // real time: let the read settle into its wait
+
+    SECTION("Disconnect") { never_connected->set_connected(false); }
+    SECTION("destruction") { never_connected.reset(); }
+    exchange.join();
+    CHECK_FALSE(threw.load());
+    CHECK(connected->get_connected());
+    CHECK(connected->get_link_fault().empty());
+    CHECK(sc::SynScanProtocolWrapper::instance().link_fault().empty());
+    st->latency_ms = 0;
+    connected->set_connected(false);
+}
+
 // Decision 0009 rule 2a (issue #1723): a pulled cable loses a serial link at once. The handset answers on a pty behind
 // a by-id style link (ReplugPort), so a case pulls the cable mid-exchange (PtyResponder::unplug_on) or while idle
 // (unplug) and plugs a new handset in under the same name. The driver runs on a FakeTaskClock, as above.

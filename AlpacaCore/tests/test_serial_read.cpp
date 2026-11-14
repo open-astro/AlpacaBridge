@@ -276,6 +276,49 @@ TEST_CASE("read_until - the deadline returns Timeout with the bytes that arrived
     CHECK(Clock::now() - start >= 100ms);
 }
 
+// Issue #2070: a flag another thread sets ends a read that would otherwise wait out its deadline, keeping the bytes
+// that arrived; the socket read checks it the same way.
+TEST_CASE("read_until - ReadSpec::cancel ends a waiting read with Cancelled", "[serial][serial_read]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), "ab");
+    std::atomic<bool> cancel{false};
+    ReadSpec spec;
+    spec.cancel = &cancel;
+    std::thread setter([&] {
+        std::this_thread::sleep_for(100ms);
+        cancel.store(true);
+    });
+    const auto start = Clock::now();
+    const auto r = read_until(link.fd(), spec, start + 5s);
+    setter.join();
+    CHECK(r.outcome == ReadOutcome::Cancelled);
+    CHECK(r.bytes == "ab");
+    CHECK(Clock::now() - start < 2s);
+
+    // Already set: the next read ends before it takes a byte, which stays in the fd.
+    feed(pty.master_fd(), "c#");
+    const auto again = read_until(link.fd(), spec, Clock::now() + 5s);
+    CHECK(again.outcome == ReadOutcome::Cancelled);
+    CHECK(again.bytes.empty());
+    cancel.store(false);
+    const auto after = read_until(link.fd(), spec, Clock::now() + 1s);
+    CHECK(after.outcome == ReadOutcome::Terminator);
+    CHECK(after.bytes == "c#");
+
+    SocketPair sp;
+    cancel.store(false);
+    std::thread socket_setter([&] {
+        std::this_thread::sleep_for(100ms);
+        cancel.store(true);
+    });
+    const auto socket_start = Clock::now();
+    const auto sr = read_until_socket(sp.a, spec, socket_start + 5s);
+    socket_setter.join();
+    CHECK(sr.outcome == ReadOutcome::Cancelled);
+    CHECK(Clock::now() - socket_start < 2s);
+}
+
 // Falsified by: serial_read.h read_until_impl() comparing bytes.size() to spec.max_len with > instead of >=
 TEST_CASE("read_until - reaching max_len without a stop is Overflow", "[serial][serial_read][issue1604]") {
     PtyPair pty("serial_read");

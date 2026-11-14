@@ -12,6 +12,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
@@ -1193,6 +1194,46 @@ TEST_CASE("Bisque PulseGuide - a short pulse keeps the configured response timeo
     driver->set_connected(false);
 }
 
+// open-astro#1786: the base class's individual guide-rate setters read the pair through the connection-checking
+// getter first, so an out-of-range GuideRateRightAscension or GuideRateDeclination write on a disconnected mount
+// answered NotConnected instead of InvalidValue.
+TEST_CASE("Bisque Telescope Driver - individual guide-rate range errors precede NotConnected",
+          "[bisque][telescope][unit][guiderate]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+    constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
+    for (const double bad : {kSiderealDegPerSec * 1.5, -0.001, 99999.0, std::numeric_limits<double>::quiet_NaN()}) {
+        require_alpaca_error([&] { driver->set_guide_rate_right_ascension(bad); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->set_guide_rate_declination(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    // An in-range value still reaches the connection check.
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(0.002); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(0.002); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// open-astro#1786: Bisque stores one rate per axis, so writing one axis keeps the other, and a refused write keeps
+// both.
+TEST_CASE("Bisque Telescope Driver - individual guide-rate writes keep the other axis",
+          "[bisque][telescope][unit][guiderate]") {
+    ConnectedFakeBisque mount;
+    auto& driver = mount.driver;
+    driver->set_guide_rate({0.001, 0.002});
+    driver->set_guide_rate_right_ascension(0.003);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.002);
+    driver->set_guide_rate_declination(0.004);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.004);
+
+    require_alpaca_error([&] { driver->set_guide_rate_right_ascension(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_guide_rate_declination(99999.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_guide_rate().ra == 0.003);
+    CHECK(driver->get_guide_rate().dec == 0.004);
+}
+
 TEST_CASE("Bisque Telescope Driver - out-of-range guide rates are InvalidValue and leave the rate unchanged (#775)",
           "[bisque][telescope][unit][guiderate]") {
     ConnectedFakeBisque mount;  // GuideRate reads need a connection (#2102)
@@ -1739,8 +1780,9 @@ TEST_CASE("Bisque park - Unpark during the park poll allows a slew again (#1838)
     CHECK(rig.mount.slew_commands.load() == 1);
 }
 
-// A Park that ends late (its 120 s timeout) must not clear the flag of a newer Park still polling.
-TEST_CASE("Bisque park - a stale Park's timeout leaves a newer Park refusing slews (#1838)",
+// A Park that a newer Park retired ends at its next poll boundary; its exit must not clear the newer Park's flag.
+// (Before open-astro#2062 the stale Park polled on until its 120 s timeout; the ParkingGuard epoch check is the same.)
+TEST_CASE("Bisque park - a retired Park's exit leaves a newer Park refusing slews (#1838)",
           "[bisque][telescope][taskclock][park-race]") {
     ClockedBisque rig;
     rig.mount.park_polls_needed = 100000;
@@ -1765,18 +1807,158 @@ TEST_CASE("Bisque park - a stale Park's timeout leaves a newer Park refusing sle
     };
     REQUIRE(wait_real([&] { return rig.mount.park_polls.load() >= 1; }));
 
-    REQUIRE_NOTHROW(rig.driver->abort_slew());
-    // Park 2 starts 60 s into Park 1, so Park 1 times out with 60 s of Park 2's budget left.
-    advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= std::chrono::seconds(60); }, 60);
-    REQUIRE(rig.virtual_elapsed() >= std::chrono::seconds(60));
     park2 = std::async(std::launch::async, [&] { rig.driver->park(); });
     REQUIRE(wait_real([&] { return rig.mount.park_commands.load() == 2; }));
-    // Park 1 times out (120 s after its start) while Park 2, started later, still polls.
-    REQUIRE(advance_until(rig.clock, [&] { return ready(park1); }, 200));
-    require_alpaca_error([&] { park1.get(); }, alpacacore::AlpacaError::DriverException);
+    // Park 2 retired Park 1, which returns quietly at its next poll boundary while Park 2 still polls.
+    REQUIRE(advance_until(rig.clock, [&] { return ready(park1); }, 5));
+    REQUIRE_NOTHROW(park1.get());
     REQUIRE_FALSE(ready(park2));
 
     require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
                          alpacacore::AlpacaError::InvalidWhileParked);
     CHECK(rig.mount.slew_commands.load() == 0);
+}
+
+// open-astro#2062: AbortSlew, Unpark and a disconnect retire a running Park poll. When the mount reports parked
+// after the cancel, the retired poll must not set AtPark: a client that cancelled the park would see a parked mount
+// that refuses slews.
+namespace {
+
+// Starts a Park held at not-parked and waits for its first IsParked poll. `cancel` retires it; then the fake is let
+// report parked and the clock is stepped until the old Park returns.
+void park_cancel_then_mount_parks(ClockedBisque& rig, const std::function<void()>& cancel) {
+    rig.mount.park_polls_needed = 100000;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    const struct FinishPark {
+        ClockedBisque& rig;
+        std::future<void>& parked;
+        ~FinishPark() {
+            rig.mount.park_polls_needed = 0;
+            advance_until(rig.clock, [&] { return !parked.valid() || ready(parked); });
+        }
+    } finish_park{rig, parked};
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+
+    cancel();
+    rig.mount.park_polls_needed = 0;  // the next IsParked the old poll sends reports parked
+    REQUIRE(advance_until(rig.clock, [&] { return ready(parked); }));
+    REQUIRE_NOTHROW(parked.get());  // a retired Park returns quietly
+}
+
+}  // namespace
+
+TEST_CASE("Bisque park - a park poll retired by AbortSlew never sets AtPark (#2062)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    park_cancel_then_mount_parks(rig, [&] { REQUIRE_NOTHROW(rig.driver->abort_slew()); });
+    CHECK_FALSE(rig.driver->get_at_park());
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(rig.mount.slew_commands.load() == 1);
+}
+
+TEST_CASE("Bisque park - a park poll retired by Unpark never sets AtPark (#2062)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    park_cancel_then_mount_parks(rig, [&] { REQUIRE_NOTHROW(rig.driver->unpark()); });
+    CHECK_FALSE(rig.driver->get_at_park());
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(rig.mount.slew_commands.load() == 1);
+}
+
+TEST_CASE("Bisque park - a park poll from before a reconnect never sets AtPark in the new session (#2062)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    park_cancel_then_mount_parks(rig, [&] {
+        REQUIRE_NOTHROW(rig.driver->set_connected(false));
+        REQUIRE_NOTHROW(rig.driver->set_connected(true));  // the fake still reports not parked
+        pause_poll(*rig.driver);
+    });
+    REQUIRE(rig.driver->get_connected());
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(poll_now(*rig.driver));  // the new session's poller still runs
+}
+
+// open-astro#2062: a lost link's Disconnect and the relink of a lost link retire a running Park too. A retired Park
+// leaves parking_ alone, so those paths clear it themselves, or the next session refused every slew as parked.
+TEST_CASE("Bisque park - a park poll retired with a lost link leaves the next session free to slew (#2062)",
+          "[bisque][telescope][taskclock][park-race]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    const struct FinishPark {
+        ClockedBisque& rig;
+        std::future<void>& parked;
+        ~FinishPark() {
+            rig.mount.mute = false;
+            rig.mount.park_polls_needed = 0;
+            advance_until(rig.clock, [&] { return !parked.valid() || ready(parked); });
+        }
+    } finish_park{rig, parked};
+    REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
+
+    // Lose the link while the Park sleeps between polls: three failed status ticks latch the fault, and a tick past
+    // the staleness bound declares the loss. The step wakes the Park once; it polls (mute) and sleeps again.
+    rig.mount.mute = true;
+    for (int i = 0; i < 3; ++i) CHECK(poll_now(*rig.driver));
+    rig.clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK_FALSE(poll_now(*rig.driver));
+    REQUIRE_FALSE(rig.driver->get_connected());
+
+    SECTION("Disconnect, then Connect") {
+        REQUIRE_NOTHROW(rig.driver->set_connected(false));
+        rig.mount.mute = false;
+        REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    }
+    SECTION("Connect relinks") {
+        rig.mount.mute = false;
+        REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    }
+    pause_poll(*rig.driver);
+    REQUIRE(rig.driver->get_connected());
+    rig.mount.park_polls_needed = 0;  // the old poll's next IsParked would report parked
+    REQUIRE(advance_until(rig.clock, [&] { return ready(parked); }));
+    REQUIRE_NOTHROW(parked.get());  // a retired Park returns quietly
+
+    CHECK_FALSE(rig.driver->get_at_park());
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(rig.mount.slew_commands.load() == 1);
+}
+
+// The final IsParked answers parked, but an AbortSlew retired the Park while that reply was on the wire: the write
+// after the loop is gated on the epoch too, not only the poll boundaries.
+TEST_CASE("Bisque park - AbortSlew during the last IsParked exchange leaves AtPark false (#2062)",
+          "[bisque][telescope][taskclock][park-race]") {
+    // Not ClockedBisque: its 300 ms response timeout would end the held IsParked read before AbortSlew lands.
+    struct SlowReplyRig {
+        alpacacore::test::FakeBisqueMount mount;
+        alpacacore::test::FakeTaskClock clock;
+        alpacacore::test::FakeMountServer server{mount.responder()};
+        std::unique_ptr<alpacacore::TelescopeDriver> driver;
+        SlowReplyRig() {
+            REQUIRE(server.ok());
+            auto info = loopback(server.port());
+            info.response_timeout_ms = 3000;
+            driver = alpacacore::vendor::bisque::create_bisque_telescope(0, info, clock);
+            REQUIRE_NOTHROW(driver->set_connected(true));
+            pause_poll(*driver);
+        }
+        ~SlowReplyRig() { driver->set_connected(false); }
+    } rig;
+    rig.mount.park_polls_needed = 0;  // the first IsParked reports parked
+    rig.mount.is_parked_ms = 1000;    // and is held on the wire for one real second
+    const int before = rig.mount.transactions.load();
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    // Park is one transaction; the next one is the IsParked the fake holds (real time: no clock wait yet).
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (rig.mount.transactions.load() < before + 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(rig.mount.transactions.load() >= before + 2);
+    // AbortSlew retires the Park under mutex_ at once, then waits for the wire behind the held IsParked.
+    REQUIRE_NOTHROW(rig.driver->abort_slew());
+    REQUIRE(parked.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE_NOTHROW(parked.get());
+    CHECK(rig.mount.parked.load());  // the mount did report parked
+    CHECK_FALSE(rig.driver->get_at_park());
 }

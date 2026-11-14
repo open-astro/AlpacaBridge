@@ -246,6 +246,14 @@ public:
     SiteInfo get_site_info();
 
     /**
+     * @brief The site information with the timezone and DST taken from a :GUT# reply already read.
+     *
+     * Sends :GLS# only. @p gut_reply is a read_utc_reply() result; its timezone/DST fields need the first
+     * 17 characters only, so a reply whose UTC field is unusable still gives them (issue #1784).
+     */
+    SiteInfo get_site_info(const std::string& gut_reply);
+
+    /**
      * @brief Get the :GLS# part of the site information (longitude, latitude, GPS digit, hemisphere).
      *
      * Sends :GLS# only; timezone and DST stay at their defaults.
@@ -429,7 +437,20 @@ public:
      * Sends :GUT# command.
      */
     std::chrono::system_clock::time_point get_utc_time();
-    
+
+    /**
+     * @brief One :GUT# exchange, the reply without its status prefix and terminator, unparsed.
+     *
+     * The connect reads it once for both the UTC sample (parse_utc_time()) and the site's timezone and DST
+     * (get_site_info(const std::string&)), issue #1784.
+     */
+    std::string read_utc_reply();
+
+    /**
+     * @brief The UTC time in a read_utc_reply() result; throws when the reply is not a valid v3.10 time.
+     */
+    static std::chrono::system_clock::time_point parse_utc_time(const std::string& gut_reply);
+
     /**
      * @brief Set timezone offset.
      *
@@ -529,7 +550,9 @@ private:
     ~iOptronProtocolWrapper();
     iOptronProtocolWrapper(const iOptronProtocolWrapper&) = delete;
     iOptronProtocolWrapper& operator=(const iOptronProtocolWrapper&) = delete;
-    
+
+    void apply_gut_site_fields(SiteInfo& site, const std::string& gut_response);
+
     // PIMPL pattern - hides platform-specific implementation
     class Impl;
     std::unique_ptr<Impl> pimpl_;
