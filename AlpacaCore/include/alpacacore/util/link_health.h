@@ -52,7 +52,9 @@ inline constexpr std::chrono::seconds kLinkStalenessBound{30};
  *
  * The fault clears on its own when a frame arrives again. Connected stays
  * true while the fault stands; a driver that adopts decision 0009 drops it
- * once the fault has stood past kLinkStalenessBound (see PolledLinkHealth).
+ * once the fault has stood past kLinkStalenessBound: check_silence() stamps
+ * the latch on the caller's clock and fault_stale() reports a fault that has
+ * stood at least that long (the PolledLinkHealth shape).
  */
 class StreamLinkHealth {
 public:
@@ -62,11 +64,13 @@ public:
         last_frame_ = now;
         fault_.clear();
         read_error_.clear();
+        fault_since_.reset();
     }
 
     bool on_frame(clock::time_point now) {
         last_frame_ = now;
         read_error_.clear();
+        fault_since_.reset();
         const bool restored = !fault_.empty();
         fault_.clear();
         return restored;
@@ -83,7 +87,15 @@ public:
         if (!read_error_.empty()) {
             fault_ += " (last read error: " + read_error_ + ")";
         }
+        fault_since_ = now;
         return fault_;
+    }
+
+    /// True when a latched fault has stood, without a frame, for at least
+    /// `bound` on the clock check_silence() was given (decision 0009 point
+    /// 2(b)). False when not latched.
+    bool fault_stale(clock::time_point now, std::chrono::nanoseconds bound = kLinkStalenessBound) const {
+        return !fault_.empty() && fault_since_ && (now - *fault_since_) >= bound;
     }
 
     bool faulted() const { return !fault_.empty(); }
@@ -93,6 +105,7 @@ private:
     clock::time_point last_frame_{};
     std::string fault_;       // non-empty while latched
     std::string read_error_;  // errno_string() of the last persistent read failure, if any
+    std::optional<clock::time_point> fault_since_;  // when check_silence() latched fault_
 };
 
 /**

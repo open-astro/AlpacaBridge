@@ -42,6 +42,7 @@ set(TEST_SOURCES
     test_unique_id.cpp
     test_polled_state.cpp
     test_link_epoch.cpp
+    test_stream_link_health.cpp
     # SDK-free ZWO open bookkeeping (issue #1500): runs on every host.
     test_zwo_shared_open_table.cpp
     test_state_snapshot.cpp

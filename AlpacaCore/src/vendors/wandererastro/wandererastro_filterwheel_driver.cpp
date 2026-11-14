@@ -96,8 +96,14 @@ public:
 
     int get_interface_version() const override { return 3; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (decision 0009, issue #1988): once the
+    // wrapper has lost the link (a hangup, or a fault standing past
+    // util::kLinkStalenessBound) it has released the port. Both reads are
+    // lock-free.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
 
+    // Decision 0009 point 5: the fault text while faulted, the loss reason
+    // after a loss until the next Connect or Disconnect.
     std::string get_link_fault() const override {
         const auto fault = protocol_.link_fault();
         return fault ? *fault : std::string{};
@@ -123,19 +129,30 @@ public:
         // driver: without this, concurrent disconnects would join the wrapper's
         // reader thread twice — undefined behavior).
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        const bool live = get_connected();
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent and would be silently dropped
         // without the record; a connect must honor a newer pending disconnect.
+        // The disconnect gate reads the raw flag, so a lost link still runs
+        // the teardown; the connect gate reads the link-aware value, so
+        // Connect over a lost link reconnects (decision 0009 point 4).
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown().
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
         if (connected) {
+            if (connected_.load()) {
+                teardown();  // a lost link: drop it before reconnecting, never reopen it as it was
+            }
             // Resolve an auto-detect request here (on the background connection
             // thread), not at registration. A local copy keeps config_ as the
             // durable intent so a later reconnect re-scans.
@@ -180,17 +197,17 @@ public:
                 protocol_.disconnect();
                 throw;
             }
+            if (!protocol_.link_alive()) {
+                // The port died before the session was published: fail this
+                // connect. disconnect() also clears the loss reason, so a
+                // connect that never completed leaves get_link_fault() empty.
+                protocol_.disconnect();
+                throw AlpacaException("Wanderer filter wheel link lost during connect", AlpacaError::NotConnected);
+            }
             connected_.store(true);
             ALPACA_LOG_INFO("WandererAstro", "Filter wheel connected");
         } else {
-            protocol_.disconnect();  // clears the wrapper's cached firmware date
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                model_.clear();
-                moving_ = false;
-                target_slot_ = 0;
-            }
-            connected_.store(false);
+            teardown();
             ALPACA_LOG_INFO("WandererAstro", "Filter wheel disconnected");
         }
     }
@@ -294,10 +311,30 @@ public:
     }
 
 private:
+    // NotConnected while disconnected and once the link is lost (decision
+    // 0009 point 3), before the fault check or the Position cache is reached.
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
         }
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("Filter wheel link lost; Connect again once the wheel is back",
+                                  AlpacaError::NotConnected);
+        }
+    }
+
+    // Driver state first, then the wrapper teardown (joins the reader, clears
+    // the cached status, firmware date and loss reason, closes the port if the
+    // loss has not already released it). Caller holds transition_mutex_.
+    void teardown() {
+        connected_.store(false);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            model_.clear();
+            moving_ = false;
+            target_slot_ = 0;
+        }
+        protocol_.disconnect();
     }
 
     // Issue #237: Position is served from the reader thread's cache, so a

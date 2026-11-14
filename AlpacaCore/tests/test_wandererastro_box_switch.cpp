@@ -259,21 +259,8 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
     CHECK(driver->get_switch_value(14) == 13.1);
     CHECK(driver->get_connected());
     CHECK(driver->get_link_fault().empty());
-
-    // A dead fd (EIO) is silence too, and the reason names the read error.
-    box.sever_link();
-    // Two passes: the second starts after the first counted one returned, so
-    // its reads hit the dead fd and the reason can name the read error.
-    REQUIRE(clock.wait_for_now_calls(clock.now_calls() + 2, std::chrono::milliseconds(4000)));
-    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(10001)));
-    CHECK(value_read_throws());
-    try {
-        (void)driver->get_switch_value(14);
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-        CHECK(std::string(ex.what()).find("Input/output error") != std::string::npos);
-    }
+    // A dead fd is no longer silence: see "a cable pulled with the stream
+    // running loses the link at once" (decision 0009, issue #1988).
     CHECK_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
 }
@@ -508,4 +495,172 @@ TEST_CASE("WandererAstro Box Switch Driver - another Box product is refused (#22
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
+}
+
+// ---------------------------------------------------------------------------
+// Decision 0009 (issue #1988): a hangup is a lost link at once, a silence fault
+// standing for util::kLinkStalenessBound is one too, the loss reason is the one
+// fault text until the next Connect or Disconnect, and only the client relinks.
+// ---------------------------------------------------------------------------
+
+#include <alpacacore/util/link_health.h>
+
+namespace {
+
+// kBoxFrame with another input voltage (12.4 V), so a reconnect shows which box answered.
+const char* const kReplugBoxFrame =
+    "ZXWBProV3A20250410A-127.00A-127.00A-127.00A45.20A21.30A1.50A0.20A0.30A12.40A1A1A1A1A1A1A0A0A0A1A1A120A\n";
+
+// Every operational member answers NotConnected over a lost link, before any
+// cache or fault check; MaxSwitch is static and keeps answering, and
+// DeviceState is the empty list.
+void require_box_lost(alpacacore::SwitchDriver& driver) {
+    CHECK_FALSE(driver.get_connected());
+    require_alpaca_error([&]() { (void)driver.get_switch_value(14); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_switch(7); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.set_switch(7, true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver.set_switch_value(10, 128.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver.get_can_write(7); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver.get_max_switch() == 24);
+    CHECK(driver.get_device_state().empty());
+}
+
+}  // namespace
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_box_protocol_wrapper.cpp reader_loop treating a
+// hangup errno as a plain read error for the silence latch (no end_link_from_reader call).
+TEST_CASE("WandererAstro Box Switch Driver - a cable pulled with the stream running loses the link at once (#1988)",
+          "[wandererastro][switch][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced: only the hangup can end the link
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_switch_value(14) == 13.1);
+    const std::string port = box.slave_path();  // emptied by the cut
+
+    box.sever_link();
+    // Real time: the reader meets the hangup on its next read.
+    CHECK(wait_until_box([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    require_box_lost(*driver);
+    CHECK(driver->get_link_fault().find("Serial link lost") != std::string::npos);
+    CHECK(wait_until_box([&] { return !alpacacore::util::is_serial_port_in_use(port); },
+                         std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_box_switch_driver.cpp get_connected returning
+// connected_.load() alone.
+TEST_CASE("WandererAstro Box Switch Driver - a command on a pulled cable fails NotConnected (#1988)",
+          "[wandererastro][switch][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    box.sever_link();
+    // The write meets the dead port, or the reader already has: either way
+    // the command is NotConnected, never DriverException.
+    require_alpaca_error([&]() { driver->set_switch(7, false); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->set_connected(false));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_box_protocol_wrapper.cpp check_link_silence never
+// asking link_.fault_stale(now), so the fault stands with Connected true.
+TEST_CASE("WandererAstro Box Switch Driver - a silence fault standing 30 s loses the link (#1988)",
+          "[wandererastro][switch][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const std::string port = box.slave_path();
+
+    box.set_muted(true);
+    REQUIRE(drain_after_mute(box, clock));
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(10001)));
+    // Faulted, not lost: Connected stays true and reads refuse with DriverException.
+    CHECK(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_switch_value(14); }, alpacacore::AlpacaError::DriverException);
+    REQUIRE(advance_one_pass(clock, alpacacore::util::kLinkStalenessBound - std::chrono::milliseconds(1)));
+    CHECK(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_switch_value(14); }, alpacacore::AlpacaError::DriverException);
+    CHECK(alpacacore::util::is_serial_port_in_use(port));
+
+    // The fault has now stood for the bound: the link is lost.
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    CHECK(wait_until_box([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    require_box_lost(*driver);
+    CHECK(driver->get_link_fault().find("no status frame") != std::string::npos);
+    CHECK(wait_until_box([&] { return !alpacacore::util::is_serial_port_in_use(port); },
+                         std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_box_protocol_wrapper.cpp disconnect not clearing
+// loss_reason_, so the reason outlives the Disconnect.
+TEST_CASE("WandererAstro Box Switch Driver - the loss reason stays until the next Disconnect or Connect (#1988)",
+          "[wandererastro][switch][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
+    alpacacore::test::FakeSerialStreamer replugged(kReplugBoxFrame, std::chrono::milliseconds(300));
+    alpacacore::test::ReplugPort port(box);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, port.path.string(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_link_fault().empty());
+
+    box.sever_link();
+    REQUIRE(wait_until_box([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    const std::string reason = driver->get_link_fault();
+    CHECK(reason.find("Serial link lost") != std::string::npos);
+    clock.advance(std::chrono::minutes(5));  // nothing ages the kept reason away
+    CHECK(driver->get_link_fault() == reason);
+
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+// Falsified by: AlpacaCore/src/vendors/wandererastro/wandererastro_box_switch_driver.cpp set_connected keeping the
+// idempotency check `connected == connected_.load()`, so a Connect over a lost link returns as already connected.
+TEST_CASE("WandererAstro Box Switch Driver - a Connect over a lost link reopens without a Disconnect (#1988)",
+          "[wandererastro][switch][unit][fake][link-lost]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300));
+    alpacacore::test::FakeSerialStreamer replugged(kReplugBoxFrame, std::chrono::milliseconds(300));
+    alpacacore::test::ReplugPort port(box);
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, port.path.string(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_switch_value(14) == 13.1);
+
+    box.sever_link();
+    REQUIRE(wait_until_box([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+
+    // No Disconnect: a Connect while the raw flag is still set must not be taken as already connected.
+    port.replug(replugged);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_switch_value(14) == 12.4);  // the replugged box's frame, not the old cache
+    CHECK(driver->get_link_fault().empty());
+
+    // A Disconnect over a lost link completes and clears the reason.
+    const std::string replugged_port = replugged.slave_path();
+    replugged.sever_link();
+    REQUIRE(wait_until_box([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(replugged_port));
 }
