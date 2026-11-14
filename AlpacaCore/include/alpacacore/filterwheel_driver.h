@@ -43,7 +43,7 @@ public:
         state.reserve(2);  // GCC 13 -O3 stringop-overflow false positive on vector growth (#1595)
         try {
             state.push_back({"Position", DeviceStateValue{static_cast<std::int32_t>(get_position())}});
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown member is omitted
             // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
         }
         if (!state.empty()) {

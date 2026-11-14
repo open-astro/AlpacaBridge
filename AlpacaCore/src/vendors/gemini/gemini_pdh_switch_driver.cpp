@@ -15,6 +15,7 @@
 #include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/gemini/gemini_pdh_protocol_wrapper.h>
 #include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
 #include <alpacacore/version.h>
@@ -135,8 +136,12 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    GeminiPdhSwitchDriver(int device_number, PdhConnectionConfig config)
-        : AsyncConnectable("Gemini"), device_number_(device_number), config_(std::move(config)), connected_(false) {
+    GeminiPdhSwitchDriver(int device_number, PdhConnectionConfig config, util::TaskClock& clock)
+        : AsyncConnectable("Gemini"),
+          device_number_(device_number),
+          config_(std::move(config)),
+          connected_(false),
+          protocol_(clock) {
         for (int i = 0; i < kPdhSwitchCount; ++i) {
             switch_names_[static_cast<std::size_t>(i)] = kSwitches[static_cast<std::size_t>(i)].name;
         }
@@ -182,15 +187,22 @@ public:
     // disconnected, because both disconnect sites call protocol_.clear_firmware()
     // BEFORE storing connected_ = false. The wrapper's own clear inside
     // protocol_.disconnect() comes only after the reader join, up to 500 ms
-    // later, which is why it cannot be the one relied on. The only window is
-    // the sub-microsecond one on connect (firmware set before the store(true)).
+    // later, which is why it cannot be the one relied on. A lost link clears the
+    // cache before link_alive() turns false (decision 0009, one critical section
+    // in the wrapper). The only window is the sub-microsecond one on connect
+    // (firmware set before the store(true)).
     std::optional<std::string> get_device_firmware() const override { return protocol_.get_firmware(); }
 
     int get_interface_version() const override { return 3; }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (decision 0009 rule 2): a hangup on the
+    // port, or a link fault that has stood for util::kLinkStalenessBound, makes
+    // the wrapper release the port and report link_alive() false. Lock-free.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
 
-    // Latched link fault, read under the wrapper's narrow state_mutex_.
+    // The latched link fault, or after a loss its reason, kept until the next
+    // Connect or Disconnect (decision 0009 rule 5); read under the wrapper's
+    // narrow state_mutex_, never the wire.
     std::string get_link_fault() const override {
         const auto fault = protocol_.link_fault();
         return fault ? *fault : std::string{};
@@ -213,18 +225,31 @@ public:
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        const bool live = connected_.load() && protocol_.link_alive();
         // Base gates BEFORE the idempotency check (see the WandererBox driver
-        // for the race this prevents).
+        // for the race this prevents). The disconnect gate reads the raw flag,
+        // so Disconnect over a lost link still runs the teardown (and a
+        // Disconnect queued against an in-flight Connect still reaches it);
+        // the connect gate reads the link-aware value, so Connect over a lost
+        // link reconnects instead of taking the idempotency return (decision
+        // 0009 rule 4).
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        // Over a lost link the pending disconnect is consumed here without a
+        // teardown, so the raw connected_ may stay true. That is harmless: the
+        // port is already released, Connected reads false, and the next
+        // Disconnect or Connect runs teardown_locked().
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
         if (connected) {
+            if (connected_.load()) {
+                teardown_locked();  // a lost link: drop it before reconnecting (no Disconnect needed first)
+            }
             // Resolve auto-detect here (on the background connection thread),
             // not at registration. A local copy keeps config_ as the durable
             // intent so a later reconnect resolves the port again (remembered port first, then the scan).
@@ -265,6 +290,16 @@ public:
                     AlpacaError::NotConnected);
             }
             protocol_.connect(effective);
+            // A port that died between the wrapper's connect and here fails this
+            // connect: Connected must not go true over a released port. The
+            // disconnect() also clears the wrapper's loss reason: a connect that
+            // never completed is not a lost session, and the reason reaches the
+            // client in this error instead (decision 0009, as the flat panel).
+            if (!protocol_.link_alive()) {
+                protocol_.clear_firmware();
+                protocol_.disconnect();
+                throw AlpacaException("Gemini power hub link lost during connect", AlpacaError::NotConnected);
+            }
             // Remember the port only after the handshake held: a port the user configured is never stored.
             if (auto_detected) {
                 util::DeviceLocationStore::save(util::location_key(get_unique_id(), effective.auto_detect_index),
@@ -279,17 +314,27 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 connected");
         } else {
-            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
-            // throwing close must not leave the driver reporting connected on
-            // a closed port. disconnect() cannot throw today; the order is
-            // the contract, not the current wrapper's behaviour. The cached
-            // firmware goes before the store so the driver is never seen
-            // disconnected beside a stale string (the teardown's own clear is
-            // behind a reader join of up to 500 ms).
-            protocol_.clear_firmware();
-            connected_.store(false);
-            protocol_.disconnect();  // joins the reader, closes the port
+            teardown_locked();
             ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 disconnected");
+        }
+    }
+
+    // The disconnect body, shared by the explicit disconnect and the
+    // lost-link reconnect. Caller holds transition_mutex_.
+    void teardown_locked() {
+        // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
+        // throwing close must not leave the driver reporting connected on
+        // a closed port. disconnect() cannot throw today; the order is
+        // the contract, not the current wrapper's behaviour. The cached
+        // firmware goes before the store so the driver is never seen
+        // disconnected beside a stale string (the teardown's own clear is
+        // behind a reader join of up to 500 ms).
+        protocol_.clear_firmware();
+        connected_.store(false);
+        protocol_.disconnect();  // joins the reader, closes the port, clears a kept loss reason
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        for (auto& c : commanded_) {
+            c.reset();
         }
     }
 
@@ -437,9 +482,15 @@ public:
     }
 
 private:
+    // NotConnected while disconnected and once the link is lost (decision 0009
+    // rule 3), before any fault check; lock-free, so a getter never waits.
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Gemini power hub not connected", AlpacaError::NotConnected);
+        }
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("Gemini power hub link lost; Connect again once the hub is back",
+                                  AlpacaError::NotConnected);
         }
     }
 
@@ -448,7 +499,9 @@ private:
     // fail with EIO. Once the wrapper latches a link fault, every value read
     // and write throws (iOptron "communications compromised" convention,
     // DriverException rather than NotConnected because Connected is still
-    // true) until status frames resume. Static metadata (names, descriptions,
+    // true) until status frames resume; a fault that stands for
+    // util::kLinkStalenessBound loses the link, and ensure_connected() answers
+    // NotConnected first. Static metadata (names, descriptions,
     // ranges, CanWrite) keeps answering: it does not depend on the hub.
     void ensure_link_up() const {
         if (const auto fault = protocol_.link_fault()) {
@@ -637,20 +690,21 @@ private:
     std::mutex transition_mutex_;  // serializes set_connected() transitions
 };
 
-std::unique_ptr<SwitchDriver> create_gemini_pdh_switch(int device_number, const std::string& serial_port,
-                                                       int baud_rate) {
+std::unique_ptr<SwitchDriver> create_gemini_pdh_switch(int device_number, const std::string& serial_port, int baud_rate,
+                                                       util::TaskClock& clock) {
     PdhConnectionConfig config;
     config.serial_port = serial_port;
     config.baud_rate = baud_rate;
-    return std::make_unique<GeminiPdhSwitchDriver>(device_number, std::move(config));
+    return std::make_unique<GeminiPdhSwitchDriver>(device_number, std::move(config), clock);
 }
 
-std::unique_ptr<SwitchDriver> create_gemini_pdh_switch_by_index(int device_number, int hub_index) {
+std::unique_ptr<SwitchDriver> create_gemini_pdh_switch_by_index(int device_number, int hub_index,
+                                                                util::TaskClock& clock) {
     // Defer the (blocking) port scan to connect time, which runs on the driver's
     // background connection thread -- never on the HTTP registration thread.
     PdhConnectionConfig config;
     config.auto_detect_index = hub_index;
-    return std::make_unique<GeminiPdhSwitchDriver>(device_number, std::move(config));
+    return std::make_unique<GeminiPdhSwitchDriver>(device_number, std::move(config), clock);
 }
 
 }  // namespace alpacacore::vendor::gemini

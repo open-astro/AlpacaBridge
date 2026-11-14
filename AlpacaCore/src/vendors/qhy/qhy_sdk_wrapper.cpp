@@ -325,19 +325,16 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
         throw AlpacaException("Failed to set QHY stream mode for: " + camera_id, AlpacaError::DriverException);
     }
 
-    pimpl_->handles[camera_id] =
-        Impl::SharedHandle{std::shared_ptr<qhyccd_handle>(raw_handle,
-                                                          [](qhyccd_handle* h) {
-                                                              if (h != nullptr) {
-                                                                  try {
-                                                                      CloseQHYCCD(h);
-                                                                  } catch (...) {  // NOLINT(bugprone-empty-catch)
-                                                                      // Best-effort close during teardown; nothing to
-                                                                      // recover here.
-                                                                  }
-                                                              }
-                                                          }),
-                           1};
+    const auto close_handle = [](qhyccd_handle* h) {
+        if (h != nullptr) {
+            try {
+                CloseQHYCCD(h);
+            } catch (...) {  // NOLINT(bugprone-empty-catch): best-effort close in teardown
+                // Nothing to recover here.
+            }
+        }
+    };
+    pimpl_->handles[camera_id] = Impl::SharedHandle{std::shared_ptr<qhyccd_handle>(raw_handle, close_handle), 1};
 }
 
 void QHYSDKWrapper::init_camera(const std::string& camera_id) {

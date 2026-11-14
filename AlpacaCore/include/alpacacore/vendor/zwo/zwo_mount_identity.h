@@ -65,7 +65,7 @@ private:
 
     static Registry& registry() {
         // Never destroyed: static drivers may release their claims at process exit.
-        static auto* reg = new Registry();  // NOLINT(cppcoreguidelines-owning-memory)
+        static auto* reg = new Registry();  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
         return *reg;
     }
 };

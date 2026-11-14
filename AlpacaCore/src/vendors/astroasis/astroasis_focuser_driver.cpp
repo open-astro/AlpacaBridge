@@ -69,7 +69,7 @@ public:
         state_.stop_and_join();
         if (connected_.load()) {
             try {
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Astroasis", "Error during focuser destruction: " + std::string(e.what()));
             }

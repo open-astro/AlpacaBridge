@@ -1848,7 +1848,7 @@ public:
             } else {
                 try {
                     refresh_tracking_mode_locked(lock);
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the stop is still sent
                 }
             }
         }
@@ -1947,7 +1947,7 @@ public:
             // failed read keeps the cache, since the stops below must still be sent.
             try {
                 refresh_tracking_mode_locked(lock);
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the stops are still sent
             }
             // Try every stop on its own, so one lost command cannot skip the others (#781).
             std::string stop_error;

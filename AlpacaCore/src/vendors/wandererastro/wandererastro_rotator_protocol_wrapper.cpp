@@ -760,7 +760,7 @@ private:
                 try {
                     (void)std::stod(*token);  // keep only numeric tokens
                     last_token = *token;
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a non-numeric token is skipped
                     // non-numeric garbage on the wire — skip the token and keep
                     // listening for the real completion report.
                 }

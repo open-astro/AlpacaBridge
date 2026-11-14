@@ -58,7 +58,7 @@ public:
         shutdown_connection();
         if (connected_.load()) {
             try {
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("iOptron", "Error during iEFW destruction: " + std::string(e.what()));
             }

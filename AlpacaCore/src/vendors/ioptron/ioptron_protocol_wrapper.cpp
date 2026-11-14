@@ -2032,7 +2032,7 @@ bool iOptronProtocolWrapper::park(bool zero_distance_workaround) {
             zero_distance =
                 std::fabs(current.altitude_degrees - park_pos.altitude_degrees) < kEpsDeg &&
                 std::fabs(std::remainder(current.azimuth_degrees - park_pos.azimuth_degrees, 360.0)) < kEpsDeg;
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a plain park follows
             // Position unavailable — proceed with a plain park attempt.
         }
 

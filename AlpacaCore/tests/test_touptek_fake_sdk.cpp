@@ -1118,7 +1118,7 @@ std::chrono::microseconds time_of(Fn&& fn) {
     return alpacacore::test::timed([&] {
         try {
             fn();
-        } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch): only the latency matters
         }
     });
 }

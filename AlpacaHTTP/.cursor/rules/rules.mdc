@@ -135,7 +135,6 @@ AlpacaHTTP/
 |       |-- config.h
 |       |-- json_utils.h
 |       `-- util/
-|           |-- threading.h
 |           |-- logging_adapter.h
 |           `-- error_mapping.h
 |
@@ -155,7 +154,6 @@ AlpacaHTTP/
 |   |   `-- discovery.cpp
 |   |
 |   `-- util/
-|       |-- threading.cpp
 |       |-- logging_adapter.cpp
 |       `-- error_mapping.cpp
 |

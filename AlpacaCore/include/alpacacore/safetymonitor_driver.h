@@ -40,7 +40,7 @@ public:
         state.reserve(2);
         try {
             state.push_back({"IsSafe", DeviceStateValue{get_is_safe()}});
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unknown member is omitted
             // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
         }
         if (!state.empty()) {
