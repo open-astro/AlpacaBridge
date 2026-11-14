@@ -254,6 +254,20 @@ TEST_CASE("driver_rig - PolledRig pause and poll_now forward to the driver's sea
     CHECK(rig.clock().waiter_count() == 1);  // and the poller is still parked
 }
 
+// A rig built without a seam fails the case when it is called, so each is a [!shouldfail] case: the case passes only
+// while the call fails.
+// Falsified by: PolledRig::pause() returning without the FAIL when it has no seam (the case then passes).
+TEST_CASE("driver_rig - PolledRig pause fails without a pause seam", "[driver_rig][!shouldfail]") {
+    StubRig rig(kRigTiming, [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, false); });
+    rig.pause(true);
+}
+
+// Falsified by: PolledRig::poll_now() returning without the FAIL when it has no seam (the case then passes).
+TEST_CASE("driver_rig - PolledRig poll_now fails without a poll_now seam", "[driver_rig][!shouldfail]") {
+    StubRig rig(kRigTiming, [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, false); });
+    rig.poll_now();
+}
+
 // Falsified by: PolledRig::expect_error() swapping code and fn or dropping the code check.
 TEST_CASE("driver_rig - PolledRig expect_error accepts the expected code", "[driver_rig]") {
     StubRig rig(kRigTiming, [](StubFake&, FakeTaskClock& c) { return std::make_unique<PollingStub>(c, false); });

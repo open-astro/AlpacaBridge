@@ -243,10 +243,16 @@ struct SerialRig : SynScanRig<SerialHandset> {
 
 // The wrapper is a process-wide singleton, and ~PolledRig disconnects only a driver that still reads Connected: a
 // serial case declares this right after its rig, so the driver is disconnected first whatever it reads, and the port
-// is released for the next case.
+// is released for the next case. It swallows a throw as ~PolledRig does: it runs while a failed REQUIRE unwinds, and a
+// throw then would reach std::terminate.
 struct ReleasePort {
     alpacacore::TelescopeDriver& driver;
-    ~ReleasePort() { driver.set_connected(false); }
+    ~ReleasePort() {
+        try {
+            driver.set_connected(false);
+        } catch (...) {  // a destructor must not throw
+        }
+    }
 };
 
 // Connects and parks the poll body on the clock, so only the case's own calls reach the handset.
