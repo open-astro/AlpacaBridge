@@ -15,6 +15,7 @@
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/util/task_clock.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -53,5 +54,13 @@ struct ToupCameraBranding {
 std::unique_ptr<CameraDriver> create_toupcam_family_camera(int device_number, int camera_index, ToupTekSDK& sdk,
                                                            ToupCameraBranding branding,
                                                            util::TaskClock& clock = util::default_task_clock());
+
+/// Test seam (issue #1995): `hook` runs on the disconnecting thread of a
+/// ToupTek-family camera (set_connected(false) and the destructor) after the
+/// disconnect has stopped the stream and marked the camera closing, and before
+/// it closes the capture session, with no driver lock held, so a case can drive
+/// a StartExposure into that window. Pass an empty function to clear it; a
+/// driver that is not a ToupTek-family camera ignores it.
+void set_disconnect_gap_hook_for_testing(CameraDriver& driver, std::function<void()> hook);
 
 } // namespace alpacacore::vendor::touptek

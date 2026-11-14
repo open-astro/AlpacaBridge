@@ -21,6 +21,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -51,6 +52,7 @@ enum FakeConstantIndex {
 
 constexpr int kE_INVALIDARG = static_cast<int>(0x80070057u);
 constexpr int kE_TIMEOUT = static_cast<int>(0x8001011fu);
+constexpr int kE_NOTIMPL = static_cast<int>(0x80004001u);
 
 template <class Brand>
 struct FakeApi {
@@ -109,7 +111,6 @@ struct FakeApi {
     FAKE_NOOP(get_RawFormat)
     FAKE_NOOP(get_Temperature)
     FAKE_NOOP(get_SerialNumber)
-    FAKE_NOOP(get_FwVersion)
     FAKE_NOOP(get_PixelSize)
     FAKE_NOOP(ST4PlusGuide)
     FAKE_NOOP(ST4PlusGuideState)
@@ -126,6 +127,10 @@ struct FakeApi {
     static inline int close_calls = 0;
     static inline int put_expo_time_hr = 0;
     static inline int put_option_hr = 0;
+    // What the four version reads answer. A refusal still scribbles on the buffer,
+    // which the real SDK does not promise to leave alone: the wrapper must not
+    // read it back.
+    static inline int version_hr = 0;
 
     // WaitImageV4 rendezvous: parks until get_ExpoTime runs, bounded so a
     // regression fails the case instead of hanging it.
@@ -140,6 +145,7 @@ struct FakeApi {
         close_calls = 0;
         put_expo_time_hr = 0;
         put_option_hr = 0;
+        version_hr = 0;
         std::lock_guard<std::mutex> lock(wait_mutex);
         wait_entered = false;
         wait_released = false;
@@ -169,6 +175,15 @@ struct FakeApi {
         ++close_calls;
         return 0;
     }
+
+    static int write_version(char* out, const char* text) {
+        std::strcpy(out, version_hr < 0 ? "refused" : text);
+        return version_hr;
+    }
+    static int get_FwVersion(HToupcam, char* out) { return write_version(out, "4.1.2.20221031"); }
+    static int get_HwVersion(HToupcam, char* out) { return write_version(out, "4.0"); }
+    static int get_FpgaVersion(HToupcam, char* out) { return write_version(out, "4.34"); }
+    static int get_ProductionDate(HToupcam, char* out) { return write_version(out, "20260310"); }
 
     static int put_ExpoTime(HToupcam, unsigned) { return put_expo_time_hr; }
     static int put_Option(HToupcam, unsigned long long, int) { return put_option_hr; }
@@ -315,6 +330,27 @@ void check_wait_image_does_not_take_the_wrapper_lock() {
     CHECK(height == 480);
 }
 
+template <class Brand>
+void check_version_reads() {
+    using Api = FakeApi<Brand>;
+    Api::reset();
+    ToupcamFamilySDK<Api> wrapper;
+    ToupTekSDK& sdk = wrapper;
+    const HToupcam h = Api::handle(0);
+
+    CHECK(sdk.get_firmware_version(h) == "4.1.2.20221031");
+    CHECK(sdk.get_hw_version(h) == "4.0");
+    CHECK(sdk.get_fpga_version(h) == "4.34");
+    CHECK(sdk.get_production_date(h) == "20260310");
+
+    // A model without the value refuses the read (E_NOTIMPL): an empty string, not a throw and not the buffer.
+    Api::version_hr = kE_NOTIMPL;
+    CHECK(sdk.get_firmware_version(h).empty());
+    CHECK(sdk.get_hw_version(h).empty());
+    CHECK(sdk.get_fpga_version(h).empty());
+    CHECK(sdk.get_production_date(h).empty());
+}
+
 }  // namespace
 
 TEST_CASE("ToupcamFamilySDK - enumerate_cameras skips filter wheels, focusers and model-less entries",
@@ -338,4 +374,10 @@ TEST_CASE("ToupcamFamilySDK - wait_image does not hold the wrapper lock across W
           "[touptek][altair][toupcam_family][unit]") {
     SECTION("Toupcam") { check_wait_image_does_not_take_the_wrapper_lock<ToupcamBrand>(); }
     SECTION("Altaircam") { check_wait_image_does_not_take_the_wrapper_lock<AltairBrand>(); }
+}
+
+TEST_CASE("ToupcamFamilySDK - version reads return the SDK text and an empty string on a refusal",
+          "[touptek][altair][toupcam_family][unit]") {
+    SECTION("Toupcam") { check_version_reads<ToupcamBrand>(); }
+    SECTION("Altaircam") { check_version_reads<AltairBrand>(); }
 }

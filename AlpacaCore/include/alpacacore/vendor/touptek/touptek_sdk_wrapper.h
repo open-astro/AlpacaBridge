@@ -232,6 +232,12 @@ public:
     // Camera metadata
     virtual std::string get_serial_number(HToupcam handle) = 0;
     virtual std::string get_firmware_version(HToupcam handle) = 0;
+    // The camera's hardware version ("3.12"), FPGA version ("1.13") and production
+    // date as the SDK writes it ("YYYYMMDD"). Like get_firmware_version, a model
+    // that refuses the read answers an empty string rather than throwing.
+    virtual std::string get_hw_version(HToupcam handle) = 0;
+    virtual std::string get_fpga_version(HToupcam handle) = 0;
+    virtual std::string get_production_date(HToupcam handle) = 0;
     virtual void get_pixel_size(HToupcam handle, unsigned resolution_index, float& x, float& y) = 0;
 
     // ST4 pulse guide
