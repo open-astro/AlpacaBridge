@@ -39,143 +39,21 @@
 #include "concurrency_stress.h"
 #include "driver_rig.h"
 #include "fake_mount_server.h"
+#include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
-struct FakeSynScanState {
-    std::atomic<int> tracking_mode{1};  // the handset's `T` mode: the status poll reads it back
-    // The GOTO timer reads the driver's task clock (a FakeTaskClock in the park
-    // cases), so a park runs in virtual time like the driver's own waits.
-    alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
-    alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
-    std::atomic<bool> goto_seen{false};
-    std::atomic<bool> no_motion{false};        // GOTO acked, mount stays put, L says idle
-    std::atomic<bool> silent_position{false};  // position reads go unanswered once a GOTO was seen
-    std::atomic<int> goto_count{0};
-    // The next N precise GOTOs end this many RA counts (of 2^32) past their aim: the ~49' miss of #1105.
-    std::atomic<int> miss_gotos{0};
-    static constexpr uint32_t kMissCounts = 9764864;  // 2,947"
-    std::atomic<Clock::rep> goto_started{0};
-    // #742: with `hold_goto` set the next GOTO goes unanswered and sets
-    // `goto_held`, which is the test's cue to drop the connection before the
-    // GOTO's read times out.
-    std::atomic<bool> hold_goto{false};
-    std::atomic<bool> goto_held{false};
-    std::atomic<unsigned char> model_id{50};
-    std::atomic<bool> invalid_slew_status{false};
-    // The next N slew-status queries go unanswered (a dropped reply), then the handset answers again.
-    std::atomic<int> drop_slew_status{0};
-    // While set, the GOTO never lands, so a test controls exactly when the slew-status queries see it end.
-    std::atomic<bool> goto_never_ends{false};
-    std::atomic<bool> reject_tracking_stop{false};
-    // With `no_location` set the handset never answers the location query,
-    // so the driver has no site unless config or a client supplies one.
-    std::atomic<bool> no_location{false};
-    std::atomic<int> slew_status_polls{0};
-    std::atomic<int> tracking_stop_attempts{0};
-    std::mutex mutex;
-    std::string position = "00000000,00000000#";
-    std::vector<std::string> gotos;
+using alpacacore::test::FakeSynScanHandset;
+using alpacacore::test::SynScanGotoLanding;
+using alpacacore::test::wait_until;
 
-    void set_position(std::string value) {
-        std::lock_guard<std::mutex> lock(mutex);
-        position = std::move(value);
-    }
-
-    std::vector<std::string> goto_snapshot() {
-        std::lock_guard<std::mutex> lock(mutex);
-        return gotos;
-    }
-
-    static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
-    bool goto_in_progress() const {
-        if (!goto_seen.load() || no_motion.load()) return false;
-        if (goto_never_ends.load()) return true;
-        const auto started = Clock::time_point(Clock::duration(goto_started.load()));
-        return now() - started < kGotoDuration;
-    }
-};
-
-alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<FakeSynScanState> st) {
-    return [st](const std::string& chunk) -> std::string {
-        if (chunk.empty()) return "0#";
-        switch (chunk[0]) {
-            case 'K':  // protocol echo: "K" + byte -> byte + "#" (the connect-time link check)
-                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
-            case 'e':
-            case 'E':
-            case 'z':
-            case 'Z': {
-                if (st->silent_position.load() && st->goto_seen.load()) return "";
-                std::lock_guard<std::mutex> lock(st->mutex);
-                return st->position;  // parseable 16/24-bit position pair
-            }
-            case 'r':
-            case 'R':
-            case 'b':
-            case 'B':
-                if (st->hold_goto.load()) {
-                    st->goto_held.store(true);
-                    return "";
-                }
-                {
-                    std::lock_guard<std::mutex> lock(st->mutex);
-                    st->gotos.push_back(chunk);
-                    // A precise GOTO lands on its aim, so the landing check after it (#1105) sees an arrival.
-                    if ((chunk[0] == 'r' || chunk[0] == 'b') && chunk.size() >= 18 && !st->no_motion.load()) {
-                        st->position = chunk.substr(1, 17) + "#";
-                        if (st->miss_gotos.load() > 0) {
-                            st->miss_gotos.fetch_sub(1);
-                            char ra[9];
-                            std::snprintf(ra, sizeof ra, "%08X",
-                                          static_cast<unsigned>(std::stoul(chunk.substr(1, 8), nullptr, 16)) +
-                                              FakeSynScanState::kMissCounts);
-                            st->position = std::string(ra) + chunk.substr(9, 9) + "#";
-                        }
-                    }
-                }
-                st->goto_started.store(st->now().time_since_epoch().count());
-                st->goto_seen.store(true);
-                st->goto_count.fetch_add(1);
-                return "#";
-            case 'w':
-                if (st->no_location.load()) return "";
-                return std::string(8, '\0') + "#";
-            case 'W':
-                return "#";
-            case 'L':
-                st->slew_status_polls.fetch_add(1);
-                if (st->drop_slew_status.load() > 0) {
-                    st->drop_slew_status.fetch_sub(1);
-                    return "";
-                }
-                if (st->invalid_slew_status.load()) return "?#";
-                return st->goto_in_progress() ? "1#" : "0#";
-            case 'M':  // cancel goto
-                st->goto_seen.store(false);
-                return "#";
-            case 't':  // tracking mode read: sidereal tracking on until a `T` says otherwise (open-astro#775 slew gate)
-                return std::string(1, static_cast<char>(st->tracking_mode.load())) + "#";
-            case 'T':
-                if (st->reject_tracking_stop.load() && chunk.size() > 1 && chunk[1] == 0) {
-                    st->tracking_stop_attempts.fetch_add(1);
-                    return "";
-                }
-                if (chunk.size() > 1) {
-                    st->tracking_mode.store(chunk[1]);
-                }
-                return "#";
-            case 'P':  // tracking mode write / passthrough
-                return "#";
-            case 'm':  // model id: chr(model) + "#"; 50 = EQM-35 Pro
-                return std::string(1, static_cast<char>(st->model_id.load())) + "#";
-            default:
-                return "0#";
-        }
-    };
+// This file's handset: a GOTO lands on its aim, and the mount starts at RA 0, Dec 0.
+std::shared_ptr<FakeSynScanHandset> make_handset(
+    alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock()) {
+    return std::make_shared<FakeSynScanHandset>(clock, SynScanGotoLanding::OnTarget, "00000000,00000000#");
 }
 
 alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
@@ -185,16 +63,6 @@ alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
     info.tcp_port = port;
     info.response_timeout_ms = 200;
     return info;
-}
-
-bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
-    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (Clock::now() < deadline) {
-        if (pred()) return true;
-        // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return pred();
 }
 
 // RA in hours of a SynScan GOTO command: "r%08X,%08X" (precise) or "R%04X,%04X".
@@ -424,8 +292,8 @@ TEST_CASE("SynScan - Name carries the model once connected", "[synscan][telescop
     // direct motor-controller path resolves to the same model string in
     // both drivers. Decision 0024 gives both the same Name; the Description
     // tells them apart.
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -438,9 +306,9 @@ TEST_CASE("SynScan - Name carries the model once connected", "[synscan][telescop
 // Decision 0024. Falsified by: synscan_telescope_driver.cpp synscan_model_id_to_name() returning "Mount (ID n)" for an
 // id not in its table.
 TEST_CASE("SynScan - an unknown model id is named Sky-Watcher Telescope", "[synscan][telescope][async]") {
-    auto st = std::make_shared<FakeSynScanState>();
+    auto st = make_handset();
     st->model_id.store(77);  // in no row of the V3/V4 table
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -451,9 +319,8 @@ TEST_CASE("SynScan - an unknown model id is named Sky-Watcher Telescope", "[syns
 
 TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew ends", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -492,9 +359,8 @@ TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew 
 
 TEST_CASE("SynScan async - Park survives dropped status replies below the threshold", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -510,9 +376,8 @@ TEST_CASE("SynScan async - Park survives dropped status replies below the thresh
 
 TEST_CASE("SynScan async - Park failure count resets on a good status reply", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -539,9 +404,8 @@ TEST_CASE("SynScan async - Park failure count resets on a good status reply", "[
 
 TEST_CASE("SynScan async - a new Park starts its failure count at zero", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -581,9 +445,8 @@ TEST_CASE("SynScan async - a new Park starts its failure count at zero", "[synsc
 
 TEST_CASE("SynScan async - Park fails after three consecutive dropped status replies", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -613,9 +476,8 @@ TEST_CASE("SynScan async - Park fails after three consecutive dropped status rep
 
 TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[synscan][telescope][park]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -641,11 +503,10 @@ TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[
 
 TEST_CASE("SynScan SetPark - Alt-Az mount retains azimuth and altitude", "[synscan][telescope][park]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
+    auto st = make_handset(clock);
     st->model_id.store(128);  // AZ GOTO
     st->set_position("40000000,20000000#");
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -669,11 +530,10 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
     {
         // Alt-Az: the park keeps azimuth and altitude, as on an AZ GOTO mount.
         alpacacore::test::FakeTaskClock clock;
-        auto st = std::make_shared<FakeSynScanState>();
-        st->clock = &clock;
+        auto st = make_handset(clock);
         st->model_id.store(5);  // AZ-EQ6
         st->set_position("40000000,20000000#");
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -694,10 +554,9 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
     {
         // Equatorial: the park keeps the hour angle, so a sidereal shift moves the RA target.
         alpacacore::test::FakeTaskClock clock;
-        auto st = std::make_shared<FakeSynScanState>();
-        st->clock = &clock;
+        auto st = make_handset(clock);
         st->model_id.store(6);  // AZ-EQ5
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -728,10 +587,9 @@ TEST_CASE("SynScan ambiguous or unknown mount - Park keeps the RA/Dec fallback",
          {static_cast<unsigned char>(5), static_cast<unsigned char>(6), static_cast<unsigned char>(255)}) {
         for (const bool set_park_first : {false, true}) {
             alpacacore::test::FakeTaskClock clock;
-            auto st = std::make_shared<FakeSynScanState>();
-            st->clock = &clock;
+            auto st = make_handset(clock);
             st->model_id.store(model_id);
-            alpacacore::test::FakeMountServer server(synscan_responder(st));
+            alpacacore::test::FakeMountServer server(st->responder());
             REQUIRE(server.ok());
             auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
                 0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -750,10 +608,9 @@ TEST_CASE("SynScan ambiguous or unknown mount - Park keeps the RA/Dec fallback",
 TEST_CASE("SynScan equatorial mount without a site - Park keeps the RA/Dec fallback", "[synscan][telescope][park]") {
     for (const bool set_park_first : {false, true}) {
         alpacacore::test::FakeTaskClock clock;
-        auto st = std::make_shared<FakeSynScanState>();
-        st->clock = &clock;  // model 50, EQM-35 Pro: known equatorial
+        auto st = make_handset(clock);  // model 50, EQM-35 Pro: known equatorial
         st->no_location.store(true);
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -771,9 +628,8 @@ TEST_CASE("SynScan equatorial mount without a site - Park keeps the RA/Dec fallb
 TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses the last known longitude",
           "[synscan][telescope][park]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -799,9 +655,8 @@ TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses 
 
 TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -853,9 +708,8 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
 // false: the park slew may still be running.
 TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -906,9 +760,8 @@ TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[sy
         });
 
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     // A long reply timeout leaves the test ample time to drop the link while
     // the driver still waits on the GOTO, so the stops always meet a closed
@@ -920,7 +773,7 @@ TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[sy
         std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    st->hold_goto.store(true);
+    st->reject_goto.store(true);
     driver->park();
     // No driver call until the link is down: the park task holds the driver
     // mutex while it waits on the GOTO, so a getter here would block until
@@ -944,10 +797,9 @@ TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[sy
 TEST_CASE("SynScan async - malformed Park status reply persists through Slewing",
           "[synscan][telescope][async][parkfailure]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
+    auto st = make_handset(clock);
     st->invalid_slew_status.store(true);
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -984,9 +836,8 @@ TEST_CASE("SynScan async - malformed Park status reply persists through Slewing"
 TEST_CASE("SynScan async - a Park tracking-stop failure persists through Slewing",
           "[synscan][telescope][async][parkfailure]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -1033,9 +884,8 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
     for (const auto& c : cases) {
         INFO(c.name);
         alpacacore::test::FakeTaskClock clock;
-        auto st = std::make_shared<FakeSynScanState>();
-        st->clock = &clock;
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -1066,9 +916,8 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
 
 TEST_CASE("SynScan sync slew - uncontended slew returns normally", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -1104,9 +953,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> mk(int port, alpacacore::util::Task
 // Case A: saved park Dec 0; mount reads Dec +30 deg; GOTO acked, mount never moves.
 TEST_CASE("SynScan case A - refused park GOTO must not report AtPark", "[park][synscan]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = mk(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1131,9 +979,8 @@ TEST_CASE("SynScan case A - refused park GOTO must not report AtPark", "[park][s
 
 TEST_CASE("SynScan case B - already at park target still parks", "[park][synscan]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = mk(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1155,9 +1002,8 @@ TEST_CASE("SynScan case B - already at park target still parks", "[park][synscan
 // #1105: the park GOTO runs no landing refinement, so the handset's far miss gets one repeat GOTO here.
 TEST_CASE("SynScan - a park GOTO the handset ends 49 arcmin off is repeated once and parks", "[park][synscan]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = mk(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1174,9 +1020,8 @@ TEST_CASE("SynScan - a park GOTO the handset ends 49 arcmin off is repeated once
 
 TEST_CASE("SynScan - a park that misses by 49 arcmin twice fails", "[park][synscan]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = mk(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1197,11 +1042,10 @@ TEST_CASE("SynScan - a park that misses by 49 arcmin twice fails", "[park][synsc
 TEST_CASE("SynScan - an alt-az park the mount does not reach fails and one it reaches parks", "[park][synscan]") {
     for (const bool moves : {false, true}) {
         alpacacore::test::FakeTaskClock clock;
-        auto st = std::make_shared<FakeSynScanState>();
-        st->clock = &clock;
+        auto st = make_handset(clock);
         st->model_id.store(128);  // AZ GOTO
         st->set_position("40000000,20000000#");
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = mk(server.port(), clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1224,9 +1068,8 @@ TEST_CASE("SynScan - an alt-az park the mount does not reach fails and one it re
 TEST_CASE("SynScan - a park whose position check cannot read the mount fails without a repeat GOTO",
           "[park][synscan]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = mk(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
