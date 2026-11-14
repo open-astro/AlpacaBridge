@@ -399,7 +399,7 @@ public:
         stop_exposure_thread();
         if (connected_.load()) {
             try {
-                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall): most-derived class
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kLogTag, "Error during destruction: " + std::string(e.what()));
             }
@@ -1549,7 +1549,7 @@ private:
         connected_.store(false);
         try {
             sdk_.close_camera(handle);
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the device is gone
             // The handle belongs to a device that is gone; a close failure adds nothing the caller can act on.
         }
     }

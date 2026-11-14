@@ -329,7 +329,7 @@ public:
                 try {
                     float px = sdk.get_sensor_pixel_size(resolved_id);
                     info.pixel_size_um = static_cast<double>(px);
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): enumeration may have set it
                     // pixel size may have been set during enumeration
                 }
 

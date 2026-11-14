@@ -68,7 +68,7 @@ std::chrono::microseconds elapsed_of(Fn&& fn) {
     return alpacacore::test::timed([&] {
         try {
             fn();
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): only the latency matters
         }
     });
 }

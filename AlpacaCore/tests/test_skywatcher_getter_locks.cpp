@@ -363,7 +363,7 @@ TEST_CASE("SkyWatcher getters - a reconnect does not race the rate-applied check
         });
         try {
             driver->set_right_ascension_rate(i % 2 == 0 ? 0.5 : -0.5);
-        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): refused mid-transition
             // A rate change refused mid-transition is not the subject here.
         }
         sw::set_rate_verify_before_start_hook_for_testing(*driver, nullptr);

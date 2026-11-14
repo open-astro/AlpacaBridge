@@ -1315,7 +1315,7 @@ TEST_CASE("SkyWatcher limits - Tracking on during a duty worker join still start
     a_thread = std::thread([&] {
         try {
             driver->set_declination_rate(0.12);
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): only the join order is tested
         }
         a_done = true;
     });

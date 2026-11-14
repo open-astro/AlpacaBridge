@@ -1822,7 +1822,7 @@ TEST_CASE("SynScan GOTO landing - a superseded synchronous landing move leaves t
     std::thread slew([&] {
         try {
             driver->slew_to_coordinates(kTargetRa, kTargetDec);
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): superseded by the abort
             // superseded by the abort
         }
         slew_done.store(true);

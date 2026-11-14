@@ -801,7 +801,7 @@ void genl_send_recv(int fd, std::vector<char>& msg, std::vector<char>& reply) {
     // Blocking recv under a WifiManager mutex is intentional: netlink
     // round-trips are local and fast, and the mutexes exist to serialize
     // whole operations, not to bound their latency.
-    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): local netlink, serialized on purpose
     ssize_t n = recv(fd, reply.data(), reply.size(), MSG_TRUNC);
     if (n < 0) throw WifiError(std::string("netlink recv: ") + alpacacore::util::errno_string(errno));
     if (static_cast<size_t>(n) > reply.size()) {

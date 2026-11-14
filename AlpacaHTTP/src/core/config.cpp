@@ -286,7 +286,7 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 // value here (unlike the unsigned http: keys above).
                 try {
                     set_motion_watchdog_seconds(std::stoi(value));
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                } catch (...) {  // NOLINT(bugprone-empty-catch): unparseable keeps the default
                     // Unparseable: keep the default.
                 }
             } else if (key == "update_packages_url") {
@@ -445,7 +445,7 @@ void Config::apply_environment_overrides() {
     if (watchdog_env) {
         try {
             set_motion_watchdog_seconds(std::stoi(watchdog_env));
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        } catch (...) {  // NOLINT(bugprone-empty-catch): unparseable keeps the file value
             // Unparseable: keep whatever the file (or the default) set.
         }
     }
