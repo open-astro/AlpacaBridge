@@ -81,7 +81,9 @@ TEST_CASE("ZWO ASIAIR Pro switch - concurrent connect/disconnect/operate stress"
     alpacacore::test::TempPowerPortDir dir;  // every write saves the port's level
     alpacacore::test::stub_reset_levels(1);
     auto driver = make_pro();
+    // Counted from here: the stub counts since the binary started, so a claim an earlier case leaked stays out.
     const int requests_before = alpacacore::test::stub_requests();
+    const int releases_before = alpacacore::test::stub_releases();
 
     // The connect really succeeds before the storm.
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
@@ -100,7 +102,7 @@ TEST_CASE("ZWO ASIAIR Pro switch - concurrent connect/disconnect/operate stress"
     CHECK(guard.total_calls() > 0);
     // Every claim the storm made was released: nothing is left holding the lines.
     CHECK_FALSE(alpacacore::test::stub_claimed());
-    CHECK(alpacacore::test::stub_releases() == alpacacore::test::stub_requests());
+    CHECK(alpacacore::test::stub_releases() - releases_before == alpacacore::test::stub_requests() - requests_before);
     CHECK(alpacacore::test::stub_requests() > requests_before);
 }
 

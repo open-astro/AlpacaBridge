@@ -387,8 +387,11 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - every ISwitchV3 member answers while c
     CHECK(driver->get_switch_value(3) == 40.0);
     CHECK(driver->get_switch(3));
 
-    // Out of range while connected: InvalidValue, and nothing written.
-    const int changes = stub_level_changes();
+    // Out of range while connected: InvalidValue, and nothing written. The boolean lines are compared, not the
+    // global change count: the 40 % PWM worker drives GPIO 18 twice every period throughout this block.
+    const int line12 = stub_level(12);
+    const int line13 = stub_level(13);
+    const int line26 = stub_level(26);
     require_alpaca_error([&] { driver->set_switch_value(0, 2.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_switch_value(3, 101.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_switch_value(3, std::numeric_limits<double>::quiet_NaN()); },
@@ -396,7 +399,10 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - every ISwitchV3 member answers while c
     require_alpaca_error([&] { driver->set_switch(4, true); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { (void)driver->get_switch_value(-1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_switch_name(4, "X"); }, alpacacore::AlpacaError::InvalidValue);
-    CHECK(stub_level_changes() == changes);
+    CHECK(stub_level(12) == line12);
+    CHECK(stub_level(13) == line13);
+    CHECK(stub_level(26) == line26);
+    CHECK(driver->get_switch_value(0) == 0.0);
     CHECK(driver->get_switch_value(3) == 40.0);
 
     // Async writes are not implemented on a connected driver.
