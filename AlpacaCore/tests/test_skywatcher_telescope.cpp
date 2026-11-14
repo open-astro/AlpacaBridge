@@ -128,7 +128,7 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported actions", "[skywatcher][tel
     require_alpaca_error([&] { driver->command_string("test", false); }, alpacacore::AlpacaError::NotConnected);
 }
 
-TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][telescope][unit]") {
+TEST_CASE("SkyWatcher Telescope Driver - Target and site members while disconnected", "[skywatcher][telescope][unit]") {
     auto driver = make_driver(0);
 
     // open-astro#391: the target getters answer NotConnected before

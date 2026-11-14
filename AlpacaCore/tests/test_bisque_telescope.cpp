@@ -431,15 +431,9 @@ TEST_CASE("Bisque Telescope Driver - Telescope Properties", "[bisque][telescope]
 
     CHECK(driver->get_interface_version() >= 3);
 
-    auto eq = driver->get_equatorial_system();
-    CHECK((eq == alpacacore::EquatorialSystem::Topocentric ||
-           eq == alpacacore::EquatorialSystem::J2000 ||
-           eq == alpacacore::EquatorialSystem::Other));
-
-    auto align = driver->get_alignment_mode();
-    CHECK((align == alpacacore::AlignmentMode::AltAz ||
-           align == alpacacore::AlignmentMode::Polar ||
-           align == alpacacore::AlignmentMode::GermanPolar));
+    // Pinned, not an OR of every value (#1858): the driver reports Topocentric (equinox of date) and German polar.
+    CHECK(driver->get_equatorial_system() == alpacacore::EquatorialSystem::Topocentric);
+    CHECK(driver->get_alignment_mode() == alpacacore::AlignmentMode::GermanPolar);
 
     auto rates = driver->get_tracking_rates();
     CHECK_FALSE(rates.empty());

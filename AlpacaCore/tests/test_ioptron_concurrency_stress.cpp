@@ -15,12 +15,14 @@
 // focuser cases further down (#271, documented in their own block comment).
 // The audited detached-thread fixes on the telescope driver (async slew +
 // pulse-guide threads racing set_connected(false) and destruction) only run
-// on a CONNECTED driver, so the telescope tests connect through a
-// FakeMountServer: the protocol wrapper treats a successful TCP
-// connect as mount-connected and every post-connect query tolerates failure,
-// so a canned "0#" responder is enough to spawn the driver's worker threads
-// on a hardware-free host. Operations racing a disconnect are EXPECTED to
-// throw; what must never happen is a crash, hang, or TSan report.
+// on a CONNECTED driver, so the telescope storm and the destruction
+// mid-operation case connect through the scripted FakeIoptronMount
+// (fake_ioptron_mount.h): a canned FakeMountServer cannot answer the status
+// read a slew needs, so every slew failed before its dispatch (issue #1859).
+// Each requires the connect and one GOTO that reached the mount first. The
+// destruction-during-connect case keeps the canned server: it needs only a
+// connect in flight. Operations racing a disconnect are EXPECTED to throw;
+// what must never happen is a crash, hang, or TSan report.
 
 #ifndef _WIN32
 
@@ -35,6 +37,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -63,6 +66,38 @@ alpacacore::vendor::ioptron::ConnectionInfo ioptron_endpoint(int port) {
     return info;
 }
 
+// The scripted fake answers every read at once, but read_response() paces each character, so it keeps the
+// default-length reply timeout of test_ioptron_abort_slew.cpp rather than the 50 ms above.
+alpacacore::vendor::ioptron::ConnectionInfo scripted_endpoint(int port) {
+    alpacacore::vendor::ioptron::ConnectionInfo info;
+    info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = 2000;
+    return info;
+}
+
+int gotos(const alpacacore::test::FakeIoptronMount& mount) { return mount.count(":MS1#") + mount.count(":MS2#"); }
+
+// Connects, then starts one async slew and requires that it reached the slew slot and its GOTO the mount. Without
+// this the canned server refused every slew before the dispatch, so no storm reached the body (#1859).
+void require_slew_dispatch(alpacacore::TelescopeDriver& scope, const alpacacore::test::FakeIoptronMount& mount,
+                           const alpacacore::test::SlotBodyTracker& slews) {
+    REQUIRE(alpacacore::test::settle_connected(scope, true, std::chrono::seconds(10)));
+    const int before = gotos(mount);
+    const int bodies = slews.started();
+    scope.slew_to_coordinates_async(5.0, 20.0);
+    REQUIRE(slews.started() > bodies);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (gotos(mount) == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));  // real time: the dispatch exchanges on the socket
+    }
+    REQUIRE(gotos(mount) > before);
+}
+
+// Each slew body waits this long before it dispatches, so one is still in its slot when the next call lands.
+constexpr std::chrono::milliseconds kSlewBodyHold{300};
+
 void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
     guard([&] { scope.set_target_right_ascension(5.0); });
@@ -84,9 +119,20 @@ void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
 }  // namespace
 
 TEST_CASE("iOptron telescope - concurrent connect/disconnect/slew/pulse stress", "[ioptron][telescope][stress]") {
-    alpacacore::test::FakeMountServer server;
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, ioptron_endpoint(server.port()));
+    alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, scripted_endpoint(mount.port()));
+    alpacacore::test::SlotBodyTracker slews(kSlewBodyHold);
+    alpacacore::vendor::ioptron::set_slew_spawn_for_testing(*driver, slews.spawn());
+
+    // The storm reaches the slew dispatch (#1859): a connected driver sends one GOTO, and a Disconnect cancels and
+    // joins the next dispatch, still held in its slot, before it returns.
+    require_slew_dispatch(*driver, mount, slews);
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    driver->set_connected(false);
+    CHECK(slews.running() == 0);
+    // The storm's dispatches run unheld, so its initiators do not queue behind the hold.
+    alpacacore::vendor::ioptron::set_slew_spawn_for_testing(*driver, alpacacore::test::SlotBodyTracker().spawn());
 
     // open-astro#326: one guard per call, replacing no isolation at all --
     // run_lifecycle_stress wraps the WHOLE callback in one try/catch, so a
@@ -95,19 +141,16 @@ TEST_CASE("iOptron telescope - concurrent connect/disconnect/slew/pulse stress",
     // registration exists to storm.
     //
     // The set REPLACES the default {NotConnected}. This registration runs
-    // CONNECTED over FakeMountServer, so a live driver's operate callback
+    // CONNECTED over FakeIoptronMount, so a live driver's operate callback
     // legitimately throws more than that: InvalidValue and InvalidOperation
     // from a slew or pulse racing a park or another motion, and the shared
-    // NotImplemented code where the canned fake cannot answer.
+    // NotImplemented code where the fake cannot answer.
     //
-    // DriverException is here for the FAKE, not the driver: FakeMountServer
-    // answers with deliberately dumb canned replies (this file's own
-    // destruction case notes the connect sequence "rides several read
-    // timeouts" because of them), so the driver correctly reports "Invalid
-    // status response from mount" and the like. Those were invisible while the
-    // callback aborted at the first throw; the guard counts them, so they have
-    // to be named. A real driver defect would show up as a code outside this
-    // set, and guard.report() names every distinct one it saw.
+    // DriverException stays for the FAKE: the scripted mount answers the
+    // reads a slew needs, but not every query (":GAC#" is unset here, and
+    // any other query gets an unparseable "0#"), so the driver correctly
+    // reports a failed read for those. A real driver defect would show up as
+    // a code outside this set, and guard.report() names every distinct one it saw.
     alpacacore::test::StressCallGuard guard{
         alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
         alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::ValueNotSet,
@@ -194,16 +237,16 @@ TEST_CASE("iOptron telescope - destruction races an in-flight connect", "[ioptro
 }
 
 TEST_CASE("iOptron telescope - destruction mid-operation (slew/pulse threads live)", "[ioptron][telescope][stress]") {
-    alpacacore::test::FakeMountServer server;
-    REQUIRE(server.ok());
+    alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+    REQUIRE(mount.ok());
 
     for (int i = 0; i < 10; ++i) {
-        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, ioptron_endpoint(server.port()));
-        static_cast<void>(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
-        try {
-            driver->slew_to_coordinates_async(5.0, 20.0);
-        } catch (const std::exception&) {
-        }
+        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, scripted_endpoint(mount.port()));
+        alpacacore::test::SlotBodyTracker slews(kSlewBodyHold);
+        alpacacore::vendor::ioptron::set_slew_spawn_for_testing(*driver, slews.spawn());
+        require_slew_dispatch(*driver, mount, slews);
+        // A second dispatch is still held in its slot at destruction (#1859).
+        driver->slew_to_coordinates_async(5.5, 20.0);
         try {
             driver->pulse_guide(0, 300);
         } catch (const std::exception&) {
@@ -214,6 +257,7 @@ TEST_CASE("iOptron telescope - destruction mid-operation (slew/pulse threads liv
             driver->disconnect();
         }
         driver.reset();
+        CHECK(slews.running() == 0);
     }
 }
 

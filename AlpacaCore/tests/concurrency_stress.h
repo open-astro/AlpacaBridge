@@ -478,6 +478,58 @@ inline bool settle_connected(AlpacaDriver& driver, bool want,
     return driver.get_connected() == want && !driver.get_connecting();
 }
 
+/// Counts the bodies a driver's util::AsyncOperation slot starts and how many
+/// are running now (issue #1859), through the slot's thread factory: pass
+/// spawn() to a driver's `set_*_spawn_for_testing` seam before the first
+/// start. A storm registration uses it to prove it reached the slot bodies,
+/// and that a Disconnect joined them (running() is 0 once a sync
+/// set_connected(false) has returned). @p start_hold keeps each new body
+/// waiting that long (real time) before it runs, so a body that would
+/// otherwise end within one exchange is still in its slot when a Disconnect
+/// lands; a cancel during the hold ends it at its first stop check.
+/// Copyable: the counters are shared and outlive the driver's threads.
+class SlotBodyTracker {
+public:
+    explicit SlotBodyTracker(std::chrono::milliseconds start_hold = std::chrono::milliseconds(0))
+        : state_(std::make_shared<State>()), start_hold_(start_hold) {}
+
+    std::function<std::thread(std::function<void()>)> spawn() const {
+        return [state = state_, hold = start_hold_](std::function<void()> body) {
+            // Counted before the thread exists, so a join that returns has always seen the body leave.
+            state->running.fetch_add(1);
+            try {
+                std::thread thread([state, hold, body = std::move(body)]() {
+                    struct Done {
+                        State& s;
+                        ~Done() { s.running.fetch_sub(1); }
+                    } done{*state};
+                    if (hold.count() > 0) {
+                        // Real time: the hold stands for a body slow to reach its first exchange, not a timer.
+                        std::this_thread::sleep_for(hold);
+                    }
+                    body();
+                });
+                state->started.fetch_add(1);
+                return thread;
+            } catch (...) {
+                state->running.fetch_sub(1);
+                throw;
+            }
+        };
+    }
+
+    int started() const { return state_->started.load(); }
+    int running() const { return state_->running.load(); }
+
+private:
+    struct State {
+        std::atomic<int> started{0};
+        std::atomic<int> running{0};
+    };
+    std::shared_ptr<State> state_;
+    std::chrono::milliseconds start_hold_;
+};
+
 /// One iteration of the destruction race: connect (and on odd iterations race a
 /// disconnect), then destroy the driver with the task possibly still running.
 inline void destroy_driver_during_connect(std::unique_ptr<AlpacaDriver>& driver, int iteration) {

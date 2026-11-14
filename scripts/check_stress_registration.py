@@ -57,10 +57,11 @@ them behind a green check. Keying on device type as well catches those.
 
 Known gap: the pair is the finest key the gate has, so a registered driver
 masks every other driver of the same vendor and type. The two ZWO ASIAIR
-switch drivers (`zwo_asiair_switch_driver.cpp`, `zwo_asiair_plus_switch_driver.cpp`,
-libgpiod, no fake seam) have no [stress] case and are hidden behind the ZWO
-dew-heater switch registration; they are covered by code review only.
-Same shape for (gemini, covercalibrator): only Flat Panel Pro
+switch drivers were hidden that way behind the ZWO dew-heater switch until
+#1862 gave them their own storms (test_zwo_asiair_concurrency_stress.cpp,
+over the libgpiod and ioctl stubs); deleting those storms would still pass
+the gate, because the dew-heater storm keeps the pair registered.
+For (gemini, covercalibrator): only Flat Panel Pro
 (GeminiFlatPanelV2Driver, gemini_flatpanel_driver.cpp) is stormed, but that
 also marks the Cover Lite class (GeminiFlatPanelDriver, same file, its own
 set_connected/calibrator implementation, no task threads) and the Rev2

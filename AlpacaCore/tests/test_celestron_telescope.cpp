@@ -305,10 +305,8 @@ TEST_CASE("Celestron Telescope Driver - Telescope Properties", "[celestron][tele
 
     CHECK(driver->get_interface_version() >= 3);
 
-    auto eq = driver->get_equatorial_system();
-    CHECK((eq == alpacacore::EquatorialSystem::Topocentric ||
-           eq == alpacacore::EquatorialSystem::J2000 ||
-           eq == alpacacore::EquatorialSystem::Other));
+    // Pinned, not an OR of every value (#1858): the driver reports J2000 coordinates.
+    CHECK(driver->get_equatorial_system() == alpacacore::EquatorialSystem::J2000);
 
     require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::NotConnected);
 
