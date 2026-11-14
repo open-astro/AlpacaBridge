@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -2550,6 +2551,136 @@ TEST_CASE("iOptron Telescope Driver - SiderealTime follows the clock to under a 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+    driver->set_connected(false);
+}
+
+// Issue #1864: the members a connected driver reads from the mount, value-checked against a fake state that gives a
+// non-default answer. The site is the mount's stored one (":GLS", GPS digit 1: no fix); SiderealTime is the LST of
+// the mount's UTC at that longitude; SideOfPier follows the hour angle, not the raw ":GEP" pier digit (always 0
+// here); TrackingRate is the ":GLS" rate digit, and a TrackingRate write is the ":RTn#" command. The fake task
+// clock holds the mount's UTC still, so the values are exact.
+TEST_CASE("iOptron Telescope Driver - connected site and pointing getters read the mount",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_gps(1, 40.5, -75.25);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(std::abs(driver->get_site_latitude() - 40.5) < 1e-6);
+    CHECK(std::abs(driver->get_site_longitude() - -75.25) < 1e-6);
+    const double lst = alpacacore::util::local_sidereal_hours(driver->get_utc_date(), -75.25);
+    CHECK(std::abs(driver->get_sidereal_time() - lst) < 1e-6);
+
+    // Past the 30 s post-connect grace and the 5 s pier-side position window, the next read asks the mount again.
+    const auto past_the_position_window = [&] { clock.advance(std::chrono::seconds(31)); };
+    // Hour angle -3 h: pierWest (1).
+    mount.set_position(alpacacore::util::wrap_hours(lst + 3.0), 20.0);
+    past_the_position_window();
+    CHECK(driver->get_side_of_pier() == 1);
+    // Hour angle +3 h: pierEast (0).
+    mount.set_position(alpacacore::util::wrap_hours(lst - 3.0), 20.0);
+    past_the_position_window();
+    CHECK(driver->get_side_of_pier() == 0);
+
+    CHECK(driver->get_tracking_rate() == 0);
+    mount.set_tracking_rate_digit(2);  // the mount tracks at the solar rate (set from the hand controller)
+    clock.advance(std::chrono::seconds(2));
+    CHECK(driver->get_tracking_rate() == 2);
+    driver->set_tracking_rate(1);
+    CHECK(driver->get_tracking_rate() == 1);
+    const int status_reads = mount.count(":GLS#");
+    clock.advance(std::chrono::seconds(3));  // past the write's read-back window: the mount answers again
+    CHECK(driver->get_tracking_rate() == 1);
+    CHECK(mount.count(":GLS#") > status_reads);
+    // ":RTn#" is sent blind (its ack is drained for at most 50 ms), so the count is read only after the ":GLS"
+    // refill above: the fake answers in wire order, so the write was recorded before that reply went out.
+    CHECK(mount.count(":RT1#") == 1);
+    driver->set_connected(false);
+}
+
+// Issue #1864: the members the iOptron mount does not have, on a connected driver. Each keeps its ITelescopeV4
+// NotImplemented answer and sends nothing; the two rate getters read 0.0 (no rate offset is applied).
+TEST_CASE("iOptron Telescope Driver - connected unsupported pier-side and rate members are NotImplemented",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto sent = mount.commands().size();
+
+    CHECK_FALSE(driver->get_can_set_pier_side());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK_FALSE(driver->get_can_sync_alt_az());
+    CHECK(driver->get_declination_rate() == 0.0);
+    CHECK(driver->get_right_ascension_rate() == 0.0);
+    require_alpaca_error([&] { driver->set_declination_rate(0.1); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(0.1); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(1); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    CHECK(mount.commands().size() == sent);
+
+    driver->set_connected(false);
+    // Disconnected, the connection check comes first (#1919).
+    require_alpaca_error([&] { (void)driver->get_declination_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_right_ascension_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Issue #1864: SlewSettleTime, ApertureDiameter, ApertureArea and FocalLength on a connected driver. Each reads back
+// what was written; a negative settle time is InvalidValue and leaves the value as it was.
+TEST_CASE("iOptron Telescope Driver - connected settle time and optics read back what was written",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->set_slew_settle_time(4);
+    CHECK(driver->get_slew_settle_time() == 4);
+    require_alpaca_error([&] { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_slew_settle_time() == 4);
+    driver->set_slew_settle_time(0);
+    CHECK(driver->get_slew_settle_time() == 0);
+
+    driver->set_aperture_diameter(0.2);
+    driver->set_focal_length(1.2);
+    CHECK(driver->get_aperture_diameter() == 0.2);
+    CHECK(driver->get_aperture_area() == Catch::Approx(0.0314159265).epsilon(1e-6));
+    CHECK(driver->get_focal_length() == 1.2);
+    driver->set_connected(false);
+}
+
+// Issue #1864: SetPark on a connected driver stores where the mount points now as its park position: the ":GAC"
+// altitude goes out as ":SPH" (8 digits) and the azimuth as ":SPA" (9 digits), both in 0.01 arcsec. It does not
+// park the mount.
+TEST_CASE("iOptron Telescope Driver - connected SetPark stores the current Alt/Az as the park position",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_alt_az(30.0, 120.0);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, loopback_endpoint(mount.port()),
+                                                                                  {}, {}, {}, false);
+    require_alpaca_error([&] { driver->set_park(); }, alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    REQUIRE_NOTHROW(driver->set_park());
+    CHECK(mount.count(":SPH10800000#") == 1);   // 30 degrees
+    CHECK(mount.count(":SPA043200000#") == 1);  // 120 degrees
+    CHECK(mount.count(":MP1#") == 0);
+    CHECK_FALSE(driver->get_at_park());
     driver->set_connected(false);
 }
 

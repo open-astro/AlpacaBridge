@@ -1489,6 +1489,30 @@ TEST_CASE("Celestron CGX USB Telescope Driver - unsupported methods use ASCOM er
 }
 
 #ifndef _WIN32
+// Issue #1868: the pier-side and rate capabilities and SlewToAltAz, read on a connected driver. The direct USB
+// backend has no Alt/Az slew, so a connected SlewToAltAz is MethodNotImplemented and sends no AUX packet.
+TEST_CASE("Celestron CGX USB Telescope Driver - connected pier-side and rate capabilities and SlewToAltAz",
+          "[celestron][cgx][telescope][unit]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::test::create_cgx_telescope_poll_held(0, info);
+    // Disconnected, the connection check comes first (#1919).
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK_FALSE(driver->get_can_set_pier_side());
+    CHECK_FALSE(driver->get_can_set_right_ascension_rate());
+    CHECK_FALSE(driver->get_can_set_declination_rate());
+    CHECK_FALSE(driver->get_can_slew_alt_az());
+    const auto before = mount.requests();
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    CHECK((mount.requests().size() == before.size()));
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - connects and homes both motor controllers",
           "[celestron][cgx][telescope][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;

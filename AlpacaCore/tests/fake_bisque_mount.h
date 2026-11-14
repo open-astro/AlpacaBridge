@@ -50,6 +50,8 @@ namespace alpacacore::test {
  *
  * A DirectGuide pulse adds `guide_ra_step_hours` to the reported RA.
  *
+ * Unpark clears `parked`, so IsParked reads false after it, as TheSkyX's does (issue #1863).
+ *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
  */
@@ -67,6 +69,7 @@ public:
     std::atomic<bool> parked{false};
     std::atomic<bool> slewing{false};
     std::atomic<int> park_commands{0};
+    std::atomic<int> unpark_commands{0};
     std::atomic<int> slew_commands{0};
     std::atomic<int> park_polls{0};
     std::atomic<int> slew_polls{0};
@@ -141,6 +144,11 @@ private:
                 parked = true;
             }
             return parked ? "|No error. Error = 0.true#" : "|No error. Error = 0.false#";
+        }
+        if (has(command, "sky6RASCOMTele.Unpark()")) {
+            ++unpark_commands;
+            parked = false;
+            return "|No error. Error = 0.OK#";
         }
         if (has(command, "Sync(")) {
             double ra = 0.0, dec = 0.0;

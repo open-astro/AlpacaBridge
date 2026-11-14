@@ -512,6 +512,35 @@ TEST_CASE("ZWO CAA Rotator Driver - Halt drops the cached frame", "[zwo][rotator
     CHECK(driver->get_is_moving() == false);
 }
 
+// Required case 7 (issue #1863). IsMoving is NotConnected while disconnected, false while idle, true as soon as
+// MoveAbsolute returns while the unit reports motion (TargetPosition is then the target), and false after Halt;
+// NotConnected again after a Disconnect. The fake task clock never ages the 100 ms status frame, so only the
+// driver's own invalidation lets a read see a new state.
+TEST_CASE("ZWO CAA Rotator Driver - State machine", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the SDK outlive the driver
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk, clock);
+    require_alpaca_error([&] { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_is_moving());
+    CHECK(driver->get_position() == 10.0);
+
+    sdk.moving = true;  // the fake settles a move at once; the unit reports the motion it is still making
+    driver->move_absolute(90.0);
+    CHECK(driver->get_is_moving());
+    CHECK(driver->get_target_position() == 90.0);
+
+    driver->halt();
+    CHECK_FALSE(sdk.moving.load());
+    CHECK_FALSE(driver->get_is_moving());
+
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
+}
+
 // Falsified by: zwo_rotator_driver.cpp move_mechanical() dropping its
 // status_cache_.invalidate() (Position keeps the pre-move angle for a TTL).
 TEST_CASE("ZWO CAA Rotator Driver - A mechanical move drops the cached frame", "[zwo][rotator][unit][fake-sdk]") {
