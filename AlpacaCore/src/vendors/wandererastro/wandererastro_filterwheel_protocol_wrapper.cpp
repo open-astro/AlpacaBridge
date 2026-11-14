@@ -65,6 +65,10 @@ constexpr const char* kSerialOwner = "Wanderer filter wheel";
 constexpr int kReadWindowMs = 500;
 
 #ifndef _WIN32
+// The errnos a tty returns once its device is gone (decision 0009 point 2(a)).
+// EBADF is not one: the wrapper only meets it on an fd it closed itself.
+bool is_hangup_errno(int err) { return err == EIO || err == ENXIO || err == ENODEV; }
+
 // 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close (CH340
 // adapters pulse the MCU reset line via DTR on open; keeping DTR high across
 // close avoids a reset on reopen).
@@ -359,6 +363,7 @@ public:
                                       AlpacaError::InvalidOperation);
             }
             config_ = config;
+            connect_hangup_ = false;
             open_serial();
         }
 
@@ -366,24 +371,29 @@ public:
         {
             std::lock_guard<std::mutex> status_lock(status_mutex_);
             link_.reset(clock_.now());
+            loss_reason_.clear();
         }
+        link_lost_.store(false);
         running_.store(true);
         reader_thread_ = std::thread([this] { reader_loop(); });
 
-        // Wait for the first valid frame that identifies a Wanderer wheel.
+        // Wait for the first valid frame that identifies a Wanderer wheel. A
+        // hangup the reader meets first ends the wait at once and keeps no
+        // loss reason: a session that never started is not lost (decision
+        // 0009, issue #1988 rule 4).
         auto start = std::chrono::steady_clock::now();
         const int timeout_ms = config.serial_timeout_s * 1000;
         FilterWheelStatus s;
         while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
                timeout_ms) {
             s = get_status();
-            if (s.valid) {
+            if (s.valid || hung_up()) {
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
-        if (!s.valid) {
+        if (!s.valid || hung_up()) {
             teardown_after_failed_connect();
             throw AlpacaException("No Wanderer filter wheel status detected on " + config.serial_port,
                                   AlpacaError::NotConnected);
@@ -396,9 +406,21 @@ public:
                                   AlpacaError::NotConnected);
         }
 
+        bool hangup_before_publish = false;
         {
+            // Under mutex_, which the reader's loss path also takes: either the
+            // reader sees connected_ and loses the link, or this sees its
+            // hangup and fails the connect.
             std::lock_guard<std::mutex> lock(mutex_);
-            connected_ = true;
+            hangup_before_publish = connect_hangup_;
+            if (!hangup_before_publish) {
+                connected_ = true;
+            }
+        }
+        if (hangup_before_publish) {
+            teardown_after_failed_connect();
+            throw AlpacaException("No Wanderer filter wheel status detected on " + config.serial_port,
+                                  AlpacaError::NotConnected);
         }
         ALPACA_LOG_INFO("WandererAstro", "Connected to " + s.model + " filter wheel (firmware " +
                                              std::to_string(s.firmware_version) + ")");
@@ -415,14 +437,21 @@ public:
             status_ = FilterWheelStatus{};
             firmware_date_.clear();
             link_.reset(clock_.now());
+            loss_reason_.clear();  // decision 0009 point 5: a Disconnect clears the loss reason
         }
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
-        close_serial();
+        close_serial();  // a no-op after a lost link: the reader released the port
+        link_lost_.store(false);
     }
+
+    bool link_alive() const { return !link_lost_.load(); }
 
     std::optional<std::string> link_fault() const {
         std::lock_guard<std::mutex> lock(status_mutex_);
+        if (!loss_reason_.empty()) {
+            return loss_reason_;
+        }
         if (!link_.faulted()) {
             return std::nullopt;
         }
@@ -465,7 +494,57 @@ private:
         if (!connected_) {
             throw AlpacaException("Wanderer filter wheel not connected", AlpacaError::NotConnected);
         }
+        if (link_lost_.load()) {
+            throw AlpacaException("Wanderer filter wheel link lost; Connect again once the wheel is back",
+                                  AlpacaError::NotConnected);
+        }
     }
+
+    bool hung_up() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return connect_hangup_;
+    }
+
+#ifndef _WIN32
+    // Decision 0009 point 3 (issue #1988): the port is gone. Caller holds
+    // mutex_ and connected_ is true. The cached status and firmware date are
+    // cleared before link_lost_ is stored, both under status_mutex_, where the
+    // reader re-checks link_lost_ before it stores a frame, so a frame that
+    // races the loss never refills the cache. The reader stops and releases
+    // the port on its way out (it is the only thread reading the fd, so a
+    // writer never closes it underneath a read).
+    void lose_link_locked(const std::string& reason) {
+        {
+            std::lock_guard<std::mutex> status_lock(status_mutex_);
+            status_ = FilterWheelStatus{};
+            firmware_date_.clear();
+            loss_reason_ = reason;
+            link_lost_.store(true);
+        }
+        running_.store(false);
+        ALPACA_LOG_ERROR("WandererAstro", "Wanderer filter wheel link lost on " + config_.serial_port + ": " + reason +
+                                              " (port released)");
+    }
+
+    // The reader met a hangup or a fault that stood past the staleness bound.
+    // Before connect() has published the session nothing latches: connect()
+    // sees connect_hangup_ and fails with NotConnected (rule 4). That covers a
+    // staleness loss too, which can only come first when serial_timeout_s is
+    // over the 40 s a fault needs to go stale; the Connect then fails and
+    // keeps no reason, like a hangup. A loss a command write already latched
+    // is kept as it is: one reason, one log line.
+    void end_link_from_reader(const std::string& reason) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_) {
+            connect_hangup_ = true;
+            return;
+        }
+        if (link_lost_.load()) {
+            return;
+        }
+        lose_link_locked(reason);
+    }
+#endif
 
     void send_command(const std::string& code) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -489,7 +568,13 @@ private:
         }
 #else
         if (!util::tty_write_all(serial_link_.fd(), payload)) {
-            throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
+            const int err = errno;
+            if (is_hangup_errno(err)) {
+                const std::string reason = "Serial link lost (errno " + std::to_string(err) + ")";
+                lose_link_locked(reason);
+                throw AlpacaException("Wanderer filter wheel " + reason, AlpacaError::NotConnected);
+            }
+            throw AlpacaException("Serial write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
 #endif
     }
@@ -529,23 +614,35 @@ private:
             if (r == 1) {
                 got = true;
             } else if (r < 0) {
-                // Persistent read error (device unplugged): the read window
-                // bounds the no-data path but not errors, so back off to avoid
-                // a CPU spin until stop_reader() runs.
+                const int err = errno;
+                if (is_hangup_errno(err)) {
+                    // The device is gone (decision 0009 point 2(a)): a lost
+                    // link at once, not a silence to wait out.
+                    end_link_from_reader("Serial link lost (errno " + std::to_string(err) + ")");
+                    break;
+                }
+                // Another persistent read error: the read window bounds the
+                // no-data path but not errors, so back off to avoid a CPU spin
+                // until stop_reader() runs.
                 {
                     std::lock_guard<std::mutex> lock(status_mutex_);
-                    link_.note_read_error(errno);
+                    link_.note_read_error(err);
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 #endif
-            check_link_silence(fd);
+            if (check_link_silence(fd)) {
+                break;  // the fault stood past the staleness bound: the link is lost
+            }
             if (!got) {
                 continue;  // read-window timeout — loop and re-check running_
             }
             FilterWheelStatus updated;
             {
                 std::lock_guard<std::mutex> lock(status_mutex_);
+                if (link_lost_.load()) {
+                    continue;  // a write met the loss: the cache stays cleared
+                }
                 updated = status_;
                 if (!parser.feed(ch, updated)) {
                     continue;
@@ -573,6 +670,15 @@ private:
                 }
             }
         }
+#ifndef _WIN32
+        if (link_lost_.load()) {
+            // Release the port of a lost link here, on the one thread that
+            // reads its fd (decision 0009 point 3). The next connect() or
+            // disconnect() joins this thread.
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_serial();
+        }
+#endif
     }
 
     // Issue #237: latch a link fault after kFilterWheelLinkSilenceMs without
@@ -580,14 +686,22 @@ private:
     // Position reads and moves until the next frame clears the latch. On the
     // latching pass only, put back the line settings if another program
     // retuned the port (#1202): a stream arriving at the wrong baud never
-    // times out a read, so tty_read()'s own restore would never run.
-    void check_link_silence(int fd) {
+    // times out a read, so tty_read()'s own restore would never run. A fault
+    // that has stood for util::kLinkStalenessBound is a lost link (decision
+    // 0009 point 2(b), issue #1988): returns true, and the reader stops. One
+    // clock read per pass serves both checks.
+    bool check_link_silence(int fd) {
         std::optional<std::string> latched;
+        std::optional<std::string> stale;
         {
             std::lock_guard<std::mutex> lock(status_mutex_);
-            latched = link_.check_silence(clock_.now(), std::chrono::milliseconds(kFilterWheelLinkSilenceMs));
+            const auto now = clock_.now();
+            latched = link_.check_silence(now, std::chrono::milliseconds(kFilterWheelLinkSilenceMs));
             if (latched.has_value()) {
                 status_.valid = false;
+            }
+            if (link_.fault_stale(now)) {
+                stale = link_.fault();
             }
         }
         if (latched.has_value()) {
@@ -599,6 +713,13 @@ private:
             (void)fd;
 #endif
         }
+#ifndef _WIN32
+        if (stale.has_value()) {
+            end_link_from_reader(*stale);
+            return true;
+        }
+#endif
+        return false;
     }
 
     void stop_reader() {
@@ -694,6 +815,12 @@ private:
     // Firmware date (YYYY-MM-DD), captured once from the first valid frame and
     // cleared on disconnect; guarded by status_mutex_ alongside status_.
     std::string firmware_date_;
+    // Decision 0009 (issue #1988): the loss reason for link_fault(), guarded by
+    // status_mutex_; link_lost_ is the lock-free latch link_alive() reads. Both
+    // are cleared by the next connect() or disconnect().
+    std::string loss_reason_;
+    std::atomic<bool> link_lost_{false};
+    bool connect_hangup_ = false;  // the reader hung up before connect() published the session; guarded by mutex_
 
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
@@ -720,6 +847,8 @@ bool WandererFilterWheelProtocolWrapper::is_connected() const { return impl_->is
 FilterWheelStatus WandererFilterWheelProtocolWrapper::get_status() const { return impl_->get_status(); }
 
 std::optional<std::string> WandererFilterWheelProtocolWrapper::link_fault() const { return impl_->link_fault(); }
+
+bool WandererFilterWheelProtocolWrapper::link_alive() const { return impl_->link_alive(); }
 
 std::optional<std::string> WandererFilterWheelProtocolWrapper::get_firmware_date() const {
     return impl_->get_firmware_date();

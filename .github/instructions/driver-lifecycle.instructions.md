@@ -365,8 +365,9 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   `sever_link()` (master closed: writes fail with EIO, reads return 0 at once) — `tests/fake_serial_streamer.h` for any
   streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
   threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
-  and the next frame restores service. On the Gemini PDH (decision 0009 adopted) only
-  `set_muted(true)` faults; `sever_link()` is a lost link (the exception below).
+  and the next frame restores service. On a driver that adopted decision 0009 (the Gemini PDH and the
+  WandererAstro streaming drivers) only `set_muted(true)` faults; `sever_link()` is a lost link instead
+  (`Connected` false at once; the exception below).
 - **Exception: a removed device node is a lost connection, not a fault (issue #445,
   Sky-Watcher direct driver).** A quiet link can come back on the same fd; a node that is gone
   cannot (the fd's link count is 0, writes fail `EIO`, and the held fd keeps the kernel from
@@ -398,9 +399,13 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   state poll; `test_astroasis_focuser.cpp`, `a removed transport drops Connected at once`). The Gemini PDH follows it since
   #1987 (`GeminiPdhProtocolWrapper::link_alive()`: a hangup on the reader's read or `EIO`/`ENXIO`/`ENODEV` on a poll or
   command write, and a #237 fault standing past `util::kLinkStalenessBound` on the task clock; the reader, the one thread
-  that reads the fd, releases the port; the `[link-lost]` cases in `test_gemini_pdh_switch.cpp`). The Wanderer #237
-  drivers still treat a removed node as a fault; that has not been changed. Tests: `sever_link()` on
-  `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
+  that reads the fd, releases the port; the `[link-lost]` cases in `test_gemini_pdh_switch.cpp`). The WandererAstro cover, SFW
+  wheel and box follow it since #1988 (`link_alive()`: a hangup on the reader's read or `EIO`/`ENXIO`/`ENODEV` on a
+  write is a lost link at once, and a stream fault standing past `util::kLinkStalenessBound` is one too,
+  `StreamLinkHealth::fault_stale()`; the reader clears the cache, stops and releases the port, and a writer that meets
+  the loss leaves the close to it), and the WandererRotator since #1989 (a hangup on a command write or a move monitor
+  read; no latch, request/response). Tests: `sever_link()` on
+  `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`; `fake_serial_streamer.h`, `[wandererastro][link-lost]`.
 
 ### Reconnect must not self-deadlock: `disconnect_locked()`
 

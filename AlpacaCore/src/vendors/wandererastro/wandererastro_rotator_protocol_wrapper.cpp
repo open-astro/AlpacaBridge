@@ -62,6 +62,10 @@ constexpr const char* kSerialOwner = "WandererRotator";
 constexpr int kReadWindowMs = 500;
 
 #ifndef _WIN32
+// The errnos a tty returns once its device is gone (decision 0009 point 2(a)).
+// EBADF is not one: the wrapper only meets it on an fd it closed itself.
+bool is_hangup_errno(int err) { return err == EIO || err == ENXIO || err == ENODEV; }
+
 // 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close: the CH340
 // adapter asserts DTR on open, which pulses the rotator's MCU reset line;
 // keeping DTR high across close means a subsequent reopen does not reset the
@@ -80,7 +84,11 @@ void configure_line(struct termios& tty) {
 // windows for the whole multi-second move) intermittently dropped the leading
 // digit or sign of the report ("136.02" -> "36.02", "-40.00" -> "40.00"),
 // producing ConformU position failures of exactly +100/-90 degrees.
-std::optional<std::string> read_section(int fd, int timeout_ms, std::string& carry) {
+//
+// @p read_errno receives the errno of a failing read. A hangup errno ends the
+// read at once: the device is gone, and the caller loses the link (decision
+// 0009 point 2(a), issue #1989).
+std::optional<std::string> read_section(int fd, int timeout_ms, std::string& carry, int& read_errno) {
     std::string token = std::move(carry);
     carry.clear();
     auto start = std::chrono::steady_clock::now();
@@ -102,9 +110,12 @@ std::optional<std::string> read_section(int fd, int timeout_ms, std::string& car
                 token.clear();  // garbage — resynchronise on the next delimiter
             }
         } else if (r < 0) {
-            // Persistent read error (e.g. unplugged): the read window bounds
-            // only the no-data path, so back off to avoid spinning for the
-            // whole window.
+            read_errno = errno;
+            if (is_hangup_errno(read_errno)) {
+                break;
+            }
+            // Another persistent read error: the read window bounds only the
+            // no-data path, so back off to avoid spinning for the whole window.
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
@@ -254,19 +265,25 @@ bool probe_rotator_port(const std::string& port_path, RotatorPortInfo& info) {
     return false;
 }
 
+#endif  // _WIN32
+
+}  // namespace
+
 // The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
 // on, so without this check it would open EVERY serial device on the box --
 // unrelated FTDI dongles, GPS receivers, or a mount controller sharing the
 // ttyUSB namespace -- not just CH340/CH341-class rotator hardware. Filters
-// the raw fallback exactly as narrowly as the by-id loop below.
-bool raw_port_looks_like_rotator_candidate(const std::string& port_path) {
-    auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
-    if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+// the raw fallback exactly as narrowly as the by-id loop below, and names
+// the reason for each node it skips (issue #2212).
+std::optional<std::string> detail::raw_rotator_skip_reason(const std::optional<util::UsbTtyDescriptor>& descriptor) {
+    if (!descriptor) {
+        return std::string("USB descriptor unreadable");
+    }
+    if (util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"})) {
+        return std::nullopt;
+    }
+    return "not a CH340/CH341 device (vendor " + descriptor->vendor_id + ", product \"" + descriptor->product + "\")";
 }
-#endif  // _WIN32
-
-}  // namespace
 
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
     std::vector<RotatorPortInfo> results;
@@ -326,7 +343,14 @@ std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
         std::string resolved = std::filesystem::canonical(port, ec).string();
         if (ec) continue;
         if (probed.count(resolved) != 0) continue;
-        if (!raw_port_looks_like_rotator_candidate(resolved)) continue;
+        // Every existing node the descriptor filter drops gets one DEBUG line
+        // (issue #2212), so a log tells a node that was never there from one
+        // that was skipped. Missing nodes and by-id-probed ones stay quiet.
+        if (const auto skip =
+                detail::raw_rotator_skip_reason(alpacacore::util::read_raw_tty_usb_descriptor(resolved))) {
+            ALPACA_LOG_DEBUG("WandererAstro", "WandererRotator scan skipped " + resolved + ": " + *skip);
+            continue;
+        }
         probed.insert(resolved);
 
         if (!detail::admit_serial_candidate(resolved, std::string(), kSerialOwner, results)) continue;
@@ -406,7 +430,9 @@ public:
             state_.backlash = handshake->backlash;
             state_.reverse = handshake->reverse;
             firmware_date_ = format_firmware_date(handshake->firmware);
+            loss_reason_.clear();
         }
+        link_lost_.store(false);
         connected_ = true;
         ALPACA_LOG_INFO("WandererAstro", "Connected to " + handshake->model + " (firmware " +
                                              std::to_string(handshake->firmware) + ") on " + config_.serial_port);
@@ -432,15 +458,24 @@ public:
             std::lock_guard<std::mutex> state_lock(state_mutex_);
             state_ = RotatorState{};
             firmware_date_.clear();
+            loss_reason_.clear();  // decision 0009 point 5: a Disconnect clears the loss reason
         }
 #ifndef _WIN32
-        close_serial_locked();
+        close_serial_locked();  // a no-op when a lost link already released the port
 #endif
+        link_lost_.store(false);
     }
 
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(io_mutex_);
         return connected_;
+    }
+
+    bool link_alive() const { return !link_lost_.load(); }
+
+    std::string link_fault() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return loss_reason_;
     }
 
     RotatorState get_state() const {
@@ -496,6 +531,7 @@ public:
             state_.moving = true;
         }
         monitor_running_.store(true);
+        monitor_reading_ = true;  // under io_mutex_, before the monitor can read the fd
         monitor_thread_ = std::thread([this, commanded] { monitor_move(commanded); });
 #else
         (void)delta_degrees;
@@ -576,7 +612,34 @@ private:
         if (!connected_) {
             throw AlpacaException("WandererRotator not connected", AlpacaError::NotConnected);
         }
+        if (link_lost_.load()) {
+            throw AlpacaException("WandererRotator link lost; Connect again once the rotator is back",
+                                  AlpacaError::NotConnected);
+        }
     }
+
+#ifndef _WIN32
+    // Decision 0009 point 3 (issue #1989): the port is gone. Caller holds
+    // io_mutex_ and connected_ is true. Resets the cached state and firmware
+    // date as disconnect() does and keeps the reason, before link_lost_ is
+    // stored. A move in flight keeps `moving` until its monitor has released
+    // the port: move_relative() joins the monitor under io_mutex_ only after
+    // it sees `moving` false, so the monitor must never wait for io_mutex_
+    // after clearing it. The caller closes the port.
+    void latch_loss_locked(const std::string& reason) {
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            const bool moving = state_.moving;
+            state_ = RotatorState{};
+            state_.moving = moving;
+            firmware_date_.clear();
+            loss_reason_ = reason;
+        }
+        link_lost_.store(true);
+        ALPACA_LOG_ERROR("WandererAstro",
+                         "WandererRotator link lost on " + config_.serial_port + ": " + reason + " (port released)");
+    }
+#endif
 
     void ensure_not_moving(const char* what) const {
         std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -622,7 +685,21 @@ private:
         const std::string payload = terminator ? code + "\n" : code;
         ALPACA_LOG_TRACE("WandererAstro", "Rotator command: " + code);
         if (!util::tty_write_all(serial_link_.fd(), payload)) {
-            throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
+            const int err = errno;
+            if (is_hangup_errno(err)) {
+                const std::string reason = "Serial link lost (errno " + std::to_string(err) + ")";
+                latch_loss_locked(reason);
+                if (monitor_reading_) {
+                    // The monitor still reads the fd, and has not yet taken
+                    // io_mutex_ for its exit: it sees the loss there and
+                    // releases the port on its way out.
+                    monitor_running_.store(false);
+                } else {
+                    close_serial_locked();
+                }
+                throw AlpacaException("WandererRotator " + reason, AlpacaError::NotConnected);
+            }
+            throw AlpacaException("Serial write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
     }
 
@@ -638,12 +715,17 @@ private:
 
         std::optional<std::string> last_token;
         std::string move_fault;
-        std::string carry;  // partial-token bytes preserved across poll windows
+        std::string carry;    // partial-token bytes preserved across poll windows
+        bool hangup = false;  // the port is gone (decision 0009 point 2(a))
+        int hangup_errno = 0;
         while (monitor_running_.load() && std::chrono::steady_clock::now() < deadline) {
             int fd;
             {
                 std::lock_guard<std::mutex> lock(io_mutex_);
                 fd = serial_link_.fd();
+                if (fd < 0) {
+                    monitor_reading_ = false;
+                }
             }
             if (fd < 0) {
                 return;  // disconnected under us
@@ -651,7 +733,13 @@ private:
             // A bounded window (each read inside it is poll()-bounded too):
             // monitor_running_ is re-checked about once a second, so
             // disconnect()'s join returns promptly (#1202).
-            auto token = read_section(fd, 600, carry);
+            int read_errno = 0;
+            auto token = read_section(fd, 600, carry, read_errno);
+            if (is_hangup_errno(read_errno)) {
+                hangup = true;
+                hangup_errno = read_errno;
+                break;
+            }
             // Firmware 20261025 answers a refused move with a bare "NP\n" or "LIMIT\n" line
             // (INDI wanderer_rotator_base.cpp); it has no 'A', so it stays in carry.
             const std::string& reply = token.has_value() ? *token : carry;
@@ -683,7 +771,30 @@ private:
             }
         }
 
+        // Every exit takes io_mutex_ once, where a write path that met a loss
+        // looks at monitor_reading_: the monitor stops reading the fd here, and
+        // a loss latched before (by a write) or now (by its own hangup, unless
+        // disconnect() is under way) releases the port here. The lock is
+        // released before `moving` is cleared (issue #1989).
+        bool lost = false;
+        {
+            std::lock_guard<std::mutex> lock(io_mutex_);
+            monitor_reading_ = false;
+            if (hangup && connected_ && !link_lost_.load()) {
+                latch_loss_locked("Serial link lost (errno " + std::to_string(hangup_errno) + ")");
+            }
+            lost = link_lost_.load();
+            if (lost) {
+                close_serial_locked();
+            }
+        }
+
         std::lock_guard<std::mutex> state_lock(state_mutex_);
+        if (lost) {
+            // A lost link: no completion_missing and no arrival.
+            state_.moving = false;
+            return;
+        }
         if (!move_fault.empty()) {
             state_.move_fault = move_fault;
         } else if (last_token.has_value()) {
@@ -751,6 +862,13 @@ private:
 
     RotatorState state_;
     std::string firmware_date_;  // YYYY-MM-DD, from the handshake
+    // Decision 0009 (issue #1989): the loss reason for link_fault(), guarded by
+    // state_mutex_; link_lost_ is the lock-free latch link_alive() reads. Both
+    // are cleared by the next connect() or disconnect(). No silence latch and
+    // no staleness bound: the rotator is request/response and silent between
+    // moves, so an idle pull is found by the next command.
+    std::string loss_reason_;
+    std::atomic<bool> link_lost_{false};
 
     // In-flight move bookkeeping (guarded by state_mutex_).
     double move_start_angle_ = 0.0;
@@ -759,6 +877,10 @@ private:
 
     std::atomic<bool> monitor_running_{false};
     std::thread monitor_thread_;
+    // True from a move's start until its monitor's exit takes io_mutex_
+    // (guarded by io_mutex_): a write that meets a loss in that span leaves the
+    // close to the monitor, which still reads the fd (issue #1989).
+    bool monitor_reading_ = false;
 
 #ifndef _WIN32
     util::SerialLink serial_link_;  // the claimed, exclusively held port; guarded by io_mutex_
@@ -778,6 +900,10 @@ std::string WandererRotatorProtocolWrapper::connect(const RotatorConnectionConfi
 void WandererRotatorProtocolWrapper::disconnect() { impl_->disconnect(); }
 
 bool WandererRotatorProtocolWrapper::is_connected() const { return impl_->is_connected(); }
+
+bool WandererRotatorProtocolWrapper::link_alive() const { return impl_->link_alive(); }
+
+std::string WandererRotatorProtocolWrapper::link_fault() const { return impl_->link_fault(); }
 
 RotatorState WandererRotatorProtocolWrapper::get_state() const { return impl_->get_state(); }
 
