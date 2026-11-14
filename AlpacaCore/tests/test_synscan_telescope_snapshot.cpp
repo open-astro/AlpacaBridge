@@ -1209,12 +1209,8 @@ TEST_CASE("SynScan snapshot - a never-connected second device's teardown leaves 
     REQUIRE(st->transactions.load() > before);       // the read is waiting for the slow reply
     std::this_thread::sleep_for(milliseconds(100));  // real time: let the read settle into its wait
 
-    SECTION("Disconnect") {
-        never_connected->set_connected(false);
-    }
-    SECTION("destruction") {
-        never_connected.reset();
-    }
+    SECTION("Disconnect") { never_connected->set_connected(false); }
+    SECTION("destruction") { never_connected.reset(); }
     exchange.join();
     CHECK_FALSE(threw.load());
     CHECK(connected->get_connected());
