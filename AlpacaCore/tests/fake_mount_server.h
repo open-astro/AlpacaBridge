@@ -47,6 +47,17 @@
 
 namespace alpacacore::test {
 
+/// Polls `pred` every 50 ms of real time until it holds or `timeout_ms` passes, then returns pred(). Real time: a
+/// fake mount on a FakeMountServer and the test's own polling run on the host clock, not the driver's task clock.
+inline bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return pred();
+}
+
 class FakeMountServer {
 public:
     using Responder = std::function<std::string(const std::string& chunk)>;

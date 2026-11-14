@@ -44,139 +44,21 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
 #include "fake_mount_server.h"
+#include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
-struct FakeSynScanState {
-    alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
-    alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
-    std::atomic<int> goto_count{0};
-    std::atomic<Clock::rep> goto_started{0};
-    std::atomic<bool> goto_stopped{false};
-    std::atomic<int> gate_ms{0};  // >0: the next goto command is held this long before it is answered
-    std::atomic<Clock::rep> gate_entered{0};
-    std::atomic<Clock::rep> gate_left{0};
-    std::atomic<bool> report_slewing{false};  // true: slewing queries answer "slewing" whatever the fake clock says
-    std::atomic<int> gate_l_ms{0};  // >0: the next slewing query is held this long, then answered "not slewing"
-    std::atomic<Clock::rep> gate_l_entered{0};
-    // true: every slewing query, a held one too, is answered with garbage
-    std::atomic<bool> fail_l{false};
-    std::atomic<int> model{50};  // the handset's model id ('m'): 50 is equatorial, 5 an AZ-EQ mount
-    std::atomic<int> gate_t_ms{0};  // >0: the next tracking-mode read is held this long before it is answered
-    std::atomic<Clock::rep> gate_t_entered{0};
-    std::atomic<int> gate_s_ms{0};  // >0: the next sync command is held this long before it is answered
-    std::atomic<Clock::rep> gate_s_entered{0};
-    std::atomic<int> gate_w_ms{0};  // >0: the next site write is held this long before it is answered
-    std::atomic<Clock::rep> gate_w_entered{0};
-    std::atomic<int> gate_h_ms{0};  // >0: the next time write is held this long before it is answered
-    std::atomic<Clock::rep> gate_h_entered{0};
-    std::mutex command_mutex;
-    std::vector<std::string> commands;
-    void record(const std::string& command) {
-        std::lock_guard<std::mutex> lock(command_mutex);
-        commands.push_back(command);
-    }
-    int command_count(char prefix) {
-        std::lock_guard<std::mutex> lock(command_mutex);
-        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [prefix](const auto& command) {
-            return !command.empty() && command[0] == prefix;
-        }));
-    }
-    static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
-    bool goto_in_progress() const {
-        if (goto_count.load() == 0) return false;
-        const auto started = Clock::time_point(Clock::duration(goto_started.load()));
-        return !goto_stopped.load() && now() - started < kGotoDuration;
-    }
-};
+using alpacacore::test::FakeSynScanHandset;
+using alpacacore::test::SynScanGotoLanding;
+using alpacacore::test::wait_until;
 
-alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
-    return [st](const std::string& chunk) -> std::string {
-        if (chunk.empty()) return "0#";
-        if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'e' || chunk[0] == 'r' || chunk[0] == 'R' ||
-            chunk[0] == 'T' || chunk[0] == 't' || chunk[0] == 's') {
-            st->record(chunk);
-        }
-        switch (chunk[0]) {
-            case 'K':  // protocol echo: "K" + byte -> byte + "#" (the connect-time link check)
-                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
-            case 'e':
-            case 'E':
-            case 'z':
-            case 'Z':
-                return "12AB0500,20000500#";
-            case 'r':
-            case 'R':
-            case 'b':
-            case 'B': {
-                const int hold = st->gate_ms.exchange(0);
-                if (hold > 0) {
-                    st->gate_entered.store(Clock::now().time_since_epoch().count());
-                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
-                    st->gate_left.store(Clock::now().time_since_epoch().count());
-                }
-                st->goto_started.store(st->now().time_since_epoch().count());
-                st->goto_stopped.store(false);
-                st->goto_count.fetch_add(1);
-                return "#";
-            }
-            case 'L': {
-                const int hold = st->gate_l_ms.exchange(0);
-                if (hold > 0) {
-                    st->gate_l_entered.store(Clock::now().time_since_epoch().count());
-                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
-                }
-                if (st->fail_l.load()) return "?#";  // neither 0 nor 1: the handset read throws
-                if (hold > 0) return "0#";
-                return st->report_slewing.load() || st->goto_in_progress() ? "1#" : "0#";
-            }
-            case 'M':  // cancel goto
-                st->goto_stopped.store(true);
-                return "#";
-            case 'T':  // tracking mode write
-            case 'P':  // passthrough
-                return "#";
-            case 'm':
-                return std::string(1, static_cast<char>(st->model.load())) + "#";
-            case 't': {  // tracking mode read: sidereal tracking on
-                const int hold = st->gate_t_ms.exchange(0);
-                if (hold > 0) {
-                    st->gate_t_entered.store(Clock::now().time_since_epoch().count());
-                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
-                }
-                return std::string(1, '\x01') + "#";
-            }
-            case 's':  // sync to coordinates
-            case 'S': {
-                const int hold = st->gate_s_ms.exchange(0);
-                if (hold > 0) {
-                    st->gate_s_entered.store(Clock::now().time_since_epoch().count());
-                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
-                }
-                return "#";
-            }
-            case 'h':  // handset time, 8 binary bytes: 12:00:00 on 1 Jan 2026, UTC (a short answer times out)
-                return std::string("\x0c\x00\x00\x01\x01\x1a\x00\x00", 8) + "#";
-            case 'w':
-                return std::string(8, '\0') + "#";
-            case 'W':
-            case 'H': {  // site and time writes
-                auto& gate_ms = chunk[0] == 'W' ? st->gate_w_ms : st->gate_h_ms;
-                auto& gate_entered = chunk[0] == 'W' ? st->gate_w_entered : st->gate_h_entered;
-                const int hold = gate_ms.exchange(0);
-                if (hold > 0) {
-                    gate_entered.store(Clock::now().time_since_epoch().count());
-                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
-                }
-                return "#";
-            }
-            default:
-                return "0#";
-        }
-    };
+// This file's handset: a GOTO is timed but never moves the mount, which stays at 12AB0500,20000500.
+std::shared_ptr<FakeSynScanHandset> make_handset(
+    alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock()) {
+    return std::make_shared<FakeSynScanHandset>(clock, SynScanGotoLanding::Stays, "12AB0500,20000500#");
 }
 
 alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
@@ -188,25 +70,14 @@ alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
     return info;
 }
 
-bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
-    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (Clock::now() < deadline) {
-        if (pred()) return true;
-        // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return pred();
-}
-
 struct Rig {
     alpacacore::test::FakeTaskClock clock;
-    std::shared_ptr<FakeSynScanState> st = std::make_shared<FakeSynScanState>();
+    std::shared_ptr<FakeSynScanHandset> st = make_handset(clock);
     std::unique_ptr<alpacacore::test::FakeMountServer> server;
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
     explicit Rig(int model = 50) {
-        st->clock = &clock;
-        st->model.store(model);
-        server = std::make_unique<alpacacore::test::FakeMountServer>(synscan_responder(st));
+        st->model_id.store(static_cast<unsigned char>(model));
+        server = std::make_unique<alpacacore::test::FakeMountServer>(st->responder());
         REQUIRE(server->ok());
         driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server->port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -440,7 +311,7 @@ TEST_CASE("SynScan initiator supersede - a superseded Park body does not count i
     rig.st->report_slewing.store(true);
     rig.clock.advance(std::chrono::seconds(9));  // past the 8 s Slewing window: the Park polls ask the handset now
     REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
-    rig.st->fail_l.store(true);
+    rig.st->invalid_slew_status.store(true);
     rig.st->gate_l_ms.store(kHoldMs);
     for (int i = 0; i < 3 && rig.st->gate_l_entered.load() == 0; ++i) {
         rig.clock.advance(std::chrono::milliseconds(260));

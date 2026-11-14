@@ -37,6 +37,7 @@
 #include "concurrency_stress.h"  // settle_connected
 #include "driver_rig.h"
 #include "fake_mount_server.h"
+#include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
 
 namespace {
@@ -44,76 +45,14 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using alpacacore::test::require_alpaca_error;
 
-struct FakeSynScanState {
-    alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
-    alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
-    std::atomic<int> goto_count{0};
-    std::atomic<Clock::rep> goto_started{0};
-    std::atomic<bool> goto_stopped{false};
-    std::atomic<bool> fail_tracking_write{false};  // 'T' gets no answer (timeout) while set
-    std::mutex command_mutex;
-    std::vector<std::string> commands;
-    void record(const std::string& command) {
-        std::lock_guard<std::mutex> lock(command_mutex);
-        commands.push_back(command);
-    }
-    int command_count(char prefix) {
-        std::lock_guard<std::mutex> lock(command_mutex);
-        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [prefix](const auto& command) {
-            return !command.empty() && command[0] == prefix;
-        }));
-    }
-    static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
-    bool goto_in_progress() const {
-        if (goto_count.load() == 0) return false;
-        const auto started = Clock::time_point(Clock::duration(goto_started.load()));
-        return !goto_stopped.load() && now() - started < kGotoDuration;
-    }
-};
+using alpacacore::test::FakeSynScanHandset;
+using alpacacore::test::SynScanGotoLanding;
+using alpacacore::test::wait_until;
 
-alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
-    return [st](const std::string& chunk) -> std::string {
-        if (chunk.empty()) return "0#";
-        if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'T') {
-            st->record(chunk);
-        }
-        switch (chunk[0]) {
-            case 'K':  // protocol echo: "K" + byte -> byte + "#" (the connect-time link check)
-                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
-            case 'e':
-            case 'E':
-            case 'z':
-            case 'Z':
-                return "12AB0500,20000500#";
-            case 'r':
-            case 'R':
-            case 'b':
-            case 'B':
-                st->goto_started.store(st->now().time_since_epoch().count());
-                st->goto_stopped.store(false);
-                st->goto_count.fetch_add(1);
-                return "#";
-            case 'L':
-                return st->goto_in_progress() ? "1#" : "0#";
-            case 'M':  // cancel goto
-                st->goto_stopped.store(true);
-                return "#";
-            case 'T':  // tracking mode write
-                return st->fail_tracking_write.load() ? "" : "#";
-            case 'P':  // passthrough
-                return "#";
-            case 'm':
-                return std::string(1, static_cast<char>(50)) + "#";
-            case 't':  // tracking mode read: sidereal tracking on
-                return std::string(1, '\x01') + "#";
-            case 'w':
-                return std::string(8, '\0') + "#";
-            case 'W':
-                return "#";
-            default:
-                return "0#";
-        }
-    };
+// This file's handset: a GOTO is timed but never moves the mount, which stays at 12AB0500,20000500.
+std::shared_ptr<FakeSynScanHandset> make_handset(
+    alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock()) {
+    return std::make_shared<FakeSynScanHandset>(clock, SynScanGotoLanding::Stays, "12AB0500,20000500#");
 }
 
 alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
@@ -125,16 +64,6 @@ alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
     return info;
 }
 
-bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
-    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (Clock::now() < deadline) {
-        if (pred()) return true;
-        // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return pred();
-}
-
 void refuse_slot_threads(alpacacore::TelescopeDriver& driver) {
     alpacacore::vendor::synscan::set_slew_spawn_for_testing(driver, [](std::function<void()>) -> std::thread {
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
@@ -143,12 +72,11 @@ void refuse_slot_threads(alpacacore::TelescopeDriver& driver) {
 
 struct Rig {
     alpacacore::test::FakeTaskClock clock;
-    std::shared_ptr<FakeSynScanState> st = std::make_shared<FakeSynScanState>();
+    std::shared_ptr<FakeSynScanHandset> st = make_handset(clock);
     std::unique_ptr<alpacacore::test::FakeMountServer> server;
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
     Rig() {
-        st->clock = &clock;
-        server = std::make_unique<alpacacore::test::FakeMountServer>(synscan_responder(st));
+        server = std::make_unique<alpacacore::test::FakeMountServer>(st->responder());
         REQUIRE(server->ok());
         driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server->port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -284,11 +212,15 @@ TEST_CASE("SynScan slot - a refused start whose tracking restore lands clears th
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
 
-    rig.st->fail_tracking_write.store(true);
+    // Driver defect found by the shared handset (#2230 PR): an RA rate command replaces tracking on the handset, so
+    // after this restore fails the handset holds mode 0, and the next pulse reads that 0 as the mode to restore and
+    // never sends the T. The old fake's RA moves left the mode alone; this case keeps that until the driver is fixed.
+    rig.st->ra_move_keeps_tracking.store(true);
+    rig.st->reject_tracking.store(true);
     CHECK_THROWS_AS(rig.driver->pulse_guide(2, 200), alpacacore::AlpacaException);
     CHECK_FALSE(rig.driver->get_tracking());  // the restore failed: the mount may not be tracking
 
-    rig.st->fail_tracking_write.store(false);
+    rig.st->reject_tracking.store(false);
     const int tracking_before = rig.st->command_count('T');
     CHECK_THROWS_AS(rig.driver->pulse_guide(2, 200), alpacacore::AlpacaException);
     CHECK(rig.st->command_count('T') > tracking_before);

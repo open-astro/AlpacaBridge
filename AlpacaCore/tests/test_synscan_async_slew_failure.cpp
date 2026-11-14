@@ -42,6 +42,7 @@
 #include "concurrency_stress.h"  // settle_connected
 #include "driver_rig.h"
 #include "fake_mount_server.h"
+#include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
 
 namespace {
@@ -50,140 +51,15 @@ using Clock = std::chrono::steady_clock;
 
 using alpacacore::test::require_alpaca_error;
 
-struct FakeSynScanState {
-    // The GOTO timer reads this clock. A case that steps the driver on a
-    // FakeTaskClock points it there, so the slew runs in virtual time too.
-    alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
-    alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
-    std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
-    std::atomic<bool> reject_tracking{false};  // true: swallow the tracking write 'T' -> the wrapper times out
-    std::atomic<bool> reject_tracking_read{false};  // true: swallow the tracking read 't' -> the wrapper times out
-    std::atomic<bool> mute{false};
-    std::atomic<int> requests{0};
-    std::atomic<unsigned char> model_id{50};
-    // The handset's tracking mode ('t' reads it, 'T' writes it). A test sets it directly to stand in for the
-    // keypad changing it outside the driver.
-    std::atomic<int> tracking_mode{1};
-    std::atomic<int> goto_count{0};
-    std::atomic<Clock::rep> goto_started{0};
-    std::atomic<bool> goto_stopped{false};
-    // The position a precise GOTO landed on; empty until the first one (#1105). With land_on_goto false the mount
-    // never moves, so the driver's landing check fails the slew after one repeat GOTO.
-    std::atomic<bool> land_on_goto{true};
-    std::mutex landed_mutex;
-    std::string landed;
-    // A test that sets hold_tracking_write parks the next tracking write 'T' inside the handset until it
-    // release_tracking_write()s; tracking_write_held says the write has arrived there.
-    std::atomic<bool> hold_tracking_write{false};
-    std::mutex hold_mutex;
-    std::condition_variable hold_cv;
-    bool tracking_write_held = false;
-    bool tracking_write_released = false;
-    void park_tracking_write() {
-        std::unique_lock<std::mutex> lock(hold_mutex);
-        tracking_write_held = true;
-        hold_cv.notify_all();
-        hold_cv.wait(lock, [this] { return tracking_write_released; });
-    }
-    bool wait_tracking_write_held() {
-        std::unique_lock<std::mutex> lock(hold_mutex);
-        return hold_cv.wait_for(lock, std::chrono::seconds(5), [this] { return tracking_write_held; });
-    }
-    void release_tracking_write() {
-        std::lock_guard<std::mutex> lock(hold_mutex);
-        tracking_write_released = true;
-        hold_cv.notify_all();
-    }
-    std::mutex command_mutex;
-    std::vector<std::string> commands;
-    void record(const std::string& command) {
-        std::lock_guard<std::mutex> lock(command_mutex);
-        commands.push_back(command);
-    }
-    std::vector<std::string> command_snapshot() {
-        std::lock_guard<std::mutex> lock(command_mutex);
-        return commands;
-    }
-    int command_count(char prefix) {
-        std::lock_guard<std::mutex> lock(command_mutex);
-        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [prefix](const auto& command) {
-            return !command.empty() && command[0] == prefix;
-        }));
-    }
-    static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
-    bool goto_in_progress() const {
-        if (goto_count.load() == 0) return false;
-        const auto started = Clock::time_point(Clock::duration(goto_started.load()));
-        return !goto_stopped.load() && now() - started < kGotoDuration;
-    }
-};
+using alpacacore::test::FakeSynScanHandset;
+using alpacacore::test::SynScanGotoLanding;
+using alpacacore::test::wait_until;
 
-alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
-    return [st](const std::string& chunk) -> std::string {
-        st->requests.fetch_add(1);
-        if (st->mute.load()) return "";
-        if (chunk.empty()) return "0#";
-        if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R') {
-            st->record(chunk);
-        }
-        if (chunk[0] == 'T' && st->reject_tracking.load()) return "";
-        if (chunk[0] == 't' && st->reject_tracking_read.load()) return "";
-        switch (chunk[0]) {
-            case 'K':  // protocol echo: "K" + byte -> byte + "#" (the connect-time link check)
-                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
-            case 'e':
-            case 'E':
-            case 'z':
-            case 'Z': {
-                std::lock_guard<std::mutex> lock(st->landed_mutex);
-                return st->landed.empty() ? "12AB0500,20000500#" : st->landed;
-            }
-            case 'r':
-            case 'R':
-            case 'b':
-            case 'B':
-                if (st->reject_goto.load()) {
-                    return "";  // no reply at all: the response timeout fires inside the slew task
-                }
-                if (chunk[0] == 'r' && chunk.size() >= 18 && st->land_on_goto.load()) {
-                    // A precise GOTO lands on its aim, so the landing check after it (#1105) sees an arrival.
-                    std::lock_guard<std::mutex> lock(st->landed_mutex);
-                    st->landed = chunk.substr(1, 17) + "#";
-                }
-                st->goto_started.store(st->now().time_since_epoch().count());
-                st->goto_stopped.store(false);
-                st->goto_count.fetch_add(1);
-                return "#";
-            case 'L':
-                return st->goto_in_progress() ? "1#" : "0#";
-            case 'T':  // tracking mode write
-                if (st->hold_tracking_write.exchange(false)) st->park_tracking_write();
-                if (chunk.size() >= 2) {
-                    st->tracking_mode.store(static_cast<unsigned char>(chunk[1]));
-                }
-                return "#";
-            case 'M':  // cancel goto
-            case 'P':  // passthrough
-                // A variable-rate move on the RA motor replaces tracking on the handset, and so does its stop.
-                if (chunk.size() >= 6 && chunk[1] == 3 && static_cast<unsigned char>(chunk[2]) == 16) {
-                    st->tracking_mode.store(0);
-                }
-                if (chunk.size() >= 8 && chunk[1] == 3 && chunk[2] == 16 && chunk[4] == 0 && chunk[5] == 0) {
-                    st->goto_stopped.store(true);
-                }
-                return "#";
-            case 'm':
-                return std::string(1, static_cast<char>(st->model_id.load())) + "#";
-            case 't':  // tracking mode read
-                return std::string(1, static_cast<char>(st->tracking_mode.load())) + "#";
-            case 'w':
-                return std::string(8, '\0') + "#";
-            case 'W':
-                return "#";
-            default:
-                return "0#";
-        }
-    };
+// This file's handset: a GOTO lands on its aim (a case may turn land_on_goto off), and the mount starts at
+// 12AB0500,20000500.
+std::shared_ptr<FakeSynScanHandset> make_handset(
+    alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock()) {
+    return std::make_shared<FakeSynScanHandset>(clock, SynScanGotoLanding::OnTarget, "12AB0500,20000500#");
 }
 
 alpacacore::vendor::synscan::ConnectionInfo endpoint(int port, int timeout_ms = 1000) {
@@ -193,16 +69,6 @@ alpacacore::vendor::synscan::ConnectionInfo endpoint(int port, int timeout_ms = 
     info.tcp_port = port;
     info.response_timeout_ms = timeout_ms;
     return info;
-}
-
-bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
-    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (Clock::now() < deadline) {
-        if (pred()) return true;
-        // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return pred();
 }
 
 // Steps the fake clock one `step` at a time, once a driver task is parked on
@@ -292,8 +158,8 @@ SlewingRead read_slewing(alpacacore::TelescopeDriver& driver, std::string* messa
 
 TEST_CASE("SynScan async - a GOTO the handset never acknowledges surfaces through Slewing (#575)",
           "[synscan][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -325,8 +191,8 @@ TEST_CASE("SynScan async - a GOTO the handset never acknowledges surfaces throug
 
 TEST_CASE("SynScan MoveAxis - failed dispatch preserves a stored slew error",
           "[synscan][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -350,8 +216,8 @@ TEST_CASE("SynScan MoveAxis - failed dispatch preserves a stored slew error",
 
 TEST_CASE("SynScan MoveAxis - successful dispatch clears a stored slew error",
           "[synscan][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -370,8 +236,8 @@ TEST_CASE("SynScan MoveAxis - successful dispatch clears a stored slew error",
 }
 
 TEST_CASE("SynScan Unpark - a no-op Unpark clears a stored slew error", "[synscan][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -387,8 +253,8 @@ TEST_CASE("SynScan Unpark - a no-op Unpark clears a stored slew error", "[synsca
 }
 
 TEST_CASE("SynScan async - AbortSlew clears a stored slew failure (#575)", "[synscan][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -404,8 +270,8 @@ TEST_CASE("SynScan async - AbortSlew clears a stored slew failure (#575)", "[syn
 }
 
 TEST_CASE("SynScan async - AbortSlew fences a pending GOTO", "[synscan][telescope][async][abort]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -425,8 +291,8 @@ TEST_CASE("SynScan async - AbortSlew fences a pending GOTO", "[synscan][telescop
 
 TEST_CASE("SynScan AbortSlew - a stop failure still reaps the cancelled slew task",
           "[synscan][telescope][async][abort]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -444,8 +310,8 @@ TEST_CASE("SynScan AbortSlew - a stop failure still reaps the cancelled slew tas
 
 TEST_CASE("SynScan AbortSlew - a failed tracking restore still clears Slewing (#830)",
           "[synscan][telescope][async][abort]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -463,9 +329,8 @@ TEST_CASE("SynScan AbortSlew - a failed tracking restore still clears Slewing (#
 
 TEST_CASE("SynScan async - MoveAxis supersedes a pending async slew", "[synscan][telescope][async][ownership]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -495,9 +360,8 @@ TEST_CASE("SynScan async - MoveAxis supersedes a pending async slew", "[synscan]
 
 TEST_CASE("SynScan async - blocking slew replaces a pending async target", "[synscan][telescope][async][ownership]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -530,8 +394,8 @@ TEST_CASE("SynScan async - blocking slew replaces a pending async target", "[syn
 }
 
 TEST_CASE("SynScan PulseGuide - cross-axis pulses keep the RA tracking restore", "[synscan][telescope][pulseguiding]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -567,9 +431,8 @@ TEST_CASE("SynScan PulseGuide - cross-axis pulses keep the RA tracking restore",
 TEST_CASE("SynScan PulseGuide - short Dec pulse keeps the position override of a long RA pulse (#990)",
           "[synscan][telescope][pulseguiding]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -587,8 +450,8 @@ TEST_CASE("SynScan PulseGuide - short Dec pulse keeps the position override of a
 }
 
 TEST_CASE("SynScan PulseGuide - guide position does not publish as target", "[synscan][telescope][pulseguiding]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -607,10 +470,9 @@ TEST_CASE("SynScan PulseGuide - guide position does not publish as target", "[sy
 
 TEST_CASE("SynScan async slew - position reports mount feedback after PulseGuide", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
+    auto st = make_handset(clock);
     st->land_on_goto.store(false);
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -681,9 +543,8 @@ TEST_CASE("SynScan pulse state refuses a latched link fault without I/O and reco
           "[synscan][telescope][link][pulseguiding]") {
     const bool guiding = GENERATE(false, true);
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -696,7 +557,7 @@ TEST_CASE("SynScan pulse state refuses a latched link fault without I/O and reco
     // wrapper mutex (not FIFO): unpaused, it can read after the third failure below and count a fourth, or
     // after the unmute and clear the latch (nightly run 40958614341). Pausing joins it.
     alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
-    st->mute.store(true);
+    st->silent.store(true);
     for (int i = 0; i < 3; ++i) {
         poll_status_now_for_testing(*driver);
     }
@@ -712,7 +573,7 @@ TEST_CASE("SynScan pulse state refuses a latched link fault without I/O and reco
         CHECK(std::string(e.what()) == "SynScan mount communications compromised: " + fault);
     }
     CHECK(st->requests.load() == requests);
-    st->mute.store(false);
+    st->silent.store(false);
     poll_status_now_for_testing(*driver);
     CHECK(driver->get_altitude() == altitude);
     CHECK(driver->get_link_fault().empty());
@@ -726,9 +587,8 @@ TEST_CASE("SynScan commanded state refuses a latched fault while safety stops st
           "[synscan][telescope][link]") {
     const bool moving = GENERATE(false, true);
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -762,7 +622,7 @@ TEST_CASE("SynScan commanded state refuses a latched fault while safety stops st
     // wrapper mutex (not FIFO): unpaused, it can read after the third failure below and count a fourth, or
     // after the unmute and clear the latch (nightly run 40958614341). Pausing joins it.
     alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
-    st->mute.store(true);
+    st->silent.store(true);
     for (int i = 0; i < 3; ++i) {
         poll_status_now_for_testing(*driver);
     }
@@ -786,7 +646,7 @@ TEST_CASE("SynScan commanded state refuses a latched fault while safety stops st
     for (const auto& value : driver->get_device_state()) {
         CHECK(value.name == "TimeStamp");
     }
-    st->mute.store(false);  // replies work again, but no poll has cleared the latch
+    st->silent.store(false);  // replies work again, but no poll has cleared the latch
     const int before_stop = st->command_count('P');
     REQUIRE_NOTHROW(driver->move_axis(1, 0.0));
     CHECK(st->command_count('P') > before_stop);
@@ -806,8 +666,8 @@ TEST_CASE("SynScan commanded state refuses a latched fault while safety stops st
 TEST_CASE("SynScan position - stale cache faults after repeated failed polls and recovers",
           "[synscan][telescope][link]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -815,7 +675,7 @@ TEST_CASE("SynScan position - stale cache faults after repeated failed polls and
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     using alpacacore::vendor::synscan::poll_status_now_for_testing;
     const double ra = driver->get_right_ascension();
-    st->mute.store(true);
+    st->silent.store(true);
 
     // One failed tick: the frame ages but is still served; a single lost reply is not a fault.
     poll_status_now_for_testing(*driver);
@@ -846,11 +706,11 @@ TEST_CASE("SynScan position - stale cache faults after repeated failed polls and
     }
 
     // Recovery is automatic: the next answered tick clears the latch.
-    st->mute.store(false);
+    st->silent.store(false);
     poll_status_now_for_testing(*driver);
     CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
     CHECK(driver->get_link_fault().empty());
-    st->mute.store(false);
+    st->silent.store(false);
     driver->set_connected(false);
 }
 
@@ -878,9 +738,9 @@ TEST_CASE("SynScan tracking - mode follows mount geometry, the same in either he
           // ... and is ignored for a mount whose geometry the model ID fixes.
           Expected{50, SynScanAlignmentSetting::AltAz, alpacacore::AlignmentMode::GermanPolar, false, 2},
           Expected{128, SynScanAlignmentSetting::Equatorial, alpacacore::AlignmentMode::AltAz, false, 1}}) {
-        auto st = std::make_shared<FakeSynScanState>();
+        auto st = make_handset();
         st->model_id.store(expected.model_id);
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -900,9 +760,9 @@ TEST_CASE("SynScan tracking - mode follows mount geometry, the same in either he
         driver->set_connected(false);
     }
 
-    auto st = std::make_shared<FakeSynScanState>();
+    auto st = make_handset();
     st->model_id.store(5);  // AZ-EQ can be used in two alignment configurations; the HC does not report which.
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     // alignmentMode "auto" (or absent) keeps the refusal to guess (#857).
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
@@ -917,9 +777,8 @@ TEST_CASE("SynScan tracking - mode follows mount geometry, the same in either he
 TEST_CASE("SynScan PulseGuide - a same-axis replacement runs for its requested duration",
           "[synscan][telescope][pulseguiding]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -949,8 +808,10 @@ TEST_CASE("SynScan AbortSlew - stops active pulse tasks and restores requested t
           "[synscan][telescope][pulseguiding][abort]") {
     for (const int direction : {0, 2}) {
         alpacacore::test::FakeTaskClock clock;
-        auto st = std::make_shared<FakeSynScanState>();
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        auto st = make_handset();
+        // The log size below spans a status-poll tick; the poll's own reads (e, t) are not what the case pins.
+        st->log_status_reads.store(false);
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -977,8 +838,8 @@ TEST_CASE("SynScan AbortSlew - stops active pulse tasks and restores requested t
 
 TEST_CASE("SynScan AbortSlew - does not restore tracking disabled during an RA pulse",
           "[synscan][telescope][pulseguiding][abort]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -998,9 +859,8 @@ TEST_CASE("SynScan PulseGuide - SlewToCoordinates reaps the pulse and clears IsP
     enum class Op { SlewToCoordinates, SlewToCoordinatesAsync, Park };
     for (const Op op : {Op::SlewToCoordinates, Op::SlewToCoordinatesAsync, Op::Park}) {
         alpacacore::test::FakeTaskClock clock;
-        auto st = std::make_shared<FakeSynScanState>();
-        st->clock = &clock;
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = make_driver(server.port(), clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1041,8 +901,8 @@ TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's
     std::atomic<bool> at_window{false};
     std::atomic<int> fired{0};
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
@@ -1092,9 +952,8 @@ TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's
 TEST_CASE("SynScan hold window - a GOTO the handset reports done keeps Slewing until the 8 s hold ends (#1836 PIN)",
           "[synscan][telescope][hold-window]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1116,9 +975,8 @@ TEST_CASE("SynScan hold window - a GOTO the handset reports done keeps Slewing u
 TEST_CASE("SynScan hold window - AbortSlew inside the hold clears Slewing at once",
           "[synscan][telescope][hold-window]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1139,9 +997,8 @@ TEST_CASE("SynScan hold window - AbortSlew inside the hold clears Slewing at onc
 TEST_CASE("SynScan hold window - a pulse keeps its axis while virtual time has not reached its end",
           "[synscan][telescope][hold-window][pulseguiding]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1164,7 +1021,7 @@ TEST_CASE("SynScan hold window - a pulse keeps its axis while virtual time has n
 // The mode a stop restores is the one the handset held when the motion started, not the one cached at connect: a
 // keypad change in between must not be undone by AbortSlew, MoveAxis(0) or the end of an RA pulse.
 namespace {
-std::unique_ptr<alpacacore::TelescopeDriver> connect_with_stale_tracking(const std::shared_ptr<FakeSynScanState>& st,
+std::unique_ptr<alpacacore::TelescopeDriver> connect_with_stale_tracking(const std::shared_ptr<FakeSynScanHandset>& st,
                                                                          alpacacore::test::FakeMountServer& server) {
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -1177,8 +1034,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> connect_with_stale_tracking(const s
 
 TEST_CASE("SynScan AbortSlew - does not turn tracking back on after a keypad change",
           "[synscan][telescope][abort][tracking]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = connect_with_stale_tracking(st, server);
     const int writes_before = st->command_count('T');
@@ -1191,8 +1048,8 @@ TEST_CASE("SynScan AbortSlew - does not turn tracking back on after a keypad cha
 
 TEST_CASE("SynScan MoveAxis - stopping RA does not turn tracking back on after a keypad change",
           "[synscan][telescope][moveaxis][tracking]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = connect_with_stale_tracking(st, server);
     const int writes_before = st->command_count('T');
@@ -1205,8 +1062,8 @@ TEST_CASE("SynScan MoveAxis - stopping RA does not turn tracking back on after a
 
 TEST_CASE("SynScan PulseGuide - the end of an RA pulse does not turn tracking back on after a keypad change",
           "[synscan][telescope][pulseguiding][tracking]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = connect_with_stale_tracking(st, server);
     const int writes_before = st->command_count('T');
@@ -1220,8 +1077,8 @@ TEST_CASE("SynScan PulseGuide - the end of an RA pulse does not turn tracking ba
 TEST_CASE("SynScan SlewToCoordinates - refuses after the keypad turned tracking off",
           "[synscan][telescope][slew][tracking]") {
     for (const bool async : {false, true}) {
-        auto st = std::make_shared<FakeSynScanState>();
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        auto st = make_handset();
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = connect_with_stale_tracking(st, server);
         INFO("async " << async);
@@ -1241,8 +1098,8 @@ TEST_CASE("SynScan SlewToCoordinates - refuses after the keypad turned tracking 
 
 TEST_CASE("SynScan idle stops - still sent when the tracking read times out", "[synscan][telescope][tracking]") {
     for (const bool abort : {true, false}) {
-        auto st = std::make_shared<FakeSynScanState>();
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        auto st = make_handset();
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
             0, endpoint(server.port(), 300), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -1267,8 +1124,8 @@ TEST_CASE("SynScan stops - restore the mode the handset held when the motion sta
           "[synscan][telescope][tracking]") {
     // The keypad moved tracking from 1 to 2 before the motion; the stop restores 2, not the cached 1.
     for (const int site : {0, 1, 2}) {
-        auto st = std::make_shared<FakeSynScanState>();
-        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        auto st = make_handset();
+        alpacacore::test::FakeMountServer server(st->responder());
         REQUIRE(server.ok());
         auto driver = connect_with_stale_tracking(st, server);
         st->tracking_mode = 2;
@@ -1295,8 +1152,8 @@ TEST_CASE("SynScan stops - restore the mode the handset held when the motion sta
 
 TEST_CASE("SynScan AbortSlew - a finished RA pulse no longer counts as running when the keypad changes tracking",
           "[synscan][telescope][pulseguiding][tracking]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -1317,14 +1174,14 @@ TEST_CASE("SynScan AbortSlew - a finished RA pulse no longer counts as running w
 // The handset turns tracking off when an RA move starts, so a stop that read `t` while the motion ran would see 0 and
 // leave the mount not tracking. Each case starts at mode 2 and the stop must write it back.
 namespace {
-int last_tracking_write(FakeSynScanState& st) {
+int last_tracking_write(FakeSynScanHandset& st) {
     const auto commands = st.command_snapshot();
     const auto last_t = std::find_if(commands.rbegin(), commands.rend(),
                                      [](const std::string& c) { return !c.empty() && c[0] == 'T'; });
     return last_t == commands.rend() ? -1 : static_cast<int>(static_cast<unsigned char>((*last_t)[1]));
 }
 
-std::unique_ptr<alpacacore::TelescopeDriver> connect_tracking_mode_2(const std::shared_ptr<FakeSynScanState>& st,
+std::unique_ptr<alpacacore::TelescopeDriver> connect_tracking_mode_2(const std::shared_ptr<FakeSynScanHandset>& st,
                                                                      alpacacore::test::FakeMountServer& server) {
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -1337,8 +1194,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> connect_tracking_mode_2(const std::
 
 TEST_CASE("SynScan MoveAxis - stopping an RA jog restores the mode the handset held before it",
           "[synscan][telescope][moveaxis][tracking]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = connect_tracking_mode_2(st, server);
     driver->move_axis(0, 0.5);
@@ -1351,8 +1208,8 @@ TEST_CASE("SynScan MoveAxis - stopping an RA jog restores the mode the handset h
 
 TEST_CASE("SynScan AbortSlew - during an RA pulse restores the mode the handset held before it",
           "[synscan][telescope][pulseguiding][abort][tracking]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = connect_tracking_mode_2(st, server);
     driver->pulse_guide(2, 1500);
@@ -1365,8 +1222,8 @@ TEST_CASE("SynScan AbortSlew - during an RA pulse restores the mode the handset 
 
 TEST_CASE("SynScan PulseGuide - a pulse replaced mid-pulse restores the mode held before the first",
           "[synscan][telescope][pulseguiding][tracking]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = connect_tracking_mode_2(st, server);
     driver->pulse_guide(2, 1500);
@@ -1380,8 +1237,8 @@ TEST_CASE("SynScan PulseGuide - a pulse replaced mid-pulse restores the mode hel
 
 TEST_CASE("SynScan MoveAxis - a Dec jog does not hide a keypad change from the next RA jog",
           "[synscan][telescope][moveaxis][tracking]") {
-    auto st = std::make_shared<FakeSynScanState>();
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = connect_with_stale_tracking(st, server);  // cache 1, handset 0
     const int writes_before = st->command_count('T');
@@ -1399,9 +1256,8 @@ TEST_CASE("SynScan MoveAxis - a Dec jog does not hide a keypad change from the n
 TEST_CASE("SynScan PulseGuide - the end of an RA pulse leaves a Tracking write that reached the wire first",
           "[synscan][telescope][pulseguiding][tracking]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock, 10000);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -1433,9 +1289,8 @@ TEST_CASE("SynScan PulseGuide - the end of an RA pulse leaves a Tracking write t
 TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for its wire turn",
           "[synscan][telescope][pulseguiding][disconnect]") {
     alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeSynScanState>();
-    st->clock = &clock;
-    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock, 10000);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
