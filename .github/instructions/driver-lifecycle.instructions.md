@@ -68,7 +68,7 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in
-  the exposure workers of cameras not yet on `util::CaptureSession` (Player One and ZWO are; decision 0020)
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One, ZWO and SVBONY are; decision 0020)
   and the GPIO soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
     writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
@@ -389,7 +389,9 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   exposure retry stops at the first one), and on a generic failure from a camera the SDK no longer enumerates (a bare
   cable pull, which ASI SDK 1.41 answers with no removal code), with no staleness bound; its dew heater switch drops
   `Connected` on its next call. The QHY integrated filter wheel drops it on `QHYCCD_ERROR_DEVICELOSE` from its own call since #1985
-  ([QHY](qhy.instructions.md)). A second owner of a shared open whose close counts opens, not owners (the QHY
+  ([QHY](qhy.instructions.md)), and the SVBONY camera on `SVB_ERROR_CAMERA_REMOVED` or `SVB_ERROR_CAMERA_CLOSED` from a
+  device call since #1986, its exposure body included (`SVB_ERROR_INVALID_ID` is not evidence; unverified on hardware,
+  [SVBONY](svbony.instructions.md)). A second owner of a shared open whose close counts opens, not owners (the QHY
   wrapper's `close_camera()`), releases its reference exactly once, at the loss or the Disconnect, whichever comes first:
   a second release drops the other owner's reference. The Astroasis focuser follows it since #1756
   (`AstroasisProtocolWrapper::link_alive()`, a lock-free latch set by a HID write or read error on the next transaction, which is the
