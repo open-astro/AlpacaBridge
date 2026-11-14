@@ -154,9 +154,6 @@ public:
     std::atomic<Clock::rep> gate_h_entered{0};
     /// The w site read goes unanswered, so the driver has no site unless config or a client supplies one.
     std::atomic<bool> no_location{false};
-    /// An RA variable-rate move leaves the handset's tracking mode alone. Not the handset's behaviour (it replaces
-    /// tracking); one slot case keeps it while the driver defect it exposes is open (see that case).
-    std::atomic<bool> ra_move_keeps_tracking{false};
     /// The command log records the status poll's reads (e, t) as well as every other logged prefix. A case that
     /// counts the whole log across a status poll turns it off.
     std::atomic<bool> log_status_reads{true};
@@ -329,8 +326,7 @@ private:
             case 'P':  // passthrough: "P" & chr(len) & chr(dev) & chr(op) & ...
                 // A variable-rate move on the RA motor is the motor's own speed and replaces tracking on the handset,
                 // and so does its zero-rate stop (EQM-35 Pro, HC 06.03.00, synscan.instructions.md "Pulse guiding").
-                if (chunk.size() >= 6 && chunk[1] == 3 && static_cast<unsigned char>(chunk[2]) == 16 &&
-                    !ra_move_keeps_tracking.load()) {
+                if (chunk.size() >= 6 && chunk[1] == 3 && static_cast<unsigned char>(chunk[2]) == 16) {
                     tracking_mode.store(0);
                 }
                 return "#";

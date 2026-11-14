@@ -212,10 +212,8 @@ TEST_CASE("SynScan slot - a refused start whose tracking restore lands clears th
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
 
-    // Driver defect found by the shared handset (#2230 PR): an RA rate command replaces tracking on the handset, so
-    // after this restore fails the handset holds mode 0, and the next pulse reads that 0 as the mode to restore and
-    // never sends the T. The old fake's RA moves left the mode alone; this case keeps that until the driver is fixed.
-    rig.st->ra_move_keeps_tracking.store(true);
+    // The RA rate command and its stop replace tracking on the handset, so after this restore fails the handset holds
+    // mode 0; the next pulse still restores the mode the client asked for, not that 0.
     rig.st->reject_tracking.store(true);
     CHECK_THROWS_AS(rig.driver->pulse_guide(2, 200), alpacacore::AlpacaException);
     CHECK_FALSE(rig.driver->get_tracking());  // the restore failed: the mount may not be tracking

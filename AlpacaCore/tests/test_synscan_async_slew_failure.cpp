@@ -34,6 +34,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -1190,7 +1191,90 @@ std::unique_ptr<alpacacore::TelescopeDriver> connect_tracking_mode_2(const std::
     REQUIRE(driver->get_tracking());
     return driver;
 }
+
+// How a case leaves a tracking restore that did not land: the RA rate command and its stop replaced tracking on the
+// handset (mode 0), the `T` that should have resumed it timed out, and Tracking reads false.
+enum class FailedRestore : std::uint8_t { RefusedPulseTimer, MoveAxisStop };
+
+void fail_tracking_restore(alpacacore::TelescopeDriver& driver, FakeSynScanHandset& st, FailedRestore how) {
+    st.reject_tracking = true;
+    if (how == FailedRestore::RefusedPulseTimer) {
+        alpacacore::vendor::synscan::set_pulse_spawn_for_testing(driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+        CHECK_THROWS_AS(driver.pulse_guide(2, 200), alpacacore::AlpacaException);
+        alpacacore::vendor::synscan::set_pulse_spawn_for_testing(
+            driver, [](std::function<void()> body) { return std::thread(std::move(body)); });
+    } else {
+        driver.move_axis(0, 0.5);
+        CHECK_THROWS_AS(driver.move_axis(0, 0.0), alpacacore::AlpacaException);
+    }
+    st.reject_tracking = false;
+    REQUIRE(st.tracking_mode.load() == 0);  // the handset is not tracking
+    REQUIRE_FALSE(driver.get_tracking());   // and the driver says so
+}
 }  // namespace
+
+// The handset's mode 0 after a failed restore is the driver's own unfinished stop, not a keypad change: the next RA
+// motion keeps the mode the client asked for and its end restores it. Before the fix the pulse read that 0 as the mode
+// to restore, ran the motor at the guide rate alone and ended with a plain stop, so the mount stayed untracked.
+TEST_CASE("SynScan pulse guide - the next RA pulse restores tracking after a failed restore",
+          "[synscan][telescope][pulseguiding][tracking]") {
+    for (const FailedRestore how : {FailedRestore::RefusedPulseTimer, FailedRestore::MoveAxisStop}) {
+        INFO("failed restore " << static_cast<int>(how));
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_tracking(true);
+        REQUIRE(st->tracking_mode.load() == 2);
+        fail_tracking_restore(*driver, *st, how);
+
+        const int writes_before = st->command_count('T');
+        driver->pulse_guide(2, 200);  // East, RA
+        REQUIRE(advance_until(clock, [&] { return !driver->get_is_pulse_guiding(); }));
+        CHECK(st->command_count('T') == writes_before + 1);
+        CHECK(last_tracking_write(*st) == 2);
+        CHECK(st->tracking_mode.load() == 2);
+        CHECK(driver->get_tracking());
+        driver->set_connected(false);
+    }
+}
+
+// The same failed restore, ended by the client's own stop instead of a pulse: AbortSlew, a bare MoveAxis(0, 0) and a
+// new RA jog's stop each send the requested mode, not the handset's 0.
+TEST_CASE("SynScan stops - AbortSlew and MoveAxis restore tracking after a failed restore",
+          "[synscan][telescope][tracking][abort][moveaxis]") {
+    enum class Stop : std::uint8_t { AbortSlew, MoveAxisStop, RaJog };
+    for (const Stop stop : {Stop::AbortSlew, Stop::MoveAxisStop, Stop::RaJog}) {
+        INFO("stop " << static_cast<int>(stop));
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_tracking(true);
+        fail_tracking_restore(*driver, *st, FailedRestore::MoveAxisStop);
+
+        const int writes_before = st->command_count('T');  // the log holds the rejected `T` too
+        if (stop == Stop::AbortSlew) {
+            REQUIRE_NOTHROW(driver->abort_slew());
+        } else if (stop == Stop::MoveAxisStop) {
+            REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
+        } else {
+            driver->move_axis(0, 0.5);
+            REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
+        }
+        CHECK(st->command_count('T') == writes_before + 1);
+        CHECK(last_tracking_write(*st) == 2);
+        CHECK(st->tracking_mode.load() == 2);
+        CHECK(driver->get_tracking());
+        driver->set_connected(false);
+    }
+}
 
 TEST_CASE("SynScan MoveAxis - stopping an RA jog restores the mode the handset held before it",
           "[synscan][telescope][moveaxis][tracking]") {

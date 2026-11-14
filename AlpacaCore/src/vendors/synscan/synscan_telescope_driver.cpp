@@ -3393,6 +3393,14 @@ private:
         if (!tracking_mode_valid_ && slew_.running()) {
             seed_tracking_mode_from_frame_locked();
         }
+        // After a restore that did not land, the cache is the mode still owed to the handset and the handset's own
+        // answer is the driver's unfinished stop: the RA rate command replaced tracking and the `T` never arrived, so
+        // it reads 0. Reading it here would make that 0 the mode to restore, and the next RA pulse, MoveAxis stop or
+        // AbortSlew would leave the mount untracked. The flag clears with a landed restore, a Tracking write, Park,
+        // an RA MoveAxis, AbortSlew or a reconnect.
+        if (tracking_mode_valid_ && ra_stop_unconfirmed_) {
+            return;
+        }
         if (tracking_mode_valid_ && (slew_.running() || ra_motion_active_locked(lock))) {
             return;
         }
@@ -3944,9 +3952,10 @@ private:
     mutable uint64_t tracking_mode_generation_ = 0;  // bumped on every control-path write of tracking_mode_cached_
     mutable bool tracking_mode_valid_;
     // A pulse-guide end whose tracking restore failed: the RA motor may be off while the cache still holds the mode.
-    // Only the public Tracking read consults it. A GOTO is refused while it is set; a pulse end that fails while a
-    // GOTO reaps it sets the flag after the Tracking gate, and it stays set across the GOTO because that T never
-    // landed.
+    // The public Tracking read reports false while it is set, and refresh_tracking_mode_locked() keeps the cached
+    // mode instead of the handset's 0, so the next RA stop restores it. A GOTO is refused while it is set; a pulse end
+    // that fails while a GOTO reaps it sets the flag after the Tracking gate, and it stays set across the GOTO because
+    // that T never landed.
     mutable bool ra_stop_unconfirmed_ = false;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
