@@ -208,6 +208,43 @@ constexpr double kRaArcsecPerRaSecond = 15.0;
 constexpr double kSiSecondsPerSiderealSecond = 0.9972695663;
 constexpr double kRateOffsetLimitArcsecPerSiderealSecond = 1800.0;
 
+// #2241: while a rate offset runs, RightAscension and Declination (and so DeviceState) serve the commanded model, the
+// anchor plus the offsets times the sidereal seconds since it, instead of the frame, which is up to a poll period old
+// and moves in the mount's whole steps. Each poll compares its :GRa#/:GDe# with the model at the time of that read and
+// re-anchors on the measurement when either axis is more than kOffsetModelGuardArcsec off (four 0.5 arcsec steps of
+// the TeSeek HM-17; a mount with larger steps needs at least four of its own), so a stalled axis shows within one poll
+// at 40 arcsec/s and within about 40 s at 0.05 arcsec/s, and after kOffsetModelHold without a re-anchor anyway. RA is
+// compared in RA-axis arcseconds (hours x kRaAxisArcsecPerHour), the unit the offset and the mount's steps are in.
+constexpr double kOffsetModelGuardArcsec = 2.0;
+constexpr auto kOffsetModelHold = std::chrono::minutes(30);
+constexpr double kRaAxisArcsecPerHour = 15.0 * 3600.0;
+
+// The model's anchor: a position and the task-clock time it holds for.
+struct OffsetAnchor {
+    double ra_hours = 0.0;
+    double dec_degrees = 0.0;
+    util::TaskClock::clock::time_point at{};
+};
+
+// The anchor plus the offsets (arcseconds per sidereal second, :SXTR/:SXTD; RA in RA-axis arcseconds) times the
+// sidereal seconds from the anchor to `at`: the task clock runs in SI seconds, kSiSecondsPerSiderealSecond each. RA
+// wraps into [0, 24) hours and Dec is clamped to +/-90 degrees.
+Position offset_model_position(const OffsetAnchor& anchor, double ra_offset_arcsec, double dec_offset_arcsec,
+                               util::TaskClock::clock::time_point at) {
+    const double si_seconds = std::max(0.0, std::chrono::duration<double>(at - anchor.at).count());
+    const double sidereal_seconds = si_seconds / kSiSecondsPerSiderealSecond;
+    return Position{util::wrap_hours(anchor.ra_hours + ra_offset_arcsec * sidereal_seconds / kRaAxisArcsecPerHour),
+                    std::clamp(anchor.dec_degrees + dec_offset_arcsec * sidereal_seconds / 3600.0, -90.0, 90.0)};
+}
+
+// The guard: a measured position more than kOffsetModelGuardArcsec from the model on either axis (RA the short way
+// round, in RA-axis arcseconds).
+bool offset_model_disagrees(const Position& model, double ra_hours, double dec_degrees) {
+    const double ra_arcsec = std::fabs(util::shortest_ra_delta_hours(ra_hours, model.ra_hours)) * kRaAxisArcsecPerHour;
+    const double dec_arcsec = std::fabs(dec_degrees - model.dec_degrees) * 3600.0;
+    return ra_arcsec > kOffsetModelGuardArcsec || dec_arcsec > kOffsetModelGuardArcsec;
+}
+
 // :GT# in Hz (Mount.command.cpp af1d26bf: 60.164 sidereal, 57.900 lunar, 60.000 solar, 60.136 King) as DriveRates
 // 0-3, within 0.01 Hz; nullopt for a rate that is none of them (and for 0, not tracking).
 std::optional<int> tracking_rate_for_hz(double hz) {
@@ -256,6 +293,9 @@ struct PolledFrame {
     double ra_hours = 0.0;
     double dec_degrees = 0.0;
     bool equatorial_known = false;
+    // The task-clock time the :GRa#/:GDe# pair stands for (the middle of its exchange), the time the rate-offset
+    // model is checked at (#2241).
+    util::TaskClock::clock::time_point position_at{};
     double alt_degrees = 0.0;
     double az_degrees = 0.0;
     bool altaz_known = false;
@@ -1079,10 +1119,12 @@ public:
     bool get_can_sync() const override { return true; }
     bool get_can_unpark() const override { return true; }
 
+    // RightAscension and Declination: the frame, or while a rate offset runs the model (#2241,
+    // served_sky_position_locked()); DeviceState calls these getters, so it serves the same value.
     double get_declination() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
-        return served_position_locked().dec_degrees;
+        return served_sky_position_locked().dec_degrees;
     }
 
     // The rate offsets are driver state, read from the mount at connect, after each write and when the polled
@@ -1131,6 +1173,7 @@ public:
         }
         // Write-through (decision 0010): the next Tracking read sees it before the next poll.
         write_status_locked([tracking](MountStatus& status) { status.is_tracking = tracking; });
+        drop_offset_model_locked();  // #2241: a frame measured from here anchors it again
         // The client has said what it wants; a pending GOTO restore must not
         // override it when the slew ends (#1230).
         tracking_before_slew_ = false;
@@ -1168,7 +1211,7 @@ public:
     double get_right_ascension() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
-        return served_position_locked().ra_hours;
+        return served_sky_position_locked().ra_hours;
     }
 
     double get_right_ascension_rate() const override {
@@ -1209,6 +1252,9 @@ public:
                                   AlpacaError::InvalidOperation);
         }
         const Wire protocol = wire();
+        // #2241: the model runs on under the old offset up to the write, which the mount applies as it takes it; a
+        // refused write leaves the offsets, and the model with them, as they were.
+        reanchor_offset_model_locked();
         if (!(ra ? protocol.set_rate_offset_ra(offset) : protocol.set_rate_offset_dec(offset))) {
             if (const auto code = refusal_code_locked(who)) {
                 throw mount_refused(who, *code);
@@ -1528,6 +1574,7 @@ public:
             rate != tracking_rate_served_locked()) {
             const Wire protocol = wire();
             for (const bool ra : {true, false}) {
+                reanchor_offset_model_locked();  // #2241: the position holds where the old offsets took it
                 if (!(ra ? protocol.set_rate_offset_ra(0.0) : protocol.set_rate_offset_dec(0.0))) {
                     if (const auto code = refusal_code_locked("TrackingRate")) {
                         throw mount_refused("TrackingRate", *code);
@@ -1686,6 +1733,7 @@ public:
             throw;
         }
         drop_poll_in_flight_locked();  // the position changes: a tick that sampled before the pulse is dropped
+        drop_offset_model_locked();    // #2241: the next frame measured after the pulse anchors it again
         if (other_ends_later) {
             return;
         }
@@ -1807,6 +1855,7 @@ public:
             frame.dec_degrees = dec;
             frame.equatorial_known = true;
         });
+        anchor_offset_model_at_sync_locked(ra, dec);  // #2241: a running offset goes on from the synced position
     }
 
     void unpark() override {
@@ -1870,6 +1919,11 @@ public:
             if (!stop_error.empty()) {
                 throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
             }
+            // #2241: a stop that ends a move or a pulse drops the rate-offset model, so a tick that sampled the
+            // motion does not anchor it (the pulse's hold, which would have kept it out, is cleared below).
+            if (manual_axis_slewing_[axis] || pulse_guiding_active_[axis]) {
+                drop_offset_model_locked();
+            }
             // :Qe#/:Qw# and :Qn#/:Qs# end every guide on that axis, a pulse
             // guide included (OnStepX Guide.command.cpp stopAxis1/stopAxis2).
             pulse_guiding_active_[axis] = false;
@@ -1895,6 +1949,7 @@ public:
             manual_axis_resend_due_[axis] = clock_.now() + kMoveAxisResendInterval;
             status_read_since_move_ = false;  // a :GU# from before the move must not end it (#1378)
             drop_poll_in_flight_locked();     // nor a poll tick that sampled before it
+            drop_offset_model_locked();       // #2241: a frame measured after the move anchors it again
         }
 
         manual_axis_slewing_[axis] = moving;
@@ -2041,6 +2096,8 @@ public:
         clear_manual_motion_locked();
         clear_pulse_guides_locked();    // :Q# ends every guide, a pulse guide included (Guide::stop())
         drop_poll_in_flight_locked();   // a tick that sampled the motion before the stops is dropped
+        // #2241: and the rate-offset model with it.
+        drop_offset_model_locked();
         // ASCOM: after AbortSlew, tracking returns to its state before the
         // slew. Decide now instead of at a later slew end the driver may never
         // see (#1230). Only an aborted GOTO costs the extra :GU#. A latched
@@ -2628,6 +2685,8 @@ private:
     // The mount took the park or home: it now moves to it with tracking off.
     void finish_park_or_home_locked(bool home) {
         tracking_before_slew_ = false;  // never restart tracking afterwards (#1218)
+        // #2241: the mount moves away from the rate-offset model.
+        drop_offset_model_locked();
         write_status_locked([home](MountStatus& status) {  // decision 0010 write-through
             status.is_at_home = false;
             status.is_slewing = true;
@@ -3103,12 +3162,19 @@ private:
         const Wire protocol = wire();
         const auto ra = protocol.get_rate_offset_ra();
         const auto dec = protocol.get_rate_offset_dec();
-        if (ra) {
-            rate_offset_ra_arcsec_ = *ra;
+        set_rate_offsets_locked(ra.value_or(rate_offset_ra_arcsec_), dec.value_or(rate_offset_dec_arcsec_));
+    }
+
+    // Every change of the stored offsets but the write's own (set_rate_offset() re-anchors before its send): the read
+    // back, an offset change the poll finds, the connect's read. The model re-anchors under the old offsets first
+    // (#2241). Caller holds mutex_.
+    void set_rate_offsets_locked(double ra, double dec) {
+        if (ra == rate_offset_ra_arcsec_ && dec == rate_offset_dec_arcsec_) {
+            return;
         }
-        if (dec) {
-            rate_offset_dec_arcsec_ = *dec;
-        }
+        reanchor_offset_model_locked();
+        rate_offset_ra_arcsec_ = ra;
+        rate_offset_dec_arcsec_ = dec;
     }
 
     // :GX90# into the pulse-guide rate; no answer or a reply that is not a positive decimal keeps what was known.
@@ -3134,6 +3200,8 @@ private:
         mount_type_seen_.reset();
         rate_offset_ra_arcsec_ = 0.0;
         rate_offset_dec_arcsec_ = 0.0;
+        offset_anchor_.reset();
+        offset_model_floor_ = {};
         guide_rate_multiple_.reset();
         guide_rate_digit_read_ = -1;
         rate_watch_.reset();
@@ -3308,6 +3376,7 @@ private:
         // Write-through (decision 0010): Slewing reads true past the grace until a poll sampled after the GOTO
         // says otherwise; a tick that sampled before it is dropped.
         write_status_locked([](MountStatus& status) { status.is_slewing = true; });
+        drop_offset_model_locked();  // #2241: a frame measured after the GOTO anchors it again
     }
 
     void start_slew_locked(double ra, double dec, const char* context, TargetWrites targets) {
@@ -3646,6 +3715,133 @@ private:
         return AltAz{frame.alt_degrees, frame.az_degrees};
     }
 
+    // ── The rate-offset position model (#2241) ─────────────────────────────────────────────────────────────────
+
+    bool rate_offsets_set_locked() const { return rate_offset_ra_arcsec_ != 0.0 || rate_offset_dec_arcsec_ != 0.0; }
+
+    // Whether the model may run for `frame` at `now`: OnStepX only; a frame that says the mount tracks and is not
+    // slewing, pulse guiding, moving an axis ('g'), homing, parking or parked; none of the driver's own motion the
+    // frame may not show yet (a MoveAxis, the slew grace, a pending Park or FindHome, a pulse); and, while an offset is
+    // set, TrackingRate sidereal (ITelescopeV4: the offsets read 0 on another rate, and the model has no lunar, solar
+    // or King term). Caller holds mutex_.
+    bool offset_model_allowed_locked(const PolledFrame& frame, util::TaskClock::clock::time_point now) const {
+        if (!onstepx_ || !frame.status_known || !frame.equatorial_known) {
+            return false;
+        }
+        const MountStatus& status = frame.status;
+        if (!status.is_tracking || status.is_slewing || status.is_pulse_guide_active || status.is_guide_active ||
+            status.is_homing || status.is_parking || status.is_parked) {
+            return false;
+        }
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1] || slew_hold_.active(now) || park_home_request_ ||
+            pulse_hold_[0].active(now) || pulse_hold_[1].active(now)) {
+            return false;
+        }
+        return !rate_offsets_set_locked() || tracking_rate_known_ == 0;
+    }
+
+    // The model's position now, when it is served: anchored, inside kOffsetModelHold, allowed for the held frame, and
+    // that frame no older than kSnapshotMaxAge. Past that bound the link has stalled and the frame is served as it is
+    // (decision 0010 rule 6), never a position extrapolated from a dead link. Snapshot data and driver state only, no
+    // I/O (decision 0010 rule 1, decision 0016). Caller holds mutex_.
+    std::optional<Position> offset_model_position_locked() const {
+        if (!offset_anchor_) {
+            return std::nullopt;
+        }
+        const auto reading = snapshot_.read();
+        const auto now = clock_.now();
+        if (!reading || reading->stale || now - offset_anchor_->at >= kOffsetModelHold ||
+            !offset_model_allowed_locked(reading->value, now)) {
+            return std::nullopt;
+        }
+        return offset_model_position(*offset_anchor_, rate_offset_ra_arcsec_, rate_offset_dec_arcsec_, now);
+    }
+
+    // What RightAscension and Declination serve: the frame's refusals first (a latched fault, no frame, no position
+    // read), then the model while it runs, else the frame as read.
+    Position served_sky_position_locked() const {
+        const Position frame = served_position_locked();
+        return offset_model_position_locked().value_or(frame);
+    }
+
+    // Before a stored offset changes: the model re-anchors at now on the position under the old offsets, the model
+    // when it is served, else the held frame's measurement carried forward from its read (a frame no older than
+    // kSnapshotMaxAge), so a new rate never applies to the time before it. In a state the model does not run in, the
+    // anchor is dropped and the next poll's measurement starts it. Caller holds mutex_.
+    void reanchor_offset_model_locked() const {
+        const auto now = clock_.now();
+        offset_model_floor_ = now;  // a tick that sampled before this change never anchors, keeps or drops the model
+        if (const auto model = offset_model_position_locked()) {
+            offset_anchor_ = OffsetAnchor{model->ra_hours, model->dec_degrees, now};
+            return;
+        }
+        const auto reading = snapshot_.read();
+        if (!reading || reading->stale || !offset_model_allowed_locked(reading->value, now)) {
+            offset_anchor_.reset();
+            return;
+        }
+        const PolledFrame& frame = reading->value;
+        const Position position =
+            offset_model_position(OffsetAnchor{frame.ra_hours, frame.dec_degrees, frame.position_at},
+                                  rate_offset_ra_arcsec_, rate_offset_dec_arcsec_, now);
+        offset_anchor_ = OffsetAnchor{position.ra_hours, position.dec_degrees, now};
+    }
+
+    // A sync: a running offset goes on from the synced position. Caller holds mutex_.
+    void anchor_offset_model_at_sync_locked(double ra, double dec) const {
+        const auto reading = snapshot_.read();
+        const auto now = clock_.now();
+        offset_model_floor_ = now;
+        if (rate_offsets_set_locked() && reading && offset_model_allowed_locked(reading->value, now)) {
+            offset_anchor_ = OffsetAnchor{ra, dec, now};
+        } else {
+            offset_anchor_.reset();
+        }
+    }
+
+    // A command that moves the mount on its own (a GOTO, a park or home, a MoveAxis start or stop, a pulse, the
+    // stops) or turns Tracking: the model stops, and the next frame measured after the command that it may run for
+    // anchors it again (a tick that sampled before it does not). Caller holds mutex_.
+    void drop_offset_model_locked() const {
+        offset_anchor_.reset();
+        offset_model_floor_ = clock_.now();
+    }
+
+    // A frame the poll (or the synchronous slew's end read) has just published: the guard. A frame whose :GRa#/:GDe#
+    // read is older than the model's last driver-side change (offset_model_floor_: a re-anchor before an offset
+    // change, a sync, a drop) changes nothing: it predates what the driver knows, so it neither ends the hold of a
+    // position whose offsets went to zero nor anchors under offsets the mount did not run then. Otherwise, with no
+    // offset set, or in a state the model does not run in, or a frame sampled before a pulse was over, the model
+    // stops; the first frame in a state it runs in anchors it; one kOffsetModelHold or more after the anchor
+    // re-anchors on the measurement; and one that disagrees with the model at its read by more than
+    // kOffsetModelGuardArcsec on either axis re-anchors on the measurement. Caller holds mutex_.
+    void adopt_offset_model_frame_locked(const PolledFrame& frame) const {
+        if (frame.position_at < offset_model_floor_) {
+            return;
+        }
+        const bool after_pulses = !pulse_hold_[0].active(frame.sampled_at - kPulseGuideSettle) &&
+                                  !pulse_hold_[1].active(frame.sampled_at - kPulseGuideSettle);
+        if (!rate_offsets_set_locked() || !after_pulses || !offset_model_allowed_locked(frame, clock_.now())) {
+            offset_anchor_.reset();
+            return;
+        }
+        const OffsetAnchor measured{frame.ra_hours, frame.dec_degrees, frame.position_at};
+        if (!offset_anchor_) {
+            offset_anchor_ = measured;
+            return;
+        }
+        if (frame.position_at - offset_anchor_->at >= kOffsetModelHold) {
+            offset_anchor_ = measured;
+            return;
+        }
+        const Position model =
+            offset_model_position(*offset_anchor_, rate_offset_ra_arcsec_, rate_offset_dec_arcsec_, frame.position_at);
+        if (offset_model_disagrees(model, frame.ra_hours, frame.dec_degrees)) {
+            ALPACA_LOG_DEBUG("OnStep", "Rate-offset model re-anchored: the mount is more than 2 arcsec from it");
+            offset_anchor_ = measured;
+        }
+    }
+
     // Decision 0010 rule 5: DeviceState's TimeStamp is when the poll measured. Task-clock age; takes only the
     // snapshot's own mutex.
     std::optional<std::chrono::nanoseconds> device_state_age() const override {
@@ -3667,7 +3863,9 @@ private:
         frame.sample_seq = ++sample_seq_;
         frame.status = protocol.get_status();
         frame.status_known = true;
+        const auto position_asked = clock_.now();
         const Position position = protocol.get_position();
+        frame.position_at = position_asked + (clock_.now() - position_asked) / 2;
         frame.ra_hours = position.ra_hours;
         frame.dec_degrees = position.dec_degrees;
         frame.equatorial_known = true;
@@ -3699,6 +3897,7 @@ private:
             note_read_ok_locked();
             if (publish_sample_locked(token, frame)) {
                 note_status_measured_locked(frame.status);
+                adopt_offset_model_frame_locked(frame);
             }
         } catch (const std::exception& ex) {
             if (is_link_lost(ex)) {
@@ -3741,7 +3940,9 @@ private:
             frame.status_known = true;
         });
         read([&] {
+            const auto position_asked = clock_.now();
             const Position position = protocol.get_position();
+            frame.position_at = position_asked + (clock_.now() - position_asked) / 2;
             frame.ra_hours = position.ra_hours;
             frame.dec_degrees = position.dec_degrees;
             frame.equatorial_known = true;
@@ -3841,6 +4042,7 @@ private:
         }
         if (publish_sample_locked(token, frame)) {
             note_status_measured_locked(frame.status);
+            adopt_offset_model_frame_locked(frame);
         }
         return true;
     }
@@ -4169,6 +4371,13 @@ private:
     mutable std::optional<MountType> mount_type_seen_;
     double rate_offset_ra_arcsec_ = 0.0;
     double rate_offset_dec_arcsec_ = 0.0;
+    // The rate-offset model's anchor (#2241, offset_model_position_locked()); empty while no model runs. Under mutex_,
+    // cleared with the rate state.
+    mutable std::optional<OffsetAnchor> offset_anchor_;
+    // The task-clock time of the model's last driver-side change (a re-anchor, a sync, a drop): a frame whose
+    // :GRa#/:GDe# read is older never changes the model (adopt_offset_model_frame_locked()). Under mutex_, cleared
+    // with the rate state.
+    mutable util::TaskClock::clock::time_point offset_model_floor_{};
     std::optional<double> guide_rate_multiple_;
     int guide_rate_digit_read_ = -1;
     std::optional<RateWatch> rate_watch_;

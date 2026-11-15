@@ -526,7 +526,8 @@ it is never reachable through `router.cpp` or the web UI.
   included, so `IsPulseGuiding` could stay true about 1 s longer and Alt/Az be 2 s older). A tick ends at its first failed
   exchange of `:GU#` or the position, so a Disconnect waits for one reply timeout. Served from the
   frame, stale or not (`kSnapshotMaxAge` 3 s is the freshness bound; stale never refuses, decision 0010
-  rule 6): `RightAscension`, `Declination`, `Altitude`, `Azimuth`, `Tracking`, `AtPark`, `AtHome`,
+  rule 6): `RightAscension`, `Declination` (through the rate-offset model while an offset runs, see "Rates"),
+  `Altitude`, `Azimuth`, `Tracking`, `AtPark`, `AtHome`,
   `Slewing` (with the driver's own MoveAxis flags, slew grace and pending Park/FindHome), `SideOfPier`
   (on an OnStepX German mount the frame's `:GU#` pier-side letter; otherwise, or when there is none, the hour-angle
   rule from the frame's RA, #2179) and `DeviceState`, whose `TimeStamp` is the frame's `measured_at`
@@ -730,6 +731,39 @@ it is never reachable through `router.cpp` or the web UI.
     firmware's units is beyond +/-1800 (the firmware clamps there silently), before the connection check, then
     connected, a latched fault, `InvalidOperation` when `TrackingRate` is not sidereal, then `:SXTR,n.n#`/`:SXTD,n.n#`
     (six decimals) with the reply read: `0` throws `InvalidOperation` with the `:GE#` reason (#1379).
+  - **`RightAscension` / `Declination` while an offset runs** (#2241, decision 0010 OnStep row). The frame is up to
+    one poll period old, so at 40 arcsec/s it lagged the mount by up to 40 arcsec, and at 0.05 arcsec/s the HM-17's
+    0.5 arcsec steps (`:GXA1#`/`:GXA2#` 7182.222 steps per degree) land about every 10 s, so a 10 s window saw 0 or
+    0.5 arcsec by luck: ConformU's extended `RightAscensionRate`/`DeclinationRate` tests, which read the position twice
+    10 s apart, reported ISSUEs. The getters, and `DeviceState` with them, now serve a commanded model while an offset
+    runs: an anchor (position, task-clock time) plus the offsets times the sidereal seconds since it
+    (`offset_model_position()`: SI seconds / 0.9972695663; RA offsets in RA-axis arcseconds, 54000 per hour), RA
+    wrapped into [0, 24) and Dec clamped to +/-90. No traffic: the model is driver state under `mutex_` built from
+    the snapshot and the stored offsets. It runs only on OnStepX, with a non-zero offset at `TrackingRate` sidereal,
+    while the frame says tracking and not slewing (`N` absent), pulse guiding (`G`), moving an axis (`g`), homing
+    (`h`), parking (`I`) or parked (`P`), and no MoveAxis, slew grace, pending Park/FindHome or pulse of the driver's
+    own runs (`offset_model_allowed_locked()`); otherwise the frame is served as read. Each published frame is the
+    guard (`adopt_offset_model_frame_locked()`): the first frame in such a state anchors the model (not one sampled
+    before a pulse's end plus 50 ms), one within 2 arcsec of the model at its `:GRa#`/`:GDe#` read
+    (`PolledFrame::position_at`) on both axes keeps the anchor, one beyond either re-anchors on the measurement, and
+    one 30 minutes (`kOffsetModelHold`) or more after the anchor re-anchors on it anyway. A stalled axis therefore
+    shows within one poll at 40 arcsec/s and within about 40 s at 0.05 arcsec/s. 2 arcsec is four HM-17 steps; a
+    mount with larger steps needs at least four of its own (reading `:GXA1#`/`:GXA2#` for it is a possible
+    follow-up). Before any stored offset changes, the model re-anchors under the old offsets
+    (`reanchor_offset_model_locked()`): a rate write before its send, each of the `TrackingRate` change's zeroing
+    writes, and an offset change the poll reads (`set_rate_offsets_locked()`); with both offsets zero the last anchor
+    holds until a frame measured after the change publishes, so the position does not jump back to an older frame.
+    A sync anchors at the synced position; a GOTO, park, home, MoveAxis start, a MoveAxis stop that ends a move or a
+    pulse, a pulse guide, the stops and a `Tracking` write drop the anchor. A frame whose `:GRa#`/`:GDe#` read is
+    older than the model's last driver-side change (a re-anchor, a sync or a drop, `offset_model_floor_`) changes
+    nothing: a tick that sampled before the change and publishes after it (the poll publishes under `mutex_` alone,
+    so it can land inside a command's exchange) neither ends that hold nor anchors the model.
+    Extrapolation stops `kSnapshotMaxAge` (3 s) after the last publish: the stale frame is served as it is (decision
+    0010 rule 6), never refused. `DeviceState`'s `TimeStamp` stays the frame's `measured_at`. An offset changed at
+    the handset while the poll sees no flag change is not read again; the guard re-anchors on the measurement each
+    time the model drifts 2 arcsec from it. Tests: the `[offset-model]` cases in `test_onstep_telescope_snapshot.cpp`,
+    whose fake moves `:GRa#`/`:GDe#` with the virtual clock in 0.5 arcsec steps at the `:SXTR`/`:SXTD` offsets
+    (`SnapshotMount::offsets_move`). Fake evidence only; the bare-mount ConformU run on the HM-17 is still owed.
   - **`GuideRate`** is the mount's pulse-guide rate: `:GX90#` (a multiple of sidereal) times 15.0410686 arcseconds per
     second, in degrees per second, on both axes. It is read at connect (any firmware) and again when the pulse-guide
     digit of `:GU#` changes. A mount that does not answer it, or answers something that is not a positive decimal,
