@@ -114,11 +114,15 @@ TEST_CASE("ZWO ASIAIR Pro switch - destruction mid-operation (PWM worker live)",
         REQUIRE(alpacacore::test::settle_connected(*driver, true));
         driver->set_switch_value(3, 50.0);  // the PWM worker toggles GPIO 18
         // Destroy it in the low half of its cycle, where a worker that is only stopped leaves the line.
+        // Require the low level this loop saw, not a second read: the worker can drive the line high
+        // again between two reads (the nightly sanitizer run caught it, #2267).
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (alpacacore::test::stub_level(18) != 0 && std::chrono::steady_clock::now() < deadline) {
+        int seen = alpacacore::test::stub_level(18);
+        while (seen != 0 && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::yield();  // real time: the worker's 1 kHz cycle
+            seen = alpacacore::test::stub_level(18);
         }
-        REQUIRE(alpacacore::test::stub_level(18) == 0);
+        REQUIRE(seen == 0);
         if ((i % 2) != 0) {
             // Half the time a disconnect is also in flight at destruction.
             driver->disconnect();
