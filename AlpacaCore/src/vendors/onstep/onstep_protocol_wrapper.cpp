@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -75,8 +76,36 @@ constexpr int kSerialReadSliceMs = 100;
 // the read slice over TCP: the window of the old byte-at-a-time recv() loop.
 constexpr int kSocketTimeoutMs = 200;
 
-// A mount reply never nears this; it caps a runaway line instead of growing a string forever.
-constexpr std::size_t kMaxReplyLen = 65536;
+// The longest reply the driver reads, the '#' included. No OnStep reply comes near it (the longest, the :GVC#
+// product description and the :GU# status, are tens of bytes), so a reply that reaches it fails its read with
+// DriverException at once instead of growing a buffer or waiting out the timeout (decisions 0007 and 0023, #2220). It
+// is one failed exchange, as a silent reply is: it counts toward the decision 0009 fault latch (three in a row). The
+// rest of such a flood is discarded before the next command (kMaxDrainLen at most per command).
+constexpr std::size_t kMaxReplyLen = 1024;
+
+// The most a drain or the pre-command discard takes in one go. The bytes are thrown away, so this only caps the
+// buffer that holds them; the drain's time cap (kDrainCap) bounds a line that never goes quiet.
+constexpr std::size_t kMaxDrainLen = 65536;
+
+// The response timeout when the config gives none (0 or less).
+constexpr int kDefaultResponseTimeoutMs = 5000;
+
+// A socket the peer closed or reset (decision 0009 rule 2a, #2220). poll() with no wait, so no wire I/O: POLLRDHUP is
+// the controller's FIN, POLLHUP and POLLERR a reset or a dead socket, POLLNVAL an fd that is no longer open.
+bool socket_hung_up(int fd) {
+    struct pollfd pfd {};
+    pfd.fd = fd;
+    pfd.events = POLLRDHUP;
+    if (::poll(&pfd, 1, 0) <= 0) {
+        return false;
+    }
+    return (pfd.revents & (POLLRDHUP | POLLHUP | POLLERR | POLLNVAL)) != 0;
+}
+
+// A send() error that means the connection is gone, not that the send timed out (EAGAIN) or was interrupted.
+bool is_socket_loss_errno(int err) {
+    return err == EPIPE || err == ECONNRESET || err == ENOTCONN || err == ENOTSOCK || err == EBADF;
+}
 
 // The longest drain_stale() runs, its first-byte wait included. A drain holds
 // the wrapper lock, and the driver's io_mutex_ above it, so every command
@@ -594,15 +623,6 @@ public:
     ~Impl() { disconnect(); }
 
     bool connect(const ConnectionInfo& info) {
-        if (info.type == ConnectionType::Serial && info.port_path.empty()) {
-            ALPACA_LOG_ERROR("OnStep", "Serial connection requested but port_path is empty");
-            return false;
-        }
-        if (info.type == ConnectionType::Network && info.host.empty()) {
-            ALPACA_LOG_ERROR("OnStep", "Network connection requested but host is empty");
-            return false;
-        }
-
         std::lock_guard<std::mutex> lock(mutex_);
 
         // A lost link whose fd could not be closed when the loss was found
@@ -625,11 +645,18 @@ public:
         connection_info_ = info;
         last_connect_error_.clear();
 
+        // A saved config the catalog warned about (#380) is kept, and refused here with the field it lacks.
+        if (const std::string fault = endpoint_fault(info); !fault.empty()) {
+            ALPACA_LOG_ERROR("OnStep", "Not connecting: " + fault);
+            last_connect_error_ = fault;
+            return false;
+        }
+
         bool success = false;
         if (info.type == ConnectionType::Serial) {
             success = connect_serial(info.port_path, info.baud_rate);
         } else {
-            success = connect_network(info.host, info.tcp_port);
+            success = connect_network(info);
         }
 
         connected_ = success;
@@ -661,6 +688,7 @@ public:
             std::lock_guard<std::mutex> id_lock(link_id_mutex_);
             connected_ = false;
             link_path_.clear();
+            link_socket_fd_ = -1;
             ++link_generation_;
         }
         run_link_loss_hook(detail::LinkLossHookPoint::DisconnectBeforeClose);
@@ -708,7 +736,7 @@ public:
         }
         bool present = true;
         std::uint64_t generation = 0;
-        std::string path;
+        std::string reason;
         {
             std::lock_guard<std::mutex> id_lock(link_id_mutex_);
             generation = link_generation_;
@@ -721,9 +749,16 @@ public:
                 } else {
                     present = st.st_dev == link_dev_ && st.st_ino == link_ino_;
                 }
-            }
-            if (!present) {
-                path = link_path_;  // for the loss text; copied only when it is needed
+                if (!present) {
+                    reason = "the adapter at " + link_path_ + " was removed or re-enumerated";
+                }
+            } else if (link_socket_fd_ >= 0) {
+                // The fd is recorded under this lock and cleared under it before the close (disconnect_locked()),
+                // so it is still open here. A hangup is a lost link at once, as a removed node is (#2220).
+                present = !socket_hung_up(link_socket_fd_);
+                if (!present) {
+                    reason = "the controller at " + link_endpoint_ + " closed the connection";
+                }
             }
         }
         if (present) {
@@ -736,7 +771,7 @@ public:
         // checked: otherwise a deliberate Disconnect would leave a loss (and
         // the next Connect would send the #521 stops), or a relink would see
         // its fresh link marked lost and closed (open-astro#1289).
-        if (!note_loss_if_current(generation, "the adapter at " + path + " was removed or re-enumerated")) {
+        if (!note_loss_if_current(generation, reason)) {
             return connected_ && !link_lost_;
         }
         run_link_loss_hook(detail::LinkLossHookPoint::AliveBeforeClose);
@@ -782,11 +817,15 @@ public:
 
         // Discard any stale bytes before sending — anything already in the
         // receive buffer predates our write and would garble this command's
-        // response framing if left in place.
+        // response framing if left in place (a reply that came after its
+        // timeout, or the rest of an overlong one). Over TCP that is a read
+        // that does not wait, and a hangup it meets loses the link.
         if (connection_type_ == ConnectionType::Serial) {
             if (serial_fd_ >= 0) {
                 tcflush(serial_fd_, TCIFLUSH);
             }
+        } else {
+            discard_pending_socket_input_locked();
         }
 
         if (!write_data(full_command)) {
@@ -798,7 +837,7 @@ public:
             timeout_ms = connection_info_.response_timeout_ms;
         }
         if (timeout_ms <= 0) {
-            timeout_ms = 5000;
+            timeout_ms = kDefaultResponseTimeoutMs;
         }
         std::string response = read_response(require_hash_terminator, timeout_ms);
         ALPACA_LOG_TRACE("OnStep", "CMD " + full_command + " RESP " + response);
@@ -834,17 +873,17 @@ public:
     // read slice) for a first byte, then read on until a read slice passes
     // with none, as the byte-at-a-time loop did, for at most kDrainCap. A line
     // still busy at the cap ends the drain without an error, like a quiet one;
-    // its rest stays in the line. A hangup on the tty loses the link; over TCP
-    // it ends the drain (the seam is never lost).
+    // its rest stays in the line. A hangup loses the link, on the tty and over
+    // TCP (#2220).
     void drain_stale(int wait_ms) {
         util::ReadSpec spec;
         spec.stop = util::ReadSpec::Stop::IdleGap;
         spec.idle_gap = read_slice();
         spec.first_byte_timeout = std::max(std::chrono::milliseconds(wait_ms), read_slice());
         spec.skip.clear();  // every byte is stale, CR/LF included
-        spec.max_len = kMaxReplyLen;
+        spec.max_len = kMaxDrainLen;
         // The deadline only ends a line that never goes idle.
-        const auto r = checked_read(spec, std::chrono::steady_clock::now() + kDrainCap, /*hangup_throws=*/false);
+        const auto r = checked_read(spec, std::chrono::steady_clock::now() + kDrainCap);
         if (r.outcome == util::ReadOutcome::Timeout && !r.bytes.empty()) {
             ALPACA_LOG_DEBUG("OnStep", "Stale-input drain stopped at its " + std::to_string(kDrainCap.count()) +
                                            " ms cap with the line still busy (" + std::to_string(r.bytes.size()) +
@@ -1372,70 +1411,111 @@ private:
         link_.close();
     }
 
-    // Network path is a test-seam only (see ConnectionType::Network) —
-    // exercised by the concurrency stress test against FakeMountServer, never
-    // reachable through AlpacaHTTP's router or web UI for OnStep.
-    bool connect_network(const std::string& host, int port) {
-        constexpr int kConnectTimeoutMs = 7000;
-        socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-        if (socket_fd_ < 0) {
-            return false;
+    // "" when the endpoint can be tried, else why not: a saved config the catalog warned about (#380) reaches here.
+    static std::string endpoint_fault(const ConnectionInfo& info) {
+        if (info.type == ConnectionType::Serial) {
+            return info.port_path.empty() ? "no serial port path is configured" : "";
         }
+        if (info.host.empty()) {
+            return "no host is configured for the network connection (host)";
+        }
+        if (info.tcp_port < 1 || info.tcp_port > 65535) {
+            return "the TCP port (tcpPort) is outside 1-65535";  // the factory passes a saved one out of range as 0
+        }
+        return "";
+    }
+
+    // The TCP command channel of a Wi-Fi or Ethernet OnStepX (#2220). The connect waits at most the response timeout
+    // (0 or less: kDefaultResponseTimeoutMs), so an unreachable controller fails Connect within it; a refusal fails it
+    // at once. Either way last_connect_error_ names the host and port. The host name lookup (getaddrinfo) is not
+    // bounded by the timeout; a numeric address needs none.
+    bool connect_network(const ConnectionInfo& info) {
+        const std::string endpoint = info.host + ":" + std::to_string(info.tcp_port);
+        const int timeout_ms = info.response_timeout_ms > 0 ? info.response_timeout_ms : kDefaultResponseTimeoutMs;
+        const auto fail = [&](const std::string& why) {
+            if (socket_fd_ >= 0) {
+                close(socket_fd_);
+                socket_fd_ = -1;
+            }
+            last_connect_error_ = "could not connect to " + endpoint + ": " + why;
+            ALPACA_LOG_ERROR("OnStep", "Network connect failed: " + last_connect_error_);
+            return false;
+        };
 
         sockaddr_in addr{};
-        std::memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(port));
-        if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
+        addr.sin_port = htons(static_cast<std::uint16_t>(info.tcp_port));  // 1-65535, endpoint_fault()
+        if (inet_pton(AF_INET, info.host.c_str(), &addr.sin_addr) <= 0) {
             addrinfo hints{};
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_STREAM;
             addrinfo* result = nullptr;
-            if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result) {
-                close(socket_fd_);
-                socket_fd_ = -1;
-                return false;
+            const int rc = getaddrinfo(info.host.c_str(), nullptr, &hints, &result);
+            if (rc != 0 || result == nullptr) {
+                if (result != nullptr) {
+                    freeaddrinfo(result);
+                }
+                return fail(std::string("host not found (") + gai_strerror(rc) + ")");
             }
             addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
             freeaddrinfo(result);
         }
 
-        if (!util::set_nonblocking(socket_fd_)) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
+        socket_fd_ = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (socket_fd_ < 0) {
+            return fail(util::errno_string(errno));
         }
-        int rc = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        if (!util::set_nonblocking(socket_fd_)) {
+            return fail("the socket could not be made non-blocking");
+        }
+        const int rc = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
         if (rc < 0 && errno != EINPROGRESS) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
+            return fail(util::errno_string(errno));  // ECONNREFUSED on loopback, ENETUNREACH with no route
         }
         if (rc < 0) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             struct pollfd pfd {};
             pfd.fd = socket_fd_;
             pfd.events = POLLOUT;
-            int poll_rc = poll(&pfd, 1, kConnectTimeoutMs);
+            int poll_rc = 0;
+            do {
+                poll_rc = poll(&pfd, 1, util::detail::wait_ms_until(deadline));
+            } while (poll_rc < 0 && errno == EINTR);
+            if (poll_rc == 0) {
+                return fail("no answer within " + std::to_string(timeout_ms) + " ms");
+            }
+            if (poll_rc < 0) {
+                return fail(util::errno_string(errno));
+            }
             int sock_err = 0;
             socklen_t len = sizeof(sock_err);
-            if (poll_rc <= 0 || getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &sock_err, &len) != 0 || sock_err != 0) {
-                close(socket_fd_);
-                socket_fd_ = -1;
-                return false;
+            if (getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &sock_err, &len) != 0) {
+                return fail(util::errno_string(errno));
+            }
+            if (sock_err != 0) {
+                return fail(util::errno_string(sock_err));  // a refusal or a reset during the handshake
             }
         }
         if (!util::clear_nonblocking(socket_fd_)) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
+            return fail("the socket could not be made blocking again");
         }
 
+        // One small write per command, each waiting for its reply or drain: no Nagle delay behind an unacked one.
+        int one = 1;
+        setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         timeval timeout{};
         timeout.tv_sec = 0;
         timeout.tv_usec = static_cast<decltype(timeout.tv_usec)>(kSocketTimeoutMs) * 1000;
         setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
+        // What link_alive() polls for a hangup, recorded as the serial node is.
+        {
+            std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            link_socket_fd_ = socket_fd_;
+            link_endpoint_ = endpoint;
+            ++link_generation_;
+        }
         return true;
     }
 
@@ -1465,11 +1545,10 @@ private:
     // mutex_ by design (the mutex makes a command and its reply one
     // transaction). A hangup on the tty loses the link ("read failed:
     // <errno>"), and a read that ended on silence checks that the node is
-    // still there, as each empty read slice did. Over TCP a hangup throws
-    // "OnStep network link lost (hangup)" when @p hangup_throws, and is
-    // returned otherwise; the TCP seam has no node and is never lost.
-    util::ReadResult checked_read(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline,
-                                  bool hangup_throws = true) {
+    // still there, as each empty read slice did. A hangup on the socket (the
+    // controller closed or reset the connection) loses the link too, at once
+    // (decision 0009 rule 2a, #2220).
+    util::ReadResult checked_read(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
         if (connection_type_ == ConnectionType::Serial) {
             const auto r = util::read_until(serial_fd_, spec, deadline);
             if (r.outcome == util::ReadOutcome::LinkDead) {
@@ -1482,10 +1561,30 @@ private:
             return r;
         }
         const auto r = util::read_until_socket(socket_fd_, spec, deadline);
-        if (r.outcome == util::ReadOutcome::LinkDead && hangup_throws) {
-            throw AlpacaException("OnStep network link lost (hangup): " + util::errno_string(r.err));
+        if (r.outcome == util::ReadOutcome::LinkDead) {
+            lose_link_locked(network_hangup_reason(r.err));
         }
         return r;
+    }
+
+    std::string network_hangup_reason(int err) const {
+        return "the controller at " + connection_info_.host + ":" + std::to_string(connection_info_.tcp_port) +
+               " closed the connection (" + util::errno_string(err) + ")";
+    }
+
+    // Over TCP, the bytes already waiting before a command (a reply that came after its timeout, the rest of an
+    // overlong one): read with no wait at all and thrown away, at most kMaxDrainLen. Caller holds mutex_.
+    void discard_pending_socket_input_locked() {
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::IdleGap;
+        spec.idle_gap = std::chrono::milliseconds(0);
+        spec.first_byte_timeout = std::chrono::milliseconds(0);
+        spec.skip.clear();
+        spec.max_len = kMaxDrainLen;
+        const auto r = checked_read(spec, std::chrono::steady_clock::now());
+        if (!r.bytes.empty()) {
+            ALPACA_LOG_DEBUG("OnStep", "Discarded " + std::to_string(r.bytes.size()) + " stale bytes before a command");
+        }
     }
 
     std::string read_response(bool require_hash_terminator, int timeout_ms) {
@@ -1495,7 +1594,7 @@ private:
         // 10 ms pacing sleep is gone, and a run of CR/LF cannot spin: the
         // deadline holds whatever arrives.
         util::ReadSpec spec;
-        spec.max_len = kMaxReplyLen;
+        spec.max_len = kMaxReplyLen;  // a reply that reaches it fails at once (decisions 0007, 0023)
         if (!require_hash_terminator) {
             spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
             spec.idle_gap = std::chrono::milliseconds(100);
@@ -1506,7 +1605,9 @@ private:
         const auto r = checked_read(spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
         switch (r.outcome) {
             case util::ReadOutcome::Overflow:
-                throw AlpacaException("OnStep response too long");
+                throw AlpacaException(
+                    "OnStep response too long: " + std::to_string(kMaxReplyLen) + " bytes without its terminator",
+                    AlpacaError::DriverException);
             case util::ReadOutcome::Timeout:
                 if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for OnStep response");
@@ -1533,10 +1634,15 @@ private:
         return ::fstat(serial_fd_, &st) != 0 || st.st_nlink == 0;
     }
 
+    // Caller holds mutex_. True when the controller closed or reset the TCP connection.
+    bool socket_closed_locked() const {
+        return connection_type_ == ConnectionType::Network && socket_fd_ >= 0 && socket_hung_up(socket_fd_);
+    }
+
     // Marks the link lost once: the first detection keeps its reason and stamp.
     void note_loss(const std::string& reason) {
         if (record_loss(reason)) {
-            ALPACA_LOG_WARN("OnStep", "Serial link to the mount lost: " + reason);
+            ALPACA_LOG_WARN("OnStep", "Link to the mount lost: " + reason);
         }
     }
 
@@ -1555,7 +1661,7 @@ private:
             recorded = record_loss(reason);
         }
         if (recorded) {
-            ALPACA_LOG_WARN("OnStep", "Serial link to the mount lost: " + reason);
+            ALPACA_LOG_WARN("OnStep", "Link to the mount lost: " + reason);
         }
         return true;
     }
@@ -1634,10 +1740,16 @@ private:
         if (node_removed_locked()) {
             lose_link_locked("the adapter was removed");
         }
+        if (socket_closed_locked()) {
+            lose_link_locked("the controller at " + connection_info_.host + ":" +
+                             std::to_string(connection_info_.tcp_port) + " closed the connection");
+        }
         mark_alive();
     }
 
-    // Caller holds mutex_; errno is from the failed write.
+    // Caller holds mutex_; errno is from the failed write. A write that failed
+    // because the link is gone loses it (decision 0009 rule 2a); one that timed
+    // out on a link still there stays a DriverException.
     [[noreturn]] void fail_write_locked() {
         const int err = errno;
         if (connection_type_ == ConnectionType::Serial) {
@@ -1647,6 +1759,8 @@ private:
             if (node_removed_locked()) {
                 lose_link_locked("the adapter was removed");
             }
+        } else if (is_socket_loss_errno(err) || socket_closed_locked()) {
+            lose_link_locked(network_hangup_reason(err));
         }
         throw AlpacaException("Failed to send command to mount");
     }
@@ -1667,6 +1781,8 @@ private:
     dev_t link_dev_{};
     ino_t link_ino_{};
     std::uint64_t link_generation_ = 0;  // under link_id_mutex_: bumped when the node is recorded or cleared
+    int link_socket_fd_ = -1;            // under link_id_mutex_: the TCP fd link_alive() polls, -1 when none
+    std::string link_endpoint_;          // under link_id_mutex_: "host:port", for the loss text
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
     util::SerialLink link_;  // the connected serial port (#1202); closed while disconnected

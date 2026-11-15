@@ -15,12 +15,15 @@
 // vendor_label(), so it keeps "OnStep support not enabled ..." as the arm
 // spelled it.
 //
-// Cross-field rules, in the arm's order: connection type, then the serial
-// port. The API is refused; a saved config is registered so it stays listed and
-// editable in the web UI (#380): an unknown connection type is read as
-// "serial", never "auto", so it cannot auto-probe, and an empty port is warned
-// about and kept.
+// Cross-field rules, in the arm's order: connection type, then the endpoint
+// (the serial port, or the network host and TCP port, #2220). The API is
+// refused; a saved config is registered so it stays listed and editable in the
+// web UI (#380): an unknown connection type is read as "serial", never "auto",
+// so it cannot auto-probe, and an empty port or host, or a TCP port outside
+// 1-65535, is warned about and kept, so the connect refuses it. "auto" scans the
+// serial ports only; nothing scans the network.
 
+#include <cstdint>
 #include <string>
 
 #include "../../catalog/builtin_descriptors.h"
@@ -36,9 +39,9 @@ NormalizeResult normalize_onstep(const DeviceConfig& in, Source source) {
     const bool from_api = source == Source::Api;
 
     std::string type = in.get(kOnStepConnectionType);
-    if (type != "" && type != "auto" && type != "serial") {
+    if (type != "" && type != "auto" && type != "serial" && type != "network") {
         if (from_api) {
-            result.rejection = "Invalid connection type. Use 'auto' or 'serial'";
+            result.rejection = "Invalid connection type. Use 'auto', 'serial', or 'network'";
             return result;
         }
         result.warnings.push_back("saved config has connectionType \"" + type +
@@ -48,13 +51,25 @@ NormalizeResult normalize_onstep(const DeviceConfig& in, Source source) {
         result.config.set(kOnStepConnectionType.key, type);
     }
 
+    std::string endpoint_fault;
     if (type == "serial" && in.get(kOnStepPortPath).empty()) {
-        constexpr const char* kPortMissing = "Serial port path is required";
+        endpoint_fault = "Serial port path is required";
+    } else if (type == "network" && in.get(kOnStepHost).empty()) {
+        endpoint_fault = "Host IP address is required";
+    } else if (type == "network") {
+        // The per-field rule has already refused (API) or dropped (saved) a port of the wrong type.
+        const std::int64_t port = result.config.get(kOnStepTcpPort);
+        if (port < kOnStepTcpPortMin || port > kOnStepTcpPortMax) {
+            endpoint_fault = std::string(kOnStepTcpPort.key) + " is out of range (min " +
+                             std::to_string(kOnStepTcpPortMin) + ") (max " + std::to_string(kOnStepTcpPortMax) + ")";
+        }
+    }
+    if (!endpoint_fault.empty()) {
         if (from_api) {
-            result.rejection = kPortMissing;
+            result.rejection = endpoint_fault;
             return result;
         }
-        result.warnings.emplace_back(kPortMissing);
+        result.warnings.push_back(std::move(endpoint_fault));
     }
     return result;
 }

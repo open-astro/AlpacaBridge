@@ -32,10 +32,11 @@
 
 namespace alpacacore::catalog {
 
-// "" and "auto" scan at connect; "serial" names the port. OnStep is USB-serial
-// only: no "network". No allowed_values: the per-field rule would substitute the
-// default "auto" for an unknown saved value, which must be read as "serial"
-// instead (#380), so the schema's normalize owns this rule.
+// "" and "auto" scan the serial ports at connect (never the network); "serial"
+// names the port; "network" names the host and TCP port (#2220). No
+// allowed_values: the per-field rule would substitute the default "auto" for an
+// unknown saved value, which must be read as "serial" instead (#380), so the
+// schema's normalize owns this rule.
 inline const Field<std::string> kOnStepConnectionType{
     .key = "connectionType", .default_value = "auto", .role = Role::Discriminator};
 inline const Field<std::int64_t> kOnStepMountIndex{
@@ -46,6 +47,21 @@ inline const Field<std::string> kOnStepPortPath{.key = "portPath",
                                                 .applies_when = AppliesWhen{"connectionType", "serial"}};
 inline const Field<std::int64_t> kOnStepBaudRate{
     .key = "baudRate", .default_value = 9600, .applies_when = AppliesWhen{"connectionType", "serial"}};
+// The network endpoint (#2220). 9998 is a persistent command channel: OnStepX
+// closes a client of the standard channel, 9999, a fixed 2 s after accepting it,
+// while 9996-9998 extend that timeout on every byte read (Serial_IP_Wifi.cpp,
+// IPSerial::available() and read(), at af1d26bf), so the status poll keeps the
+// link open. No min/max on the port: a saved port out of range must stay in the
+// config so the connect refuses it, where the per-field rule would drop it to
+// the default 9998 and connect there; normalize owns the range rule
+// (kOnStepTcpPortMin/Max).
+inline const Field<std::string> kOnStepHost{
+    .key = "host", .default_value = "", .role = Role::Host, .applies_when = AppliesWhen{"connectionType", "network"}};
+inline const Field<std::int64_t> kOnStepTcpPort{
+    .key = "tcpPort", .default_value = 9998, .applies_when = AppliesWhen{"connectionType", "network"}};
+inline constexpr std::int64_t kOnStepTcpPortMin = 1;
+inline constexpr std::int64_t kOnStepTcpPortMax = 65535;
+// Every reply wait, and the TCP connect's wait, on either transport.
 inline const Field<std::int64_t> kOnStepResponseTimeoutMs{.key = "responseTimeoutMs", .default_value = 5000};
 // The 0.0 defaults below are not a site: the factory reads the site with
 // find(), and an unset coordinate stays unset.
@@ -59,11 +75,19 @@ inline const Field<double> kOnStepApertureDiameter{.key = "apertureDiameter", .d
 inline const Field<double> kOnStepFocalLength{.key = "focalLength", .default_value = 0.0};
 
 inline const std::vector<FieldRef>& onstep_telescope_fields() {
-    static const std::vector<FieldRef> fields{
-        kOnStepConnectionType.ref(),   kOnStepMountIndex.ref(),        kOnStepPortPath.ref(),
-        kOnStepBaudRate.ref(),         kOnStepResponseTimeoutMs.ref(), kOnStepSiteLatitude.ref(),
-        kOnStepSiteLongitude.ref(),    kOnStepSiteElevation.ref(),     kOnStepSyncTimeOnConnect.ref(),
-        kOnStepApertureDiameter.ref(), kOnStepFocalLength.ref()};
+    static const std::vector<FieldRef> fields{kOnStepConnectionType.ref(),
+                                              kOnStepMountIndex.ref(),
+                                              kOnStepPortPath.ref(),
+                                              kOnStepBaudRate.ref(),
+                                              kOnStepHost.ref(),
+                                              kOnStepTcpPort.ref(),
+                                              kOnStepResponseTimeoutMs.ref(),
+                                              kOnStepSiteLatitude.ref(),
+                                              kOnStepSiteLongitude.ref(),
+                                              kOnStepSiteElevation.ref(),
+                                              kOnStepSyncTimeOnConnect.ref(),
+                                              kOnStepApertureDiameter.ref(),
+                                              kOnStepFocalLength.ref()};
     return fields;
 }
 

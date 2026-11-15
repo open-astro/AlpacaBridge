@@ -1340,17 +1340,20 @@ TEST_CASE("OnStep snapshot - a GOTO whose :MS# send fails leaves Slewing false a
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
-// #1887 (decision 0022 rule 2): the pulse's hold window is cleared when the :Mg send throws, so IsPulseGuiding reads
-// false right after, with no virtual time advanced. :Mg is sent blind, so a silent mount is not a failed send: the
-// connection is dropped instead, which fails the write.
-TEST_CASE("OnStep snapshot - a pulse guide whose :Mg send fails leaves IsPulseGuiding false at once",
-          "[onstep][telescope][snapshot][hold-window]") {
+// #1887 (decision 0022 rule 2), #2220: the pulse's hold window is cleared when the :Mg send throws. :Mg is sent
+// blind, so a silent mount is not a failed send: the controller hangs up as :Mg arrives instead, after the call's
+// connection check. That is a lost link (decision 0009 rule 2a), so the call throws NotConnected and IsPulseGuiding
+// answers NotConnected, never a pulse still running. (Before #2220 a dropped TCP link failed the write with the link
+// still alive and IsPulseGuiding read false; no fake fails a send without a loss now, so that read is reviewed.)
+TEST_CASE("OnStep snapshot - a pulse guide whose :Mg send meets a hangup loses the link",
+          "[onstep][telescope][snapshot][hold-window][network]") {
     Rig rig;
     rig.connect();
     rig.pause();
-    REQUIRE(rig.server.drop_connections());
-    CHECK(error_of([&] { rig.driver->pulse_guide(0, 2000); }) == alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    rig.server.hang_up_on(":Mg");
+    CHECK(error_of([&] { rig.driver->pulse_guide(0, 2000); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(error_of([&] { (void)rig.driver->get_is_pulse_guiding(); }) == alpacacore::AlpacaError::NotConnected);
 }
 
 // ── Pier side (#2179) ─────────────────────────────────────────────────────────────────────────────────────────────

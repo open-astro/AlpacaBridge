@@ -3563,6 +3563,7 @@ if (onstepConnectionType) {
     onstepConnectionType.addEventListener('change', function() {
         const type = this.value;
         document.getElementById('onstep-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+        document.getElementById('onstep-network-config').style.display = type === 'network' ? 'block' : 'none';
     });
 }
 
@@ -4477,8 +4478,11 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('onstepPortPath');
             deviceData.baudRate = parseInt(formData.get('onstepBaudRate')) || 9600;
+        } else if (deviceData.connectionType === 'network') {
+            deviceData.host = (formData.get('onstepHost') || '').trim();
+            deviceData.tcpPort = parseInt(formData.get('onstepTcpPort')) || 9998;
         }
-        // "auto" needs no connection fields - port is discovered at startup
+        // "auto" needs no connection fields - the serial port is discovered at connect; the network is never scanned
 
         if (!applyOpticsMm(formData, deviceData, 'onstepApertureDiameter', 'onstepFocalLength')) {
             return;

@@ -124,12 +124,50 @@ column is from the source, not from hardware.
   in both: 1-120 s or `0` for none (OnStep 4.x `Config.h` ships `0`; OnStepX defaults to 10 s, which
   the HM-17 runs). The re-send keeps a move going under a limit and changes nothing without one.
 
-Connection types: **Serial (USB) only** in this project — no Wi-Fi/network config is exposed to
-users, unlike iOptron/Celestron. Default 9600 baud, 8N1, standard LX200 `#`-terminated ASCII
-commands. `onstep_protocol_wrapper`'s `ConnectionType::Network` branch still exists internally
-(mirrors the SynScan wrapper) purely as a test seam so the mandatory `[stress]` concurrency test
-can drive the driver to CONNECTED against a loopback `FakeMountServer` without real hardware —
-it is never reachable through `router.cpp` or the web UI.
+Connection types: **Auto-Detect** (the USB serial ports only), **Serial** (a named port, default
+9600 baud, 8N1) and **Network** (#2220): a Wi-Fi or Ethernet OnStepX (ESP32, or the Smart Web Server
+add-on) by `host` and `tcpPort`, the same standard LX200 `#`-terminated ASCII commands on a TCP
+command channel. Nothing scans the network; the host is typed in.
+
+- **The default port is 9998**, a persistent channel. In OnStepX the standard channel, 9999, closes a
+  client a fixed 2 s after it is accepted, while the persistent channels, 9996-9998, extend that timeout
+  on every byte read (`Serial_IP_Wifi.cpp`, `IPSerial::available()` and `read()`, at `af1d26bf`); the
+  1 s status poll keeps the link open. A user who picks 9999 gets a link that drops every 2 s, which the
+  driver then sees as a hangup.
+- **Config** (`onstep_fields.h`, `onstep_schema.cpp`): `connectionType` `network` with `host`, `tcpPort`
+  (default 9998) and the shared `responseTimeoutMs`. From the API an empty host is refused with "Host IP
+  address is required" and a port outside 1-65535 with "tcpPort is out of range (min 1) (max 65535)". A
+  saved entry with the same faults is normalized with that warning, stays registered and editable, and
+  keeps its value: `tcpPort` has no per-field min/max, which would drop a saved port to the default and
+  connect there. The factory passes a saved port outside 1-65535 as 0 (range-checked before the cast,
+  decision 0007 rule 4), and the wrapper's connect refuses an empty host or a port outside 1-65535 with
+  the field in the message ("... (host)", "... (tcpPort)"), opening nothing.
+- **Connect** (`connect_network()`): a numeric IPv4 address or a host name (`getaddrinfo`, IPv4; the
+  lookup is not bounded by the timeout), a non-blocking connect that waits at most the response timeout,
+  then `TCP_NODELAY` (one small write per command). An unreachable controller fails Connect within the
+  response timeout ("could not connect to <host>:<port>: no answer within <n> ms"), a refusal at once
+  ("... Connection refused"); both are the connect error the client and `LastConnectError` see.
+- **Link loss** follows decision 0009 as the serial link does: a TCP hangup (the controller closed or
+  reset the connection) is a lost link at once, the way a removed device node is for serial (rule 2a).
+  `link_alive()` polls the socket with no wait (`POLLRDHUP`, `POLLHUP`, `POLLERR`), so `Connected` drops
+  with no client I/O; a hangup on any reply read, in a blind command's drain or before a command, and a
+  send that fails with `EPIPE`/`ECONNRESET`/`ENOTCONN`, lose it too (`NotConnected`, socket closed, loss
+  stamped). A refused reconnect fails at once and keeps the loss stamps, so the reconnect that gets
+  through times the whole outage for the #521 stops, and the #1289 rule (no stops while `:GU#` shows `I`)
+  applies unchanged. A controller that drops off Wi-Fi without closing the connection is silence: the
+  fault latch and the 30 s staleness bound decide, as for a silent mount on serial.
+- **Bounded replies** (decisions 0007 and 0023): every reply read is bounded by the response timeout and
+  by `kMaxReplyLen` (1024 bytes); a reply that reaches it without its terminator fails its read at once
+  with `DriverException` "OnStep response too long ...". It is one failed exchange, as a silent reply is:
+  it counts toward the decision 0009 fault latch (three in a row latch it), and is not a lost link. Before each
+  command the bytes already waiting are read with no wait and discarded (at most `kMaxDrainLen`, 64 KiB),
+  as `tcflush()` does over serial, so a late or overlong reply never answers the next command.
+- **Rig check**: not yet run on an OnStepX over Wi-Fi or Ethernet; it is tracked in the OnStep test plan,
+  #2126. Tests: the `OnStep network -` cases in `test_onstep_link_loss.cpp`, the TCP hangup cases in
+  `test_onstep_telescope.cpp` and `test_mount_read_until_hangup.cpp`, and the catalog cases in
+  `test_catalog_builtins.cpp`. The `[stress]` test and most of the telescope tests run over this link
+  against a loopback `FakeMountServer` (`hang_up_on()` hangs up mid-exchange, `drop_connections()` at
+  once).
 
 - **Auto-detection**: probes `/dev/serial/by-id/` (Prolific/FTDI/CP210x/Silicon Labs/CH340/
   CH341 substrings, plus `Arduino`/`Teensy`) falling back to `/dev/ttyUSB0-9` **and**
@@ -270,8 +308,9 @@ it is never reachable through `router.cpp` or the web UI.
   `AsyncOperation`) re-sends the rate and direction of each running axis until `MoveAxis(axis, 0)`,
   `AbortSlew`, a GOTO, `Park`, `FindHome`, disconnect, a lost link, or the mount ending the move (below); a stop request ends the re-send even when the stop
   itself fails, and a `MoveAxis` whose command cannot be sent leaves the other axis's re-send
-  running (both tested over a dropped TCP link, which fails the write while the wrapper still reads
-  the link as alive, #1459). If the slot refuses the new body after the move went out (no thread,
+  running (#1459; since #2220 a dropped TCP link is a lost link, which ends every re-send, so the
+  stop half is tested with a hangup mid-exchange and the other-axis half is reviewed: no fake fails a
+  send with the link still alive). If the slot refuses the new body after the move went out (no thread,
   or replaced bodies still finishing), `MoveAxis` stops that axis (both directions) and throws
   `DriverException` (if those stops fail too, the message says so and `Slewing` stays true; a
   newer `MoveAxis`, or an `AbortSlew`, GOTO, `Park`, `FindHome` or disconnect that ended the move
@@ -370,8 +409,8 @@ it is never reachable through `router.cpp` or the web UI.
   the next read slice still settles the reply (a late `#` ends it; `ReadSpec::late_byte_grace` set to
   `read_slice()`, whose TCP value is `kSocketTimeoutMs`, the socket's `SO_RCVTIMEO`). The probe's `:GVP#`/`:GVN#`
   reads and `drain_stale()` are `read_until` calls too. A hangup on the tty loses the link
-  ("read failed: <errno text>", below), a read that ends on silence checks the node, and over the
-  TCP test seam a hangup throws `DriverException` "OnStep network link lost (hangup): <errno text>"
+  ("read failed: <errno text>", below), a read that ends on silence checks the node, and over TCP
+  a hangup loses the link as well ("the controller at <host>:<port> closed the connection", #2220)
   instead of timing out (`test_mount_read_until_hangup.cpp`, the `OnStep mount - ...` cases).
 - **The serial read slice must be 100 ms, not higher** (`kSerialReadSliceMs`; it was `VTIME=1` on
   a blocking fd before #1202): an earlier version copied Gemini's one-time
@@ -405,8 +444,8 @@ it is never reachable through `router.cpp` or the web UI.
   the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
   an auto-detect re-scan included. It is not timed from when the loss was noticed: the status poll
   checks the link once a second, but the router reads `Connected` before every Connect, so the
-  first to notice can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
-  lost. `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
+  first to notice can be the reconnect itself. Tracking is left alone. Over TCP the same rules hold with a hangup as
+  the evidence (the Network bullet under "Connection types"). `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
   still the current link (a generation counter under `link_id_mutex_`): a Disconnect or a relink that
   lands between its `stat()` and the record leaves no loss behind and does not close the new link, and
   a Disconnect bumps the generation before it closes the port; the close that follows a recorded loss

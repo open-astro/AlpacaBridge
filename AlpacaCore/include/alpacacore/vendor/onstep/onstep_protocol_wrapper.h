@@ -35,16 +35,13 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports();
 /**
  * @brief Connection type for the OnStep protocol wrapper.
  *
- * OnStep controllers in this project are USB-serial only — Network exists
- * purely as an internal test seam (see AlpacaCore/tests/fake_mount_server.h)
- * so the mandatory concurrency stress test can drive the driver into a
- * CONNECTED state without real hardware. It is never surfaced through
- * AlpacaHTTP's router or web UI.
+ * Serial: the USB port. Network: a TCP command channel of a Wi-Fi or Ethernet
+ * OnStepX (ESP32, or the Smart Web Server add-on), host and port typed in by
+ * the user (#2220); auto-detect never scans the network. Both follow decision
+ * 0009: a removed node, or a TCP hangup or refused connect, is a lost link at
+ * once.
  */
-enum class ConnectionType : std::uint8_t {
-    Serial,
-    Network  // Test-seam only — not exposed to users.
-};
+enum class ConnectionType : std::uint8_t { Serial, Network };
 
 struct ConnectionInfo {
     ConnectionType type = ConnectionType::Serial;
@@ -53,11 +50,14 @@ struct ConnectionInfo {
     std::string port_path;
     int baud_rate = 9600;  // OnStep default per INDI reference driver
 
-    // Network connection (test-seam only)
+    // Network connection. 9998 is a persistent channel: OnStepX closes a client
+    // of the standard channel, 9999, 2 s after accepting it, while 9996-9998
+    // extend that on every byte read (Serial_IP_Wifi.cpp, af1d26bf). A port
+    // outside 1-65535 is refused at connect.
     std::string host;
-    int tcp_port = 9999;
+    int tcp_port = 9998;
 
-    // Per-command response timeout
+    // Per-command response timeout, and the TCP connect's wait (0 or less: 5000)
     int response_timeout_ms = 5000;
 };
 
@@ -170,13 +170,14 @@ public:
     std::string last_connect_error() const;
 
     /**
-     * @brief Whether the serial link is still there (decision 0009, #1241).
+     * @brief Whether the link is still there (decision 0009, #1241, #2220).
      *
-     * False once the link is lost: the configured port path no longer
-     * reaches the node opened at connect (adapter unplugged or re-enumerated),
-     * or a read or write failed with EIO, ENXIO, ENODEV or EBADF. A loss
-     * found here closes the port when no exchange holds it. No serial I/O;
-     * the network test seam is never lost this way.
+     * False once the link is lost: over serial the configured port path no
+     * longer reaches the node opened at connect (adapter unplugged or
+     * re-enumerated), or a read or write failed with EIO, ENXIO, ENODEV or
+     * EBADF; over TCP the controller closed or reset the connection (a
+     * zero-wait poll() of the socket, or a hangup on a read or write). A loss
+     * found here closes the port when no exchange holds it. No wire I/O.
      */
     bool link_alive();
 

@@ -794,7 +794,9 @@ TEST_CASE("OnStep Telescope Driver - non-finite slew and sync coordinates are re
 // #742: MoveAxis(axis, 0) swallowed both direction stops and cleared the
 // manual-slew flag, so a stop lost on a dead link read as Slewing false while
 // the mount kept moving. The stops are blind sends, which a responder cannot
-// fail, so the fake resets the connection instead: every stop after that fails.
+// fail, so the fake hangs up as the first stop arrives: the call has passed its
+// connection check, the stop's drain meets the hangup and the link is lost
+// (#2220), so the next stop cannot be sent either.
 TEST_CASE("OnStep Telescope Driver - MoveAxis at rate 0 reports a stop it could not send",
           "[onstep][telescope][unit]") {
     alpacacore::test::FakeMountServer server([](const std::string& chunk) {
@@ -822,7 +824,7 @@ TEST_CASE("OnStep Telescope Driver - MoveAxis at rate 0 reports a stop it could 
     driver->move_axis(0, 1.0);
     REQUIRE(driver->get_slewing());
 
-    REQUIRE(server.drop_connections());
+    server.hang_up_on(":Qe#");
     try {
         driver->move_axis(0, 0.0);
         FAIL("MoveAxis(0, 0) returned success although the stop could not be sent");
@@ -830,7 +832,9 @@ TEST_CASE("OnStep Telescope Driver - MoveAxis at rate 0 reports a stop it could 
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).rfind("MoveAxis stop failed: ", 0) == 0);
     }
-    CHECK(driver->get_slewing());  // the mount may still be moving
+    // The mount may still be moving: never Slewing false, the lost link answers NotConnected.
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
 
     driver->set_connected(false);
 }
@@ -1281,7 +1285,9 @@ TEST_CASE("OnStep Telescope Driver - a refused re-send whose stop fails too leav
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).find("stopping the axis failed too") != std::string::npos);
     }
-    CHECK(driver->get_slewing());
+    // The dropped connection is a lost link (#2220): never Slewing false, NotConnected.
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(false);
 }
 
@@ -1411,9 +1417,9 @@ TEST_CASE("OnStep Telescope Driver - a pulse guide at the first re-send tick doe
 }
 
 // #1459: a MoveAxis(axis, 0) whose stop cannot be sent still ends that axis's
-// re-send (the flag drops before the stop), so no tick runs for it later. A
-// dropped TCP link fails the write while the wrapper still reads the link as
-// alive, as a serial write error that is not a loss would.
+// re-send (the flag drops before the stop), so no tick runs for it later. The
+// controller hangs up as the stop arrives, after the call's connection check,
+// which loses the link (#2220).
 TEST_CASE("OnStep Telescope Driver - a MoveAxis stop that cannot be sent still ends the re-send",
           "[onstep][telescope][unit]") {
     MoveAxisFake fake(true);
@@ -1426,7 +1432,7 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis stop that cannot be sent still e
     fake.start_move(*driver, 0, 1.0);
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
-    REQUIRE(fake.server.drop_connections());
+    fake.server.hang_up_on(":Qe#");
     require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::DriverException);
     fake.advance(std::chrono::seconds(14));  // two intervals: no tick may run
     CHECK(resend_warns.count() == 0);
@@ -1435,7 +1441,8 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis stop that cannot be sent still e
 
 // #1459: a MoveAxis whose command cannot be sent drops its own axis's
 // earlier move from the re-send first, so the old direction is not kept
-// going for a move the client changed.
+// going for a move the client changed. The controller hangs up as the new
+// move's rate arrives, after the call's connection check (#2220).
 TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent ends its axis's earlier re-send",
           "[onstep][telescope][unit]") {
     MoveAxisFake fake(true);
@@ -1448,32 +1455,37 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent ends its axi
     fake.start_move(*driver, 0, 1.0);
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
-    REQUIRE(fake.server.drop_connections());
-    require_alpaca_error([&]() { driver->move_axis(0, -1.0); }, alpacacore::AlpacaError::DriverException);
+    fake.server.hang_up_on(":RA");
+    require_alpaca_error([&]() { driver->move_axis(0, -1.0); }, alpacacore::AlpacaError::NotConnected);
     fake.advance(std::chrono::seconds(14));  // two intervals: no tick may run
     CHECK(resend_warns.count() == 0);
     driver->set_connected(false);
 }
 
-// #1459: a MoveAxis whose command cannot be sent leaves the other axis's
-// re-send running: the generation moves only once the move went out. The
-// kept body's next tick shows it: its status read fails on the dropped link.
-TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent leaves the other axis's re-send running",
-          "[onstep][telescope][unit]") {
+// #2220 (decision 0009 rule 2a): a MoveAxis on one axis that meets a hangup of
+// the TCP link loses the link, so the other axis's re-send ends with it: its
+// next tick sends nothing on a link that is gone, and Connected reads false.
+// (Before #2220 a dropped TCP link failed the write with the link still read as
+// alive, and this case showed the other axis's re-send kept running, #1459. No
+// fake fails a send without a loss now, so that half is reviewed, not tested.)
+TEST_CASE("OnStep Telescope Driver - a MoveAxis that meets a hangup ends the other axis's re-send with the link",
+          "[onstep][telescope][unit][network]") {
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
-    WarnCounter skipped("MoveAxis re-send skipped");
 
     fake.guide_active->store(true);
     fake.start_move(*driver, 0, 1.0);
     fake.resend_tick();
     REQUIRE(fake.logged(":Me#", 2));
-    REQUIRE(fake.server.drop_connections());
-    require_alpaca_error([&]() { driver->move_axis(1, 1.0); }, alpacacore::AlpacaError::DriverException);
-    fake.resend_tick();  // axis 0 is due again
-    CHECK(skipped.count() >= 1);
+    WarnCounter resend_warns("MoveAxis re-send");  // a re-send tick that outlives the link logs it skipped
+    fake.server.hang_up_on(":RE");
+    require_alpaca_error([&]() { driver->move_axis(1, 1.0); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    fake.advance(std::chrono::seconds(14));  // axis 0 was due twice: the re-send ended with the link
+    CHECK(resend_warns.count() == 0);
+    CHECK(fake.count(":Me#") == 2);
     driver->set_connected(false);
 }
 
@@ -1528,8 +1540,10 @@ TEST_CASE("OnStep Telescope Driver - AbortSlew reports a stop it could not send"
         CHECK(count(":Qs#") >= 1);
     }
 
-    SECTION("a dropped link throws DriverException and leaves Slewing true") {
-        REQUIRE(server.drop_connections());
+    SECTION("a hangup at the first stop throws DriverException and never reads Slewing false") {
+        // After the call's connection check: the :Q# drain meets the hangup, the link is lost (#2220) and the
+        // per-axis stops cannot be sent either.
+        server.hang_up_on(":Q#");
         try {
             driver->abort_slew();
             FAIL("AbortSlew returned success although the stops could not be sent");
@@ -1537,7 +1551,8 @@ TEST_CASE("OnStep Telescope Driver - AbortSlew reports a stop it could not send"
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
             CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
         }
-        CHECK(driver->get_slewing());
+        CHECK_FALSE(driver->get_connected());
+        require_alpaca_error([&]() { (void)driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
     }
 
     driver->set_connected(false);
@@ -2427,8 +2442,9 @@ TEST_CASE("OnStep Telescope Driver - a GOTO stopped by Park is not resumed as a 
 
 // #1430: a stop that cannot be sent fails the Park with DriverException
 // before :hP#, as MoveAxis(axis, 0) and AbortSlew report theirs (#742,
-// #781). The stops are blind sends, so the fake drops the connection: every
-// write after that fails while the wrapper still reads the link as alive.
+// #781). The stops are blind sends, so the fake hangs up as the first stop
+// arrives, after the call's connection check: the link is lost (#2220) and
+// the stops after it cannot be sent.
 TEST_CASE("OnStep Telescope Driver - Park reports a stop it could not send", "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ParkHomeFake>();
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
@@ -2437,7 +2453,7 @@ TEST_CASE("OnStep Telescope Driver - Park reports a stop it could not send", "[o
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     start_move(*driver, *mount, 0, 1.0);
-    REQUIRE(server.drop_connections());
+    server.hang_up_on(":Q#");
     try {
         on_clock(*mount, *driver, [&] { driver->park(); });
         FAIL("Park returned success although the motion could not be stopped");
@@ -2447,7 +2463,7 @@ TEST_CASE("OnStep Telescope Driver - Park reports a stop it could not send", "[o
     }
     CHECK(mount->count(":hP#") == 0);
     // The re-send ends with the failed stop, as AbortSlew's does (#781): no
-    // tick runs, so no status read fails on the dropped link.
+    // tick runs, so no status read fails on the lost link.
     std::atomic<int> resend_warns{0};
     {
         struct SinkGuard {

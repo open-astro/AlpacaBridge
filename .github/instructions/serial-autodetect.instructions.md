@@ -66,10 +66,11 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   "<mount> network link lost (hangup): <errno text>" over TCP only, and the ZWO mount feeds
   it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
   is noticed. OnStep keeps its decision 0009 loss on the tty (`lose_link_locked("read failed: <errno text>")`,
-  `NotConnected`; a read that ends on silence checks the node, as each empty read slice did) and throws a
-  `DriverException` "OnStep network link lost (hangup): <errno text>" over its TCP test seam, which is never lost; its
+  `NotConnected`; a read that ends on silence checks the node, as each empty read slice did) and, since #2220, over
+  its TCP network link too: a hangup there, on a reply read or in a drain, is a lost link at once ("the controller at
+  <host>:<port> closed the connection"), and `link_alive()` polls the socket for one with no wait; its
   drain waits at least one read slice and ends after a quiet one, or at its 2 s cap on a line that never goes
-  quiet (#1449), and over TCP a hangup just ends it. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
+  quiet (#1449). Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
   the Wanderer cover and filter wheel probes, which back off 50 ms and keep listening until their deadline as before.
   The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial or overflowed reply as it stands;
   the Wanderer probes drop an overflowed token and keep listening. Still on their own loops, moving in later slices

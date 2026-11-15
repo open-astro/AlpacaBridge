@@ -11,8 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // OnStep serial-port ownership (issue #1202), over a pty that answers every
-// '#'-framed LX200 command with "0#". The other OnStep tests drive the
-// wrapper's TCP test seam; this file covers the serial link itself: a port
+// '#'-framed LX200 command with "0#". Most other OnStep tests drive the
+// wrapper's TCP network link; this file covers the serial link itself: a port
 // another device holds is refused untouched, the connected port is claimed
 // and released, and a port another program retunes (its own baud,
 // VMIN=1/VTIME=0) can no longer park a read, and gets the driver's settings

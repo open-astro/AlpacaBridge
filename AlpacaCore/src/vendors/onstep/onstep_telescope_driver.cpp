@@ -2977,14 +2977,14 @@ private:
         // Park::requestAborted()). A status that cannot be read stops anyway.
         try {
             if (wire().get_status().is_parking) {
-                ALPACA_LOG_INFO("OnStep", std::string("Serial link was last seen alive ") + seconds +
+                ALPACA_LOG_INFO("OnStep", std::string("The link to the mount was last seen alive ") + seconds +
                                               " s ago; the mount is parking, so the park is left to finish");
                 return;
             }
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unread status stops anyway
             // unknown state: stop, as before
         }
-        ALPACA_LOG_WARN("OnStep", std::string("Serial link was last seen alive ") + seconds +
+        ALPACA_LOG_WARN("OnStep", std::string("The link to the mount was last seen alive ") + seconds +
                                       " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521)");
         // Each stop on its own, as AbortSlew does (#781): a failed :Q# must
         // not skip the per-axis stops that end a MoveAxis.

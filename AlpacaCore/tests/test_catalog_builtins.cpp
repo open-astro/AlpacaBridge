@@ -1590,8 +1590,9 @@ TEST_CASE("Builtin catalog - Bisque normalize refuses an empty host from the API
 }
 
 // ---------------------------------------------------------------------------
-// OnStep telescope. Serial only (no "network"); the auto-detect factory
-// constructs without a scan (#659), so no port is opened here.
+// OnStep telescope. Serial, or a network host and TCP port (#2220); the
+// auto-detect factory constructs without a scan (#659) and scans the serial
+// ports only, so no port or socket is opened here.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -1613,8 +1614,9 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the OnStep teles
     CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
 
     const std::vector<std::string_view> expected_keys{
-        "connectionType", "mountIndex",    "portPath",          "baudRate",         "responseTimeoutMs", "siteLatitude",
-        "siteLongitude",  "siteElevation", "syncTimeOnConnect", "apertureDiameter", "focalLength"};
+        "connectionType",    "mountIndex",        "portPath",     "baudRate",      "host",
+        "tcpPort",           "responseTimeoutMs", "siteLatitude", "siteLongitude", "siteElevation",
+        "syncTimeOnConnect", "apertureDiameter",  "focalLength"};
     REQUIRE(v->fields.size() == expected_keys.size());
     for (std::size_t i = 0; i < expected_keys.size(); ++i) {
         CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
@@ -1630,6 +1632,17 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the OnStep teles
     REQUIRE(port != nullptr);
     REQUIRE(port->applies_when.has_value());
     CHECK(std::string_view(port->applies_when->value) == "serial");
+    // #2220: the network endpoint. 9998 is a persistent OnStepX channel (9999 closes a client after 2 s).
+    const FieldRef* host = find_field(v->fields, "host");
+    REQUIRE(host != nullptr);
+    CHECK(host->role == Role::Host);
+    REQUIRE(host->applies_when.has_value());
+    CHECK(std::string_view(host->applies_when->value) == "network");
+    const FieldRef* tcp_port = find_field(v->fields, "tcpPort");
+    REQUIRE(tcp_port != nullptr);
+    CHECK(same_scalar(tcp_port->default_value, std::int64_t{9998}));
+    REQUIRE(tcp_port->applies_when.has_value());
+    CHECK(std::string_view(tcp_port->applies_when->value) == "network");
 }
 
 TEST_CASE("Builtin catalog - register_builtin_factories makes the OnStep telescope available only when built",
@@ -1655,6 +1668,15 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the OnStep telesco
     auto serial_driver = catalog.create(kOnStepKey, serial, 5);
     REQUIRE(serial_driver != nullptr);
     CHECK(serial_driver->get_device_number() == 5);
+
+    // A network entry constructs without opening a socket (#2220).
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    network.set("host", std::string{"192.0.2.1"});
+    auto network_driver = catalog.create(kOnStepKey, network, 6);
+    REQUIRE(network_driver != nullptr);
+    CHECK(network_driver->get_device_number() == 6);
+    CHECK_FALSE(network_driver->get_connected());
 #else
     CHECK_FALSE(v->available);
     try {
@@ -1666,16 +1688,17 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the OnStep telesco
 #endif
 }
 
-TEST_CASE("Builtin catalog - OnStep normalize accepts '', auto and serial, and refuses network from the API",
+TEST_CASE("Builtin catalog - OnStep normalize accepts '', auto, serial and network, and refuses other types",
           "[catalog][onstep][unit]") {
     DeviceCatalog catalog;
     register_builtin_schemas(catalog);
 
-    for (const char* type : {"", "auto", "serial"}) {
+    for (const char* type : {"", "auto", "serial", "network"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
         config.set("portPath", std::string{"/dev/ttyUSB3"});
+        config.set("host", std::string{"192.168.0.1"});
         const auto api = catalog.normalize(kOnStepKey, config, Source::Api);
         CHECK_FALSE(api.rejection.has_value());
         CHECK(string_at(api.config, "connectionType") == type);
@@ -1689,14 +1712,14 @@ TEST_CASE("Builtin catalog - OnStep normalize accepts '', auto and serial, and r
     no_site.set("connectionType", std::string{"auto"});
     CHECK_FALSE(catalog.normalize(kOnStepKey, no_site, Source::Api).rejection.has_value());
 
-    for (const char* type : {"network", "carrier-pigeon", "usb"}) {
+    for (const char* type : {"wifi", "carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
         config.set("portPath", std::string{"/dev/ttyUSB3"});
         const auto api = catalog.normalize(kOnStepKey, config, Source::Api);
         REQUIRE(api.rejection.has_value());
-        CHECK(*api.rejection == "Invalid connection type. Use 'auto' or 'serial'");
+        CHECK(*api.rejection == "Invalid connection type. Use 'auto', 'serial', or 'network'");
 
         // #380: a saved one is read as serial, never auto.
         const auto persisted = catalog.normalize(kOnStepKey, config, Source::Persisted);
@@ -1729,15 +1752,75 @@ TEST_CASE("Builtin catalog - OnStep normalize requires a serial port path from t
 
     // A saved unknown type is read as serial, so it is warned about the port too.
     DeviceConfig unknown;
-    unknown.set("connectionType", std::string{"network"});
+    unknown.set("connectionType", std::string{"usb"});
     const auto persisted = catalog.normalize(kOnStepKey, unknown, Source::Persisted);
-    CHECK(any_contains(persisted.warnings, "has connectionType \"network\""));
+    CHECK(any_contains(persisted.warnings, "has connectionType \"usb\""));
     CHECK(any_contains(persisted.warnings, "Serial port path is required"));
 
     // Auto never needs a port.
     DeviceConfig automatic;
     automatic.set("connectionType", std::string{"auto"});
     CHECK_FALSE(catalog.normalize(kOnStepKey, automatic, Source::Api).rejection.has_value());
+}
+
+// #2220 (the #380 rule): a network entry needs a host and a TCP port in 1-65535. The API refuses the entry with a
+// message naming the field; a saved one is warned about and kept as saved, so it stays listed and editable and the
+// connect refuses it (the per-field range rule would have dropped the port to the default 9998 and connected there).
+TEST_CASE("Builtin catalog - OnStep network needs a host and a TCP port in 1-65535", "[catalog][onstep][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    // The default port: a host alone is a complete entry, connecting to 9998.
+    DeviceConfig defaults;
+    defaults.set("connectionType", std::string{"network"});
+    defaults.set("host", std::string{"onstep.local"});
+    const auto accepted = catalog.normalize(kOnStepKey, defaults, Source::Api);
+    REQUIRE_FALSE(accepted.rejection.has_value());
+    CHECK(accepted.config.find_value("tcpPort") == nullptr);  // unset: the factory connects to the field's 9998
+    CHECK(catalog.normalize(kOnStepKey, defaults, Source::Persisted).warnings.empty());
+    for (const std::int64_t port : {std::int64_t{1}, std::int64_t{9999}, std::int64_t{65535}}) {
+        INFO("tcpPort " << port);
+        DeviceConfig edge = defaults;
+        edge.set("tcpPort", port);
+        CHECK_FALSE(catalog.normalize(kOnStepKey, edge, Source::Api).rejection.has_value());
+    }
+
+    for (bool set_empty : {true, false}) {
+        INFO(std::string(set_empty ? "empty" : "absent") + " host");
+        DeviceConfig config;
+        config.set("connectionType", std::string{"network"});
+        if (set_empty) config.set("host", std::string{});
+        const auto api = catalog.normalize(kOnStepKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "Host IP address is required");
+        const auto persisted = catalog.normalize(kOnStepKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == "Host IP address is required");
+    }
+
+    for (const std::int64_t port : {std::int64_t{0}, std::int64_t{65536}, std::int64_t{-1}}) {
+        INFO("tcpPort " << port);
+        DeviceConfig config = defaults;
+        config.set("tcpPort", port);
+        const auto api = catalog.normalize(kOnStepKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "tcpPort is out of range (min 1) (max 65535)");
+        const auto persisted = catalog.normalize(kOnStepKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == "tcpPort is out of range (min 1) (max 65535)");
+        const auto* kept = persisted.config.find_value("tcpPort");  // kept: the connect refuses it
+        REQUIRE(kept != nullptr);
+        CHECK(std::get<std::int64_t>(*kept) == port);
+    }
+
+    // The endpoint rules follow the connection type: a serial entry's unused network fields are not checked.
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    serial.set("portPath", std::string{"/dev/ttyACM0"});
+    serial.set("tcpPort", std::int64_t{0});
+    CHECK_FALSE(catalog.normalize(kOnStepKey, serial, Source::Api).rejection.has_value());
 }
 
 TEST_CASE("Builtin catalog - OnStep site range is per-field", "[catalog][onstep][unit]") {
