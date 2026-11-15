@@ -19,6 +19,9 @@
 
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -44,13 +47,25 @@ void register_onstep_factory(DeviceCatalog& catalog) {
             telescope = vendor::onstep::create_onstep_telescope_auto(device_number, mount_index, latitude, longitude,
                                                                      elevation, sync_time);
         } else {
-            // normalize has left "serial" here; anything else is read as
-            // serial, never auto (#380).
+            // normalize has left "serial" or "network" here; anything else is
+            // read as serial, never auto (#380). Only "auto" scans, and only the
+            // serial ports: a network endpoint is the configured one (#2220).
             vendor::onstep::ConnectionInfo info;
-            info.type = vendor::onstep::ConnectionType::Serial;
-            info.port_path = config.get(kOnStepPortPath);
-            info.baud_rate = static_cast<int>(config.get(kOnStepBaudRate));
-            info.response_timeout_ms = static_cast<int>(config.get(kOnStepResponseTimeoutMs));
+            if (type == "network") {
+                info.type = vendor::onstep::ConnectionType::Network;
+                info.host = config.get(kOnStepHost);
+                // Range-checked before the narrowing cast (decision 0007 rule 4): a saved port outside 1-65535
+                // (normalize warned and kept it) becomes 0, which the connect refuses, never a port that wrapped.
+                const std::int64_t port = config.get(kOnStepTcpPort);
+                info.tcp_port = port >= kOnStepTcpPortMin && port <= kOnStepTcpPortMax ? static_cast<int>(port) : 0;
+            } else {
+                info.type = vendor::onstep::ConnectionType::Serial;
+                info.port_path = config.get(kOnStepPortPath);
+                info.baud_rate = static_cast<int>(config.get(kOnStepBaudRate));
+            }
+            // Clamped before the cast for the same reason; 0 or less reads as the wrapper's 5 s default.
+            info.response_timeout_ms = static_cast<int>(
+                std::clamp<std::int64_t>(config.get(kOnStepResponseTimeoutMs), 0, std::numeric_limits<int>::max()));
             telescope = vendor::onstep::create_onstep_telescope_with_site(device_number, info, latitude, longitude,
                                                                           elevation, sync_time);
         }

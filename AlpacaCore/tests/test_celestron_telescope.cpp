@@ -2357,7 +2357,7 @@ TEST_CASE("Celestron Link - a cable pulled mid-pulse loses the link and the puls
 }
 
 // Over TCP a hangup is not a pulled cable: it stays a DriverException and the fault latch and the staleness bound
-// decide, as before (the OnStep TCP seam is the same).
+// decide, as before. (OnStep differs since #2220: its network link treats a TCP hangup as a lost link at once.)
 TEST_CASE("Celestron Link - over TCP a hangup is a failed exchange, not a lost link",
           "[celestron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;

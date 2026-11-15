@@ -5404,14 +5404,13 @@ int main() {
         entries.push_back({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9646}, {"host", ""}});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        // OnStep is serial-only, so its valid list is shorter: a persisted
-        // "network" is unrecognised HERE even though it is valid for the other
-        // four, and normalises to serial rather than dropping the device.
+        // #2220: OnStep takes "network" too; a persisted one with an empty
+        // host is warned about and registered (#380), not dropped.
         entries.push_back({{"vendor", "onstep"},
                            {"deviceType", "telescope"},
                            {"deviceNumber", 9645},
                            {"connectionType", "network"},
-                           {"host", "192.168.1.50"}});
+                           {"host", ""}});
 #endif
         std::filesystem::create_directories(persisted.parent_path());
         {
@@ -5533,7 +5532,7 @@ int main() {
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
             if (w.find("telescope 9645") != std::string::npos &&
-                w.find("has connectionType \"network\"") != std::string::npos) {
+                w.find("Host IP address is required") != std::string::npos) {
                 warned_onstep_network = true;
             }
 #endif
@@ -5599,26 +5598,29 @@ int main() {
 #ifdef ALPACACORE_ENABLE_ONSTEP
     {
         // onstep / telescope — same mountIndex allowlist gap class as
-        // ioptron/synscan above; also asserts no "network" fields leak
-        // through (OnStep is serial-only for end users in this project): the
-        // posted host and tcpPort are dropped (#1762).
+        // ioptron/synscan above. #2220: host and tcpPort are declared fields
+        // now (the network connection type), so every field of a network
+        // entry survives, the unused serial ones included (ADR 0004).
         const auto cfg = roundtrip_config(router,
                                           {{"vendor", "onstep"},
                                            {"deviceType", "telescope"},
                                            {"deviceNumber", 9622},
-                                           {"connectionType", "serial"},
+                                           {"connectionType", "network"},
+                                           {"host", "192.168.0.1"},
+                                           {"tcpPort", 9996},
+                                           {"responseTimeoutMs", 3000},
                                            {"portPath", "/dev/ttyACM0"},
                                            {"baudRate", 9600},
-                                           {"mountIndex", 1},
-                                           {"host", "h"},
-                                           {"tcpPort", 1}},
+                                           {"mountIndex", 1}},
                                           "Telescope", 9622);
         EXPECT(cfg.is_object() && !cfg.empty());
-        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("connectionType", "") == "network");
+        EXPECT(cfg.value("host", "") == "192.168.0.1");
+        EXPECT(cfg.value("tcpPort", -1) == 9996);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 3000);
         EXPECT(cfg.value("portPath", "") == "/dev/ttyACM0");
         EXPECT(cfg.value("baudRate", -1) == 9600);
         EXPECT(cfg.value("mountIndex", -1) == 1);
-        EXPECT(!cfg.contains("host") && !cfg.contains("tcpPort"));
         remove_device(router, "onstep", "telescope", 9622);
     }
 #endif
@@ -5897,9 +5899,14 @@ int main() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
+        // #2220: host and tcpPort are declared, so a serial entry keeps them too (ADR 0004); an undeclared
+        // key (udpPort) still drops.
         add("onstep", "telescope", "Telescope", "serial",
-            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1,"host":"h"})",
-            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1})");
+            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1,"host":"h","udpPort":1})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1,"host":"h"})");
+        add("onstep", "telescope", "Telescope", "network",
+            R"({"connectionType":"network","host":"192.168.0.1","tcpPort":9998})",
+            R"({"connectionType":"network","host":"192.168.0.1","tcpPort":9998})");
         add("onstep", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
             R"({"connectionType":"auto","mountIndex":1})");  // #659
 #endif
@@ -6117,7 +6124,7 @@ int main() {
         mounts.push_back({"celestron", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", ""});
+        mounts.push_back({"onstep", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
         mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", ""});
@@ -6144,15 +6151,9 @@ int main() {
             // way into registration and into the stored entry, so "Network"
             // behaves exactly as "network" from the API and from a saved file:
             // registered as a network mount, host kept, no fallback WARN, and
-            // configureddevices lists the folded "network". OnStep has no
-            // network type, so there the folded value is refused (API) or
-            // read as "serial" (saved), naming the folded value.
-            if (vendor == "onstep") {
-                pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
-                    obj({R"("connectionType":"Network")", site}), m.bad_type_message, "{}", true,
-                    obj({R"("connectionType":"network")", site}), {"has connectionType \"network\"", warned_serial},
-                    {"Skipping persisted device"});
-            } else {
+            // configureddevices lists the folded "network" (OnStep too since
+            // #2220).
+            {
                 const std::string network = obj({R"("connectionType":"network","host":"192.0.2.60")", site});
                 pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
                     obj({R"("connectionType":"Network","host":"192.0.2.60")", site}), "", network, true, network, {},
@@ -6192,13 +6193,19 @@ int main() {
         }
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        // #380: OnStep is serial-only, so a saved "network" is unrecognised for
-        // it (the other network-capable mounts accept it). The entry keeps
-        // "network" but not its host.
-        pin("connectionType \"network\" (#380)", "onstep", "telescope", "Telescope",
-            R"({"connectionType":"network","host":"192.168.1.60"})", "Invalid connection type. Use 'auto' or 'serial'",
-            "{}", true, R"({"connectionType":"network"})",
-            {"has connectionType \"network\"", "treating it as \"serial\""}, {"Skipping persisted device"});
+        // #2220 (the #380 rule): an OnStep network entry with an empty host, or a
+        // TCP port outside 1-65535, is refused from the API naming the field,
+        // and a saved one is warned about, kept as saved and registered, so
+        // the connect refuses it.
+        pin("OnStep network with empty host (#2220)", "onstep", "telescope", "Telescope",
+            R"({"connectionType":"network","host":""})", "Host IP address is required", "{}", true,
+            R"({"connectionType":"network","host":""})", {"config normalized: Host IP address is required"},
+            {"Skipping persisted device", "treating it as \"serial\""});
+        pin("OnStep network with port 0 (#2220)", "onstep", "telescope", "Telescope",
+            R"({"connectionType":"network","host":"192.0.2.61","tcpPort":0})",
+            "tcpPort is out of range (min 1) (max 65535)", "{}", true,
+            R"({"connectionType":"network","host":"192.0.2.61","tcpPort":0})",
+            {"config normalized: tcpPort is out of range (min 1) (max 65535)"}, {"Skipping persisted device"});
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN

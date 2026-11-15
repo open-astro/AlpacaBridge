@@ -382,7 +382,8 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   shape since #527, detected on its next transaction (request/response, no reader thread) with a
   lock-free `link_lost_` latch the getter reads; since #1310 that transaction is the state poll
   (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
-  (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`). The ZWO EAF follows it since #1500 for its
+  (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`), and over its TCP network link
+  since #2220, where a hangup of the connection is the evidence (`OnStep network -` cases in the same file). The ZWO EAF follows it since #1500 for its
   SDK: `NotConnected` from a per-device call (`EAF_ERROR_REMOVED`, `CLOSED`, BLE disconnect, `INVALID_ID`) drops `Connected`
   at once, and the next Connect rebinds by serial ([ZWO](zwo.instructions.md)); since #1666 a status fault standing past
   `util::kLinkStalenessBound` is a lost link too; the ZWO EFW filter wheel and CAA rotator have the same shape since #1668. The ZWO camera drops `Connected` at once the same way since #1667

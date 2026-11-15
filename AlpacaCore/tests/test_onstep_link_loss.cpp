@@ -14,24 +14,31 @@
 // re-enumerated adapter reads as not connected, operations fail NotConnected
 // at once, a Connected=true reconnects instead of short-circuiting, and the
 // reconnect after a long outage stops the motion that ran unattended (#521).
-// The existing OnStep tests use the TCP seam, which has no device node to
-// remove, so these run the driver over a pty reached through a symlink.
+// The serial cases run the driver over a pty reached through a symlink, which
+// an unplug removes. The network cases at the end (#2220) run it over the TCP
+// command channel against a loopback FakeMountServer, where a hangup is the
+// loss (decision 0009 rule 2a).
 // The write-side loss mapping (fail_write_locked) has no case of its own: on
 // a severed pty the removed-node check before every write fires first, so a
 // pty cannot make the write itself return EIO with the node still present.
 
+#include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
@@ -45,6 +52,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "driver_rig.h"
+#include "fake_mount_server.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
 
@@ -1489,4 +1497,365 @@ TEST_CASE("OnStep link loss - a link lost during the connect's first reads keeps
     CHECK(replugged.received(":Qe#"));
     CHECK(replugged.received(":Qw#"));
     driver->set_connected(false);
+}
+
+// ── Network link (#2220) ──────────────────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// A minimal OnStepX on a TCP command channel: the pty fake's replies, every command recorded, the :GU# reply
+// settable. `port` 0 is ephemeral; a later instance can take an earlier one's port (the controller coming back).
+class NetworkOnStep {
+public:
+    explicit NetworkOnStep(std::uint16_t port = 0)
+        : state_(std::make_shared<State>()),
+          server([state = state_](const std::string& chunk) { return state->reply(chunk); }, INADDR_LOOPBACK, port) {}
+
+    int port() const { return server.port(); }
+    void set_status(const std::string& reply) {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->status = reply;
+    }
+    bool received(const std::string& command) const {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        return std::find(state_->commands.begin(), state_->commands.end(), command) != state_->commands.end();
+    }
+    bool received_any_stop() const {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        return std::any_of(state_->commands.begin(), state_->commands.end(),
+                           [](const std::string& c) { return c.rfind(":Q", 0) == 0; });
+    }
+
+private:
+    struct State {
+        std::mutex mutex;
+        std::string status = "nNpHEo190#";
+        std::vector<std::string> commands;
+        std::string reply(const std::string& chunk) {
+            std::lock_guard<std::mutex> lock(mutex);
+            commands.push_back(chunk);
+            if (chunk == ":GVP#") return "On-Step#";
+            if (chunk == ":GVN#") return "10.23a#";
+            if (chunk == ":GU#") return status;
+            if (chunk == ":GRa#") return "01:00:00.0000#";
+            if (chunk == ":GDe#") return "+10*00:00.000#";
+            if (chunk == ":GA#") return "+40*00:00#";
+            if (chunk == ":GZ#") return "000*00:00#";
+            if (chunk.rfind(":Q", 0) == 0 || chunk.rfind(":R", 0) == 0) return "";
+            if (chunk.rfind(":S", 0) == 0 || chunk == ":GXEE#") return "1";
+            return "0#";
+        }
+    };
+    std::shared_ptr<State> state_;
+
+public:
+    alpacacore::test::FakeMountServer server;
+};
+
+ConnectionInfo network_info(int port, int response_timeout_ms = 2000) {
+    ConnectionInfo info;
+    info.type = ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = response_timeout_ms;
+    return info;
+}
+
+// The message and error code of a throwing call, and how long it took.
+struct Thrown {
+    std::string message;
+    int code = 0;
+    std::chrono::steady_clock::duration took{};
+};
+Thrown thrown_by(const std::function<void()>& fn) {
+    Thrown t;
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& e) {
+        t.message = e.what();
+        t.code = e.error_code();
+    }
+    t.took = std::chrono::steady_clock::now() - start;
+    return t;
+}
+
+// A loopback listener that answers no new connect: its accept queue (backlog 0) is filled by connects that are never
+// accepted, so the kernel drops the next SYN and a connect to it waits, as one to a controller that is off the
+// network does. ok() is false when the queue could not be seen to fill.
+class SilentListener {
+public:
+    SilentListener() {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len = sizeof(addr);
+        if (listen_fd_ < 0 || ::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+            ::listen(listen_fd_, 0) != 0 || ::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+            return;
+        }
+        port_ = ntohs(addr.sin_port);
+        for (int i = 0; i < 8 && !full_; ++i) {
+            const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+            if (fd < 0) return;
+            fillers_.push_back(fd);
+            (void)::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+            struct pollfd pfd {};
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            full_ = ::poll(&pfd, 1, 300) == 0;  // this one got no answer: the queue is full
+        }
+    }
+    ~SilentListener() {
+        for (const int fd : fillers_) ::close(fd);
+        if (listen_fd_ >= 0) ::close(listen_fd_);
+    }
+    SilentListener(const SilentListener&) = delete;
+    SilentListener& operator=(const SilentListener&) = delete;
+    bool ok() const { return full_; }
+    int port() const { return port_; }
+
+private:
+    int listen_fd_ = -1;
+    int port_ = 0;
+    bool full_ = false;
+    std::vector<int> fillers_;
+};
+
+const alpacacore::catalog::DeviceKey kOnStepTelescope{"onstep", alpacacore::DeviceType::Telescope};
+
+alpacacore::catalog::DeviceCatalog onstep_catalog() {
+    alpacacore::catalog::DeviceCatalog catalog;
+    alpacacore::catalog::register_builtin_schemas(catalog);
+    alpacacore::catalog::register_builtin_factories(catalog);
+    return catalog;
+}
+
+}  // namespace
+
+// Falsified by: onstep_protocol_wrapper.cpp link_alive() not polling the socket for a hangup (the TCP link has no
+// node, so it was never lost and Connected stayed true on a closed connection)
+TEST_CASE("OnStep network - Connected drops when the controller hangs up with no client I/O",
+          "[onstep][network][connected]") {
+    WrapperReset reset;
+    NetworkOnStep mount;
+    REQUIRE(mount.server.ok());
+    // The fake clock is never advanced and the poll is paused, so no status tick runs: only link_alive() can see
+    // the hangup (decision 0005 rule 2).
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, network_info(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    pause_poll(*driver);
+    CHECK(std::fabs(driver->get_right_ascension() - 1.0) < 1e-6);
+    REQUIRE(driver->get_link_fault().empty());
+
+    REQUIRE(mount.server.drop_connections());
+
+    // The management listing alone notices the hangup: no exchange runs. The real-time wait is for the kernel to
+    // deliver the controller's FIN to the driver's socket, not for any driver timer.
+    REQUIRE(alpacacore::test::wait_until([&] { return !driver->get_link_fault().empty(); }, 2000));
+    const std::string fault = driver->get_link_fault();
+    INFO("fault: " << fault);
+    CHECK(fault.find("127.0.0.1:" + std::to_string(mount.port())) != std::string::npos);
+    CHECK(fault.find("closed the connection") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_device_state().empty());
+    const auto t = thrown_by([&] { (void)driver->get_right_ascension(); });
+    CHECK(t.code == alpacacore::AlpacaError::NotConnected);
+    CHECK(t.took < std::chrono::milliseconds(500));
+
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp connect_network() waiting a fixed 7000 ms instead of the response
+// timeout, or last_connect_error_ left empty (the refusal named neither the host nor the port)
+TEST_CASE(
+    "OnStep network - an unreachable controller fails Connect within the response timeout, naming the host "
+    "and port",
+    "[onstep][network][connected]") {
+    WrapperReset reset;
+    SilentListener silent;
+    REQUIRE(silent.ok());  // the accept queue filled: a connect to it gets no answer
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, network_info(silent.port(), 1000));
+    const auto t = thrown_by([&] { driver->set_connected(true); });
+    INFO("message: " << t.message);
+    CHECK(t.took >= std::chrono::milliseconds(900));
+    CHECK(t.took < std::chrono::milliseconds(2500));
+    CHECK(t.message.find("127.0.0.1:" + std::to_string(silent.port())) != std::string::npos);
+    CHECK(t.message.find("no answer within 1000 ms") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp connect_network() returning false without setting last_connect_error_
+// (Connect failed with "Failed to connect to OnStep mount" alone)
+TEST_CASE("OnStep network - a refused connect fails at once, naming the host and port",
+          "[onstep][network][connected]") {
+    WrapperReset reset;
+    int port = 0;
+    {
+        alpacacore::test::FakeMountServer gone;  // its port, now closed
+        REQUIRE(gone.ok());
+        port = gone.port();
+    }
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, network_info(port, 3000));
+    const auto t = thrown_by([&] { driver->set_connected(true); });
+    INFO("message: " << t.message);
+    CHECK(t.took < std::chrono::milliseconds(1000));
+    CHECK(t.message.find("could not connect to 127.0.0.1:" + std::to_string(port)) != std::string::npos);
+    CHECK(t.message.find("refused") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Decision 0009 rule 2a and #521/#1289 over TCP: the hangup is a loss stamped at once, a reconnect the controller
+// refuses keeps the stamps, and the reconnect that gets through times the whole outage (21 s here, from the last time
+// the link was seen alive) and stops the motion that ran unattended only when that is past the window, and never
+// while the mount parks. A refused reconnect that re-stamped the times would measure 1 s and stop nothing.
+// Falsified by: onstep_protocol_wrapper.cpp link_alive() not polling the socket for a hangup (no stamp, so the
+// reconnect stops nothing)
+TEST_CASE("OnStep network - the reconnect after a hangup stops motion only after a long outage, never while parking",
+          "[onstep][network][connected]") {
+    WrapperReset reset;
+    WindowReset window_reset;
+    alpacacore::test::FakeTaskClock clock;
+    auto first = std::make_unique<NetworkOnStep>();
+    REQUIRE(first->server.ok());
+    const int port = first->port();
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, network_info(port), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(first->received_any_stop());
+
+    REQUIRE(first->server.drop_connections());
+    REQUIRE_FALSE(driver->get_connected());  // the loss is seen, and stamped, here
+    first.reset();                           // the controller is off the network: the reconnect is refused
+    clock.advance(std::chrono::seconds(20));
+    const auto refused = thrown_by([&] { driver->set_connected(true); });
+    CHECK(refused.message.find("refused") != std::string::npos);
+    REQUIRE_FALSE(driver->get_connected());
+
+    NetworkOnStep back(static_cast<std::uint16_t>(port));  // the controller is back, on the same port
+    REQUIRE(back.server.ok());
+    clock.advance(std::chrono::seconds(1));  // the outage is now 21 s; 1 s since the refused reconnect
+    SECTION("outage past the window: AbortSlew's stops are sent") {
+        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::seconds(10));
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(back.received(":Q#"));
+        CHECK(back.received(":Qn#"));
+        CHECK(back.received(":Qs#"));
+        CHECK(back.received(":Qe#"));
+        CHECK(back.received(":Qw#"));
+    }
+    SECTION("outage past the window while the mount parks: the park is left to finish (#1289)") {
+        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::seconds(10));
+        back.set_status("nIEo190#");
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK_FALSE(back.received_any_stop());
+    }
+    SECTION("outage inside the window: motion is left alone") {
+        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::seconds(30));
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK_FALSE(back.received_any_stop());
+    }
+    driver->set_connected(false);
+}
+
+// Decisions 0007 and 0023: a reply is bounded in length. One that reaches the bound without its '#' fails its read at
+// once (no wait for the response timeout), counts toward the decision 0009 fault latch like a silent reply (three in
+// a row latch it; it is not a lost link), and its rest is discarded before the next command, so the next good reply
+// clears the fault.
+// Falsified by: onstep_protocol_wrapper.cpp kMaxReplyLen at 65536 (a 2000-byte unterminated reply waits out the 3 s
+// response timeout on every tick)
+TEST_CASE("OnStep network - a reply that overruns the length bound fails at once and counts toward the link fault",
+          "[onstep][network][connected]") {
+    WrapperReset reset;
+    NetworkOnStep mount;
+    REQUIRE(mount.server.ok());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, network_info(mount.port(), 3000));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    pause_poll(*driver);
+
+    mount.set_status(std::string(2000, 'x'));  // no '#'
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 3; ++i) {
+        (void)tick(*driver);
+    }
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    const std::string fault = driver->get_link_fault();
+    INFO("fault: " << fault);
+    CHECK(fault.find("not answering") != std::string::npos);
+    CHECK(fault.find("too long") != std::string::npos);
+    CHECK(driver->get_connected());  // a fault, not a loss
+
+    mount.set_status("nNpHEo190#");
+    CHECK(tick(*driver));
+    CHECK(driver->get_link_fault().empty());
+    driver->set_connected(false);
+}
+
+// #2220 through the catalog: an API entry with the host and port connects to them; a saved entry with no host or a
+// port out of range is normalized with a warning, builds its driver (it stays registered) and refuses to connect,
+// naming the field.
+// Falsified by: onstep_schema.cpp normalize_onstep() refusing "network" (the API entry is rejected), or
+// onstep_catalog.cpp building a serial ConnectionInfo for it
+TEST_CASE("OnStep network - a network entry from the catalog connects to its host and port",
+          "[onstep][network][connected][catalog]") {
+    WrapperReset reset;
+    NetworkOnStep mount;
+    REQUIRE(mount.server.ok());
+    const auto catalog = onstep_catalog();
+    alpacacore::catalog::DeviceConfig config;
+    config.set("connectionType", std::string{"network"});
+    config.set("host", std::string{"127.0.0.1"});
+    config.set("tcpPort", static_cast<std::int64_t>(mount.port()));
+    const auto normalized = catalog.normalize(kOnStepTelescope, config, alpacacore::catalog::Source::Api);
+    REQUIRE_FALSE(normalized.rejection.has_value());
+    auto driver = catalog.create(kOnStepTelescope, normalized.config, 0);
+    REQUIRE(driver != nullptr);
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(mount.received(":GVP#"));
+    driver->set_connected(false);
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp endpoint_fault() not checking the host or the port (an empty host reaches
+// getaddrinfo, a port out of range is cast and tried)
+TEST_CASE(
+    "OnStep network - a saved entry with no host or a port out of range stays registered and refuses to "
+    "connect",
+    "[onstep][network][connected][catalog]") {
+    WrapperReset reset;
+    const auto catalog = onstep_catalog();
+    struct Case {
+        const char* what;
+        std::string host;
+        std::int64_t port;
+        const char* field;
+    };
+    for (const Case& c :
+         {Case{"empty host", "", 9998, "(host)"}, Case{"port 0", "127.0.0.1", 0, "(tcpPort)"},
+          Case{"port 65536", "127.0.0.1", 65536, "(tcpPort)"},
+          Case{"port 2^32 + 1, which an int cast wraps to 1", "127.0.0.1", 4294967297LL, "(tcpPort)"}}) {
+        INFO(c.what);
+        alpacacore::catalog::DeviceConfig config;
+        config.set("connectionType", std::string{"network"});
+        config.set("host", c.host);
+        config.set("tcpPort", c.port);
+        const auto normalized = catalog.normalize(kOnStepTelescope, config, alpacacore::catalog::Source::Persisted);
+        CHECK_FALSE(normalized.rejection.has_value());
+        CHECK_FALSE(normalized.warnings.empty());
+        auto driver = catalog.create(kOnStepTelescope, normalized.config, 0);
+        REQUIRE(driver != nullptr);
+        const auto t = thrown_by([&] { driver->set_connected(true); });
+        INFO("message: " << t.message);
+        CHECK(t.message.find(c.field) != std::string::npos);
+        CHECK(t.took < std::chrono::milliseconds(500));
+        CHECK_FALSE(driver->get_connected());
+    }
 }

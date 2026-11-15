@@ -12,11 +12,10 @@
 
 // Connect/disconnect/operate concurrency stress for the OnStep telescope
 // driver, mirroring the SynScan/iOptron [stress] coverage (audit 3.0.1
-// follow-up). OnStep is USB-serial only for end users (see
-// .github/instructions/onstep.instructions.md), but
-// the protocol wrapper's ConnectionType::Network branch exists purely as a
-// test seam so this suite can drive the driver into the CONNECTED state
-// through a FakeMountServer without real hardware. The fake (AcceptingOnStep)
+// follow-up). The driver connects over USB serial or over the network
+// (ConnectionType::Network, #2220; see .github/instructions/onstep.instructions.md),
+// and this suite drives it into the CONNECTED state over the network link,
+// against a loopback FakeMountServer, without real hardware. The fake (AcceptingOnStep)
 // answers what the driver asks and accepts a GOTO, so a slew really goes out
 // (#1762). The driver has no slew or pulse-guide thread: a GOTO and a pulse
 // guide are one command each (the mount times the pulse). Its background work

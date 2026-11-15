@@ -32,11 +32,10 @@
 // serial blind-command ack drain: once an ack byte came it reads on until
 // 100 ms of silence, past its 300 ms wait.
 // OnStep keeps its own hangup handling: a hangup on the tty loses the link
-// (NotConnected, "read failed: <errno>", decision 0009), and over TCP, a test
-// seam that is never lost, a peer that hangs up reads as a hangup at once
-// instead of a timeout. Its drain after a blind command still waits at least
-// one read slice for a stray ack, as the old loop's first read did, and on a
-// line that never goes quiet it ends at its 2 s cap (#1449).
+// (NotConnected, "read failed: <errno>", decision 0009), and over TCP a peer
+// that hangs up loses the link at once too (#2220) instead of a timeout. Its drain after a blind command still waits at
+// least one read slice for a stray ack, as the old loop's first read did, and on a line that never goes quiet it ends
+// at its 2 s cap (#1449).
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
@@ -737,7 +736,8 @@ TEST_CASE("OnStep mount - a hangup while a command waits for its reply loses the
 }
 
 // Falsified by: onstep_protocol_wrapper.cpp checked_read() returning a LinkDead on the TCP fd as a timeout (the old
-// recv() loop read a closed peer as silence and timed out after 3 s with "Timeout waiting for OnStep response")
+// recv() loop read a closed peer as silence and timed out after 3 s with "Timeout waiting for OnStep response"), or
+// throwing it as a DriverException without losing the link (before #2220)
 TEST_CASE("OnStep mount - a TCP hangup while a command waits for its reply reads as a hangup",
           "[onstep][network][serial_read][issue1644]") {
     OnStepReset reset;
@@ -759,7 +759,10 @@ TEST_CASE("OnStep mount - a TCP hangup while a command waits for its reply reads
     const auto message = hangup_message([&] { (void)wrapper.send_command("Hang", true, 3000); }, took);
     dropper.join();
     INFO("message: " << message);
-    CHECK(message.find("OnStep network link lost (hangup): ") != std::string::npos);
+    CHECK(message.find("OnStep link lost (the controller at 127.0.0.1:") != std::string::npos);
+    CHECK(message.find("closed the connection") != std::string::npos);
+    CHECK(wrapper.link_lost_reason().find("closed the connection") != std::string::npos);
+    CHECK_FALSE(wrapper.link_alive());
     CHECK(took < std::chrono::seconds(2));
 }
 

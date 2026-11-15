@@ -60,6 +60,50 @@ using std::chrono::seconds;
 
 constexpr auto kLatency = milliseconds(100);
 
+// #2241: the fake mount's offset motion. The rate offsets are arcseconds per sidereal second (:SXTR/:SXTD, OnStepX
+// Mount.command.cpp), a sidereal second being this many SI seconds, and the mount moves in whole steps of this many
+// arcseconds on each axis (the TeSeek HM-17's 7182.222 steps per degree, :GXA1#/:GXA2#).
+constexpr double kSiSecondsPerSiderealSecond = 0.9972695663;
+constexpr double kStepArcsec = 0.5;
+constexpr double kRaAxisArcsecPerHour = 54000.0;  // 15 x 3600: RA is compared as the axis steps
+
+// "HH:MM:SS.SSSS#" and "sDD*MM:SS.SSS#", the high-precision :GRa#/:GDe# replies, rounded to their last digit. The
+// parsers answer NaN for a reply that does not parse (they run on the fake's thread too, where no REQUIRE may).
+std::string format_ra_reply(double hours) {
+    constexpr long long kPerHour = 3600LL * 10000LL;
+    long long total = std::llround(hours * static_cast<double>(kPerHour)) % (24LL * kPerHour);
+    if (total < 0) total += 24LL * kPerHour;
+    char out[40];
+    std::snprintf(out, sizeof(out), "%02lld:%02lld:%02lld.%04lld#", total / kPerHour, total / 600000LL % 60LL,
+                  total / 10000LL % 60LL, total % 10000LL);
+    return out;
+}
+std::string format_dec_reply(double degrees) {
+    const long long total = std::llround(std::fabs(degrees) * 3600.0 * 1000.0);
+    char out[40];
+    std::snprintf(out, sizeof(out), "%c%02lld*%02lld:%02lld.%03lld#", degrees < 0.0 ? '-' : '+', total / 3600000LL,
+                  total / 60000LL % 60LL, total / 1000LL % 60LL, total % 1000LL);
+    return out;
+}
+double parse_ra_reply(const std::string& text) {
+    int h = 0;
+    int m = 0;
+    double sec = 0.0;
+    if (std::sscanf(text.c_str(), "%d:%d:%lf", &h, &m, &sec) != 3) return std::numeric_limits<double>::quiet_NaN();
+    return h + m / 60.0 + sec / 3600.0;
+}
+double parse_dec_reply(const std::string& text) {
+    char sign = '+';
+    int d = 0;
+    int m = 0;
+    double sec = 0.0;
+    if (std::sscanf(text.c_str(), "%c%d*%d:%lf", &sign, &d, &m, &sec) != 4) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const double value = d + m / 60.0 + sec / 3600.0;
+    return sign == '-' ? -value : value;
+}
+
 // An OnStepX that answers what the driver asks, idle and tracking unless told otherwise, and counts every exchange.
 struct SnapshotMount {
     std::atomic<int> exchanges{0};
@@ -99,6 +143,64 @@ struct SnapshotMount {
     std::vector<std::string> log;     // under `mutex`
     // Runs on the server thread for each command before it is answered (under `mutex` to set, called outside it).
     std::function<void(const std::string&)> on_command;
+    // #2241: with `offsets_move` set, :GRa#/:GDe# move with the virtual clock at the offsets :SXTR/:SXTD stored (in
+    // gxtr/gxtd), in whole kStepArcsec steps of each axis; `stall_ra`/`stall_dec` stop an axis while its offset still
+    // reads back. The motion is under `mutex`; `clock` is the Rig's.
+    std::atomic<bool> offsets_move{false};
+    std::atomic<bool> stall_ra{false};
+    std::atomic<bool> stall_dec{false};
+    std::atomic<const FakeTaskClock*> clock{nullptr};
+    double ra_motion_arcsec = 0.0;
+    double dec_motion_arcsec = 0.0;
+    std::optional<FakeTaskClock::clock::time_point> motion_at;
+
+    // The motion up to now at the stored offsets. Under `mutex`.
+    void advance_motion_locked() {
+        const auto now = clock.load()->now();
+        if (motion_at) {
+            const double sidereal =
+                std::chrono::duration<double>(now - *motion_at).count() / kSiSecondsPerSiderealSecond;
+            if (!stall_ra.load()) ra_motion_arcsec += std::strtod(gxtr.c_str(), nullptr) * sidereal;
+            if (!stall_dec.load()) dec_motion_arcsec += std::strtod(gxtd.c_str(), nullptr) * sidereal;
+        }
+        motion_at = now;
+    }
+    // The whole steps the axis has made.
+    static double stepped(double arcsec) { return std::trunc(arcsec / kStepArcsec) * kStepArcsec; }
+    // What :GRa#/:GDe# answer now with the motion on. Under `mutex`.
+    std::string moving_ra_locked() {
+        advance_motion_locked();
+        double base = 12.0 + ra_seconds.load() / 3600.0;
+        if (!ra_text.empty()) base = parse_ra_reply(ra_text);
+        return format_ra_reply(base + stepped(ra_motion_arcsec) / kRaAxisArcsecPerHour);
+    }
+    std::string moving_dec_locked() {
+        advance_motion_locked();
+        const double base = dec_text.empty() ? 45.0 : parse_dec_reply(dec_text);
+        return format_dec_reply(std::clamp(base + stepped(dec_motion_arcsec) / 3600.0, -90.0, 90.0));
+    }
+    // The position :GRa#/:GDe# would answer now, without counting an exchange.
+    double ra_now() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return parse_ra_reply(moving_ra_locked());
+    }
+    double dec_now() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return parse_dec_reply(moving_dec_locked());
+    }
+    // The mount's position, without the motion so far (which goes on from here).
+    void set_position(double ra_hours, double dec_degrees) {
+        std::lock_guard<std::mutex> lock(mutex);
+        ra_text = format_ra_reply(ra_hours);
+        dec_text = format_dec_reply(dec_degrees);
+    }
+    // Offsets set at the mount by something other than this driver (a handset, another client), from now on.
+    void set_offsets_elsewhere(const std::string& ra, const std::string& dec) {
+        std::lock_guard<std::mutex> lock(mutex);
+        advance_motion_locked();
+        gxtr = ra;
+        gxtd = dec;
+    }
 
     void set_on_command(std::function<void(const std::string&)> hook) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -178,6 +280,7 @@ struct SnapshotMount {
             if (garble_position.load()) return "?#";
             {
                 std::lock_guard<std::mutex> lock(mutex);
+                if (offsets_move.load()) return moving_ra_locked();
                 if (!ra_text.empty()) return ra_text;
             }
             char out[32];
@@ -186,6 +289,7 @@ struct SnapshotMount {
         }
         if (chunk.rfind(":GDe", 0) == 0) {
             std::lock_guard<std::mutex> lock(mutex);
+            if (offsets_move.load()) return moving_dec_locked();
             return dec_text.empty() ? "+45*00:00.000#" : dec_text;
         }
         if (chunk.rfind(":GA", 0) == 0) {
@@ -221,6 +325,7 @@ struct SnapshotMount {
             if (sxt_reply != "1") return sxt_reply;
             // The firmware clamps at +/-1800 and reads back eight decimals (Mount.command.cpp, af1d26bf).
             const double value = std::clamp(std::strtod(chunk.c_str() + 6, nullptr), -1800.0, 1800.0);
+            if (offsets_move.load()) advance_motion_locked();  // the old offset up to now, the new one from here
             char text[40];
             std::snprintf(text, sizeof(text), "%.8f", value);
             (chunk[4] == 'R' ? gxtr : gxtd) = text;
@@ -279,6 +384,7 @@ struct Rig {
         driver = onstep::create_onstep_telescope_with_site(
             0, info, with_site ? std::optional<double>(-33.856784) : std::nullopt,
             with_site ? std::optional<double>(151.215297) : std::nullopt, std::nullopt, false, clock);
+        mount->clock = &clock;
     }
     ~Rig() {
         mount->mute = false;
@@ -1234,17 +1340,20 @@ TEST_CASE("OnStep snapshot - a GOTO whose :MS# send fails leaves Slewing false a
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
-// #1887 (decision 0022 rule 2): the pulse's hold window is cleared when the :Mg send throws, so IsPulseGuiding reads
-// false right after, with no virtual time advanced. :Mg is sent blind, so a silent mount is not a failed send: the
-// connection is dropped instead, which fails the write.
-TEST_CASE("OnStep snapshot - a pulse guide whose :Mg send fails leaves IsPulseGuiding false at once",
-          "[onstep][telescope][snapshot][hold-window]") {
+// #1887 (decision 0022 rule 2), #2220: the pulse's hold window is cleared when the :Mg send throws. :Mg is sent
+// blind, so a silent mount is not a failed send: the controller hangs up as :Mg arrives instead, after the call's
+// connection check. That is a lost link (decision 0009 rule 2a), so the call throws NotConnected and IsPulseGuiding
+// answers NotConnected, never a pulse still running. (Before #2220 a dropped TCP link failed the write with the link
+// still alive and IsPulseGuiding read false; no fake fails a send without a loss now, so that read is reviewed.)
+TEST_CASE("OnStep snapshot - a pulse guide whose :Mg send meets a hangup loses the link",
+          "[onstep][telescope][snapshot][hold-window][network]") {
     Rig rig;
     rig.connect();
     rig.pause();
-    REQUIRE(rig.server.drop_connections());
-    CHECK(error_of([&] { rig.driver->pulse_guide(0, 2000); }) == alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    rig.server.hang_up_on(":Mg");
+    CHECK(error_of([&] { rig.driver->pulse_guide(0, 2000); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(error_of([&] { (void)rig.driver->get_is_pulse_guiding(); }) == alpacacore::AlpacaError::NotConnected);
 }
 
 // ── Pier side (#2179) ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -2395,6 +2504,682 @@ TEST_CASE("OnStep SyncToAltAz - validation order matches SlewToAltAz", "[onstep]
         CHECK(rig.mount->count(":CM#") == 0);
         CHECK(rig.mount->count(":Sr") == 0);
     }
+}
+
+// ── #2241: RightAscension and Declination while a rate offset is set ────────────────────────────────────────────────
+// Against the loopback OnStepX whose :GRa#/:GDe# move with the virtual clock at the stored offsets in 0.5 arcsec
+// steps. The poll is paused and ticked by hand once a second, so a read lands at a known point between polls. Every
+// case reads the position through the public getters, as a client would.
+
+namespace {
+
+// A position read the same as `value` (degrees or hours): no relative slack, which Catch's default epsilon would add
+// (about 1.9 arcsec at 45 degrees), only the parse's rounding.
+Approx same_position(double value) { return Approx(value).epsilon(0.0).margin(1e-9); }
+
+// A connected, paused OnStepX whose position follows its rate offsets.
+void connect_moving(Rig& rig, const char* version = "10.23a") {
+    rig.mount->offsets_move = true;
+    connect_rates(rig, version);
+}
+
+// Moves the virtual time `span` forward from `elapsed` (since the last tick) with a poll tick at every whole second
+// since it, as the 1 s poll would run. Returns the time since the last tick.
+milliseconds run_polls(Rig& rig, milliseconds elapsed, milliseconds span) {
+    while (elapsed + span >= seconds(1)) {
+        const auto step = seconds(1) - elapsed;
+        rig.clock.advance(step);
+        REQUIRE(rig.tick(false));
+        span -= step;
+        elapsed = milliseconds(0);
+    }
+    rig.clock.advance(span);
+    return elapsed + span;
+}
+
+double served(Rig& rig, bool ra) { return ra ? rig.driver->get_right_ascension() : rig.driver->get_declination(); }
+
+// From one read of the axis to another, in axis arcseconds (RA: hours x 54000, the short way round).
+double axis_arcsec(bool ra, double from, double to) {
+    if (!ra) return (to - from) * 3600.0;
+    double hours = std::fmod(to - from, 24.0);
+    if (hours > 12.0) hours -= 24.0;
+    if (hours < -12.0) hours += 24.0;
+    return hours * kRaAxisArcsecPerHour;
+}
+
+// ConformU's method (#2241): a poll tick, `phase` later the rate write, a read, 10 s, a read. The mount polls every
+// second from the first tick. Returns the motion the two reads show, in axis arcseconds.
+double measured_motion(Rig& rig, bool ra, double rate, milliseconds phase) {
+    REQUIRE(rig.tick(false));
+    rig.clock.advance(phase);
+    if (ra) {
+        rig.driver->set_right_ascension_rate(rate);
+    } else {
+        rig.driver->set_declination_rate(rate);
+    }
+    const double before = served(rig, ra);
+    (void)run_polls(rig, phase, seconds(10));
+    return axis_arcsec(ra, before, served(rig, ra));
+}
+
+// The motion a rate gives over `si_seconds`, in axis arcseconds: DeclinationRate is arcseconds per SI second;
+// RightAscensionRate is seconds of RA per sidereal second, 15 axis arcseconds each.
+double expected_motion(bool ra, double rate, double si_seconds) {
+    return ra ? rate * 15.0 * si_seconds / kSiSecondsPerSiderealSecond : rate * si_seconds;
+}
+
+// The ASCOM rate for `arcsec` on each axis: DeclinationRate `arcsec` per SI second, as ConformU sets it, and
+// RightAscensionRate `arcsec` axis arcseconds per sidereal second (`arcsec` / 15 seconds of RA).
+double ascom_rate(bool ra, double arcsec) { return ra ? arcsec / 15.0 : arcsec; }
+
+}  // namespace
+
+// Red on the code before #2241: the getters served the last frame, up to 1 s old, so the second read lagged the mount
+// by the time since the last tick (10, 20 and 30 arcsec at 250, 500 and 750 ms). The tolerance is the model's guard,
+// 2 arcsec, 0.5 percent of the 400 arcsec the window holds.
+// Falsified by: served_sky_position_locked() returning the frame position instead of offset_model_position_locked().
+TEST_CASE("OnStep rate offsets - a 40 arcsec/s offset shows in two reads 10 s apart from any point between polls",
+          "[onstep][telescope][rates][offset-model]") {
+    for (const bool ra : {false, true}) {
+        for (const int phase_ms : {0, 250, 500, 750}) {
+            CAPTURE(ra, phase_ms);
+            Rig rig;
+            connect_moving(rig);
+            const double rate = ascom_rate(ra, 40.0);
+            const double motion = measured_motion(rig, ra, rate, milliseconds(phase_ms));
+            CHECK(motion == Approx(expected_motion(ra, rate, 10.0)).margin(2.0));
+        }
+    }
+}
+
+// Red on the code before #2241: the mount makes one 0.5 arcsec step about every 10 s at 0.05 arcsec/s, so the frame
+// read 10 s after the rate write showed no step unless a tick landed after it (0 at 250, 500 and 750 ms). The model
+// shows the commanded rate times the window, not a count of steps; the tolerance is 2 percent of the 0.5 arcsec.
+// Falsified by: offset_model_position() leaving out the elapsed time (the model would hold the anchor).
+TEST_CASE("OnStep rate offsets - a 0.05 arcsec/s offset shows in two reads 10 s apart from any point between polls",
+          "[onstep][telescope][rates][offset-model]") {
+    for (const bool ra : {false, true}) {
+        for (const int phase_ms : {0, 250, 500, 750}) {
+            CAPTURE(ra, phase_ms);
+            Rig rig;
+            connect_moving(rig);
+            const double rate = ascom_rate(ra, 0.05);
+            const double expected = expected_motion(ra, rate, 10.0);
+            CHECK(measured_motion(rig, ra, rate, milliseconds(phase_ms)) == Approx(expected).margin(0.02 * expected));
+        }
+    }
+}
+
+// The model starts from the measured position at the rate write and runs at the commanded rate with SI seconds
+// converted to sidereal ones: 40 arcsec per sidereal second is 40.11 per SI second on the RA axis.
+// Falsified by: offset_model_position() dividing by kSiSecondsPerSiderealSecond nowhere (the RA motion would be 400).
+TEST_CASE("OnStep rate offsets - the model converts SI seconds to sidereal seconds",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_right_ascension_rate(40.0 / 15.0);  // 40 axis arcseconds per sidereal second at the mount
+    const double before = rig.driver->get_right_ascension();
+    rig.clock.advance(milliseconds(900));  // inside one poll period: the model alone
+    CHECK(axis_arcsec(true, before, rig.driver->get_right_ascension()) ==
+          Approx(40.0 * 0.9 / kSiSecondsPerSiderealSecond).margin(1e-3));
+}
+
+// The guard: a poll that measures an axis more than 2 arcsec from the model re-anchors on the measured position, so
+// a stalled axis shows within one poll at 40 arcsec/s, and within about 40 s at 0.05 arcsec/s.
+// Falsified by: adopt_offset_model_frame_locked() keeping the anchor whatever the frame measured.
+TEST_CASE("OnStep rate offsets - a stalled axis re-anchors the model on the measured position",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+
+    SECTION("at 40 arcsec/s, within one poll") {
+        rig.driver->set_declination_rate(40.0);
+        (void)run_polls(rig, milliseconds(0), seconds(2));
+        rig.mount->stall_dec = true;
+        rig.clock.advance(seconds(1));
+        const double model = rig.driver->get_declination();  // the model ran on for the second
+        REQUIRE(rig.tick(false));
+        const double measured = rig.mount->dec_now();
+        CHECK(axis_arcsec(false, measured, model) == Approx(40.0).margin(1.0));
+        CHECK(rig.driver->get_declination() == same_position(measured));  // re-anchored on the poll
+    }
+    SECTION("at 0.05 arcsec/s, once the model is 2 arcsec ahead") {
+        rig.mount->stall_dec = true;
+        rig.clock.advance(milliseconds(500));
+        rig.driver->set_declination_rate(0.05);  // half way between polls: they land 0.5, 1.5, ... s after it
+        (void)run_polls(rig, milliseconds(500), seconds(39));  // the last tick 38.5 s after the write
+        rig.clock.advance(milliseconds(500));
+        REQUIRE(rig.tick(false));  // 39.5 s: 1.975 arcsec apart, the anchor holds
+        CHECK(axis_arcsec(false, rig.mount->dec_now(), rig.driver->get_declination()) == Approx(1.975).margin(1e-3));
+        rig.clock.advance(seconds(1));
+        REQUIRE(rig.tick(false));  // 40.5 s: 2.025 arcsec, past the guard
+        CHECK(rig.driver->get_declination() == same_position(rig.mount->dec_now()));
+    }
+}
+
+// The hold cap: 30 minutes after its anchor the model re-anchors on the measured position even inside the guard.
+// Falsified by: adopt_offset_model_frame_locked() skipping the kOffsetModelHold check.
+TEST_CASE("OnStep rate offsets - the model re-anchors on the measured position after 30 minutes",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_declination_rate(0.05);
+    // The mount's Dec moves 1 arcsec away from the model's (inside the 2 arcsec guard): only the cap re-anchors.
+    rig.mount->set_position(12.0, 45.0 + 1.0 / 3600.0);
+    for (int minute = 1; minute < 30; ++minute) {
+        rig.clock.advance(seconds(60));
+        REQUIRE(rig.tick(false));
+    }
+    rig.clock.advance(seconds(59));
+    REQUIRE(rig.tick(false));  // 29 min 59 s: the anchor holds
+    const double apart = axis_arcsec(false, rig.driver->get_declination(), rig.mount->dec_now());
+    CHECK(apart > 0.4);
+    CHECK(apart < 2.0);
+    rig.clock.advance(seconds(2));
+    REQUIRE(rig.tick(false));  // 30 min 1 s: re-anchored on the measurement
+    const double measured = rig.mount->dec_now();
+    CHECK(rig.driver->get_declination() == same_position(measured));
+    rig.clock.advance(milliseconds(500));  // and the model runs on from there
+    CHECK(axis_arcsec(false, measured, rig.driver->get_declination()) == Approx(0.05 * 0.5).margin(1e-6));
+}
+
+// A stalled link: the model extrapolates for kSnapshotMaxAge (3 s) after the last good poll, then the last frame is
+// served as it is (stale, never refused).
+// Falsified by: offset_model_position_locked() ignoring the reading's stale flag.
+TEST_CASE("OnStep rate offsets - the model stops 3 s after the last good poll",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    const double frame = rig.driver->get_declination();
+    rig.driver->set_declination_rate(40.0);
+    rig.mount->mute = true;
+    rig.clock.advance(seconds(1));
+    CHECK(rig.tick(false));  // two failed ticks: no fault latched
+    rig.clock.advance(seconds(1));
+    CHECK(rig.tick(false));
+    REQUIRE(rig.driver->get_link_fault().empty());
+    rig.clock.advance(milliseconds(900));  // 2.9 s after the last good poll
+    CHECK(axis_arcsec(false, frame, rig.driver->get_declination()) == Approx(40.0 * 2.9).margin(1e-6));
+    rig.clock.advance(milliseconds(200));  // 3.1 s
+    CHECK(rig.driver->get_declination() == same_position(frame));
+    CHECK(has_entry(*rig.driver, "Declination"));
+}
+
+// A rate write re-anchors under the old offsets first, so the new rate never applies to the time before it.
+// Falsified by: set_rate_offset() assigning the new offset without reanchor_offset_model_locked() before the send.
+TEST_CASE("OnStep rate offsets - a rate write re-anchors under the old rate first",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_declination_rate(40.0);
+    (void)run_polls(rig, milliseconds(0), milliseconds(3500));
+    const double before = rig.driver->get_declination();
+    CHECK(axis_arcsec(false, rig.mount->dec_now(), before) == Approx(0.0).margin(kStepArcsec + 1e-6));
+    rig.driver->set_declination_rate(10.0);
+    CHECK(rig.driver->get_declination() == same_position(before));  // no jump at the write
+    (void)run_polls(rig, milliseconds(500), seconds(1));
+    CHECK(axis_arcsec(false, before, rig.driver->get_declination()) == Approx(10.0).margin(1e-6));
+}
+
+// A TrackingRate change that zeroes the offsets re-anchors first: the position holds there until a poll measures it,
+// instead of jumping back to the older frame.
+// Falsified by: set_tracking_rate() zeroing the offsets without reanchor_offset_model_locked().
+TEST_CASE("OnStep rate offsets - a TrackingRate change that zeroes the offsets does not move the position",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_declination_rate(40.0);
+    (void)run_polls(rig, milliseconds(0), milliseconds(2500));
+    const double before = rig.driver->get_declination();
+    rig.mount->set_status(kLunarStatus);
+    rig.driver->set_tracking_rate(1);
+    REQUIRE(rig.driver->get_declination_rate() == 0.0);
+    CHECK(rig.driver->get_declination() == same_position(before));
+    rig.clock.advance(milliseconds(300));
+    CHECK(rig.driver->get_declination() == same_position(before));  // the offsets are zero: no motion
+    rig.clock.advance(milliseconds(200));
+    REQUIRE(rig.tick(false));  // the frame again, where the mount stopped
+    CHECK(axis_arcsec(false, before, rig.driver->get_declination()) == Approx(0.0).margin(kStepArcsec + 1e-6));
+}
+
+// An offset change the poll finds (set at the handset or by another client) re-anchors under the old offsets first.
+// Falsified by: read_rate_offsets_locked() storing the offsets without set_rate_offsets_locked()'s re-anchor.
+TEST_CASE("OnStep rate offsets - an offset change the poll finds re-anchors under the old offsets",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_declination_rate(1.0);
+    (void)run_polls(rig, milliseconds(0), seconds(1));
+    const double at_tick = rig.driver->get_declination();
+    rig.clock.advance(seconds(1));
+    // The handset sets 0.25 arcsec/s; the frame's compensation letter changes, so the tick reads the offsets again.
+    rig.mount->set_offsets_elsewhere("0.00000000", "0.24931739");
+    rig.mount->set_status(kCompensatedStatus);
+    REQUIRE(rig.tick(false));
+    REQUIRE(rig.driver->get_declination_rate() == Approx(0.25).margin(1e-6));
+    rig.clock.advance(milliseconds(500));
+    CHECK(axis_arcsec(false, at_tick, rig.driver->get_declination()) == Approx(1.0 + 0.25 * 0.5).margin(1e-4));
+}
+
+// A sync anchors the model at the synced position.
+// Falsified by: sync_to_mount_locked() leaving the model's anchor where it was.
+TEST_CASE("OnStep rate offsets - a sync anchors the model at the synced position",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_declination_rate(40.0);
+    (void)run_polls(rig, milliseconds(0), milliseconds(2500));
+    rig.driver->sync_to_coordinates(6.5, 20.0);
+    CHECK(rig.driver->get_right_ascension() == same_position(6.5));
+    CHECK(rig.driver->get_declination() == same_position(20.0));
+    rig.clock.advance(milliseconds(400));
+    CHECK(axis_arcsec(false, 20.0, rig.driver->get_declination()) == Approx(16.0).margin(1e-6));
+}
+
+// RA stays in [0, 24) hours and Dec within +/-90 degrees under the model.
+// Falsified by: offset_model_position() without util::wrap_hours() or the clamp.
+TEST_CASE("OnStep rate offsets - the model wraps RA at 24 h and clamps Dec at the poles",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    SECTION("RA wraps") {
+        // 2.67 s of RA short of 24 h. 40 axis arcsec per sidereal second is 2.674 s of RA per SI second.
+        constexpr double kStartSeconds = 2.67;
+        const double ra_per_si_second = 40.0 / 15.0 / kSiSecondsPerSiderealSecond;
+        rig.mount->set_position(24.0 - kStartSeconds / 3600.0, 45.0);
+        REQUIRE(rig.tick(false));
+        rig.driver->set_right_ascension_rate(40.0 / 15.0);
+        rig.clock.advance(milliseconds(500));
+        CHECK((24.0 - rig.driver->get_right_ascension()) * 3600.0 ==
+              Approx(kStartSeconds - ra_per_si_second * 0.5).margin(1e-6));
+        rig.clock.advance(milliseconds(500));
+        // The model has passed 24 h and the mount, 40 whole steps on, has not: the guard compares the short way round
+        // and keeps the anchor.
+        REQUIRE(rig.tick(false));
+        REQUIRE(rig.mount->ra_now() > 23.9);
+        rig.clock.advance(milliseconds(500));
+        const double ra = rig.driver->get_right_ascension();
+        CHECK(ra >= 0.0);
+        CHECK(ra < 24.0);
+        CHECK(ra * 3600.0 == Approx(ra_per_si_second * 1.5 - kStartSeconds).margin(1e-6));
+    }
+    for (const double pole : {90.0, -90.0}) {
+        DYNAMIC_SECTION("Dec clamps at " << pole) {
+            rig.mount->set_position(12.0, pole - std::copysign(0.01, pole));
+            REQUIRE(rig.tick(false));
+            rig.driver->set_declination_rate(std::copysign(40.0, pole));
+            rig.clock.advance(seconds(1));
+            CHECK(rig.driver->get_declination() == pole);
+        }
+    }
+}
+
+// The model applies only on OnStepX, with a non-zero offset, while the frame says the mount tracks and is not slewing,
+// guiding, moving an axis, homing, parking or parked: otherwise two reads between polls serve the same frame.
+// Not red on the code before #2241 (the frame was always served): it pins what the model must not change.
+// Falsified by: offset_model_allowed_locked() returning true whatever the frame's status. The 4.x section pins the
+// 4.x behaviour only: 4.x never reads an offset and refuses the writes, so no offset is stored there and no model
+// runs; the `!onstepx_` term in offset_model_allowed_locked() is defensive and this section does not falsify it.
+TEST_CASE("OnStep rate offsets - no model while the mount is not just tracking, nor on OnStep 4.x",
+          "[onstep][telescope][rates][offset-model]") {
+    const std::vector<std::pair<const char*, const char*>> states = {
+        {"slewing", kGotoStatus},       {"parked", kParkedStatus},       {"not tracking", kNotTrackingStatus},
+        {"pulse guiding", "NpGEW180#"}, {"moving an axis", "NpgEW180#"}, {"homing", "NphEW180#"},
+        {"parking", "NpIEW180#"},
+    };
+    for (const auto& [name, status] : states) {
+        CAPTURE(name);
+        Rig rig;
+        connect_moving(rig);
+        REQUIRE(rig.tick(false));
+        rig.driver->set_declination_rate(40.0);
+        rig.mount->set_status(status);
+        rig.clock.advance(seconds(1));
+        REQUIRE(rig.tick(false));
+        const double frame = rig.mount->dec_now();
+        CHECK(rig.driver->get_declination() == same_position(frame));
+        rig.clock.advance(milliseconds(800));
+        CHECK(rig.driver->get_declination() == same_position(frame));
+    }
+    SECTION("OnStep 4.x") {
+        Rig rig;
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxtd = "39.89078300";  // an offset at the mount the driver never reads on 4.x
+        }
+        connect_moving(rig, "4.24q");
+        REQUIRE(rig.tick(false));
+        const double frame = rig.driver->get_declination();
+        rig.clock.advance(milliseconds(800));
+        CHECK(rig.driver->get_declination() == frame);
+        CHECK(rig.driver->get_declination_rate() == 0.0);
+    }
+}
+
+// DeviceState serves the same position as the getters (maintainer decision on #2241); its TimeStamp stays the
+// poll's measurement time.
+// Falsified by: get_right_ascension() reading the frame while a DeviceState path reads the model, or the reverse.
+TEST_CASE("OnStep rate offsets - DeviceState serves the getters' position",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    const double frame = rig.driver->get_declination();
+    rig.driver->set_declination_rate(40.0);
+    rig.clock.advance(milliseconds(700));
+    const auto state = rig.driver->get_device_state();
+    const auto entry = std::find_if(state.begin(), state.end(), [](const auto& e) { return e.name == "Declination"; });
+    REQUIRE(entry != state.end());
+    const double from_state = std::get<double>(entry->value);
+    CHECK(from_state == same_position(rig.driver->get_declination()));
+    CHECK(axis_arcsec(false, frame, from_state) == Approx(28.0).margin(1e-6));  // the model, not the frame
+}
+
+// ── #2241 review: what the driver itself does while an offset runs ─────────────────────────────────────────────────
+
+namespace {
+
+// DeclinationRate 40 written right after a tick, a tick 1 s later, then 400 ms on: the model serves the Dec that tick
+// measured plus 16 arcsec. Returns that measured Dec (what a getter serves when the frame is served).
+double model_running(Rig& rig) {
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_declination_rate(40.0);
+    rig.clock.advance(seconds(1));
+    REQUIRE(rig.tick(false));
+    const double frame = rig.mount->dec_now();
+    rig.clock.advance(milliseconds(400));
+    REQUIRE(axis_arcsec(false, frame, rig.driver->get_declination()) == Approx(16.0).margin(1e-4));
+    return frame;
+}
+
+// `wait` on, a tick: the model anchors on that measurement and runs at 40 arcsec/s from it again.
+void model_restarts(Rig& rig, milliseconds wait) {
+    rig.clock.advance(wait);
+    REQUIRE(rig.tick(false));
+    const double measured = rig.mount->dec_now();
+    CHECK(rig.driver->get_declination() == same_position(measured));
+    rig.clock.advance(milliseconds(400));
+    CHECK(axis_arcsec(false, measured, rig.driver->get_declination()) == Approx(16.0).margin(1e-4));
+}
+
+// The mount lands 1 arcsec north of where the offset took it (inside the 2 arcsec guard), `wait` on a tick measures
+// it, and the getters serve that measurement: the model anchored on it, not on its anchor from before the command.
+void lands_on_measurement(Rig& rig, milliseconds wait) {
+    rig.mount->set_position(12.0, 45.0 + 1.0 / 3600.0);
+    rig.clock.advance(wait);
+    REQUIRE(rig.tick(false));
+    CHECK(rig.driver->get_declination() == same_position(rig.mount->dec_now()));
+}
+
+// Runs one tick on its own thread, stopped after its sample until `release()`; `done` once it has published.
+struct HeldTick {
+    alpacacore::test::Latch sampled;
+    std::atomic<bool> once{false};
+    std::atomic<bool> done{false};
+    std::thread thread;
+    Rig& rig;
+
+    explicit HeldTick(Rig& r) : rig(r) {
+        onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [this] {
+            if (!once.exchange(true)) sampled.block();
+        });
+        thread = std::thread([this] {
+            (void)rig.tick(false);
+            done = true;
+        });
+        REQUIRE(sampled.wait_entered());
+    }
+    // From the mount's server thread, inside a command's exchange: the tick publishes now.
+    void publish_now() {
+        sampled.release();
+        const auto give_up = std::chrono::steady_clock::now() + seconds(5);
+        while (!done.load() && std::chrono::steady_clock::now() < give_up) std::this_thread::sleep_for(milliseconds(1));
+    }
+    ~HeldTick() {
+        sampled.release();
+        if (thread.joinable()) thread.join();
+        onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
+    }
+    HeldTick(const HeldTick&) = delete;
+    HeldTick& operator=(const HeldTick&) = delete;
+};
+
+}  // namespace
+
+// A tick that sampled before a write that sets the offsets to zero, and publishes after it, must not end the hold
+// of the position the old offsets reached: the getters would jump back to the older frame (20 arcsec at 40 arcsec/s
+// and 500 ms). Only a frame measured after the write ends it.
+// Falsified by: adopt_offset_model_frame_locked() dropping the model on a zero offset before the
+// offset_model_floor_ check.
+TEST_CASE("OnStep rate offsets - a tick sampled before a write that zeroes the offsets does not move the position",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_declination_rate(40.0);
+    rig.clock.advance(seconds(1));
+    REQUIRE(rig.tick(false));
+    rig.clock.advance(seconds(1));
+    double before = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("DeclinationRate 0") {
+        std::atomic<bool> once{false};
+        onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [&] {
+            if (once.exchange(true)) return;
+            rig.clock.advance(milliseconds(500));
+            before = rig.driver->get_declination();
+            rig.driver->set_declination_rate(0.0);
+        });
+        REQUIRE(rig.tick(false));  // sampled 500 ms before the write, published after it
+        onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
+    }
+    SECTION("a TrackingRate change, the tick publishing during its rate command") {
+        HeldTick held(rig);
+        rig.clock.advance(milliseconds(500));
+        before = rig.driver->get_declination();
+        rig.mount->set_on_command([&](const std::string& chunk) {
+            if (chunk.rfind(":TL", 0) == 0) held.publish_now();
+        });
+        rig.driver->set_tracking_rate(1);
+        rig.mount->set_on_command(nullptr);
+        REQUIRE(held.done.load());
+        REQUIRE(rig.driver->get_declination_rate() == 0.0);
+    }
+    CHECK(rig.driver->get_declination() == same_position(before));
+    rig.clock.advance(milliseconds(500));
+    REQUIRE(rig.tick(false));  // measured after the write: the frame again, where the mount stopped
+    CHECK(rig.driver->get_declination() == same_position(rig.mount->dec_now()));
+    CHECK(axis_arcsec(false, before, rig.driver->get_declination()) == Approx(0.0).margin(kStepArcsec + 1e-6));
+}
+
+// A rate write while the frame is stale (no good poll for 3 s) starts no model from that frame: carried forward under
+// the old offset it would be 1.75 arcsec off a stalled axis, inside the guard, so the next poll would keep it.
+// Falsified by: reanchor_offset_model_locked() carrying a stale frame forward (no reading->stale check).
+TEST_CASE("OnStep rate offsets - a rate write on a stale frame starts the model from the next measurement",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    rig.driver->set_declination_rate(0.5);
+    rig.mount->stall_dec = true;
+    const double frame = rig.mount->dec_now();
+    rig.clock.advance(milliseconds(3500));  // no poll: the frame is 3.5 s old
+    CHECK(rig.driver->get_declination() == same_position(frame));
+    rig.driver->set_declination_rate(0.25);
+    CHECK(rig.driver->get_declination() == same_position(frame));
+    REQUIRE(rig.tick(false));
+    CHECK(rig.driver->get_declination() == same_position(rig.mount->dec_now()));
+    rig.clock.advance(milliseconds(400));
+    CHECK(axis_arcsec(false, frame, rig.driver->get_declination()) == Approx(0.25 * 0.4).margin(1e-6));
+}
+
+// An offset the poll finds while the mount tracks at another rate runs no model: ITelescopeV4 reads the offsets as 0
+// there, and the model has no lunar, solar or King term.
+// Falsified by: offset_model_allowed_locked() not requiring tracking_rate_known_ 0 while an offset is set.
+TEST_CASE("OnStep rate offsets - an offset found at the lunar rate runs no model",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    connect_moving(rig);
+    REQUIRE(rig.tick(false));
+    const auto reads = rig.mount->count(":GXTD");
+    rig.mount->set_offsets_elsewhere("0.00000000", "39.89078300");  // 40 arcsec per SI second at the mount
+    show(rig, kLunarStatus);  // the rate letter changes: the tick reads the offsets again
+    REQUIRE(rig.mount->count(":GXTD") > reads);
+    REQUIRE(rig.driver->get_tracking_rate() == 1);
+    const double frame = rig.mount->dec_now();
+    CHECK(rig.driver->get_declination() == same_position(frame));
+    rig.clock.advance(milliseconds(400));
+    CHECK(rig.driver->get_declination() == same_position(frame));
+}
+
+// A PulseGuide: the frame is served from the moment it goes out until a frame sampled 50 ms or more after its end
+// anchors the model again.
+// Falsified by: offset_model_allowed_locked() not refusing an armed pulse_hold_ (the read inside the :Mg exchange);
+// pulse_guide() not calling drop_offset_model_locked() (the read past the end); adopt_offset_model_frame_locked()
+// ignoring after_pulses (the read after the tick inside the settle).
+TEST_CASE("OnStep rate offsets - a PulseGuide serves the frame until a frame measured after its end",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    const double frame = model_running(rig);
+    double during = std::numeric_limits<double>::quiet_NaN();
+    rig.mount->set_on_command([&](const std::string& chunk) {
+        if (chunk.rfind(":Mg", 0) == 0) during = rig.driver->get_declination();
+    });
+    rig.driver->pulse_guide(0, 500);  // North, 0.5 s
+    rig.mount->set_on_command(nullptr);
+    CHECK(during == same_position(frame));  // the hold is armed before the command goes out
+    CHECK(rig.driver->get_declination() == same_position(frame));
+    rig.clock.advance(milliseconds(510));  // past the pulse's end, no tick yet
+    CHECK(rig.driver->get_declination() == same_position(frame));
+    rig.clock.advance(milliseconds(10));
+    REQUIRE(rig.tick(false));  // sampled 20 ms after the end, inside the 50 ms settle
+    const double settling = rig.mount->dec_now();
+    CHECK(rig.driver->get_declination() == same_position(settling));
+    rig.clock.advance(milliseconds(200));
+    CHECK(rig.driver->get_declination() == same_position(settling));
+    model_restarts(rig, milliseconds(800));
+}
+
+// A MoveAxis: no model while the axis moves, and none from a tick that sampled the move (or a pulse a stop ended)
+// and published after the stop.
+// Falsified by: offset_model_allowed_locked() not refusing manual_axis_slewing_ (a frame measured during the move);
+// move_axis()'s stop not calling drop_offset_model_locked() (a tick published after the stop, for a move and for a
+// pulse).
+TEST_CASE("OnStep rate offsets - a MoveAxis serves the frame until a frame measured after it",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    const double frame = model_running(rig);
+
+    SECTION("a frame measured during the move") {
+        rig.driver->move_axis(0, 0.5);
+        CHECK(rig.driver->get_declination() == same_position(frame));
+        rig.clock.advance(milliseconds(600));
+        REQUIRE(rig.tick(false));
+        const double moving = rig.mount->dec_now();
+        CHECK(rig.driver->get_declination() == same_position(moving));
+        rig.clock.advance(milliseconds(400));
+        CHECK(rig.driver->get_declination() == same_position(moving));
+        rig.driver->move_axis(0, 0.0);
+        model_restarts(rig, milliseconds(600));
+    }
+    SECTION("a tick that sampled the move, published after the stop") {
+        rig.driver->move_axis(0, 0.5);
+        rig.clock.advance(milliseconds(600));
+        std::atomic<bool> once{false};
+        double moved = std::numeric_limits<double>::quiet_NaN();
+        onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [&] {
+            if (once.exchange(true)) return;
+            moved = rig.mount->dec_now();          // what the tick sampled
+            rig.clock.advance(milliseconds(100));  // the stop goes out after the sample
+            rig.driver->move_axis(0, 0.0);
+        });
+        REQUIRE(rig.tick(false));
+        onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
+        CHECK(rig.driver->get_declination() == same_position(moved));
+        rig.clock.advance(milliseconds(400));
+        CHECK(rig.driver->get_declination() == same_position(moved));
+        model_restarts(rig, milliseconds(500));
+    }
+    SECTION("a tick that sampled a pulse, published after the stop that ended it") {
+        rig.driver->pulse_guide(0, 3000);  // North, 3 s
+        rig.clock.advance(milliseconds(600));
+        std::atomic<bool> once{false};
+        double pulsed = std::numeric_limits<double>::quiet_NaN();
+        onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, [&] {
+            if (once.exchange(true)) return;
+            pulsed = rig.mount->dec_now();         // what the tick sampled
+            rig.clock.advance(milliseconds(100));  // the stop goes out after the sample
+            rig.driver->move_axis(1, 0.0);         // :Qn#/:Qs# end the pulse
+        });
+        REQUIRE(rig.tick(false));
+        onstep::set_status_poll_after_sample_hook_for_testing(*rig.driver, nullptr);
+        CHECK(rig.driver->get_declination() == same_position(pulsed));
+        rig.clock.advance(milliseconds(400));
+        CHECK(rig.driver->get_declination() == same_position(pulsed));
+        model_restarts(rig, milliseconds(600));
+    }
+}
+
+// A GOTO, Park or FindHome: no model from the moment the command goes out, and the first frame measured after it
+// anchors the model on its measurement, even one inside the guard of the anchor from before.
+// Falsified by: offset_model_allowed_locked() not refusing slew_hold_ (the read inside the :MS# exchange) or
+// park_home_request_ (a Park the mount refused "in motion"); dispatch_goto_locked() or finish_park_or_home_locked()
+// not calling drop_offset_model_locked() (the landing frame).
+TEST_CASE("OnStep rate offsets - a GOTO, Park or FindHome serves the frame until a frame measured after it",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    const double frame = model_running(rig);
+
+    SECTION("a GOTO") {
+        double during = std::numeric_limits<double>::quiet_NaN();
+        rig.mount->set_on_command([&](const std::string& chunk) {
+            if (chunk.rfind(":MS", 0) == 0) during = rig.driver->get_declination();
+        });
+        rig.driver->slew_to_coordinates_async(12.0, 45.0);
+        rig.mount->set_on_command(nullptr);
+        CHECK(during == same_position(frame));  // the slew hold is armed before :MS# goes out
+        CHECK(rig.driver->get_declination() == same_position(frame));
+        lands_on_measurement(rig, milliseconds(600));
+    }
+    SECTION("a Park the mount refuses while in motion") {
+        rig.mount->refuse_park = true;
+        rig.driver->park();  // pending: the body retries
+        CHECK(rig.driver->get_declination() == same_position(frame));
+    }
+    SECTION("a Park the mount takes") {
+        rig.driver->park();
+        CHECK(rig.driver->get_declination() == same_position(frame));
+        lands_on_measurement(rig, milliseconds(600));
+    }
+    SECTION("a FindHome the mount takes") {
+        rig.driver->find_home();
+        CHECK(rig.driver->get_declination() == same_position(frame));
+        lands_on_measurement(rig, milliseconds(600));
+    }
+}
+
+// AbortSlew and a Tracking write drop the model; the next frame measured anchors it again.
+// Falsified by: abort_slew() or set_tracking() not calling drop_offset_model_locked().
+TEST_CASE("OnStep rate offsets - AbortSlew and a Tracking write serve the frame until the next measurement",
+          "[onstep][telescope][rates][offset-model]") {
+    Rig rig;
+    const double frame = model_running(rig);
+    SECTION("AbortSlew") { rig.driver->abort_slew(); }
+    SECTION("Tracking true") { rig.driver->set_tracking(true); }
+    CHECK(rig.driver->get_declination() == same_position(frame));
+    rig.clock.advance(milliseconds(300));
+    CHECK(rig.driver->get_declination() == same_position(frame));
+    model_restarts(rig, milliseconds(300));
 }
 
 #endif  // !_WIN32

@@ -196,6 +196,14 @@ public:
         return false;
     }
 
+    /// The controller hangs up mid-exchange: the next chunk that starts with `prefix` is taken and
+    /// not answered, and its connection is reset (RST) at once, so the driver meets the hangup while
+    /// it waits for the reply or drains after a blind command. Once; the listener stays up.
+    void hang_up_on(const std::string& prefix) {
+        std::lock_guard<std::mutex> lock(conn_mutex_);
+        hang_up_prefix_ = prefix;
+    }
+
     /// Replies "0#" to anything: valid terminator for every '#'-framed
     /// protocol in the family, but not a valid identity or measurement.
     /// ZWO driver fixtures must answer :GVP# with a supported AM model
@@ -243,7 +251,21 @@ private:
             if (n <= 0) {
                 break;  // peer disconnected (the storm churns connections)
             }
-            const std::string reply = responder_(std::string(buf, static_cast<std::size_t>(n)));
+            const std::string chunk(buf, static_cast<std::size_t>(n));
+            bool hang_up = false;
+            {
+                std::lock_guard<std::mutex> lock(conn_mutex_);
+                if (!hang_up_prefix_.empty() && chunk.rfind(hang_up_prefix_, 0) == 0) {
+                    hang_up_prefix_.clear();
+                    hang_up = true;
+                }
+            }
+            if (hang_up) {
+                const struct linger abortive = {1, 0};
+                static_cast<void>(::setsockopt(fd, SOL_SOCKET, SO_LINGER, &abortive, sizeof(abortive)));
+                break;  // the close below sends the RST
+            }
+            const std::string reply = responder_(chunk);
             if (!reply.empty()) {
                 static_cast<void>(::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL));
                 replies_sent_.fetch_add(1);
@@ -268,6 +290,7 @@ private:
     std::mutex conn_mutex_;
     std::vector<int> conn_fds_;
     std::vector<std::thread> conn_threads_;
+    std::string hang_up_prefix_;  // under conn_mutex_
 };
 
 }  // namespace alpacacore::test
