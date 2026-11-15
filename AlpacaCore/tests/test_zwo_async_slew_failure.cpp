@@ -1759,7 +1759,7 @@ TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO
 // each timed out silently (3 x 5 s, an empty reply counts as accepted). The destructor then ran after the GOTO was
 // over, and ":Sd"/":MS" reached the count only when the fake read them after release().
 // Falsified by: zwo_telescope_driver.cpp set_connected(): Connected=false without protocol_.cancel_pending_io(), so
-// the fence waits for the held ":Sr" until the 5 s link timeout.
+// the fence waits for the held ":SMTI" until the 5 s link timeout.
 TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and the poll live",
           "[zwo][telescope][async][operation-slot][stress-guard]") {
     Rig rig(5000);
