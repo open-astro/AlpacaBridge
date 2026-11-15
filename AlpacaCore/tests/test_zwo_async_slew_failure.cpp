@@ -1765,7 +1765,10 @@ TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and t
     mount.hold_reply(":Sr");
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
-    REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 3000));  // the drain queues behind the held exchange
+    // The pulse must queue at once and leave its drain waiting for the link; a pulse that waits for the GOTO to
+    // finish runs the destructor after the GOTO is over, and the test checks nothing (#2256).
+    const auto pulse_took = timed([&] { REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 3000)); });
+    CHECK(pulse_took < kInitiatorBudget);
     auto destroy = std::async(std::launch::async, [&] { rig.driver.reset(); });
     const bool destroyed = destroy.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
     mount.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the held reply
