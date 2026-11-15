@@ -1782,10 +1782,14 @@ TEST_CASE("ZWO async - AbortSlew and Connected=false together during a held GOTO
     driver->set_connected(false);
 }
 
-// The destructor with live bodies: a GOTO held on ":Sr", a pulse drain waiting for the same link and the poll. The
-// destructor disconnects (cancelling the held read), fences and reaps the GOTO, then reaps the teardown, the pulse
-// drain and the poll, without waiting out the link timeout. Under ThreadSanitizer ([stress-guard]) it also checks
-// that no body outlives the members it touches.
+// The destructor with live bodies: a GOTO held on its time write (":SMTI"), a pulse drain waiting for the same link
+// and the poll. The destructor disconnects (cancelling the held read), fences and reaps the GOTO, then reaps the
+// teardown, the pulse drain and the poll, without waiting out the link timeout. Under ThreadSanitizer ([stress-guard])
+// it also checks that no body outlives the members it touches.
+// #2256: the hold is on ":SMTI", not ":Sr". The GOTO body holds target_write_mutex_ from ":Sr" through ":MS", and
+// PulseGuide queues under it (open-astro#2093), so a hold on ":Sr" blocked the pulse until ":Sr", ":Sd" and ":MS" had
+// each timed out silently (3 x 5 s, an empty reply counts as accepted). The destructor then ran after the GOTO was
+// over, and ":Sd"/":MS" reached the count only when the fake read them after release().
 // Falsified by: zwo_telescope_driver.cpp set_connected(): Connected=false without protocol_.cancel_pending_io(), so
 // the fence waits for the held ":Sr" until the 5 s link timeout.
 TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and the poll live",
@@ -1794,7 +1798,7 @@ TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and t
     auto& mount = rig.mount;
     rig.connect();
 
-    mount.hold_reply(":Sr");
+    mount.hold_reply(":SMTI");
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
     // The pulse must queue at once and leave its drain waiting for the link; a pulse that waits for the GOTO to
@@ -1806,6 +1810,7 @@ TEST_CASE("ZWO async - the destructor reaps a held GOTO with a pulse drain and t
     mount.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the held reply
     destroy.wait();
     CHECK(destroyed);
+    CHECK(mount.count(":Sr") == 0);
     CHECK(mount.count(":Sd") == 0);
     CHECK(mount.count(":MS") == 0);
 }
