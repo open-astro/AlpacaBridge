@@ -1565,8 +1565,12 @@ public:
         }
         join_pulse_bodies();
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        clear_pulse_guiding_locked();
+        {
+            // A refusal here clears the windows of pulses the join just cut short; the clear below consumes them.
+            const CutShortPulseRelease cut_short(*this, -1);
+            check_connected();
+            clear_pulse_guiding_locked();
+        }
         check_not_parked_locked("SlewToCoordinates");
         claim_slew_slot_locked();
         parking_ = false;  // a park body in flight no longer clears it: the claim ended it
@@ -1619,6 +1623,8 @@ public:
         auto prev_override = util::TaskClock::clock::time_point::min();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // A refusal below clears the windows of pulses the join just cut short.
+            const CutShortPulseRelease cut_short(*this, -1);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
             displaced = claim_slew_slot_locked();

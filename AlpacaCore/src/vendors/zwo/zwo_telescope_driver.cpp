@@ -3401,7 +3401,8 @@ private:
     // last (the leaf). Not a state lock: no getter takes it, so it may be held across wire I/O, including the
     // pulse-send wait in reset_position_offsets(). Never taken by a body, fence_goto(), a getter or set_connected().
     std::mutex initiator_mutex_;
-    std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
+    // Test seam; set before the first slew. A failure it injects is a thrown std::exception (the pulse drain's catch).
+    std::function<void(std::string_view)> goto_send_hook_;
     std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting
     util::OperationGeneration goto_generation_;
     util::OperationGeneration pulse_generation_;
