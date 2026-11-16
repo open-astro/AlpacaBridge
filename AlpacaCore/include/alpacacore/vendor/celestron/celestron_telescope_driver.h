@@ -57,6 +57,9 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs between the poll's sample and its publish, without any driver lock held; null clears it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs once a poll tick has planned its sample (whether it reads Slewing), before its site read and sample exchanges,
+/// without any driver lock held; null clears it.
+void set_status_poll_after_plan_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 /// Runs after a slewing read (the slew-complete wait, the park poll), before its result is applied, without any
 /// driver lock held; null clears it.
 void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);

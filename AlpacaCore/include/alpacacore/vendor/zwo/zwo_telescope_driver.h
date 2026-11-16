@@ -34,9 +34,16 @@ void set_goto_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 /// Test-only: replaces the disconnect teardown slot's thread factory (call before the first Connected=false).
 void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test-only: replaces the pulse drain slot's thread factory (call before the first PulseGuide), so a test can refuse
+/// a start.
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test-only: called with the frame prefix (":Sr", ":MS", ...) after a GOTO wire call is counted at the send gate and
-/// before it is sent, and with ":Mg" after a guide pulse step passed its check and before it is sent (call before the
-/// first slew or pulse).
+/// before it is sent, with ":Mg" after a guide pulse step passed its check and before it is sent, and with ":Rv",
+/// ":hC" and ":hP" right before a MoveAxis jog's, a FindHome's and a Park's command (after its slew window is armed).
+/// A hook that throws at ":Mg", ":Rv", ":hC" or ":hP" stands for that command failing to send (call before the first
+/// slew or pulse). It must report that failure by throwing a std::exception, as the tests' injected_send_failure()
+/// does: the pulse drain catches only std::exception around its ":Mg" call.
 void set_goto_send_hook_for_testing(TelescopeDriver& driver, std::function<void(std::string_view)> hook);
 
 /// Test-only: called with the initiator's name ("Park", "FindHome", "MoveAxis", "AbortSlew", "Unpark") after its GOTO

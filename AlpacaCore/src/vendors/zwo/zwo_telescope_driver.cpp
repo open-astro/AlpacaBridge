@@ -350,6 +350,7 @@ public:
                     manual_axis_slewing_[1] = false;
                     slew_hold_.clear();
                     pulse_hold_.clear();
+                    pulse_sent_end_ = std::chrono::steady_clock::time_point::min();
                     ra_offset_hours_ = 0.0;
                     dec_offset_deg_ = 0.0;
                     park_command_active_ = false;
@@ -404,6 +405,7 @@ public:
                 pulse_hold_.arm(now, (pulse_task_end_ + kPulseGuideHold) - now);
             } else {
                 pulse_hold_.clear();
+                pulse_sent_end_ = std::chrono::steady_clock::time_point::min();
             }
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
@@ -1323,6 +1325,10 @@ public:
                     park_command_active_ = false;
                     park_motion_seen_ = false;
                 }
+                // decision 0022 rule 2: the ":Q" above is an abort, as AbortSlew's is, so it ends the window (this
+                // jog's, or that of the GOTO or Park it stopped) and Slewing reads the mount from here on. With the
+                // other axis still jogging no ":Q" went out and that jog keeps the window.
+                if (!other_axis_jogging) slew_hold_.clear();
                 write_frame_locked();
             }
             initiator_lock.unlock();
@@ -1356,6 +1362,9 @@ public:
 
         bump_motion_epoch();  // open-astro#1925: before ":Rv" and the jog
 
+        // decision 0022 rule 2: Slewing is true before ":Rv" and the jog go out; a failed send gives the window back.
+        const SlewHoldArm hold = arm_slew_hold(std::chrono::seconds(2));
+
         // Pause the poll thread so its protocol reads don't hold the protocol
         // mutex while we send the rate + move commands. On Wi-Fi the poll
         // thread's reads can add 200-400ms of contention per blocked command.
@@ -1366,6 +1375,7 @@ public:
         // forever (M9).
         try {
             const double multiplier = std::abs(rate) / kSiderealRateDegPerSec;
+            if (goto_send_hook_) goto_send_hook_(":Rv");
             protocol.set_move_rate_sidereal_multiple(multiplier);
 
             if (axis == 0) {
@@ -1383,6 +1393,7 @@ public:
             }
         } catch (...) {
             poll_pause_.store(false);
+            restore_slew_hold(hold);
             throw;
         }
 
@@ -1397,6 +1408,7 @@ public:
         park_command_active_ = false;
         park_motion_seen_ = false;
         parked_cached_ = false;
+        // Re-armed from the command's return, as before: landing still counts this guard (rule 3, open).
         slew_hold_.arm(clock_.now(), std::chrono::seconds(2));
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
@@ -1588,7 +1600,15 @@ public:
         reset_position_offsets();
         if (initiator_hook_) initiator_hook_("FindHome");
         bump_motion_epoch();  // open-astro#1925: before ":hC"
-        protocol_.go_home();
+        // decision 0022 rule 2: Slewing is true before ":hC" goes out; a failed send gives the window back.
+        const SlewHoldArm hold = arm_slew_hold(std::chrono::seconds(5));
+        try {
+            if (goto_send_hook_) goto_send_hook_(":hC");
+            protocol_.go_home();
+        } catch (...) {
+            restore_slew_hold(hold);
+            throw;
+        }
         if (initiator_hook_) initiator_hook_("FindHome sent");
         std::lock_guard<std::mutex> lock(mutex_);
         parked_cached_ = false;
@@ -1596,6 +1616,7 @@ public:
         park_motion_seen_ = false;
         park_state_cached_ = false;
         park_state_at_ = std::chrono::steady_clock::time_point{};
+        // Re-armed from the command's return, as before: completion still counts this guard (rule 3, open).
         slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that calls FindHome after a failed GOTO must not be told the OLD
@@ -1637,7 +1658,16 @@ public:
         // parked within 6 s of the same ":hP#" after ":Td#"). A parked mount does not track, so stop tracking first.
         set_tracking(false);
 
-        protocol.park();
+        // decision 0022 rule 2: Slewing is true before ":hP" goes out (after the no-op return, the AltAz refusal and
+        // the ":Td", which start no motion); a failed send gives the window back.
+        const SlewHoldArm hold = arm_slew_hold(std::chrono::seconds(5));
+        try {
+            if (goto_send_hook_) goto_send_hook_(":hP");
+            protocol.park();
+        } catch (...) {
+            restore_slew_hold(hold);
+            throw;
+        }
         if (initiator_hook_) initiator_hook_("Park sent");
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1645,6 +1675,7 @@ public:
         park_command_active_ = true;
         park_command_started_ = clock_.now();
         park_motion_seen_ = false;
+        // Re-armed from the command's return, as before: completion still counts this guard (rule 3, open).
         slew_hold_.arm(clock_.now(), std::chrono::seconds(5));
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that calls Park after a failed GOTO must not be told the OLD goto
@@ -1756,6 +1787,8 @@ public:
         // late start never supersedes a newer drain that already took a task.
         std::lock_guard<std::mutex> start_lock(pulse_start_mutex_);
         bool start_drain = false;
+        util::HoldWindow pulse_before;  // the window this call replaces, for a refused drain start
+        util::HoldWindow::mono pulse_armed_until{};
         {
             // open-astro#2093: the epoch moves in the same section that queues the task, under target_write_mutex_,
             // so an older Sync's ownership check and its stop fall wholly before the queue (and its reset drops this
@@ -1772,7 +1805,9 @@ public:
             ra_offset_hours_ += expected_hours;
             dec_offset_deg_ += expected_dec;
             dec_offset_deg_ = std::clamp(dec_offset_deg_, -180.0, 180.0);
+            pulse_before = pulse_hold_;
             pulse_hold_.arm(now, (pulse_queue_end_ - now) + kPulseGuideHold);
+            pulse_armed_until = pulse_hold_.until();
             pulse_queue_.push_back(task);
             snapshot_.write([](PolledFrame&) {});
             // A drain that is running takes the task; only the caller that finds none starts one.
@@ -1789,9 +1824,16 @@ public:
             // No drain runs, so nobody would send what is queued (decision 0006 "Thread refusal").
             {
                 std::lock_guard<std::mutex> lock(pulse_mutex_);
+                std::lock_guard<std::mutex> state_lock(mutex_);
                 pulse_queue_.clear();
                 pulse_queue_end_ = std::chrono::steady_clock::time_point{};
                 pulse_drain_active_ = false;
+                // decision 0022 rule 2: no ":Mg" goes out, so the pulse window is given back as this call found it.
+                // This call found no drain, so no pulse still owns the window; the value it replaced is restored, not
+                // cleared, because its end is the link-staleness base after a guide pause (update_link_state()).
+                // Not when a connect or a disconnect has replaced the window since (pulse_start_mutex_ keeps out
+                // every other writer).
+                if (pulse_hold_.until() == pulse_armed_until) pulse_hold_ = pulse_before;
             }
             if (!connected_.load()) throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
             throw;
@@ -1981,6 +2023,9 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (goto_claim_ == claim && ctx.stop_reason() == util::StopReason::None && connected_.load()) {
                     last_slew_error_ = "SlewToTargetAsync failed: " + what;
+                    // decision 0022 rule 2: a failed dispatch (a rejected or thrown ":MS", a failed setup) started
+                    // no slew, so its window ends here, as abandon()'s does; Slewing raises the kept error.
+                    slew_hold_.clear();
                     goto_setup_pending_ = false;
                     poll_pause_.store(false);
                     return;
@@ -2498,6 +2543,7 @@ private:
         dec_offset_deg_ = 0.0;
         // until = now, not clear(): the no-sample deadline counts from this reset (update_link_state()).
         pulse_hold_.arm(clock_.now(), std::chrono::nanoseconds::zero());
+        pulse_sent_end_ = std::chrono::steady_clock::time_point::min();
         snapshot_.write([](PolledFrame&) {});
         const uint64_t epoch = slew_error_epoch_;  // in this section (#2093): the wait below releases it
         // open-astro#2072: a step already past its check sends its ":Mg" after the cancel; wait for it, so the caller's
@@ -3005,15 +3051,24 @@ private:
                         cv.notify_all();
                     }
                 } end_send{mutex_, pulse_sends_in_flight_, pulse_send_cv_};
-                if (goto_send_hook_) goto_send_hook_(":Mg");
                 try {
+                    if (goto_send_hook_) goto_send_hook_(":Mg");  // a hook that throws stands for a failed send
                     protocol.pulse_guide(task.direction, step);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO", "PulseGuide command failed: " + std::string(e.what()));
                     sent = false;
                 }
             }
-            if (!sent) break;
+            if (!sent) {
+                release_failed_pulse_window(ctx);
+                break;
+            }
+            {
+                // The completion hold a failed ":Mg" after this one keeps (release_failed_pulse_window()).
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (ctx.stop_reason() == util::StopReason::None)
+                    pulse_sent_end_ = clock_.now() + std::chrono::milliseconds(step);
+            }
             // One clock wait per step; a cancel wakes it at once.
             if (!ctx.wait_for(std::chrono::milliseconds(step))) return;
             remaining_ms -= step;
@@ -3060,6 +3115,29 @@ private:
             more_queued = !pulse_queue_.empty();
         }
         if (!more_queued) static_cast<void>(ctx.wait_for(kPulseGuideHold));
+    }
+
+    // decision 0022 rule 2: a ":Mg" that failed starts no pulse, so the running task gives up its share of the one
+    // pulse window. The window also covers the pulses still queued behind it, so it is set to end where they end (now
+    // plus their durations, plus the hold), not cleared; with none queued it ends now. A pulse step that did go out
+    // (an earlier step of this task, or the task before it, which skipped its own hold because this one was queued)
+    // keeps its completion hold: the window never ends before that step's end plus kPulseGuideHold, and never later
+    // than the window it replaces, so a reset or a connect since that step leaves nothing of it. until = now rather
+    // than clear(), as reset_position_offsets() does: its end is the link-staleness base after a guide pause. The
+    // queue end and the task end move with it, so a PulseGuide or a redundant connect after this counts no time for
+    // the failed pulse. A drain a reset or a link loss cancelled leaves the window to them.
+    void release_failed_pulse_window(util::OperationContext& ctx) {
+        std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ctx.stop_reason() != util::StopReason::None) return;
+        const auto now = clock_.now();
+        std::chrono::milliseconds queued{0};
+        for (const auto& queued_task : pulse_queue_) queued += std::chrono::milliseconds(queued_task.duration_ms);
+        pulse_task_end_ = now;
+        pulse_queue_end_ = now + queued;
+        const auto queue_until = pulse_queue_.empty() ? now : now + queued + kPulseGuideHold;
+        const auto sent_until = std::min(pulse_sent_end_ + kPulseGuideHold, pulse_hold_.until());
+        pulse_hold_.arm(now, std::max(queue_until, sent_until) - now);
     }
 
     // Stops the pulse drain and drops what it had queued. The pulse slot's reapers are the disconnect teardown,
@@ -3127,6 +3205,30 @@ private:
         return true;
     }
 
+    // decision 0022 rule 2 for MoveAxis (jog), FindHome and Park: the slew window is armed before the command goes
+    // out, so a Slewing read during the write is true. The arm keeps the window it replaced: a failed command
+    // restores it (restore_slew_hold()) rather than clearing it, because an earlier motion the fence did not stop (an
+    // accepted GOTO, a Park, the other axis's jog) may still own it, and a send that threw started nothing new. The
+    // caller holds initiator_mutex_, so no other initiator arms in between.
+    struct SlewHoldArm {
+        util::HoldWindow before;
+        util::HoldWindow::mono armed_until;
+    };
+
+    SlewHoldArm arm_slew_hold(std::chrono::nanoseconds hold) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        SlewHoldArm arm{slew_hold_, {}};
+        slew_hold_.arm(clock_.now(), hold);
+        arm.armed_until = slew_hold_.until();
+        return arm;
+    }
+
+    // Unless a connect or a disconnect has replaced the window since the arm.
+    void restore_slew_hold(const SlewHoldArm& arm) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slew_hold_.until() == arm.armed_until) slew_hold_ = arm.before;
+    }
+
     // open-astro#720 fence, for MoveAxis, FindHome, Park, AbortSlew, Sync and Unpark, and before the GOTO slot's
     // reap on disconnect, connect and destruction. One mutex_ section: take the claim from any GOTO body, clean up
     // what a body that never sent ":MS" leaves (its force window and its poll pause), cancel() the slot (never a
@@ -3154,6 +3256,9 @@ public:
     }
     void set_teardown_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         teardown_slot_.set_spawn_for_testing(std::move(spawn));
+    }
+    void set_pulse_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        pulse_slot_.set_spawn_for_testing(std::move(spawn));
     }
     void set_goto_send_hook_for_testing(std::function<void(std::string_view)> hook) {
         goto_send_hook_ = std::move(hook);
@@ -3282,6 +3387,12 @@ private:
     // The IsPulseGuiding window (decision 0022, util::HoldWindow): one window for both axes, ending at the last queued
     // pulse plus kPulseGuideHold; its end is also the link-staleness base during a guide pause. Under mutex_.
     util::HoldWindow pulse_hold_;
+    // Under mutex_: a send stamp, not a deadline (decision 0022 rule 4). The end of the last ":Mg" step a running drain
+    // sent (clock_.now() at the send plus the step), so a failed ":Mg" after it keeps that step's completion hold in
+    // pulse_hold_, which stays the one IsPulseGuiding deadline (release_failed_pulse_window()). Reset with the pulse
+    // window by reset_position_offsets(), connect (unless a kept drain still runs) and the disconnect teardown; min()
+    // while no step has been sent since.
+    std::chrono::steady_clock::time_point pulse_sent_end_ = std::chrono::steady_clock::time_point::min();
     mutable std::mutex pulse_mutex_;
     std::deque<PulseTask> pulse_queue_;
     bool pulse_drain_active_ = false;  // pulse_mutex_: a drain body runs and will take a queued task
@@ -3325,7 +3436,8 @@ private:
     // last (the leaf). Not a state lock: no getter takes it, so it may be held across wire I/O, including the
     // pulse-send wait in reset_position_offsets(). Never taken by a body, fence_goto(), a getter or set_connected().
     std::mutex initiator_mutex_;
-    std::function<void(std::string_view)> goto_send_hook_;  // test seam; set before the first slew
+    // Test seam; set before the first slew. A failure it injects is a thrown std::exception (the pulse drain's catch).
+    std::function<void(std::string_view)> goto_send_hook_;
     std::function<void(std::string_view)> initiator_hook_;  // test seam; set before connecting
     util::OperationGeneration goto_generation_;
     util::OperationGeneration pulse_generation_;
@@ -3351,6 +3463,12 @@ void set_goto_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_teardown_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
         zwo->set_teardown_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* zwo = dynamic_cast<ZWOTelescopeDriver*>(&driver)) {
+        zwo->set_pulse_spawn_for_testing(std::move(spawn));
     }
 }
 
