@@ -332,9 +332,14 @@ notes carry only the pin map and per-board deltas.
   against the stock firmware's actual value or on real hardware — never re-derived
   from bench psychoacoustics: ASIAIR Pro/CM4 1 kHz, ASIAIR Plus RK3568 50 Hz, iMate
   50 Hz, StellaVita 100 Hz.
-- **Read-only pass-through ports** (e.g. iMate DC3): writes check the connection first
-  (a disconnected write answers `NotConnected`), then throw `NotImplemented`; the
-  capability is unit-tested on a connected fake.
+- **`SetSwitchValue` checks the id, a finite value and the port's range before the
+  connection** (issue #2264): Min/MaxSwitchValue are static on these boards, so a
+  non-finite or out-of-range value answers `InvalidValue` while disconnected, and a valid
+  one `NotConnected`. The order is id, finite value, range, connection, writability.
+  Tests: the "value range is InvalidValue while disconnected" case of each board.
+- **Read-only pass-through ports** (e.g. iMate DC3): a write with a valid value checks the
+  connection first (a disconnected write answers `NotConnected`), then throws
+  `NotImplemented`; the capability is unit-tested on a connected fake.
 
 ### Platform 7 InterfaceVersion + DeviceState
 

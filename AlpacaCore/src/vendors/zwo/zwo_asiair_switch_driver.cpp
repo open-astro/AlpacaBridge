@@ -242,9 +242,9 @@ public:
 
     void set_switch_value(int id, double value) override {
         validate_id(id);
-        ensure_connected();
         // std::lround on NaN/Inf is undefined behaviour; reject non-finite
-        // values from the HTTP API as InvalidValue first.
+        // values from the HTTP API as InvalidValue first. The value checks
+        // precede the connection check (ASCOM precedence, issue #2264).
         if (!std::isfinite(value)) {
             throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
         }
@@ -254,6 +254,7 @@ public:
         if (rounded < static_cast<long>(min_v) || rounded > static_cast<long>(max_v)) {
             throw AlpacaException("Switch value out of range", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         wrapper_.set_value(static_cast<std::size_t>(id), static_cast<int>(rounded));
         save_port_state(id, static_cast<int>(rounded));
     }

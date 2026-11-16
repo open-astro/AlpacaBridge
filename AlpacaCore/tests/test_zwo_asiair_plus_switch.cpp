@@ -92,6 +92,26 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - Not connected throws",
                          alpacacore::AlpacaError::NotConnected);
 }
 
+// Issue #2264: the value checks precede the connection check (ASCOM precedence), as on the iMate.
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - value range is InvalidValue while disconnected",
+          "[zwo][switch][asiair-plus][unit]") {
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    REQUIRE_FALSE(driver->get_connected());
+
+    // An on/off port takes 0-1.
+    require_alpaca_error([&]() { driver->set_switch_value(2, 2.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, -1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, std::nan("")); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, std::numeric_limits<double>::infinity()); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, 1.0); }, alpacacore::AlpacaError::NotConnected);
+    // A PWM port takes 0-100.
+    require_alpaca_error([&]() { driver->set_switch_value(3, 101.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(3, 100.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
 TEST_CASE("ZWO ASIAIR Plus Switch Driver - Unsupported actions",
           "[zwo][switch][asiair-plus][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(
