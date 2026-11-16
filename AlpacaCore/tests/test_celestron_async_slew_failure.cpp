@@ -1784,6 +1784,47 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
     driver->set_connected(false);
 }
 
+// FindHome takes over a GOTO inside its 8 s hold and its MC_LEVEL_START goes unanswered: fail_home ends the GOTO's
+// hold with the home (decision 0022 rule 2). Slewing raises the stored FindHome error either way, so the status poll is
+// where the hold shows: a tick inside the 8 s reads L once the hold is gone, and would leave it unread under the hold.
+TEST_CASE("Celestron hold window - a failed FindHome dispatch ends a superseded GOTO's hold",
+          "[celestron][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    auto bodies_returned = std::make_shared<std::atomic<int>>(0);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    alpacacore::vendor::celestron::set_slew_spawn_for_testing(*driver, [bodies_returned](std::function<void()> body) {
+        return std::thread([bodies_returned, body = std::move(body)] {
+            body();
+            bodies_returned->fetch_add(1);
+        });
+    });
+
+    const auto start = clock.now();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
+    REQUIRE(driver->get_slewing());
+
+    st->reject_level_start.store(true);
+    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::DriverException);
+    // The superseded body wakes from the claim's cancel and returns, so the slot no longer reports it running.
+    REQUIRE(wait_until([&] { return bodies_returned->load() >= 1; }, 5000));
+    std::string message;
+    REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("FindHome dispatch failed") != std::string::npos);
+
+    const int l_reads_before = st->slew_status_polls.load();
+    (void)alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    REQUIRE(clock.now() - start < std::chrono::seconds(8));  // inside the GOTO's hold
+    CHECK(st->slew_status_polls.load() > l_reads_before);    // the tick's read_slewing gate is open
+    driver->set_connected(false);
+}
+
 // The pulse position holds (pg_hold_) and one-shot corrections (pg_correction_) close with the pulse that armed them
 // (decision 0022 rule 2). The fake's MC_AUX_GUIDE moves nothing, so a correction reads about 4" from the pre-pulse
 // value and a hold reads it exactly, while the mount these cases move reads about 0.094 h and 1.4 deg away.
