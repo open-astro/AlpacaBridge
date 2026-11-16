@@ -90,8 +90,8 @@ TEST_CASE("FakeTouptekPowerboxSDK - set_value enforces the real wrapper's rules"
     CHECK(fake.get_value(0) == 0);
 }
 
-// Connected, async switch control and a write to a read-only port answer NotImplemented (disconnected, NotConnected
-// comes first: test_touptek_switch.cpp).
+// Connected, async switch control and a valid write to a read-only port answer NotImplemented (disconnected,
+// NotConnected comes first: test_touptek_switch.cpp). An out-of-range write answers InvalidValue before either.
 TEST_CASE("ToupTek StellaVita Switch Driver - connected async and read-only writes are NotImplemented",
           "[touptek][switch][unit][fake-sdk]") {
     const auto cfg = mixed_config();

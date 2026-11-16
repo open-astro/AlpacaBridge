@@ -347,7 +347,8 @@ private:
     }
 
     // Read-only ports reject writes with a not-implemented error per the ASCOM
-    // Switch spec, after the connection check.
+    // Switch spec, after the connection check (and, in set_switch_value, after
+    // the value checks: issue #2264).
     void ensure_writable(int id) const {
         if (!config_.ports[static_cast<std::size_t>(id)].writable) {
             throw AlpacaException("Switch " + std::to_string(id) + " is read-only", AlpacaError::NotImplemented);
