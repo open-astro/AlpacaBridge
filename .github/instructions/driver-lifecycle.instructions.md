@@ -157,7 +157,7 @@ vendor-agnostic; do them in the driver from the start.
   camera moves its operational calls to the rule above only after a measurement shows a getter stall. The exposure body (a
   `CaptureSession` body, or a worker not yet converted) keeps
   a bare snapshot — it must not hold any lock across a blocking image wait
-  (`WaitImageV4`, `SVBGetVideoData`, `POAGetImageData`), and its close is
+  (`SVBGetVideoData`, `POAGetImageData`), and its close is
   stop-and-joined first. Same exemption for a call that blocks for its whole
   duration on the device (SVBONY `SVBPulseGuide`). A helper returning a
   **reference** into a locked container (`control_caps_`) is the same trap one

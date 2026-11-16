@@ -107,6 +107,10 @@ struct ToupFilterWheelInfo {
     unsigned long long flags{};
 };
 
+// TOUPCAM_EVENT_IMAGE (= ALTAIRCAM_EVENT_IMAGE): the pull-mode callback's "a frame is ready" event. Each brand's
+// wrapper .cpp static_asserts it against its SDK header.
+inline constexpr unsigned kToupEventImage = 0x0004;
+
 /**
  * AAF (Astro Auto Focuser) action codes.
  *
@@ -154,7 +158,7 @@ namespace ToupAAF {
  *
  * Contract notes for implementors (fakes included):
  * - Methods report failure by THROWING AlpacaException, never by return code
- *   (except wait_image's documented bool-on-timeout).
+ *   (except pull_image's documented bool-on-no-frame).
  * - open_*_by_id are reference-counted per id: the physical open happens on
  *   the first opener, the physical close when the last holder releases, and
  *   two opens of the same id return the SAME handle.
@@ -174,8 +178,10 @@ public:
     virtual void stop(HToupcam handle) = 0;
     virtual void put_trigger_mode(HToupcam handle, int mode) = 0;
     virtual void trigger(HToupcam handle, unsigned short n_frames) = 0;
-    virtual bool wait_image(HToupcam handle, unsigned timeout_ms, void* buffer, int bits, int row_pitch,
-                            unsigned& actual_width, unsigned& actual_height) = 0;
+    // Non-blocking (PullImageV4): false when no frame is waiting (E_PENDING). The camera driver calls it once
+    // after the kToupEventImage callback.
+    virtual bool pull_image(HToupcam handle, void* buffer, int bits, int row_pitch, unsigned& actual_width,
+                            unsigned& actual_height) = 0;
 
     // Exposure & gain
     virtual ToupExpRange get_exposure_range(HToupcam handle) = 0;

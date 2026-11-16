@@ -31,7 +31,9 @@ namespace alpacacore::test {
  * the driver races the harness exists to catch. The real SDK wrapper
  * serializes internally, so production drivers never need this.
  *
- * The mutex is a leaf: the inner SDK never calls back into this interface.
+ * The mutex is a leaf: the inner SDK never calls back into this interface (the
+ * fake's frame event calls the driver's callback, which takes only the
+ * capture-session leaf mutex).
  */
 class LockedToupTekSDK : public vendor::touptek::ToupTekSDK {
 public:
@@ -63,9 +65,8 @@ public:
     void trigger(HToupcam h, unsigned short n) override {
         locked([&] { inner_.trigger(h, n); });
     }
-    bool wait_image(HToupcam h, unsigned timeout_ms, void* buf, int bits, int pitch, unsigned& w,
-                    unsigned& hgt) override {
-        return locked([&] { return inner_.wait_image(h, timeout_ms, buf, bits, pitch, w, hgt); });
+    bool pull_image(HToupcam h, void* buf, int bits, int pitch, unsigned& w, unsigned& hgt) override {
+        return locked([&] { return inner_.pull_image(h, buf, bits, pitch, w, hgt); });
     }
 
     vendor::touptek::ToupExpRange get_exposure_range(HToupcam h) override {
