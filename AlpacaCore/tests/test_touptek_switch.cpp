@@ -14,7 +14,9 @@
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <cmath>
 #include <functional>
+#include <limits>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
@@ -72,6 +74,31 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Not connected throws", "[touptek][
     require_alpaca_error([&]() { driver->get_state_change_complete(2); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_switch(0, true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_switch_value(3, 1.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Issue #2264: the value checks precede the connection and writability checks (ASCOM precedence), as on
+// the iMate.
+TEST_CASE("ToupTek StellaVita Switch Driver - value range is InvalidValue while disconnected",
+          "[touptek][switch][unit]") {
+    auto cfg = alpacacore::vendor::touptek::default_stellavita_config();
+    cfg.ports[0].writable = false;
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_switch(0, cfg);
+    REQUIRE_FALSE(driver->get_connected());
+
+    // An on/off port takes 0-1.
+    require_alpaca_error([&]() { driver->set_switch_value(2, 2.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, -1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, std::nan("")); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, std::numeric_limits<double>::infinity()); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, 1.0); }, alpacacore::AlpacaError::NotConnected);
+    // A PWM port takes 0-100.
+    require_alpaca_error([&]() { driver->set_switch_value(3, 101.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(3, 100.0); }, alpacacore::AlpacaError::NotConnected);
+    // A read-only port: the value checks, then the connection check, then NotImplemented once connected.
+    require_alpaca_error([&]() { driver->set_switch_value(0, 2.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(0, 1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 // 4. Unsupported actions

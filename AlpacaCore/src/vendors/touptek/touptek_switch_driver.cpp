@@ -256,10 +256,10 @@ public:
 
     void set_switch_value(int id, double value) override {
         validate_id(id);
-        ensure_connected();
-        ensure_writable(id);
         // Guard against NaN/Inf from the HTTP API: std::lround on a non-finite
         // value is undefined behaviour. Reject them as InvalidValue up front.
+        // The value checks precede the connection and writability checks
+        // (ASCOM precedence, issue #2264).
         if (!std::isfinite(value)) {
             throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
         }
@@ -269,6 +269,8 @@ public:
             throw AlpacaException("Switch value out of range [0," + std::to_string(max_v) + "]",
                                   AlpacaError::InvalidValue);
         }
+        ensure_connected();
+        ensure_writable(id);
         wrapper_.set_value(static_cast<std::size_t>(id), static_cast<int>(rounded));
         save_port_state(id, static_cast<int>(rounded));
     }
