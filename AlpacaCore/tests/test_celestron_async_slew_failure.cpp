@@ -1408,4 +1408,547 @@ TEST_CASE("Celestron hold window - a Dec pulse holds RA only once the RA pulse w
     }
 }
 
+// Decision 0022 rule 2 (#1833): the closing of the three rule 2 gaps the Adoption row named.
+namespace {
+
+// An MC_AUX_GUIDE pass-through to the RA (axis 0) or Dec (axis 1) motor, as FakeCelestronHandset counts them.
+bool is_guide_command(const std::string& chunk, int axis) {
+    const auto device = static_cast<unsigned char>(axis == 0 ? 0x10 : 0x11);
+    return chunk.size() >= 8 && chunk[0] == 'P' && static_cast<unsigned char>(chunk[2]) == device &&
+           static_cast<unsigned char>(chunk[3]) == 0x26;
+}
+
+}  // namespace
+
+// The per-axis pulse window is armed before the MC_AUX_GUIDE write: IsPulseGuiding read while the mount receives the
+// command, with mutex_ free for the exchange, is already true.
+TEST_CASE("Celestron hold window - the pulse window is armed before the guide command is written",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    std::atomic<alpacacore::TelescopeDriver*> probe{nullptr};
+    std::atomic<int> guiding_at_write{-1};  // -1 not read, 0 false, 1 true, 2 threw
+    const auto inner = st->responder();
+    alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+        if (auto* driver = probe.load(); driver != nullptr && is_guide_command(chunk, 0)) {
+            try {
+                guiding_at_write.store(driver->get_is_pulse_guiding() ? 1 : 0);
+            } catch (...) {
+                guiding_at_write.store(2);
+            }
+        }
+        return inner(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    probe.store(driver.get());
+    REQUIRE_NOTHROW(driver->pulse_guide(2, 500));  // East, RA: one chunk
+    probe.store(nullptr);
+    CHECK(guiding_at_write.load() == 1);
+    CHECK(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// A guide write the mount never answers throws, and the window armed before it closes again: IsPulseGuiding reads
+// false at once, not for the pulse plus the 1 s completion delay.
+TEST_CASE("Celestron hold window - a failed guide write leaves IsPulseGuiding false",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    std::atomic<bool> swallow_guide{false};
+    const auto inner = st->responder();
+    alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+        if (swallow_guide.load() && is_guide_command(chunk, 1)) {
+            return std::string();  // unanswered: the wrapper times out
+        }
+        return inner(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    swallow_guide.store(true);
+    const auto start = clock.now();
+    CHECK_THROWS_AS(driver->pulse_guide(0, 2000), alpacacore::AlpacaException);  // North, Dec
+    swallow_guide.store(false);
+    REQUIRE(clock.now() - start < std::chrono::seconds(3));  // virtual time has not reached the window's end
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// A blocking SlewToCoordinates whose GOTO reaches the hand controller but whose reply is lost throws. The mount may
+// be slewing, so the driver stops it as the async body's fail_slew() does, after the GOTO, before the error reaches
+// the client. An answered stop ends the 8 s hold armed before the send: Slewing reads false at once. A stop that
+// fails too keeps the failure in Slewing, because the mount may still be moving.
+TEST_CASE("Celestron hold window - a blocking SlewToCoordinates whose GOTO send fails leaves Slewing false",
+          "[celestron][telescope][hold-window]") {
+    for (const bool stop_fails : {false, true}) {
+        CAPTURE(stop_fails);
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        std::atomic<bool> lose_goto_reply{false};
+        const auto inner = st->responder();
+        alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+            std::string reply = inner(chunk);
+            if (lose_goto_reply.load() && !chunk.empty() && (chunk[0] == 'R' || chunk[0] == 'r')) {
+                return std::string();  // the mount took the GOTO; its reply is lost and the wrapper times out
+            }
+            return reply;
+        });
+        REQUIRE(server.ok());
+        auto driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+        REQUIRE(read_slewing(*driver) == SlewingRead::False);
+
+        lose_goto_reply.store(true);
+        st->reject_stop.store(stop_fails);
+        const auto start = clock.now();
+        CHECK_THROWS_AS(driver->slew_to_coordinates(no_flip_ra_hours(), 20.0), alpacacore::AlpacaException);
+        lose_goto_reply.store(false);
+        st->reject_stop.store(false);
+        REQUIRE(st->goto_count.load() == 1);                     // the mount accepted the GOTO
+        REQUIRE(clock.now() - start < std::chrono::seconds(8));  // virtual time has not reached the hold's end
+        if (stop_fails) {
+            CHECK(read_slewing(*driver) == SlewingRead::Threw);
+        } else {
+            CHECK(st->cancel_goto_count.load() == 1);
+            CHECK(st->cancel_first_seq.load() > st->goto_last_seq.load());  // the stop went out after the GOTO
+            CHECK_FALSE(st->goto_in_progress());
+            CHECK(read_slewing(*driver) == SlewingRead::False);
+        }
+        driver->set_connected(false);
+    }
+}
+
+// The same for the flip decision's pier read, which runs after the publish and before any GOTO: the hand controller
+// never answers it, the call throws, and Slewing reads false at once.
+TEST_CASE("Celestron hold window - a blocking SlewToCoordinates whose pier read fails leaves Slewing false",
+          "[celestron][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    std::atomic<bool> swallow_pier{false};
+    std::atomic<int> pier_reads{0};
+    const auto inner = st->responder();
+    alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+        if (swallow_pier.load() && chunk == "p") {
+            ++pier_reads;
+            return std::string();  // unanswered: the wrapper times out
+        }
+        return inner(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE(read_slewing(*driver) == SlewingRead::False);
+
+    swallow_pier.store(true);
+    const auto start = clock.now();
+    CHECK_THROWS_AS(driver->slew_to_coordinates(no_flip_ra_hours(), 20.0), alpacacore::AlpacaException);
+    swallow_pier.store(false);
+    REQUIRE(pier_reads.load() == 1);
+    REQUIRE(st->goto_requests.load() == 0);
+    REQUIRE(clock.now() - start < std::chrono::seconds(8));  // virtual time has not reached the hold's end
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+// The rollback after a failed pier read puts back the Slewing value the client was served, which the status poll
+// took from the mount, not the driver's own last write: a GOTO started from the hand pad reads true before the call
+// and still reads true after it throws.
+TEST_CASE("Celestron hold window - a failed pier read keeps the polled Slewing of a hand-pad GOTO",
+          "[celestron][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    std::atomic<bool> swallow_pier{false};
+    const auto inner = st->responder();
+    alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+        if (swallow_pier.load() && chunk == "p") {
+            return std::string();  // unanswered: the wrapper times out
+        }
+        return inner(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE(read_slewing(*driver) == SlewingRead::False);
+
+    st->goto_never_ends.store(true);
+    st->goto_seen.store(true);  // a GOTO from the hand pad: the driver sent nothing
+    REQUIRE(alpacacore::vendor::celestron::poll_status_now_for_testing(*driver));
+    REQUIRE(read_slewing(*driver) == SlewingRead::True);
+
+    swallow_pier.store(true);
+    CHECK_THROWS_AS(driver->slew_to_coordinates(no_flip_ra_hours(), 20.0), alpacacore::AlpacaException);
+    swallow_pier.store(false);
+    REQUIRE(st->goto_requests.load() == 0);
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+    driver->set_connected(false);
+}
+
+// A blocking SlewToCoordinates that takes over a MoveAxis or a FindHome keeps its flag until its GOTO is out. When
+// the GOTO's reply is lost and the stops after it are answered, the mount is stopped: the MoveAxis or FindHome is
+// over with it, so Slewing reads false at once, not until a later MoveAxis(axis, 0) or AbortSlew.
+TEST_CASE("Celestron hold window - a failed blocking GOTO send ends a superseded MoveAxis or FindHome",
+          "[celestron][telescope][hold-window]") {
+    for (const bool homing : {false, true}) {
+        CAPTURE(homing);
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        std::atomic<bool> lose_goto_reply{false};
+        const auto inner = st->responder();
+        alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+            std::string reply = inner(chunk);
+            if (lose_goto_reply.load() && !chunk.empty() && (chunk[0] == 'R' || chunk[0] == 'r')) {
+                return std::string();  // the mount took the GOTO; its reply is lost and the wrapper times out
+            }
+            return reply;
+        });
+        REQUIRE(server.ok());
+        auto driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+        if (homing) {
+            REQUIRE_NOTHROW(driver->find_home());
+        } else {
+            REQUIRE_NOTHROW(driver->move_axis(0, 2.0));
+        }
+        REQUIRE(read_slewing(*driver) == SlewingRead::True);
+
+        lose_goto_reply.store(true);
+        CHECK_THROWS_AS(driver->slew_to_coordinates(no_flip_ra_hours(), 20.0), alpacacore::AlpacaException);
+        lose_goto_reply.store(false);
+        REQUIRE(st->goto_requests.load() == 1);      // the GOTO went out
+        REQUIRE(st->cancel_goto_count.load() == 1);  // and the stop after it was answered
+        CHECK(read_slewing(*driver) == SlewingRead::False);
+        driver->set_connected(false);
+    }
+}
+
+// A failed AbortSlew stop is stored and Slewing raises it, because the mount may still be moving. A blocking
+// SlewToCoordinates whose flip pier read is never answered fails before any GOTO byte goes out, so nothing it did
+// reached the mount: the stored stop failure is still what Slewing raises, not the false the rollback serves.
+TEST_CASE("Celestron hold window - a failed pier read keeps a stored AbortSlew stop failure",
+          "[celestron][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    std::atomic<bool> swallow_pier{false};
+    const auto inner = st->responder();
+    alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+        if (swallow_pier.load() && chunk == "p") {
+            return std::string();  // unanswered: the wrapper times out
+        }
+        return inner(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    st->reject_stop.store(true);
+    CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    st->reject_stop.store(false);
+    std::string message;
+    REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
+    REQUIRE(message.find("AbortSlew stop failed") != std::string::npos);
+
+    swallow_pier.store(true);
+    CHECK_THROWS_AS(driver->slew_to_coordinates(no_flip_ra_hours(), 20.0), alpacacore::AlpacaException);
+    swallow_pier.store(false);
+    REQUIRE(st->goto_requests.load() == 0);
+    message.clear();
+    CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(message.find("AbortSlew stop failed") != std::string::npos);
+    driver->set_connected(false);
+}
+
+// FindHome supersedes a GOTO inside its 8 s hold and ends the hold: once the status poll sees the home done, Slewing
+// reads false at once, not when the GOTO's hold would have closed.
+TEST_CASE("Celestron hold window - FindHome ends a superseded GOTO's hold", "[celestron][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto start = clock.now();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
+    clock.advance(std::chrono::seconds(1));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
+    REQUIRE(driver->get_slewing());
+
+    REQUIRE_NOTHROW(driver->find_home());
+    // The superseded body wakes from the claim's cancel and ends; only the paused poll waits then.
+    REQUIRE(wait_until([&] { return clock.waiter_count() == 1; }, 2000));
+    REQUIRE(driver->get_slewing());  // homing
+    // The fake's GOTO does not end at MC_LEVEL_START; the mount that took the home reports no GOTO on L, so the
+    // poll's L read below cannot hold Slewing true for the device.
+    st->no_motion.store(true);
+    REQUIRE(alpacacore::vendor::celestron::poll_status_now_for_testing(*driver));  // MC_LEVEL_DONE answers done
+    REQUIRE(driver->get_at_home());
+    REQUIRE(clock.now() - start < std::chrono::seconds(8));  // inside the GOTO's hold
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// FindHome takes over a GOTO inside its 8 s hold. While its MC_LEVEL_START is on the wire (mutex_ free, homing_ not yet
+// set) and the superseded body has ended, the GOTO's hold still owns Slewing: a status poll tick in that gap leaves L
+// unread, as it does through the rest of the hold, so it cannot publish an idle frame for a GOTO L does not show yet.
+TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while its home command is in flight",
+          "[celestron][telescope][hold-window]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    std::atomic<alpacacore::TelescopeDriver*> probe{nullptr};
+    std::atomic<bool> polling{false};
+    std::atomic<int> l_reads_in_gap_tick{0};
+    std::thread poller;
+    const auto inner = st->responder();
+    alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+        if (polling.load() && !chunk.empty() && chunk[0] == 'L') {
+            ++l_reads_in_gap_tick;
+        }
+        const bool level_start = chunk.size() >= 8 && chunk[0] == 'P' && static_cast<unsigned char>(chunk[2]) == 0x10 &&
+                                 static_cast<unsigned char>(chunk[3]) == 0x0B;
+        if (auto* driver = probe.exchange(nullptr); driver != nullptr && level_start) {
+            // The superseded body wakes from the claim's cancel and ends; only the paused poll waits then.
+            (void)wait_until([&] { return clock.waiter_count() == 1; }, 300);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));  // test side: the body returns
+            polling.store(true);
+            poller = std::thread([&, driver] {
+                (void)alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+                polling.store(false);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));  // test side: the tick plans with mutex_ free
+        }
+        return inner(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
+    REQUIRE(driver->get_slewing());
+
+    probe.store(driver.get());
+    REQUIRE_NOTHROW(driver->find_home());
+    REQUIRE(poller.joinable());
+    poller.join();
+    CHECK(l_reads_in_gap_tick.load() == 0);
+    CHECK(driver->get_slewing());  // homing
+    driver->set_connected(false);
+}
+
+// The pulse position holds (pg_hold_) and one-shot corrections (pg_correction_) close with the pulse that armed them
+// (decision 0022 rule 2). The fake's MC_AUX_GUIDE moves nothing, so a correction reads about 4" from the pre-pulse
+// value and a hold reads it exactly, while the mount these cases move reads about 0.094 h and 1.4 deg away.
+namespace {
+
+struct PrePulsePosition {
+    double ra_hours;
+    double dec_degrees;
+};
+
+PrePulsePosition read_position(alpacacore::TelescopeDriver& driver) {
+    return {driver.get_right_ascension(), driver.get_declination()};
+}
+
+// Moves the fake's mount and publishes the move with one status tick.
+bool move_mount(FakeCelestronHandset& st, alpacacore::TelescopeDriver& driver) {
+    st.set_position("13AB0500,21000500#");
+    return alpacacore::vendor::celestron::poll_status_now_for_testing(driver);
+}
+
+// Both axes serve the moved mount: no correction and no hold left from the pulse.
+void check_served_live(alpacacore::TelescopeDriver& driver, const PrePulsePosition& before) {
+    CHECK(std::abs(driver.get_declination() - before.dec_degrees) > 1.0);
+    CHECK(std::abs(driver.get_right_ascension() - before.ra_hours) > 0.05);
+}
+
+}  // namespace
+
+// The reviewer's case: a North pulse whose guide write the mount never answers armed the Dec correction and the RA
+// hold before the write. Neither may outlive the failure.
+TEST_CASE("Celestron hold window - a failed guide write leaves no position hold or correction",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    std::atomic<bool> swallow_guide{false};
+    const auto inner = st->responder();
+    alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+        if (swallow_guide.load() && is_guide_command(chunk, 1)) {
+            return std::string();  // unanswered: the wrapper times out
+        }
+        return inner(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto before = read_position(*driver);
+    swallow_guide.store(true);
+    CHECK_THROWS_AS(driver->pulse_guide(0, 2000), alpacacore::AlpacaException);  // North, Dec
+    swallow_guide.store(false);
+    REQUIRE(move_mount(*st, *driver));
+    check_served_live(*driver, before);
+    driver->set_connected(false);
+}
+
+// A failed Dec guide write while an RA pulse runs gives the Dec hold back to the RA pulse that armed it: Dec stays at
+// its pre-pulse value for the rest of that pulse, as it would have without the failed call.
+TEST_CASE("Celestron hold window - a failed guide write keeps the hold a running pulse armed",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    std::atomic<bool> swallow_guide{false};
+    const auto inner = st->responder();
+    alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
+        if (swallow_guide.load() && is_guide_command(chunk, 1)) {
+            return std::string();
+        }
+        return inner(chunk);
+    });
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto before = read_position(*driver);
+    REQUIRE_NOTHROW(driver->pulse_guide(2, 5000));  // East, RA: holds Dec for 6.2 s of virtual time
+    swallow_guide.store(true);
+    CHECK_THROWS_AS(driver->pulse_guide(0, 2000), alpacacore::AlpacaException);  // North, Dec
+    swallow_guide.store(false);
+    REQUIRE(driver->get_is_pulse_guiding());  // the RA pulse
+    REQUIRE(move_mount(*st, *driver));
+    CHECK(std::abs(driver->get_declination() - before.dec_degrees) < 1e-9);
+    driver->set_connected(false);
+}
+
+// AbortSlew ends a pulse, and with it the pulse's correction and its hold on the other axis.
+TEST_CASE("Celestron hold window - AbortSlew ends a pulse's position hold and correction",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto before = read_position(*driver);
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 2000));  // North, Dec
+    REQUIRE_NOTHROW(driver->abort_slew());
+    REQUIRE(move_mount(*st, *driver));
+    check_served_live(*driver, before);
+    driver->set_connected(false);
+}
+
+// A reconnect inside a pulse's windows starts with none of them: the new session serves the mount.
+TEST_CASE("Celestron hold window - a reconnect ends a pulse's position hold and correction",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto before = read_position(*driver);
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 2000));  // North, Dec
+    REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE(move_mount(*st, *driver));
+    check_served_live(*driver, before);
+    driver->set_connected(false);
+}
+
+// MoveAxis on the pulsed axis ends the pulse: its correction and its hold on the other axis close with its window.
+TEST_CASE("Celestron hold window - MoveAxis ends the pulse's position hold and correction",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto before = read_position(*driver);
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 2000));  // North, Dec (axis 1)
+    REQUIRE_NOTHROW(driver->move_axis(1, 0.0));
+    REQUIRE(move_mount(*st, *driver));
+    check_served_live(*driver, before);
+    driver->set_connected(false);
+}
+
+// MoveAxis moving the other axis ends the hold a pulse put on it: RA serves the moving mount while the Dec pulse keeps
+// its own correction.
+TEST_CASE("Celestron hold window - MoveAxis on the other axis ends the hold a pulse put on it",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+
+    const auto before = read_position(*driver);
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 2000));  // North, Dec (axis 1): holds RA
+    REQUIRE_NOTHROW(driver->move_axis(0, 0.5));
+    REQUIRE(move_mount(*st, *driver));
+    CHECK(std::abs(driver->get_right_ascension() - before.ra_hours) > 0.05);
+    CHECK(std::abs(driver->get_declination() - before.dec_degrees) < 0.01);  // the Dec pulse's correction
+    REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
+    driver->set_connected(false);
+}
+
+// A pulse whose chunk chain cannot start is stopped after its first chunk: the correction predicted the whole pulse
+// and the hold on the other axis was for its length, so both close with the refusal.
+TEST_CASE("Celestron hold window - a refused chunk chain leaves no position hold or correction",
+          "[celestron][telescope][hold-window][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    alpacacore::vendor::celestron::set_pulse_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    const auto before = read_position(*driver);
+    CHECK_THROWS(driver->pulse_guide(0, 5000));  // North, Dec: 5 s needs a chained chunk
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    REQUIRE(move_mount(*st, *driver));
+    check_served_live(*driver, before);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

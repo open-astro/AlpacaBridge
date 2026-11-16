@@ -30,6 +30,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -697,8 +699,12 @@ TEST_CASE("ZWO telescope clock - FindHome publishes completion only when the for
     CHECK(rig.driver->get_at_home());
 }
 
-TEST_CASE("ZWO telescope clock - MoveAxis reports Slewing for the 2 s forced window after the jog stops",
-          "[zwo][telescope][unit][clock]") {
+// decision 0022 rule 2 (#1834): the stop's ":Q" is an abort, so it ends the jog's 2 s window; Slewing then reads the
+// mount. Until #1834 this case pinned Slewing true for the rest of the 2 s window after the stop.
+// Falsified by: zwo_telescope_driver.cpp move_axis(): removing the slew_hold_.clear() in the stop branch, so Slewing
+// stays true for 2 s after the jog stops.
+TEST_CASE("ZWO telescope clock - a MoveAxis stop ends the jog's 2 s forced window",
+          "[zwo][telescope][unit][clock][hold-window]") {
     Rig rig;
     rig.connect();
     rig.advance(250ms);
@@ -707,9 +713,10 @@ TEST_CASE("ZWO telescope clock - MoveAxis reports Slewing for the 2 s forced win
     CHECK(rig.driver->get_slewing());
     rig.driver->move_axis(0, 0.0);
     rig.mount.set_slew_duration(0ms);
-    for (int i = 0; i < 6; ++i) rig.advance(250ms);  // 1.5 s
-    CHECK(rig.driver->get_slewing());
-    for (int i = 0; i < 4; ++i) rig.advance(250ms);  // 2.5 s
+    rig.advance(250ms);
+    rig.advance(250ms);  // 0.5 s: a poll has read the stopped mount, inside the old 2 s window
+    CHECK_FALSE(rig.driver->get_slewing());
+    for (int i = 0; i < 8; ++i) rig.advance(250ms);  // 2.5 s
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
@@ -1138,6 +1145,242 @@ TEST_CASE("ZWO telescope clock - a client command waits for at most one poll exc
     REQUIRE(static_cast<int>(sent.size()) > poll_queries);
     INFO("first command after the held :GR: " << sent[static_cast<std::size_t>(poll_queries)]);
     CHECK(sent[static_cast<std::size_t>(poll_queries)].rfind(expected, 0) == 0);
+}
+
+// ---- decision 0022 rule 2: arm before the command, give the window back when the command fails (#1834) ----------
+
+namespace {
+
+// The motion initiators that arm the slew window, with the send-hook label of their command.
+struct HoldInitiator {
+    std::string name;
+    std::string label;
+};
+
+void run_initiator(TelescopeDriver& driver, const std::string& name) {
+    if (name == "MoveAxis") driver.move_axis(0, 1.0);
+    if (name == "FindHome") driver.find_home();
+    if (name == "Park") driver.park();
+}
+
+AlpacaException injected_send_failure() {
+    return AlpacaException("injected send failure", AlpacaError::DriverException);
+}
+
+std::thread refuse_pulse_thread(std::function<void()>) {
+    throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+}
+
+}  // namespace
+
+// The slew window is armed before the command goes out, so a Slewing read while it is written is true.
+// Falsified by: zwo_telescope_driver.cpp arm_slew_hold(): removing slew_hold_.arm(clock_.now(), hold), so the window
+// is armed only after the command returns and the read during the send is false.
+TEST_CASE("ZWO hold window - MoveAxis, FindHome and Park read Slewing true while their command is sent (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    const auto initiator =
+        GENERATE(HoldInitiator{"MoveAxis", ":Rv"}, HoldInitiator{"FindHome", ":hC"}, HoldInitiator{"Park", ":hP"});
+    CAPTURE(initiator.name);
+    Rig rig;
+    std::atomic<int> slewing_at_send{-1};
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == initiator.label) slewing_at_send.store(rig.driver->get_slewing() ? 1 : 0);
+    });
+    rig.connect();
+    rig.advance(250ms);
+    REQUIRE_FALSE(rig.driver->get_slewing());
+    run_initiator(*rig.driver, initiator.name);
+    CHECK(slewing_at_send.load() == 1);
+}
+
+// A command that fails to send starts no motion, so its slew window goes: Slewing reads false at once, not for the
+// 2 s / 5 s hold.
+// Falsified by: zwo_telescope_driver.cpp restore_slew_hold(): removing slew_hold_ = arm.before, so the window armed
+// before the failed command stays and Slewing reads true.
+TEST_CASE("ZWO hold window - a MoveAxis, FindHome or Park whose command fails leaves Slewing false (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    const auto initiator =
+        GENERATE(HoldInitiator{"MoveAxis", ":Rv"}, HoldInitiator{"FindHome", ":hC"}, HoldInitiator{"Park", ":hP"});
+    CAPTURE(initiator.name);
+    Rig rig;
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == initiator.label) throw injected_send_failure();
+    });
+    rig.connect();
+    rig.advance(250ms);
+    REQUIRE_THROWS(run_initiator(*rig.driver, initiator.name));
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.mount.count(initiator.label) == 0);
+}
+
+// The failed command gives back the window it replaced, not a cleared one: an accepted GOTO the fence does not stop
+// still owns it, so Slewing stays true for the GOTO's hold although the mount already reports idle.
+// Falsified by: zwo_telescope_driver.cpp restore_slew_hold(): slew_hold_.clear() in place of slew_hold_ = arm.before,
+// so the failed command also ends the accepted GOTO's window.
+TEST_CASE("ZWO hold window - a failed MoveAxis, FindHome or Park keeps an accepted GOTO's window (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    const auto initiator =
+        GENERATE(HoldInitiator{"MoveAxis", ":Rv"}, HoldInitiator{"FindHome", ":hC"}, HoldInitiator{"Park", ":hP"});
+    CAPTURE(initiator.name);
+    Rig rig;
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == initiator.label) throw injected_send_failure();
+    });
+    rig.connect();
+    rig.mount.set_slew_duration(0ms);  // the mount reports idle at once: only the window says Slewing
+    rig.driver->slew_to_coordinates_async(6.0, 30.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();  // the GOTO body has accepted ":MS" and armed its 5 s window
+    REQUIRE(rig.driver->get_slewing());
+    REQUIRE_THROWS(run_initiator(*rig.driver, initiator.name));
+    // Two poll cycles publish a fresh frame from the idle mount: only an open window still forces it to moving.
+    rig.advance(250ms);
+    rig.advance(250ms);
+    CHECK(rig.driver->get_slewing());
+}
+
+// A rejected ":MS" started no slew, so the GOTO body ends its window when it keeps the failure, as a stopped body
+// does: the next poll publishes the mount's own Home flag instead of a forced "moving" frame for 5 s.
+// Falsified by: zwo_telescope_driver.cpp run_goto() fail(): removing slew_hold_.clear() in the branch that keeps the
+// failure, so the poll forces at_home false until the 5 s window ends.
+TEST_CASE("ZWO hold window - a rejected GOTO leaves no slew window behind (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.set_slew_duration(0ms);
+    rig.driver->find_home();
+    for (int i = 0; i < 24; ++i) rig.advance(250ms);  // 6 s: home landed, its window closed
+    REQUIRE(rig.driver->get_at_home());
+    rig.mount.reject_goto("2");
+    rig.driver->slew_to_coordinates_async(6.0, 30.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();  // the body kept the failure and released the poll
+    rig.advance(250ms);        // one full poll cycle after the failure, 0.5 s or less into the 5 s hold
+    require_alpaca_error([&] { static_cast<void>(rig.driver->get_slewing()); }, AlpacaError::DriverException);
+    CHECK(rig.driver->get_at_home());
+}
+
+// A ":Mg" that fails to send starts no pulse; with nothing queued behind it, IsPulseGuiding is false at once rather
+// than for the pulse plus 500 ms.
+// Falsified by: zwo_telescope_driver.cpp release_failed_pulse_window(): removing the pulse_hold_.arm(...) statement,
+// so the window armed for the 3000 ms pulse stays.
+TEST_CASE("ZWO hold window - a failed :Mg ends IsPulseGuiding at once (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    Rig rig;
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == ":Mg") throw injected_send_failure();
+    });
+    rig.connect();
+    rig.driver->pulse_guide(0, 3000);
+    REQUIRE(rig.clock.wait_for_waiters(2, kReal));  // the poll loop and the drain's hold after its last task
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.mount.count(":Mg") == 0);
+}
+
+// One window covers both axes and the queue: a failed ":Mg" gives up only its own share. The pulse queued behind it
+// still owns the window (true while the drain reconciles, before the queued task starts), and the window then ends
+// at that pulse plus 500 ms, with no time counted for the failed 3000 ms pulse.
+// Falsified by: zwo_telescope_driver.cpp release_failed_pulse_window(): pulse_hold_.clear() in place of the
+// pulse_hold_.arm(...) that covers the queue, so IsPulseGuiding reads false while the queued pulse waits.
+TEST_CASE("ZWO hold window - a failed :Mg keeps the window for the pulse queued behind it (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    Rig rig;
+    std::atomic<int> pulses_seen{0};
+    std::promise<void> first_entered;
+    std::promise<void> second_queued;
+    auto queued = second_queued.get_future().share();
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&, queued](std::string_view name) {
+        if (name != ":Mg" || pulses_seen.fetch_add(1) != 0) return;
+        first_entered.set_value();
+        static_cast<void>(queued.wait_for(kReal));  // bounded, so a failed case never wedges the drain
+        throw injected_send_failure();
+    });
+    rig.connect();
+    rig.mount.hold_reply(":GR");  // the drain's reconciliation read after the failed step (the poll is paused)
+    rig.driver->pulse_guide(0, 3000);
+    REQUIRE(first_entered.get_future().wait_for(kReal) == std::future_status::ready);
+    rig.driver->pulse_guide(2, 1000);  // queued before the first ":Mg" fails
+    second_queued.set_value();
+    const bool held = rig.mount.wait_until_held(kReal);
+    const bool guiding_while_queued = rig.driver->get_is_pulse_guiding();
+    rig.mount.release();
+    REQUIRE(held);
+    CHECK(guiding_while_queued);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));  // the queued pulse is sent
+    rig.advance(1499ms);
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.advance(1ms);  // 1000 ms + 500 ms: the failed pulse counts for nothing
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.mount.count(":Mgn") == 0);
+}
+
+// A ":Mg" step that went out keeps its completion hold when a later ":Mg" fails: the second step of the same pulse,
+// or the first step of the pulse queued behind it (the pulse before it skipped its own hold because it was queued).
+// IsPulseGuiding stays true until the sent step's end plus 500 ms, not only until the failure.
+// Falsified by: zwo_telescope_driver.cpp release_failed_pulse_window(): arming to queue_until alone in place of
+// std::max(queue_until, sent_until), so the window ends at the failure.
+TEST_CASE("ZWO hold window - a failed :Mg keeps the completion hold of the step sent before it (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    const bool queued = GENERATE(false, true);
+    CAPTURE(queued);
+    Rig rig;
+    std::atomic<int> pulses_seen{0};
+    alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view name) {
+        if (name == ":Mg" && pulses_seen.fetch_add(1) == 1) throw injected_send_failure();
+    });
+    rig.connect();
+    // One 5000 ms pulse sends a 3000 ms step, then fails its second; or a 1000 ms pulse is sent and the 1000 ms pulse
+    // queued behind it fails its first.
+    const auto sent_step = queued ? 1000ms : 3000ms;
+    rig.driver->pulse_guide(0, queued ? 1000 : 5000);
+    if (queued) rig.driver->pulse_guide(2, 1000);
+    // The sent step's end is stamped at virtual time 0; the drain then waits it out, besides the poll loop.
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    rig.wait_for_blocked_caller();
+    rig.advance(sent_step);  // the drain wakes and the next ":Mg" fails
+    REQUIRE(pulses_seen.load() == 2);
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.advance(499ms);
+    CHECK(rig.driver->get_is_pulse_guiding());
+    rig.advance(1ms);  // the sent step's end plus 500 ms
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.mount.count(":Mg") == 1);
+}
+
+// A MoveAxis stop with the other axis idle sends ":Q", which stops an accepted GOTO, so it ends the GOTO's 5 s window:
+// Slewing reads the idle mount at once, as after AbortSlew.
+// Falsified by: zwo_telescope_driver.cpp move_axis(): removing the slew_hold_.clear() in the stop branch, so the
+// stopped GOTO's window keeps Slewing true.
+TEST_CASE("ZWO hold window - a MoveAxis stop ends an accepted GOTO's window (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    const int axis = GENERATE(0, 1);
+    CAPTURE(axis);
+    Rig rig;
+    rig.connect();
+    rig.mount.set_slew_duration(0ms);  // the mount reports idle at once: only the window says Slewing
+    rig.driver->slew_to_coordinates_async(6.0, 30.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();  // the GOTO body has accepted ":MS" and armed its 5 s window
+    REQUIRE(rig.driver->get_slewing());
+    rig.driver->move_axis(axis, 0.0);
+    // Two poll cycles publish a fresh frame from the idle mount: only an open window would still force it to moving.
+    rig.advance(250ms);
+    rig.advance(250ms);
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// A PulseGuide whose drain the slot refuses to start sends nothing, so it gives the pulse window back:
+// IsPulseGuiding is false after the refusal, not for the pulse plus 500 ms.
+// Falsified by: zwo_telescope_driver.cpp pulse_guide(): removing the pulse_hold_ = pulse_before restore in the
+// refused-start catch, so the window armed for the 1000 ms pulse stays.
+TEST_CASE("ZWO hold window - a refused pulse drain start leaves IsPulseGuiding false (#1834)",
+          "[zwo][telescope][unit][clock][hold-window]") {
+    Rig rig;
+    alpacacore::vendor::zwo::set_pulse_spawn_for_testing(*rig.driver, refuse_pulse_thread);
+    rig.connect();
+    CHECK_THROWS(rig.driver->pulse_guide(0, 1000));
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.mount.count(":Mg") == 0);
 }
 
 #endif  // !_WIN32
