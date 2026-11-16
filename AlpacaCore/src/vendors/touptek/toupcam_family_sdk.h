@@ -58,7 +58,7 @@
     X(StartPullModeWithCallback)               \
     X(Stop)                                    \
     X(Trigger)                                 \
-    X(WaitImageV4)                             \
+    X(PullImageV4)                             \
     X(get_ExpTimeRange)                        \
     X(get_ExpoTime)                            \
     X(put_ExpoTime)                            \
@@ -193,7 +193,7 @@ inline int map_hresult(int hr) {
 }
 
 constexpr int kS_OK = 0;
-constexpr unsigned kE_TIMEOUT = 0x8001011fu;
+constexpr unsigned kE_PENDING = 0x8000000au;
 
 }  // namespace toupcam_family_detail
 
@@ -329,20 +329,19 @@ public:
         check(Api::Trigger(handle, n_frames), "Trigger");
     }
 
-    // Returns true if a frame was delivered within timeout_ms. Throws on
-    // non-timeout errors. On success, actual_width/height carry the frame
-    // dimensions reported by the SDK.
-    bool wait_image(HToupcam handle, unsigned timeout_ms, void* buffer, int bits, int row_pitch, unsigned& actual_width,
+    // Non-blocking: false when no frame is waiting (E_PENDING). Throws on any
+    // other error. On success, actual_width/height carry the frame dimensions
+    // reported by the SDK.
+    bool pull_image(HToupcam handle, void* buffer, int bits, int row_pitch, unsigned& actual_width,
                     unsigned& actual_height) override {
-        // Do NOT hold the wrapper mutex across WaitImageV4 — it blocks until a
-        // frame is ready (or timeout), and we need the disconnect path to be
-        // able to call Stop without waiting for the exposure to finish.
+        // Not under the wrapper mutex: the call copies a whole frame, and a
+        // pulse guide or a stop must not queue behind that copy.
         typename Api::FrameInfoV4 info{};
-        const int hr = Api::WaitImageV4(handle, timeout_ms, buffer, 0, bits, row_pitch, &info);
-        if (static_cast<unsigned>(hr) == toupcam_family_detail::kE_TIMEOUT) {
+        const int hr = Api::PullImageV4(handle, buffer, 0, bits, row_pitch, &info);
+        if (static_cast<unsigned>(hr) == toupcam_family_detail::kE_PENDING) {
             return false;
         }
-        check(hr, "WaitImageV4");
+        check(hr, "PullImageV4");
         actual_width = info.v3.width;
         actual_height = info.v3.height;
         return true;

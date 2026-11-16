@@ -19,12 +19,8 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 
-#include <chrono>
-#include <condition_variable>
 #include <cstring>
-#include <mutex>
 #include <string>
-#include <thread>
 
 #include "../src/vendors/touptek/toupcam_family_sdk.h"
 #include "catch2_compat.h"
@@ -51,7 +47,7 @@ enum FakeConstantIndex {
 };
 
 constexpr int kE_INVALIDARG = static_cast<int>(0x80070057u);
-constexpr int kE_TIMEOUT = static_cast<int>(0x8001011fu);
+constexpr int kE_PENDING = static_cast<int>(0x8000000au);
 constexpr int kE_NOTIMPL = static_cast<int>(0x80004001u);
 
 template <class Brand>
@@ -132,12 +128,8 @@ struct FakeApi {
     // read it back.
     static inline int version_hr = 0;
 
-    // WaitImageV4 rendezvous: parks until get_ExpoTime runs, bounded so a
-    // regression fails the case instead of hanging it.
-    static inline std::mutex wait_mutex;
-    static inline std::condition_variable wait_cv;
-    static inline bool wait_entered = false;
-    static inline bool wait_released = false;
+    // What PullImageV4 answers.
+    static inline int pull_hr = 0;
 
     static void reset() {
         open_returns_null = false;
@@ -146,9 +138,7 @@ struct FakeApi {
         put_expo_time_hr = 0;
         put_option_hr = 0;
         version_hr = 0;
-        std::lock_guard<std::mutex> lock(wait_mutex);
-        wait_entered = false;
-        wait_released = false;
+        pull_hr = 0;
     }
 
     static HToupcam handle(int n) { return reinterpret_cast<HToupcam>(&handle_storage[n]); }
@@ -189,23 +179,16 @@ struct FakeApi {
     static int put_Option(HToupcam, unsigned long long, int) { return put_option_hr; }
 
     static int get_ExpoTime(HToupcam, unsigned* value) {
-        std::lock_guard<std::mutex> lock(wait_mutex);
-        wait_released = true;
-        wait_cv.notify_all();
         *value = 1000;
         return 0;
     }
 
-    static int WaitImageV4(HToupcam, unsigned, void*, int, int, int, FrameInfoV4* info) {
-        std::unique_lock<std::mutex> lock(wait_mutex);
-        wait_entered = true;
-        wait_cv.notify_all();
-        if (!wait_cv.wait_for(lock, std::chrono::seconds(2), [] { return wait_released; })) {
-            return kE_TIMEOUT;
+    static int PullImageV4(HToupcam, void*, int, int, int, FrameInfoV4* info) {
+        if (pull_hr == 0) {
+            info->v3.width = 640;
+            info->v3.height = 480;
         }
-        info->v3.width = 640;
-        info->v3.height = 480;
-        return 0;
+        return pull_hr;
     }
 };
 
@@ -302,32 +285,30 @@ void check_error_text_names_the_brand_function() {
 }
 
 template <class Brand>
-void check_wait_image_does_not_take_the_wrapper_lock() {
+void check_pull_image() {
     using Api = FakeApi<Brand>;
     Api::reset();
     ToupcamFamilySDK<Api> wrapper;
     ToupTekSDK& sdk = wrapper;
     const HToupcam h = Api::handle(0);
-
-    bool delivered = false;
     unsigned width = 0;
     unsigned height = 0;
-    std::thread waiter([&] { delivered = sdk.wait_image(h, 60000, nullptr, 16, 0, width, height); });
-    bool entered = false;
-    {
-        std::unique_lock<std::mutex> lock(Api::wait_mutex);
-        entered = Api::wait_cv.wait_for(lock, std::chrono::seconds(5), [] { return Api::wait_entered; });
-    }
-    // A locked call while WaitImageV4 is parked: it can only get in if
-    // wait_image left the wrapper mutex free, and it is what releases the wait.
-    const unsigned exposure = sdk.get_exposure_us(h);
-    waiter.join();
 
-    REQUIRE(entered);
-    CHECK(exposure == 1000);
-    CHECK(delivered);
+    CHECK(sdk.pull_image(h, nullptr, 16, 0, width, height));
     CHECK(width == 640);
     CHECK(height == 480);
+
+    // No frame waiting (an event that was not a frame, or one already pulled): false, not a throw.
+    Api::pull_hr = kE_PENDING;
+    CHECK_FALSE(sdk.pull_image(h, nullptr, 16, 0, width, height));
+
+    Api::pull_hr = kE_INVALIDARG;
+    try {
+        (void)sdk.pull_image(h, nullptr, 16, 0, width, height);
+        FAIL("pull_image over E_INVALIDARG did not throw");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()) == std::string(Brand::kPrefix) + "_PullImageV4: E_INVALIDARG");
+    }
 }
 
 template <class Brand>
@@ -370,10 +351,10 @@ TEST_CASE("ToupcamFamilySDK - SDK errors are named <prefix>_<function>", "[toupt
     SECTION("Altaircam") { check_error_text_names_the_brand_function<AltairBrand>(); }
 }
 
-TEST_CASE("ToupcamFamilySDK - wait_image does not hold the wrapper lock across WaitImageV4",
+TEST_CASE("ToupcamFamilySDK - pull_image answers false on E_PENDING and throws on an SDK error",
           "[touptek][altair][toupcam_family][unit]") {
-    SECTION("Toupcam") { check_wait_image_does_not_take_the_wrapper_lock<ToupcamBrand>(); }
-    SECTION("Altaircam") { check_wait_image_does_not_take_the_wrapper_lock<AltairBrand>(); }
+    SECTION("Toupcam") { check_pull_image<ToupcamBrand>(); }
+    SECTION("Altaircam") { check_pull_image<AltairBrand>(); }
 }
 
 TEST_CASE("ToupcamFamilySDK - version reads return the SDK text and an empty string on a refusal",

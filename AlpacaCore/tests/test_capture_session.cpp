@@ -454,6 +454,58 @@ TEST_CASE("CaptureSession - the watchdog ends a body that waits on the clock", "
     CHECK(error_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
 }
 
+// Decision 0020 rule 4, issue #1973: the ToupTek body waits for the SDK frame event with no poll step. Falsified by:
+// capture_session.h start() without its signalled_ = false (the first wait returns at once), or abort() without its
+// cv_.notify_all() before the join (the waiting body sleeps to the deadline and the abort joins it there).
+TEST_CASE("CaptureSession - wait_for_signal returns at the signal, keeps an early one and an abort wakes it",
+          "[util][capture-session]") {
+    Harness h;
+    h.session->signal();  // the previous exposure's event: start() clears it
+    auto p = std::make_shared<Probe>();
+    h.session->start(1.0, [p](CaptureControl& c) {
+        p->entered = true;
+        p->wait_result = c.wait_for_signal() ? 1 : 0;
+        p->accepted = c.image_ready(frame(1)) ? 1 : 0;
+        p->exited = true;
+    });
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+    CHECK_FALSE(p->exited.load());
+    h.session->signal();
+    REQUIRE(eventually([&] { return p->exited.load(); }));
+    CHECK(p->wait_result == 1);
+    CHECK(p->accepted == 1);
+
+    // An event that lands before the body waits is kept.
+    auto early = std::make_shared<Probe>();
+    h.session->start(1.0, [early, session = h.session.get()](CaptureControl& c) {
+        session->signal();
+        early->wait_result = c.wait_for_signal() ? 1 : 0;
+        early->accepted = c.image_ready(frame(2)) ? 1 : 0;
+        early->exited = true;
+    });
+    REQUIRE(eventually([&] { return early->exited.load(); }));
+    CHECK(early->wait_result == 1);
+    CHECK(early->accepted == 1);
+
+    // No event: an abort wakes the wait at once, with no clock advance.
+    auto aborted = std::make_shared<Probe>();
+    h.session->start(1.0, [aborted](CaptureControl& c) {
+        aborted->entered = true;
+        aborted->wait_result = c.wait_for_signal() ? 1 : 0;
+        aborted->exited = true;
+    });
+    REQUIRE(eventually([&] { return aborted->entered.load(); }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+    auto abort = std::async(std::launch::async, [&] { h.session->abort(); });
+    const bool prompt = abort.wait_for(kBound) == std::future_status::ready;
+    if (!prompt) h.clock.advance(3s);  // the deadline frees a regressed join so the case fails, not hangs
+    abort.get();
+    CHECK(prompt);
+    CHECK(aborted->wait_result == 0);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+}
+
 TEST_CASE("CaptureSession - start while exposing is refused and leaves the exposure running",
           "[util][capture-session]") {
     Harness h;

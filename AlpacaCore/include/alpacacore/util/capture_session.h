@@ -49,6 +49,10 @@ public:
 
     /// Waits `d` on the TaskClock, never past the watchdog deadline. False when the body must stop.
     inline bool wait_for(std::chrono::nanoseconds d);
+    /// Waits on the TaskClock for CaptureSession::signal() (an SDK frame event), never past the watchdog
+    /// deadline, with no poll step. True when the signal came and the body still owns the session; false when
+    /// the body must stop. A signal raised before the wait is kept, so an early event is not lost.
+    inline bool wait_for_signal();
     StopReason stop_reason() const { return ctx_.stop_reason(); }
     /// This body's session token: what begin_stop() returns while the body owns the session, so a
     /// driver can tell a stop meant for this exposure from one meant for an earlier one (#2043).
@@ -124,6 +128,7 @@ public:
         const std::uint64_t token = ++last_token_;
         owner_ = token;
         stopping_ = false;
+        signalled_ = false;
         state_ = State::Exposing;
         image_.reset();
         failure_.reset();
@@ -154,6 +159,14 @@ public:
         }
     }
 
+    /// Wakes the body's wait_for_signal(), or marks the signal for its next one. For an SDK event callback:
+    /// any thread, the driver mutex held or not (the session mutex is a leaf). start() clears it.
+    void signal() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        signalled_ = true;
+        cv_.notify_all();
+    }
+
     /// Forwards to the slot's thread factory, for a test that must hold a body
     /// before it runs or make thread creation fail. Call with nothing running.
     void set_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
@@ -171,6 +184,7 @@ public:
         image_.reset();
         owner_ = 0;
         ++pending_;
+        cv_.notify_all();  // wakes a body in wait_for_signal(), which the SDK stop does not
         lock.unlock();
         join_all();
         lock.lock();
@@ -446,6 +460,7 @@ private:
     int running_ = 0;  // bodies reserved or running
     int disconnecting_ = 0;
     bool open_ = true;
+    bool signalled_ = false;  // signal() since start(), not yet taken by wait_for_signal()
     bool stopping_ = false;  // the driver is stopping the SDK exposure: a body failure is not kept
     bool started_ = false;
     double duration_ = 0.0;
@@ -475,6 +490,21 @@ inline bool CaptureControl::wait_for(std::chrono::nanoseconds d) {
     std::unique_lock<std::mutex> lock(session_.mutex_);
     session_.apply_watchdog(lock);
     return session_.owns_locked(token_) && wait == d;
+}
+
+// Every path that ends the body's ownership (abort, disconnect_and_join, the watchdog's fail_locked) clears
+// owner_ and notifies cv_ under mutex_, so the predicate needs no slot call (the session mutex stays a leaf).
+inline bool CaptureControl::wait_for_signal() {
+    std::unique_lock<std::mutex> lock(session_.mutex_);
+    session_.apply_watchdog(lock);
+    const bool woke = session_.clock_.wait_for(lock, session_.cv_, session_.deadline_ - session_.clock_.now(),
+                                               [this] { return session_.signalled_ || !session_.owns_locked(token_); });
+    session_.apply_watchdog(lock);
+    if (!woke || !session_.owns_locked(token_)) {
+        return false;
+    }
+    session_.signalled_ = false;
+    return true;
 }
 
 inline void CaptureControl::exposure_started() {

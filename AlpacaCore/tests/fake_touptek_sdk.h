@@ -77,17 +77,25 @@ public:
     // sets it on the connect call to hold a connect open.
     // Ownership (as fake_qhy_sdk.h): set before the driver exists, never changed while a connect is in flight.
     std::function<void(const std::string&)> before_call;
-    // When true, wait_image blocks (an exposure stays in flight) until
-    // release_wait_image() or stop() is called, or the driver's timeout
-    // elapses. Lets a test observe the driver's mid-exposure behaviour.
+    // When true, a trigger's frame event is held (an exposure stays in flight)
+    // until release_wait_image() or stop() raises it. Lets a test observe the
+    // driver's mid-exposure behaviour. A stop raising the held frame is harsher
+    // than hardware: it makes a frame race every abort and disconnect.
     void hold_wait_image(bool hold) {
-        std::lock_guard<std::mutex> lock(sync_->wait_mutex);
-        sync_->wait_hold = hold;
-        if (!hold) sync_->wait_cv.notify_all();
+        bool raise = false;
+        {
+            std::lock_guard<std::mutex> lock(sync_->wait_mutex);
+            sync_->wait_hold = hold;
+            if (!hold) {
+                sync_->wait_cv.notify_all();
+                raise = std::exchange(sync_->frame_pending, false);
+            }
+        }
+        if (raise) raise_frame_event();
     }
     void release_wait_image() { hold_wait_image(false); }
     // Arm only after joining the previous acquisition. A stream-restart stop()
-    // before wait_image must not release the next acquisition's hold.
+    // before the trigger must not release the next acquisition's hold.
     void hold_next_wait_image() {
         std::lock_guard<std::mutex> lock(sync_->wait_mutex);
         sync_->hold_next_wait = true;
@@ -98,6 +106,9 @@ public:
         return sync_->wait_cv.wait_for(lock, timeout, [this] { return sync_->held_wait_entered && sync_->wait_hold; });
     }
     bool deliver_frame = false;
+    // False: the camera never raises the frame event (a lost trigger), so only an
+    // abort, a disconnect or the watchdog ends the body's frame wait.
+    bool frame_events = true;
     // What is_guiding() answers: the SDK side of a pulse the driver started.
     bool guiding = false;
     std::optional<std::pair<unsigned, unsigned>> delivered_dimensions;
@@ -189,37 +200,48 @@ public:
         close_shared(handle);
     }
 
-    void start_pull_mode(HToupcam h, void (*)(unsigned, void*), void*) override {
+    void start_pull_mode(HToupcam h, void (*event_callback)(unsigned, void*), void* ctx) override {
         hit("start_pull_mode");
         require_open(h);
+        std::lock_guard<std::mutex> lock(sync_->wait_mutex);
+        sync_->event_callback = event_callback;
+        sync_->event_ctx = ctx;
     }
     void stop(HToupcam h) override {
         hit("stop");
         require_open(h);
-        release_wait_image();  // a stopped stream unblocks a pending wait
+        release_wait_image();  // a held frame races the stop
+        std::lock_guard<std::mutex> lock(sync_->wait_mutex);
+        sync_->event_callback = nullptr;  // a stopped stream raises no more events
     }
     void put_trigger_mode(HToupcam h, int) override {
         hit("put_trigger_mode");
         require_open(h);
     }
+    // The frame event follows at once, from this thread, unless a hold keeps it
+    // back. deliver_frame decides whether the pull then finds a frame.
     void trigger(HToupcam h, unsigned short) override {
         hit("trigger");
         require_open(h);
-    }
-    bool wait_image(HToupcam h, unsigned timeout_ms, void* buffer, int bits, int row_pitch, unsigned& actual_width,
-                    unsigned& actual_height) override {
-        hit("wait_image");
-        require_open(h);
         {
-            std::unique_lock<std::mutex> lock(sync_->wait_mutex);
+            std::lock_guard<std::mutex> lock(sync_->wait_mutex);
             if (sync_->hold_next_wait) {
                 sync_->hold_next_wait = false;
                 sync_->wait_hold = true;
                 sync_->held_wait_entered = true;
                 sync_->wait_cv.notify_all();
             }
-            sync_->wait_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !sync_->wait_hold; });
+            if (sync_->wait_hold) {
+                sync_->frame_pending = true;
+                return;
+            }
         }
+        raise_frame_event();
+    }
+    bool pull_image(HToupcam h, void* buffer, int bits, int row_pitch, unsigned& actual_width,
+                    unsigned& actual_height) override {
+        hit("pull_image");
+        require_open(h);
         if (!deliver_frame) {
             actual_width = 0;
             actual_height = 0;
@@ -252,7 +274,7 @@ public:
         // odd-NumX frame and every such sub-frame failed on hardware.
         if (row_pitch < 0 ||
             static_cast<std::size_t>(row_pitch) < static_cast<std::size_t>(actual_width) * (bits > 8 ? 2U : 1U)) {
-            throw alpacacore::AlpacaException("Toupcam_WaitImageV4: E_INVALIDARG",
+            throw alpacacore::AlpacaException("Toupcam_PullImageV4: E_INVALIDARG",
                                               alpacacore::AlpacaError::DriverException);
         }
         const std::size_t required = static_cast<std::size_t>(row_pitch) * actual_height;
@@ -619,8 +641,23 @@ private:
         bool wait_hold = false;
         bool hold_next_wait = false;
         bool held_wait_entered = false;
+        bool frame_pending = false;  // a trigger's event the hold kept back
+        void (*event_callback)(unsigned, void*) = nullptr;
+        void* event_ctx = nullptr;
     };
     std::unique_ptr<Sync> sync_ = std::make_unique<Sync>();
+
+    // Called with no fake lock held, as the SDK calls back from its own thread.
+    void raise_frame_event() {
+        void (*callback)(unsigned, void*) = nullptr;
+        void* ctx = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(sync_->wait_mutex);
+            callback = sync_->event_callback;
+            ctx = sync_->event_ctx;
+        }
+        if (callback != nullptr && frame_events) callback(vendor::touptek::kToupEventImage, ctx);
+    }
 
     void hit(const char* fn) {
         {
@@ -734,6 +771,10 @@ private:
                         handles_by_id_.erase(it);
                         break;
                     }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(sync_->wait_mutex);
+                    sync_->event_callback = nullptr;  // the driver that registered it may be gone
                 }
                 break;
         }

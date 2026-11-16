@@ -242,10 +242,10 @@ public:
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         if (!connected) {
             // Stop the SDK exposure, then join the body, BEFORE taking mutex_ and
-            // closing the handle: the body runs Toupcam_WaitImageV4 on a raw handle
-            // snapshot, so closing under it is a use-after-close (decision 0020 rule
-            // 5). The stop wakes that wait; a body failure it causes is dropped, not
-            // kept. closing_, set with the stop, is what refuses a StartExposure that
+            // closing the handle: the body pulls its frame on a raw handle snapshot,
+            // so closing under it is a use-after-close (decision 0020 rule 5).
+            // disconnect_and_join() wakes the body's frame wait; a body failure the
+            // stop causes is dropped, not kept. closing_, set with the stop, is what refuses a StartExposure that
             // passed its connection check before disconnect_and_join() closes the
             // session: it raises NotConnected and runs no body. The join runs
             // without mutex_ (the body takes mutex_).
@@ -1074,9 +1074,10 @@ public:
     // All cache fields are guarded by mutex_ (callers hold it via with_handle).
 
     // During an exposure the last reading is served regardless of age: no
-    // thermal USB control transfer may be issued while Toupcam_WaitImageV4 is
-    // pending (the SDK answers E_UNEXPECTED / drops the frame, seen on the
-    // ATR585M at bin 3-4), and a 1-3 s old temperature is harmless.
+    // thermal USB control transfer may be issued while a frame is pending
+    // (measured with Toupcam_WaitImageV4 parked: the SDK answers E_UNEXPECTED /
+    // drops the frame, seen on the ATR585M at bin 3-4), and a 1-3 s old
+    // temperature is harmless.
     // Freshness is tracked PER quantity (temperature vs TEC voltage): a
     // temperature-only fallback read must not mark the TEC reading fresh, or
     // DeviceState (temperature first, then CoolerPower) right after connect
@@ -1196,10 +1197,9 @@ public:
             if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
                 throw AlpacaException("An exposure is already in progress", AlpacaError::InvalidOperation);
             }
-            // A body the watchdog failed can still be parked in Toupcam_WaitImageV4:
-            // stop the stream to wake it, so session_.start() below does not wait out
-            // the SDK timeout (decision 0020 rule 5). Before the snapshot, because the
-            // stop dirties the stream configuration.
+            // A body the watchdog failed can still be in an SDK call: stop its stream
+            // now (decision 0020 rule 5), before the snapshot, because the stop
+            // dirties the stream configuration.
             if (session_.busy() && stop_unclean_stream_locked()) {
                 format_dirty_ = true;
                 roi_dirty_ = true;
@@ -1272,10 +1272,10 @@ public:
             }
             // NB: at bin 1 an odd NumX/NumY (the +1 even pad), and at bin >= 2 the
             // grown span, make the SDK frame one pixel wider/taller than
-            // requested, so got_w/got_h from WaitImageV4 can exceed
+            // requested, so got_w/got_h from PullImageV4 can exceed
             // active_num_x/active_num_y — this is NOT an off-by-one. The body
             // lays the frame out at that wider stride and build_image_array reads
-            // the first active_num_x columns of each row (WaitImageV4 rejects a
+            // the first active_num_x columns of each row (the SDK rejects a
             // rowPitch shorter than the delivered row with E_INVALIDARG, measured
             // on the GPCMOS01200KPF, so the stride can never be the requested
             // width). Reported NumX/NumY stay = active_num_x/y.
@@ -1391,7 +1391,6 @@ public:
                     sdk_local.trigger(handle, 1);
                 }
 
-                unsigned timeout_ms = (exposure_us / 1000) + 10000;
                 // Buffer rows are stride_px wide at the sensor's byte depth (RAW8
                 // = 1 byte/pixel, >8-bit = 16-bit little-endian; M14): the frame
                 // the SDK will deliver (expected_w, one wider than num for an odd
@@ -1407,14 +1406,18 @@ public:
 
                 unsigned got_w = 0;
                 unsigned got_h = 0;
-                // rowPitch = stride_px * bytes_per_pixel: Toupcam_WaitImageV4's
+                // Decision 0020 rule 4: the frame event (on_event_static) wakes this
+                // wait; the watchdog deadline bounds it, and an abort, a disconnect or
+                // the watchdog ends it without a pull. Then one non-blocking pull.
+                // rowPitch = stride_px * bytes_per_pixel: Toupcam_PullImageV4's
                 // nRowPitch is the destination row stride in OUR buffer and must
                 // hold a whole delivered row — a pitch shorter than the frame's
                 // row (the requested width against a one-wider frame) is
                 // E_INVALIDARG on hardware. build_image_array reads the first
                 // active_num_x columns of each stride_px-wide row.
-                bool got = sdk_local.wait_image(handle, timeout_ms, pixel_buffer.data(), active_16bit ? 16 : 8,
-                                                stride_px * static_cast<int>(bytes_per_pixel), got_w, got_h);
+                const bool got = c.wait_for_signal() &&
+                                 sdk_local.pull_image(handle, pixel_buffer.data(), active_16bit ? 16 : 8,
+                                                      stride_px * static_cast<int>(bytes_per_pixel), got_w, got_h);
 
                 if (!got) {
                     throw AlpacaException("The camera failed to deliver the exposure frame",
@@ -1531,9 +1534,8 @@ public:
                 session_.discard_image();
             }
             // A completed exposure leaves a reusable pull-mode stream: keep it. For an
-            // active, failed or timed-out exposure, stop() wakes WaitImageV4 promptly
-            // (a 10-min frame would otherwise take ~10 min to abort) and is the SDK
-            // stop before the join (decision 0020 rule 5). Held under mutex_ so a
+            // active, failed or timed-out exposure, stop() is the SDK stop before the
+            // join (decision 0020 rule 5); session_.abort() wakes the body's frame wait. Held under mutex_ so a
             // concurrent disconnect can't close the handle in the gap.
             if (stop_unclean_stream_locked()) {
                 // Stream was stopped; force the next exposure to re-init it. Mark the
@@ -1544,7 +1546,7 @@ public:
             }
         }
         if (exposing) {
-            session_.abort();  // joins the body; bounded by the stop above waking its frame wait
+            session_.abort();  // wakes the body's frame wait and joins it
         }
     }
 
@@ -1612,7 +1614,7 @@ private:
     // Guarded by mutex_. True only when pull mode is running and the last
     // exposure (if any) published a frame without an abort/failure/timeout.
     // An idle camera does not imply a stopped body: a body the watchdog failed
-    // can still be parked in Toupcam_WaitImageV4 until a stop wakes it.
+    // can still be in an SDK call until it returns.
     bool stream_clean_;
     // Guarded by mutex_. True from a StartExposure's settings snapshot until
     // session_.start() has published Exposing (or refused).
@@ -1622,8 +1624,8 @@ private:
     bool abort_pending_{false};
     // Guarded by mutex_. Set with the disconnect's SDK stop, cleared on connect:
     // a StartExposure in the gap before disconnect_and_join() closes the session
-    // would otherwise run a body that parks in Toupcam_WaitImageV4 and holds the
-    // join (decision 0020 rule 5).
+    // would otherwise run a body that triggers on a camera being closed (decision
+    // 0020 rule 5).
     bool closing_{false};
     // Guarded by mutex_. Test seam (set_disconnect_gap_hook_for_testing): runs on the
     // disconnecting thread after closing_ is set and before disconnect_and_join(),
@@ -1658,17 +1660,19 @@ private:
     std::mutex pulse_guide_lifecycle_mutex_;
 
     // Past start + duration + this, the session fails the exposure (watchdog).
-    // Toupcam_WaitImageV4's own timeout is the exposure + 10 s, inside it.
+    // The body's frame wait has no timeout of its own: this bounds it.
     static constexpr std::chrono::seconds kWatchdogMargin{15};
     // The exposure (decision 0020). Declared after every member the body touches:
     // destroyed first, so the body is joined before they die.
     util::CaptureSession session_;
 
-    static void on_event_static(unsigned /*event*/, void* /*ctx*/) {
+    static void on_event_static(unsigned event, void* ctx) {
         // Pull-mode callbacks fire on an SDK-owned thread. Do not touch the
         // handle here — close/stop from this context deadlocks (SDK contract).
-        // Frame delivery is handled by Toupcam_WaitImageV4 in the exposure
-        // body, so this callback is intentionally a no-op.
+        // A frame wakes the exposure body, which pulls it (decision 0020 rule 4).
+        if (event == kToupEventImage) {
+            static_cast<ToupTekCameraDriver*>(ctx)->session_.signal();
+        }
     }
 
     void ensure_connected() const {
@@ -1682,7 +1686,7 @@ private:
     // means a concurrent disconnect cannot Toupcam_Close the handle mid-call — closing the
     // use-after-close window that a bare handle snapshot left open (it released
     // mutex_ before the SDK call). Use this for every fast SDK option
-    // read/write. Do NOT use it for blocking SDK calls (Toupcam_WaitImageV4) or
+    // read/write. Do NOT use it for a frame pull (Toupcam_PullImageV4) or
     // the exposure body, which must not hold mutex_ across them. Callers that also need
     // readout_mutex_ (set_gain/set_offset/get/set_readout_mode) take both locks
     // directly instead, to stay atomic against the two-step readout-mode apply.
@@ -1699,7 +1703,7 @@ private:
     }
 
     // Reject runtime sensor-register writes (readout mode / gain / offset) while
-    // a frame is integrating: the exposure body is blocked in wait_image
+    // a frame is integrating: the exposure body waits for the frame event
     // holding no lock, so a mid-exposure register write would race the live
     // integration and yield a mixed-state or stalled frame with no error.
     // Requires mutex_ held, the lock start_exposure sets exposure_starting_ under.
@@ -1826,8 +1830,8 @@ private:
         closing_ = false;
     }
 
-    // A body has not returned: it may be parked in Toupcam_WaitImageV4, where a
-    // thermal control transfer makes the SDK drop the frame.
+    // A body has not returned: a frame may be integrating, where a thermal
+    // control transfer makes the SDK drop it.
     bool exposure_body_running() const { return session_.busy(); }
 
     // Assumes mutex_ is held. Returns true when the pull-mode stream was not
@@ -1942,7 +1946,7 @@ private:
     }
 
     // Buffer holds stride_px-wide rows at 1 (RAW8) or 2 (16-bit, little-endian
-    // native) bytes per pixel — the same stride passed as WaitImageV4's
+    // native) bytes per pixel — the same stride passed as PullImageV4's
     // nRowPitch (M14); stride_px >= out_width, and the first out_width columns
     // of each row are the image.
     ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, bool is_16bit, int stride_px, int out_width,
@@ -1978,7 +1982,7 @@ private:
         image.data.resize(output_pixels);
         for (int row = 0; row < out_height; ++row) {
             for (int col = 0; col < out_width; ++col) {
-                // Rows are laid out at stride_px (WaitImageV4's nRowPitch); a
+                // Rows are laid out at stride_px (PullImageV4's nRowPitch); a
                 // delivered width above out_width is cropped by reading only the
                 // first out_width columns, and one below it has only the last
                 // column missing, which reads its neighbour.
