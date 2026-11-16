@@ -1707,6 +1707,8 @@ TEST_CASE("Celestron hold window - FindHome ends a superseded GOTO's hold", "[ce
 // FindHome takes over a GOTO inside its 8 s hold. While its MC_LEVEL_START is on the wire (mutex_ free, homing_ not yet
 // set) and the superseded body has ended, the GOTO's hold still owns Slewing: a status poll tick in that gap leaves L
 // unread, as it does through the rest of the hold, so it cannot publish an idle frame for a GOTO L does not show yet.
+// The gap is held open by the fake's MC_LEVEL_START handler, which waits on two signals: the superseded body has
+// returned (the slew slot's thread factory), and the gap tick has planned its sample (the after-plan seam).
 TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while its home command is in flight",
           "[celestron][telescope][hold-window]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1714,24 +1716,37 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
     std::atomic<alpacacore::TelescopeDriver*> probe{nullptr};
     std::atomic<bool> polling{false};
     std::atomic<int> l_reads_in_gap_tick{0};
+    std::atomic<int> position_reads_in_gap_tick{0};
+    std::atomic<bool> body_returned_before_tick{false};
+    std::atomic<bool> tick_planned_in_gap{false};
+    auto bodies_returned = std::make_shared<std::atomic<int>>(0);
+    alpacacore::test::Latch planned;
     std::thread poller;
     const auto inner = st->responder();
     alpacacore::test::FakeMountServer server([&, inner](const std::string& chunk) {
-        if (polling.load() && !chunk.empty() && chunk[0] == 'L') {
-            ++l_reads_in_gap_tick;
+        if (polling.load() && !chunk.empty()) {
+            if (chunk[0] == 'L') {
+                ++l_reads_in_gap_tick;
+            }
+            const bool mc_position =
+                chunk.size() >= 8 && chunk[0] == 'P' && static_cast<unsigned char>(chunk[3]) == 0x01;
+            if (chunk == "e" || chunk == "E" || mc_position) {
+                ++position_reads_in_gap_tick;
+            }
         }
         const bool level_start = chunk.size() >= 8 && chunk[0] == 'P' && static_cast<unsigned char>(chunk[2]) == 0x10 &&
                                  static_cast<unsigned char>(chunk[3]) == 0x0B;
         if (auto* driver = probe.exchange(nullptr); driver != nullptr && level_start) {
-            // The superseded body wakes from the claim's cancel and ends; only the paused poll waits then.
-            (void)wait_until([&] { return clock.waiter_count() == 1; }, 300);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));  // test side: the body returns
+            // The superseded body wakes from the claim's cancel and returns, so the slot no longer reports it running.
+            body_returned_before_tick.store(wait_until([&] { return bodies_returned->load() >= 1; }, 5000));
             polling.store(true);
             poller = std::thread([&, driver] {
                 (void)alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
                 polling.store(false);
             });
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));  // test side: the tick plans with mutex_ free
+            // The tick has read its plan with mutex_ free; its exchanges wait for this one to be answered.
+            tick_planned_in_gap.store(planned.wait_entered());
+            planned.release();
         }
         return inner(chunk);
     });
@@ -1739,6 +1754,17 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    alpacacore::vendor::celestron::set_slew_spawn_for_testing(*driver, [bodies_returned](std::function<void()> body) {
+        return std::thread([bodies_returned, body = std::move(body)] {
+            body();
+            bodies_returned->fetch_add(1);
+        });
+    });
+    alpacacore::vendor::celestron::set_status_poll_after_plan_hook_for_testing(*driver, [&] {
+        if (polling.load()) {
+            planned.block();
+        }
+    });
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
@@ -1749,6 +1775,10 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
     REQUIRE_NOTHROW(driver->find_home());
     REQUIRE(poller.joinable());
     poller.join();
+    alpacacore::vendor::celestron::set_status_poll_after_plan_hook_for_testing(*driver, nullptr);
+    REQUIRE(body_returned_before_tick.load());
+    REQUIRE(tick_planned_in_gap.load());
+    REQUIRE(position_reads_in_gap_tick.load() > 0);  // the gap tick sampled the mount
     CHECK(l_reads_in_gap_tick.load() == 0);
     CHECK(driver->get_slewing());  // homing
     driver->set_connected(false);

@@ -3356,6 +3356,9 @@ private:
     // ":Mg" after it keeps that step's completion hold (release_failed_pulse_window()). Reset with the pulse window by
     // reset_position_offsets(), connect (unless a kept drain still runs) and the disconnect teardown; min() while no
     // step has been sent since.
+    // A send stamp, not a deadline (decision 0022 rule 4): the end of the last `:Mg` step that went out, stamped from
+    // clock_.now(). release_failed_pulse_window() reads it to keep that step's completion hold in pulse_hold_, which
+    // stays the one IsPulseGuiding deadline. min() means no step was sent since the last reset.
     std::chrono::steady_clock::time_point pulse_sent_end_ = std::chrono::steady_clock::time_point::min();
     mutable std::mutex pulse_mutex_;
     std::deque<PulseTask> pulse_queue_;

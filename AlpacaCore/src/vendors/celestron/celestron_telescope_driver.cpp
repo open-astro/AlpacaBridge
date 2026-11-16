@@ -3102,6 +3102,7 @@ private:
                                   manual_axis_slewing_[1] || slew_hold_.active(clock_.now()));
             read_site = !site_info_valid_ && plan.full && site_read_due_locked();
         }
+        run_status_poll_after_plan_hook();  // test seam: the tick has its plan, mutex_ is free
         if (read_site) {
             std::optional<LocationInfo> site;
             try {
@@ -3208,6 +3209,17 @@ private:
         }
     }
 
+    void run_status_poll_after_plan_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = status_poll_after_plan_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_status_poller(util::OperationContext& ctx) {
         for (int tick = 0;; ++tick) {
             const auto started = clock_.now();
@@ -3269,6 +3281,11 @@ public:
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         status_poll_after_sample_hook_ = std::move(hook);
+    }
+
+    void set_status_poll_after_plan_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        status_poll_after_plan_hook_ = std::move(hook);
     }
 
 private:
@@ -4129,6 +4146,7 @@ private:
     std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> status_poll_after_plan_hook_;  // guarded by status_poll_hook_mutex_
     std::function<void()> slewing_read_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> failure_stop_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
@@ -4180,6 +4198,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_status_poll_after_plan_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_status_poll_after_plan_hook_for_testing(std::move(hook));
     }
 }
 
