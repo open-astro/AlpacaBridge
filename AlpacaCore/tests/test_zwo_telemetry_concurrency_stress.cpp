@@ -11,12 +11,16 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #ifndef _WIN32
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <future>
@@ -24,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -1382,32 +1387,138 @@ TEST_CASE("ZWO host time synchronization seeds UTC at connect refresh and before
         CHECK(rig.driver->get_utc_date() <= after_connect + 1234ms);
     } else
         error([&] { rig.driver->get_utc_date(); }, AlpacaError::InvalidOperation);
+    // open-astro#2286: a client write wins until disconnect; neither the refresh nor the GOTO puts host time back.
     const auto client = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
     rig.driver->set_utc_date(client);
-    const auto before_refresh = std::chrono::system_clock::now();
     rig.driver->set_connected(true);
-    if (sync_time) {
-        CHECK(rig.driver->get_utc_date() >= before_refresh);
-        const auto after_refresh = std::chrono::system_clock::now();
-        REQUIRE(rig.clock.wait_for_waiters(1, 5s));
-        rig.tick(1234ms);
-        CHECK(rig.driver->get_utc_date() >= before_refresh + 1234ms);
-        CHECK(rig.driver->get_utc_date() <= after_refresh + 1234ms);
-    } else
-        CHECK(rig.driver->get_utc_date() == client);
-    const auto before_goto = std::chrono::system_clock::now();
+    CHECK(rig.driver->get_utc_date() == client);
     rig.driver->slew_to_coordinates_async(6.0, 20.0);
     REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
     REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));  // Drain the setup exchange.
-    const auto goto_utc = rig.driver->get_utc_date();
-    const auto goto_after = std::chrono::system_clock::now();
-    CHECK(goto_utc >= before_goto);
-    CHECK(goto_utc <= goto_after);
-    const auto after_goto = std::chrono::system_clock::now();
+    CHECK(rig.driver->get_utc_date() == client);
     rig.tick(1234ms);
-    CHECK(rig.driver->get_utc_date() >= before_goto + 1234ms);
-    CHECK(rig.driver->get_utc_date() <= after_goto + 1234ms);
-    CHECK(time_writes() == (sync_time ? 4 : 2));
+    CHECK(rig.driver->get_utc_date() == client + 1234ms);
+    CHECK(time_writes() == (sync_time ? 3 : 2));
+}
+
+namespace {
+// The UTC instant of the last ":SMTI" the mount received ("MM/DD/YY&HH:MM:SS&..."); the driver sends UTC.
+std::chrono::system_clock::time_point last_time_write(const Rig& rig) {
+    const auto all = rig.mount.commands();
+    const auto it =
+        std::find_if(all.rbegin(), all.rend(), [](const std::string& c) { return c.rfind(":SMTI", 0) == 0; });
+    REQUIRE(it != all.rend());
+    int mo = 0, d = 0, y = 0, h = 0, mi = 0, s = 0;
+    REQUIRE(std::sscanf(it->c_str(), ":SMTI%d/%d/%d&%d:%d:%d", &mo, &d, &y, &h, &mi, &s) == 6);
+    return std::chrono::sys_days{std::chrono::year{2000 + y} / mo / d} + std::chrono::hours(h) +
+           std::chrono::minutes(mi) + std::chrono::seconds(s);
+}
+
+std::chrono::system_clock::duration abs_diff(std::chrono::system_clock::time_point a,
+                                             std::chrono::system_clock::time_point b) {
+    return a > b ? a - b : b - a;
+}
+}  // namespace
+
+TEST_CASE("ZWO SiderealTime and the pre-GOTO time write follow a client's UTCDate", "[zwo][telescope][utc]") {
+    Rig rig(1000, 0, false);
+    rig.connect();
+    const auto client = std::chrono::system_clock::now() + 1h;
+    rig.driver->set_utc_date(client);
+
+    const double expected = util::local_sidereal_hours(rig.driver->get_utc_date(), rig.driver->get_site_longitude());
+    CHECK(std::abs(util::wrap_hour_angle(rig.driver->get_sidereal_time() - expected)) < 1.0 / 3600.0);
+
+    // Time passes while the GOTO's ":SMTI" is on the wire; the client's anchor must keep counting it.
+    rig.mount.hold_reply(":SMTI");
+    rig.driver->slew_to_coordinates_async(6.0, 20.0);
+    REQUIRE(rig.mount.wait_until_held(5s));
+    rig.clock.advance(5s);
+    rig.mount.release();
+    REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));  // Drain the setup exchange.
+    CHECK(rig.mount.count(":SMTI") == 2);
+    CHECK(abs_diff(last_time_write(rig), client) <= 1s);
+    CHECK(rig.driver->get_utc_date() == client + 5s);
+}
+
+TEST_CASE("ZWO pier side follows a client's UTCDate", "[zwo][telescope][utc]") {
+    Rig rig(1000, 0, false);
+    rig.connect();
+    const double longitude = rig.driver->get_site_longitude();
+    // Host hour angle about -6 h; twelve hours later on the client clock it is about +6 h, the other side.
+    const double ra = std::fmod(util::local_sidereal_hours(std::chrono::system_clock::now(), longitude) + 6.0, 24.0);
+    const auto client = std::chrono::system_clock::now() + 12h;
+    const int host_side = util::pier_side_for_hour_angle(
+        util::wrap_hour_angle(util::local_sidereal_hours(std::chrono::system_clock::now(), longitude) - ra));
+    const int client_side =
+        util::pier_side_for_hour_angle(util::wrap_hour_angle(util::local_sidereal_hours(client, longitude) - ra));
+    REQUIRE(host_side != client_side);
+
+    rig.mount.set_position(ra, 20.0);
+    rig.tick();
+    rig.driver->set_utc_date(client);
+    CHECK(rig.driver->get_destination_side_of_pier(ra, 20.0) == client_side);
+    CHECK(rig.driver->get_side_of_pier() == client_side);
+}
+
+namespace {
+// Pins the host-discipline probe and counts the driver's unsynchronized-host-clock WARNs; restores both on exit.
+struct HostClockWarnings {
+    std::atomic<int> count{0};  // first, so the sink below is restored before it dies
+    struct ProbeGuard {
+        explicit ProbeGuard(bool synced) {
+            util::ClientUtcWarning::set_host_synchronized_probe([synced] { return synced; });
+        }
+        ~ProbeGuard() { util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+    } probe;
+    struct SinkGuard {
+        logging::LogSink previous = logging::get_log_sink();
+        ~SinkGuard() { logging::set_log_sink(previous); }
+    } sink;
+
+    explicit HostClockWarnings(bool host_synchronized) : probe(host_synchronized) {
+        logging::set_log_sink([this](logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == logging::LogLevel::Warn && component == "ZWO" &&
+                message.find("host clock is not synchronized") != std::string_view::npos)
+                ++count;
+        });
+    }
+};
+}  // namespace
+
+TEST_CASE("ZWO writing an unsynchronized host clock to the mount warns once per connection", "[zwo][telescope][utc]") {
+    const bool host_synchronized = GENERATE(false, true);
+    HostClockWarnings warns(host_synchronized);
+
+    Rig rig(1000, 0, true);
+    rig.connect();
+    CHECK(warns.count == (host_synchronized ? 0 : 1));
+    rig.driver->set_connected(true);  // the refresh writes host time again
+    rig.driver->slew_to_coordinates_async(6.0, 20.0);
+    REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+    CHECK(rig.mount.count(":SMTI") == 3);
+    CHECK(warns.count == (host_synchronized ? 0 : 1));
+    rig.driver->set_connected(false);
+    rig.connect();
+    CHECK(warns.count == (host_synchronized ? 0 : 2));
+}
+
+TEST_CASE("ZWO the pre-GOTO time write warns on an unsynchronized host only when it sends the host clock",
+          "[zwo][telescope][utc]") {
+    // Time sync off: the GOTO is the first time write, so the connect sync cannot have spent the warning.
+    const bool client_wrote = GENERATE(false, true);
+    HostClockWarnings warns(false);
+    Rig rig(1000, 0, false);
+    rig.connect();
+    CHECK(warns.count == 0);
+    if (client_wrote) rig.driver->set_utc_date(std::chrono::system_clock::now() + 1h);
+    rig.driver->slew_to_coordinates_async(6.0, 20.0);
+    REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+    CHECK(rig.mount.count(":SMTI") == (client_wrote ? 2 : 1));
+    CHECK(warns.count == (client_wrote ? 0 : 1));
 }
 
 TEST_CASE("ZWO a management health read cannot expire the connect warmup", "[zwo][telescope][telemetry]") {
