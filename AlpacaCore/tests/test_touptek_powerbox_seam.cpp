@@ -102,6 +102,12 @@ TEST_CASE("ToupTek StellaVita Switch Driver - connected async and read-only writ
     CHECK(error_code([&] { driver->set_async(0, true); }) == alpacacore::AlpacaError::NotImplemented);
     CHECK(error_code([&] { driver->set_async_value(0, 1.0); }) == alpacacore::AlpacaError::NotImplemented);
     CHECK(error_code([&] { driver->set_switch(3, true); }) == alpacacore::AlpacaError::NotImplemented);
+    // The range check precedes the writability check (issue #2264): an out-of-range write to the read-only
+    // port is InvalidValue, a valid one NotImplemented, and neither reaches the box.
+    const int writes_before = fake.set_value_calls();
+    CHECK(error_code([&] { driver->set_switch_value(3, 2.0); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_code([&] { driver->set_switch_value(3, 1.0); }) == alpacacore::AlpacaError::NotImplemented);
+    CHECK(fake.set_value_calls() == writes_before);
     driver->set_connected(false);
 }
 
