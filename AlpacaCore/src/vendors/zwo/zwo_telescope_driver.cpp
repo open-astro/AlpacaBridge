@@ -424,6 +424,7 @@ public:
                 // while already connected" no-op, and re-arming there would
                 // log a line per poll for a client that re-sends both.
                 client_disagreement_warned_ = false;
+                host_clock_warned_ = false;
                 cached_equatorial_.reset();
                 cached_status_.reset();
                 park_state_cached_.reset();
@@ -562,12 +563,15 @@ public:
             // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
             const int offset_minutes = 0;
             TimeInfo info = from_utc_time_point(now, offset_minutes);
+            const bool host_synchronized = util::ClientUtcWarning::host_synchronized();
             std::lock_guard<std::mutex> time_write(time_write_mutex_);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (utc_client_writes_ != client_writes_seen) {
+                // A client write on this connection wins until disconnect, even over a later refresh (#2286).
+                if (utc_client_writes_ != client_writes_seen || client_utc_session_ == utc_session_) {
                     return;
                 }
+                warn_host_clock_write_locked(host_synchronized);
             }
             protocol.set_time_info(info);
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1045,7 +1049,7 @@ public:
 
         if (has_longitude) {
             const double current_ra = get_right_ascension();
-            const double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
+            const double lst_hours = util::local_sidereal_hours(pointing_utc(), longitude);
             const double ha = util::wrap_hour_angle(lst_hours - current_ra);
             // HA >= 0 → target west of meridian → pierEast (0)
             // HA <  0 → target east of meridian → pierWest (1)
@@ -1072,7 +1076,7 @@ public:
             return get_side_of_pier();
         }
 
-        const double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
+        const double lst_hours = util::local_sidereal_hours(pointing_utc(), longitude);
         const double hour_angle = util::wrap_hour_angle(lst_hours - ra);
 
         // German equatorial: target west of meridian (hour angle >= 0) -> pier side East.
@@ -1130,7 +1134,7 @@ public:
         if (!has_longitude) {
             throw AlpacaException("SiteLongitude is not available for SiderealTime", AlpacaError::DriverException);
         }
-        return util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
+        return util::local_sidereal_hours(pointing_utc(), longitude);
     }
 
     double get_site_elevation() const override {
@@ -1553,7 +1557,8 @@ public:
         // The wire write and the anchor below go together, so the connect's host-time
         // sync cannot land between them and leave the mount and the anchor apart.
         std::lock_guard<std::mutex> time_write(time_write_mutex_);
-        if (connected_.load()) {
+        const bool written = connected_.load();
+        if (written) {
             protocol_.set_time_info(info);
             std::lock_guard<std::mutex> lock(mutex_);
             ++utc_client_writes_;  // newer than the connect's host-time sync, which then skips
@@ -1563,6 +1568,7 @@ public:
         // A completed write to an old link must not replace a new session's or offline client's anchor.
         if (session != utc_session_) return;
         utc_offset_.set(utc, clock_.now());
+        if (written) client_utc_session_ = session;
         timezone_offset_minutes_ = offset_minutes;
         timezone_valid_ = true;
         if (connected_.load()) {
@@ -2537,6 +2543,7 @@ private:
     // call goes through the send gate, and the site and UTC caches are written only while the body holds its claim.
     bool synchronize_mount_time_and_site_for_goto(util::OperationContext& ctx, std::uint64_t claim) {
         auto& protocol = protocol_;
+        const bool host_synchronized = util::ClientUtcWarning::host_synchronized();
         std::unique_lock<std::mutex> lock(mutex_);
 
         std::optional<SiteInfo> site_to_write;
@@ -2577,17 +2584,42 @@ private:
             }
         }
 
-        const auto now = std::chrono::system_clock::now();
+        // The mount answers e7 without a time write; resend the client's time when it wrote one (#2286).
+        const auto client = client_utc_locked();
+        if (!client) warn_host_clock_write_locked(host_synchronized);
+        const auto now = client.value_or(std::chrono::system_clock::now());
         const int offset_minutes = 0;
         const TimeInfo info = from_utc_time_point(now, offset_minutes);
         if (!send_goto_locked(lock, claim, ctx, ":SMTI", [&] { protocol.set_time_info(info); })) {
             return false;
         }
         if (!connected_.load() || goto_claim_ != claim) return false;
+        if (client) return true;  // the client's anchor already holds this instant
         utc_offset_.set(now, clock_.now());
         timezone_offset_minutes_ = offset_minutes;
         timezone_valid_ = true;
         return true;
+    }
+
+    // The client's UTCDate when its write reached the mount on this connection (#2286, the #409 rule). Under mutex_.
+    std::optional<std::chrono::system_clock::time_point> client_utc_locked() const {
+        if (client_utc_session_ != utc_session_) return std::nullopt;
+        return utc_offset_.current(clock_.now());
+    }
+
+    // The instant SiderealTime and pier side use: the client's UTCDate, else the host clock.
+    std::chrono::system_clock::time_point pointing_utc() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return client_utc_locked().value_or(std::chrono::system_clock::now());
+    }
+
+    // Before the driver writes the host clock to the mount (#2286). Under mutex_; probe the host outside it.
+    void warn_host_clock_write_locked(bool host_synchronized) {
+        if (host_synchronized || host_clock_warned_) return;
+        host_clock_warned_ = true;
+        ALPACA_LOG_WARN("ZWO",
+                        "The host clock is not synchronized and is being written to the mount; pointing "
+                        "follows it until a client writes UTCDate (logged once per connection)");
     }
 
     // Call without mutex_, including safety stops; match Connected without waiting on the wire.
@@ -3170,6 +3202,9 @@ private:
         return utc_client_writes_;
     }
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
+    bool host_clock_warned_ = false;           // open-astro#2286, re-armed on connect
+    // utc_session_ of the client UTCDate write that reached the mount; guarded by mutex_ (#2286).
+    std::optional<std::uint64_t> client_utc_session_;
 
     std::string mount_info_;
     // Active claims release on teardown; this identity lasts until the driver is recreated.
