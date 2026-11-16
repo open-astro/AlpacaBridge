@@ -1462,37 +1462,63 @@ TEST_CASE("ZWO pier side follows a client's UTCDate", "[zwo][telescope][utc]") {
     CHECK(rig.driver->get_side_of_pier() == client_side);
 }
 
-TEST_CASE("ZWO writing an unsynchronized host clock to the mount warns once per connection", "[zwo][telescope][utc]") {
-    const bool host_synchronized = GENERATE(false, true);
+namespace {
+// Pins the host-discipline probe and counts the driver's unsynchronized-host-clock WARNs; restores both on exit.
+struct HostClockWarnings {
+    std::atomic<int> count{0};  // first, so the sink below is restored before it dies
     struct ProbeGuard {
         explicit ProbeGuard(bool synced) {
             util::ClientUtcWarning::set_host_synchronized_probe([synced] { return synced; });
         }
         ~ProbeGuard() { util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
-    } probe_guard(host_synchronized);
-    std::atomic<int> warns{0};
+    } probe;
     struct SinkGuard {
         logging::LogSink previous = logging::get_log_sink();
         ~SinkGuard() { logging::set_log_sink(previous); }
-    } sink_guard;
-    logging::set_log_sink([&](logging::LogLevel level, std::string_view component, std::string_view message) {
-        if (level == logging::LogLevel::Warn && component == "ZWO" &&
-            message.find("host clock is not synchronized") != std::string_view::npos)
-            ++warns;
-    });
+    } sink;
+
+    explicit HostClockWarnings(bool host_synchronized) : probe(host_synchronized) {
+        logging::set_log_sink([this](logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == logging::LogLevel::Warn && component == "ZWO" &&
+                message.find("host clock is not synchronized") != std::string_view::npos)
+                ++count;
+        });
+    }
+};
+}  // namespace
+
+TEST_CASE("ZWO writing an unsynchronized host clock to the mount warns once per connection", "[zwo][telescope][utc]") {
+    const bool host_synchronized = GENERATE(false, true);
+    HostClockWarnings warns(host_synchronized);
 
     Rig rig(1000, 0, true);
     rig.connect();
-    CHECK(warns == (host_synchronized ? 0 : 1));
+    CHECK(warns.count == (host_synchronized ? 0 : 1));
     rig.driver->set_connected(true);  // the refresh writes host time again
     rig.driver->slew_to_coordinates_async(6.0, 20.0);
     REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
     REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
     CHECK(rig.mount.count(":SMTI") == 3);
-    CHECK(warns == (host_synchronized ? 0 : 1));
+    CHECK(warns.count == (host_synchronized ? 0 : 1));
     rig.driver->set_connected(false);
     rig.connect();
-    CHECK(warns == (host_synchronized ? 0 : 2));
+    CHECK(warns.count == (host_synchronized ? 0 : 2));
+}
+
+TEST_CASE("ZWO the pre-GOTO time write warns on an unsynchronized host only when it sends the host clock",
+          "[zwo][telescope][utc]") {
+    // Time sync off: the GOTO is the first time write, so the connect sync cannot have spent the warning.
+    const bool client_wrote = GENERATE(false, true);
+    HostClockWarnings warns(false);
+    Rig rig(1000, 0, false);
+    rig.connect();
+    CHECK(warns.count == 0);
+    if (client_wrote) rig.driver->set_utc_date(std::chrono::system_clock::now() + 1h);
+    rig.driver->slew_to_coordinates_async(6.0, 20.0);
+    REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
+    CHECK(rig.mount.count(":SMTI") == (client_wrote ? 2 : 1));
+    CHECK(warns.count == (client_wrote ? 0 : 1));
 }
 
 TEST_CASE("ZWO a management health read cannot expire the connect warmup", "[zwo][telescope][telemetry]") {
