@@ -368,6 +368,7 @@ public:
                                   AlpacaError::InvalidValue);
         }
         ensure_link_locked();
+        ensure_not_exposing_locked();  // #2259 step 5: a second StartExposure no longer supersedes
         const std::size_t step = iguider_exposure_step(duration);
         const double taken = kIGuiderDurations[step];
         // The frames the settle waits out run at the exposure being replaced.
@@ -563,7 +564,9 @@ private:
 
     void set_bin(int bin) {
         if (bin != 1) throw AlpacaException("The iGuider does not bin; BinX/BinY must be 1", AlpacaError::InvalidValue);
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        ensure_not_exposing_locked();
     }
 
     void set_roi_member(int value, int minimum, int Roi::*member) {
@@ -574,7 +577,18 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         ensure_link_locked();
+        ensure_not_exposing_locked();
         roi_.*member = value;
+    }
+
+    // #2259 canonical order, last step: a geometry write or a second StartExposure while an exposure is pending is
+    // InvalidOperation, as on every other camera. The pending exposure keeps its own window (exposure_roi_), so this
+    // is the contract's answer rather than a guard against a torn frame; a StartExposure used to supersede.
+    void ensure_not_exposing_locked() const {
+        latch_exposure_timeout_locked();
+        if (exposure_pending_) {
+            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
+        }
     }
 
     void throw_exposure_failure_locked() const {
