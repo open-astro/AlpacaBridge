@@ -13,7 +13,7 @@
 #pragma once
 
 // Test-only: the Sky-Watcher telescope driver over a FakeSkyWatcherMount's
-// loopback UDP port, for the fake ConformU server (fake_skywatcher_server.cpp).
+// loopback UDP port, for the fake ConformU server (fake_conformu_server.cpp).
 // It lives here, not in AlpacaHTTP, so the vendor header stays out of AlpacaHTTP
 // (scripts/check_layering.py). The mount must outlive the returned driver.
 

@@ -244,6 +244,20 @@ Checks:
      check list: `// NOLINT(bugprone-empty-catch): the poll retries` (issue
      #2059). A suppression with no reason cannot be reviewed, and `git grep
      NOLINT` shows only that line. NOLINTEND is exempt.
+ 29. The fake ConformU run list, scripts/conformu_fake_runs.tsv, agrees with
+     kFakeConnectableRoster in both directions (issue #2078). Every roster row
+     has one record (vendor, deviceType, fakeHeader) whose status is `run` or
+     `pending`, and every such record has a roster row, so a new fake cannot
+     be left outside the ConformU run unnoticed. A driver with no fake has a
+     `no-fake` record whose fakeHeader is `-`, or `-<backend>` when its
+     (vendor, deviceType) also has a roster row for another backend (the
+     ToupTek thermal switch beside the StellaVita); a bare `-` there is a
+     finding. A `pending` or `no-fake` record names the slice (2 to 6) that
+     runs it and no report. A `run` record names its committed report,
+     AlpacaCore/conformu/<Vendor>/Fake/Fake-<deviceType>-<fakeStem>-Linux-arm64.txt
+     (the Sky-Watcher UDP mount keeps Fake-Linux-arm64.txt), and the file
+     exists. The roster is read as text, so a row compiled only under a build
+     option still needs a record.
 """
 
 import glob
@@ -1859,6 +1873,90 @@ def check_fake_roster_matches_disk(root=ROOT):
     return _fake_roster_findings(read("AlpacaCore/tests/contract_sweep.h", root), disk)
 
 
+# Check 29 (issue #2078): the fake ConformU run list is data, one record per
+# roster row, kept in step with the roster both ways.
+
+CONFORMU_RUNS_PATH = "scripts/conformu_fake_runs.tsv"
+CONFORMU_RUNS_HEADER = ["vendor", "deviceType", "fakeHeader", "status", "slice", "reportPath"]
+CONFORMU_RUNS_STATUSES = ("run", "pending", "no-fake")
+# The one report that keeps its name from before the run list (#1621).
+CONFORMU_LEGACY_REPORT = ("skywatcher", "telescope", "fake_skywatcher_mount.h",
+                          "AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt")
+CONFORMU_REPORT_RE = re.compile(r"^AlpacaCore/conformu/[^/]+/Fake/(Fake-[^/]+\.txt)$")
+
+
+def _conformu_run_list_findings(header_text, tsv_text, report_exists=lambda path: True):
+    """Check 29 over the roster header and the run list. Pure, so --self-test can drive it."""
+    findings = []
+    m = ROSTER_ARRAY_RE.search(_strip_comments(header_text))
+    roster = ROSTER_ROW_RE.findall(m.group(1)) if m else []
+    if not roster:
+        return ["AlpacaCore/tests/contract_sweep.h has no kFakeConnectableRoster rows (or the array moved): "
+                "the ConformU run list cannot be checked against it"]
+    lines = [ln for ln in tsv_text.splitlines() if ln.strip() and not ln.startswith("#")]
+    if not lines or lines[0].split("\t") != CONFORMU_RUNS_HEADER:
+        return ["%s must start with the tab-separated header %s" % (CONFORMU_RUNS_PATH, "\t".join(CONFORMU_RUNS_HEADER))]
+    roster_keys = set(roster)
+    roster_pairs = {(v, t) for v, t, _ in roster}
+    seen = set()
+    listed = set()
+    for n, line in enumerate(lines[1:], start=2):
+        cells = line.split("\t")
+        where = "%s line %d" % (CONFORMU_RUNS_PATH, n)
+        if len(cells) != len(CONFORMU_RUNS_HEADER):
+            findings.append("%s has %d columns, not %d" % (where, len(cells), len(CONFORMU_RUNS_HEADER)))
+            continue
+        vendor, dtype, fake, status, slice_, report = cells
+        key = (vendor, dtype, fake)
+        if key in seen:
+            findings.append("%s repeats the record {%s, %s, %s}" % (where, vendor, dtype, fake))
+        seen.add(key)
+        if status not in CONFORMU_RUNS_STATUSES:
+            findings.append("%s has status %r, not one of %s" % (where, status, ", ".join(CONFORMU_RUNS_STATUSES)))
+            continue
+        if status == "no-fake":
+            if not fake.startswith("-"):
+                findings.append("%s is no-fake but names a fake header %r: a no-fake record's fakeHeader is - or "
+                                "-<backend>" % (where, fake))
+            elif fake == "-" and (vendor, dtype) in roster_pairs:
+                findings.append("%s is a no-fake record {%s, %s, -} but kFakeConnectableRoster has a %s %s row: name "
+                                "the backend that has no fake (-<backend>), or run that row" % (where, vendor, dtype,
+                                                                                                 vendor, dtype))
+        else:
+            listed.add(key)
+            if key not in roster_keys:
+                findings.append("%s {%s, %s, %s} has no kFakeConnectableRoster row (AlpacaCore/tests/contract_sweep.h): "
+                                "remove the record or add the roster row" % (where, vendor, dtype, fake))
+        if status == "run":
+            if slice_ not in ("1", "2", "3", "4", "5", "6"):
+                findings.append("%s has slice %r: a run record names the slice that started running it" % (where, slice_))
+            rm = CONFORMU_REPORT_RE.match(report)
+            stem = fake[:-2] if fake.endswith(".h") else fake
+            expected = "Fake-%s-%s-Linux-arm64.txt" % (dtype, stem)
+            if (vendor, dtype, fake, report) == CONFORMU_LEGACY_REPORT:
+                pass
+            elif not rm or rm.group(1) != expected:
+                findings.append("%s reportPath %r must be AlpacaCore/conformu/<Vendor>/Fake/%s" % (where, report, expected))
+            if not report_exists(report):
+                findings.append("%s reportPath %s does not exist: commit the fake report the run writes" % (where, report))
+        else:
+            if slice_ not in ("2", "3", "4", "5", "6"):
+                findings.append("%s is %s with slice %r: name the slice (2 to 6) that runs it" % (where, status, slice_))
+            if report != "-":
+                findings.append("%s is %s but names a report %r: a record that does not run has reportPath -" %
+                                (where, status, report))
+    for vendor, dtype, fake in roster:
+        if (vendor, dtype, fake) not in listed:
+            findings.append("kFakeConnectableRoster row {%s, %s, %s} has no run or pending record in %s: add one "
+                            "(issue #2078)" % (vendor, dtype, fake, CONFORMU_RUNS_PATH))
+    return findings
+
+
+def check_conformu_run_list_matches_roster(root=ROOT):
+    return _conformu_run_list_findings(read("AlpacaCore/tests/contract_sweep.h", root), read(CONFORMU_RUNS_PATH, root),
+                                       lambda path: (root / path).is_file())
+
+
 STD_REGEX_TEMP_RE = re.compile(r"\bstd::regex\s*[({]")
 STD_REGEX_NAMED_RE = re.compile(r"\bstd::regex\s+(?:const\s+)?(\w+)\s*[({=]")
 
@@ -3196,6 +3294,7 @@ CHECKS = [
     ("Celestron CGX state-frame writers match the pinned callers", check_cgx_frame_writers),
     ("Every workflow job sets timeout-minutes", check_workflow_job_timeouts),
     ("Every NOLINT in first-party C/C++ gives its reason", check_nolint_reasons),
+    ("Fake ConformU run list matches the fake-connectable roster", check_conformu_run_list_matches_roster),
 ]
 
 
@@ -3727,6 +3826,47 @@ def self_test():
           len(_fake_roster_findings("// nothing here\n", roster_disk, roster_helpers)) == 1)
     check("fake roster: a row inside a comment is not a row",
           len(_fake_roster_findings("// {\"a\", \"b\", \"fake_x.h\"},\n" + roster_hdr, roster_disk, roster_helpers)) == 0)
+    runs_hdr = ("inline constexpr FakeRosterRow kFakeConnectableRoster[] = {\n"
+                "    {\"skywatcher\", \"telescope\", \"fake_skywatcher_mount.h\"},\n"
+                "    {\"zwo\", \"camera\", \"fake_zwo_sdk.h\"},\n"
+                "    {\"touptek\", \"switch\", \"fake_touptek_powerbox_sdk.h\"},\n"
+                "};\n")
+    runs_head = "vendor\tdeviceType\tfakeHeader\tstatus\tslice\treportPath\n"
+    runs_rows = ("skywatcher\ttelescope\tfake_skywatcher_mount.h\trun\t1\t"
+                 "AlpacaCore/conformu/Sky-Watcher/Fake/Fake-Linux-arm64.txt\n"
+                 "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\n"
+                 "touptek\tswitch\tfake_touptek_powerbox_sdk.h\tpending\t6\t-\n")
+    runs_ok = runs_head + runs_rows
+    check("conformu runs: a run list that matches the roster produces no finding",
+          _conformu_run_list_findings(runs_hdr, runs_ok) == [])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\n", ""))
+    check("conformu runs: a roster row with no run-list record is flagged by name",
+          len(f) == 1 and "{zwo, camera, fake_zwo_sdk.h}" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tfocuser\tfake_zwo_eaf_sdk.h\tpending\t3\t-\n")
+    check("conformu runs: a pending record with no roster row is flagged",
+          len(f) == 1 and "fake_zwo_eaf_sdk.h" in f[0] and "no kFakeConnectableRoster row" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\t-\tno-fake\t6\t-\n")
+    check("conformu runs: a no-fake record with no roster row is not a finding", f == [])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "touptek\tswitch\t-\tno-fake\t6\t-\n")
+    check("conformu runs: a bare no-fake record whose pair has a roster row is flagged",
+          len(f) == 1 and "-<backend>" in f[0])
+    check("conformu runs: a no-fake record naming its backend beside a roster row passes",
+          _conformu_run_list_findings(runs_hdr, runs_ok + "touptek\tswitch\t-thermal\tno-fake\t6\t-\n") == [])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "run\t5\t"
+                                    "AlpacaCore/conformu/ZWO/Fake/Fake-Linux-arm64.txt"))
+    check("conformu runs: a run record whose report name breaks the naming rule is flagged",
+          len(f) == 1 and "Fake-camera-fake_zwo_sdk-Linux-arm64.txt" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok, lambda path: False)
+    check("conformu runs: a run record whose report is not committed is flagged",
+          len(f) == 1 and "does not exist" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "pending\t\t-"))
+    check("conformu runs: a pending record with no slice is flagged", len(f) == 1 and "slice" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5", "skipped\t5"))
+    check("conformu runs: an unknown status is flagged", any("status 'skipped'" in x for x in f))
+    check("conformu runs: a run list with the wrong header is one finding",
+          len(_conformu_run_list_findings(runs_hdr, runs_rows)) == 1)
+    check("conformu runs: a missing roster array is a finding, not a silent pass",
+          len(_conformu_run_list_findings("// nothing here\n", runs_ok)) == 1)
 
     rx_ok = 'static const std::regex kX(R"(a)");\n'
     check("static regex: a static const regex is clean", _static_regex_findings(rx_ok) == [])
