@@ -43,6 +43,16 @@
 // another fd keeps open (a pty fake's keep-alive, a second program) the
 // exclusive flag would otherwise outlive this fd and refuse the next connect.
 //
+// The link also owns the verdict that it is lost (issue #2262, decision 0009
+// point 2a). Its read(), write_all() and read_until(SerialLink&, ...) (in
+// serial_read.h) classify every failure with is_serial_loss_errno(): EIO,
+// ENXIO, ENODEV and EBADF on an open link set a lock-free latch (lost()) once
+// and keep the text that set it (fault()). The wrapper still releases the
+// port itself, with close() under its own I/O lock: close() keeps the verdict,
+// so the fault text survives the port release until the next open (a new
+// link moved in) or an explicit clear_loss() on Disconnect (decision 0009
+// rule 5). The link never closes an fd under another thread's poll().
+//
 // POSIX-only, like serial_io.h; callers include it inside their existing
 // `#ifndef _WIN32` branches.
 
@@ -295,6 +305,19 @@ using SerialLineConfigure = std::function<void(struct termios&)>;
 /// 8N1, raw, no flow control, CLOCAL|CREAD, at @p baud: the shape almost every
 /// wrapper builds by hand. Callers that need more (HUPCL off, RTS/CTS) start
 /// from this and adjust.
+/**
+ * @brief The one rule for a lost serial link (issue #2262, decision 0009 point 2a).
+ *
+ * EIO (a hangup; tty_read() reports end-of-file as EIO), ENXIO and ENODEV say the
+ * device behind the fd is gone. EBADF says the fd itself is unusable, which on a
+ * link we opened is our own bug, not a pulled cable: still a loss, logged as an
+ * error by SerialLink. Timeouts, EAGAIN and EINTR are not.
+ */
+constexpr bool is_serial_loss_errno(int e) noexcept { return e == EIO || e == ENXIO || e == ENODEV || e == EBADF; }
+
+/// The fault text a lost serial link keeps: "Serial link lost (errno N)".
+inline std::string serial_link_lost_text(int err) { return "Serial link lost (errno " + std::to_string(err) + ")"; }
+
 inline void make_raw_8n1(struct termios& tty, speed_t baud) {
     cfmakeraw(&tty);
     cfsetispeed(&tty, baud);
@@ -317,7 +340,9 @@ enum class SerialExclusive : std::uint8_t {
  * @brief A serial port this process owns: registry claim + fd + TIOCEXCL.
  *
  * Move-only. Thread-compatible like the int fd it replaces: the owning wrapper
- * serialises open/close against its I/O with its own mutex.
+ * serialises open/close against its I/O with its own mutex. The loss verdict is
+ * the exception: lost() is lock-free and fault() takes only a leaf mutex, so a
+ * getter can read them while another thread holds the wrapper's I/O lock.
  */
 class SerialLink {
 public:
@@ -325,14 +350,19 @@ public:
     ~SerialLink() { close(); }
     SerialLink(const SerialLink&) = delete;
     SerialLink& operator=(const SerialLink&) = delete;
+    /// A move carries the loss verdict with the fd, so a link returned from a factory keeps it.
     SerialLink(SerialLink&& other) noexcept
-        : claim_(std::move(other.claim_)), fd_(std::exchange(other.fd_, -1)), path_(std::move(other.path_)) {}
+        : claim_(std::move(other.claim_)), fd_(std::exchange(other.fd_, -1)), path_(std::move(other.path_)) {
+        take_verdict(other);
+    }
+    /// A newly opened link moved in brings its clear verdict: that is how a reconnect clears the latch.
     SerialLink& operator=(SerialLink&& other) noexcept {
         if (this != &other) {
             close();
             claim_ = std::move(other.claim_);
             fd_ = std::exchange(other.fd_, -1);
             path_ = std::move(other.path_);
+            take_verdict(other);
         }
         return *this;
     }
@@ -412,7 +442,84 @@ public:
         return held.st_rdev == now.st_rdev && held.st_nlink > 0;
     }
 
+    /**
+     * @brief Read up to @p len bytes, as tty_read(), and classify a failure.
+     * @return as tty_read(): bytes read, 0 on timeout, -1 with errno set. A loss
+     *         errno on an open link sets lost() before the return; errno is kept.
+     */
+    ssize_t read(void* buf, std::size_t len, int timeout_ms) {
+        const ssize_t n = tty_read(fd_, buf, len, timeout_ms);
+        if (n < 0) {
+            const int err = errno;
+            note_error(err);
+            errno = err;
+        }
+        return n;
+    }
+
+    /**
+     * @brief Write all of @p data, as tty_write_all(), and classify a failure.
+     * @return false on an error or a timeout (errno set); a loss errno on an open
+     *         link sets lost() first. errno is kept.
+     */
+    bool write_all(const void* data, std::size_t len, int timeout_ms = 2000) {
+        if (tty_write_all(fd_, data, len, timeout_ms)) return true;
+        const int err = errno;
+        note_error(err);
+        errno = err;
+        return false;
+    }
+    bool write_all(const std::string& data, int timeout_ms = 2000) {
+        return write_all(data.data(), data.size(), timeout_ms);
+    }
+
+    /**
+     * @brief Feed one failed exchange's errno to the verdict.
+     * @return true when the link is lost after this call: @p err is a loss errno
+     *         on an open link (the first such error sets the latch and its text;
+     *         a later one keeps them), or the link was already lost while open.
+     *         A closed link never becomes lost: a late EBADF from a stale thread
+     *         after the wrapper's own close() is not a new loss.
+     *
+     * read(), write_all() and read_until(SerialLink&, ...) call this; a wrapper
+     * calls it itself only for an fd operation they do not cover.
+     */
+    bool note_error(int err) {
+        if (!is_open()) return false;
+        if (!is_serial_loss_errno(err)) return lost();
+        if (!lost_.load(std::memory_order_acquire)) {
+            {
+                std::lock_guard<std::mutex> lock(fault_mutex_);
+                if (fault_.empty()) fault_ = serial_link_lost_text(err);
+            }
+            lost_.store(true, std::memory_order_release);
+            if (err == EBADF) {
+                // Our own fd is unusable: a bug in this process, not a pulled cable (issue #2262).
+                ALPACA_LOG_ERROR("Serial", "The fd for " + path_ +
+                                               " is no longer valid (EBADF); a driver bug, treated as a lost link");
+            }
+        }
+        return true;
+    }
+
+    /// Lock-free: true once a loss errno was seen on this link while it was open (a driver's Connected getter).
+    bool lost() const noexcept { return lost_.load(std::memory_order_acquire); }
+
+    /// The text that set lost(), kept after close() until clear_loss() or a new link moved in; empty while not lost.
+    std::string fault() const {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        return fault_;
+    }
+
+    /// Forget the verdict: an explicit Disconnect (decision 0009 rule 5). Does not close the fd.
+    void clear_loss() noexcept {
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        fault_.clear();
+        lost_.store(false, std::memory_order_release);
+    }
+
     /// Release TIOCEXCL, close the fd and release the claim. Idempotent, never throws.
+    /// Keeps the loss verdict: the port release after a loss must not erase why it was lost.
     void close() noexcept {
         if (fd_ >= 0) {
             {
@@ -446,9 +553,26 @@ private:
         return true;
     }
 
+    void take_verdict(SerialLink& other) noexcept {
+        std::string text;
+        {
+            std::lock_guard<std::mutex> lock(other.fault_mutex_);
+            text = std::move(other.fault_);
+            other.fault_.clear();
+        }
+        const bool lost = other.lost_.exchange(false);
+        std::lock_guard<std::mutex> lock(fault_mutex_);
+        fault_ = std::move(text);
+        lost_.store(lost, std::memory_order_release);
+    }
+
     SerialPortClaim claim_;
     int fd_ = -1;
     std::string path_;
+    std::atomic<bool> lost_{false};
+    // A leaf: held only to copy the text in or out, never across I/O.
+    mutable std::mutex fault_mutex_;
+    std::string fault_;
 };
 
 }  // namespace alpacacore::util

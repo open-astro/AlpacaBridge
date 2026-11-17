@@ -125,9 +125,11 @@ public:
 
     /**
      * @brief False once a transaction has seen the port die (POLLHUP, EOF,
-     * EIO/ENXIO/ENODEV/EBADF) since the last connect(). The wrapper releases
-     * the fd at that moment; every later command throws NotConnected until a
-     * new connect(). Lock-free, safe from a FAST-timing getter (issue #527).
+     * EIO/ENXIO/ENODEV/EBADF: the util::SerialLink verdict, #2262) since the
+     * last connect(). The wrapper releases the fd at that moment; every later
+     * command throws NotConnected until a new connect(). A disconnect() clears
+     * it too (decision 0009 rule 5). Lock-free, safe from a FAST-timing getter
+     * (issue #527).
      */
     bool link_alive() const noexcept;
 

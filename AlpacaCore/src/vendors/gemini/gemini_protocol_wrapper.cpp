@@ -322,6 +322,10 @@ public:
 
         if (!success) {
             disconnect_locked();
+#ifndef _WIN32
+            // A connect that never completed keeps no loss reason (only a connected link is lost).
+            link_.clear_loss();
+#endif
             throw AlpacaException("Gemini focuser handshake failed after " +
                                   std::to_string(HANDSHAKE_RETRIES) + " attempts",
                                   AlpacaError::NotConnected);
@@ -356,8 +360,10 @@ public:
         }
 
         connected_ = true;
-        link_lost_.store(false);
-        set_fault("");
+#ifndef _WIN32
+        // A hangup the handshake retries absorbed is not a loss of this connection.
+        link_.clear_loss();
+#endif
         ALPACA_LOG_INFO("Gemini", "Connected, firmware version: " + std::to_string(firmware));
         return firmware;
     }
@@ -365,7 +371,9 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
-        set_fault("");
+#ifndef _WIN32
+        link_.clear_loss();  // decision 0009 rule 5: a Disconnect clears the loss reason
+#endif
     }
 
     bool is_connected() const {
@@ -373,13 +381,24 @@ public:
         return connected_;
     }
 
-    bool link_alive() const noexcept { return !link_lost_.load(); }
+    // The util::SerialLink verdict (#2262): lock-free, never waits on an exchange.
+    bool link_alive() const noexcept {
+#ifndef _WIN32
+        return !link_.lost();
+#else
+        return true;
+#endif
+    }
 
     void set_exchange_timeout_s(int seconds) noexcept { exchange_timeout_override_s_.store(seconds); }
 
+    // The text the link kept when it was lost; the link's own leaf mutex, never held across an exchange.
     std::string link_fault() const {
-        std::lock_guard<std::mutex> lock(fault_mutex_);
-        return fault_;
+#ifndef _WIN32
+        return link_.fault();
+#else
+        return {};
+#endif
     }
 
     int get_position() {
@@ -687,25 +706,21 @@ private:
         close_serial();
     }
 
-    void set_fault(const std::string& text) {
-        std::lock_guard<std::mutex> lock(fault_mutex_);
-        fault_ = text;
-    }
-
-    // The port is gone (a hangup, or EIO/ENXIO/ENODEV on the fd; EBADF is not one, a write only meets it on an fd we
-    // closed): decision 0009 rule 2 loses the link at once. Release the port so a replugged focuser can be reopened,
-    // latch link_lost_ for the driver's Connected getter and fail with NotConnected. During connect() nothing is
-    // latched: the handshake retries and connect() closes the port itself.
-    [[noreturn]] void fail_link_locked(const std::string& reason) {
+#ifndef _WIN32
+    // The link has judged the port gone (util::SerialLink, #2262: a hangup, or EIO/ENXIO/ENODEV/EBADF on the fd):
+    // decision 0009 rule 2 loses it at once. Release the port so a replugged focuser can be reopened; the link keeps
+    // its lost() latch for the driver's Connected getter and its fault text across the release. During connect()
+    // the port stays open: the handshake retries, and connect() closes the port and clears the verdict itself.
+    [[noreturn]] void fail_link_locked() {
+        const std::string reason = link_.fault();
         if (connected_) {
             ALPACA_LOG_ERROR("Gemini",
                              "Focuser link lost on " + config_.serial_port + ": " + reason + " (port released)");
-            set_fault(reason);
-            link_lost_.store(true);
             disconnect_locked();
         }
         throw AlpacaException(reason, AlpacaError::NotConnected);
     }
+#endif
 
     void close_serial() {
 #ifdef _WIN32
@@ -734,11 +749,9 @@ private:
             total += bytes_written;
         }
 #else
-        if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
+        if (!link_.write_all(data)) {
             const int err = errno;
-            if (err == EIO || err == ENXIO || err == ENODEV) {
-                fail_link_locked("Serial link lost (errno " + std::to_string(err) + ")");
-            }
+            if (link_.lost()) fail_link_locked();
             throw AlpacaException("Write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
 #endif
@@ -780,8 +793,8 @@ private:
 #else
         util::ReadSpec spec;
         spec.max_len = MAX_RESPONSE_LEN;
-        const auto r = util::read_until(link_.fd(), spec,
-                                        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+        const auto r =
+            util::read_until(link_, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
         switch (r.outcome) {
             case util::ReadOutcome::Terminator:
                 response = r.bytes;
@@ -789,7 +802,8 @@ private:
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("Response too long", AlpacaError::DriverException);
             case util::ReadOutcome::LinkDead:
-                fail_link_locked("Serial link lost (errno " + std::to_string(r.err) + ")");
+                if (link_.lost()) fail_link_locked();
+                throw AlpacaException("Read failed: " + util::errno_string(r.err), AlpacaError::DriverException);
             default:
                 throw AlpacaException("Read timeout", AlpacaError::DriverException);
         }
@@ -827,16 +841,12 @@ private:
     ConnectionConfig config_;
     bool connected_ = false;
     std::atomic<int> exchange_timeout_override_s_{0};  // set_exchange_timeout_s(); 0 = config_.serial_timeout_s
-    std::atomic<bool> link_lost_{false};  // set by fail_link_locked(), cleared by the next connect
-    // The loss reason for get_link_fault(); its own mutex, never held across an exchange, so a getter cannot wait on
-    // the wire while mutex_ is held by one.
-    mutable std::mutex fault_mutex_;
-    std::string fault_;
 
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
 #else
-    util::SerialLink link_;  // the claimed, open port (#1202); closed while disconnected
+    util::SerialLink
+        link_;  // the claimed, open port (#1202), and the lost-link verdict (#2262); closed while disconnected
 #endif
 };
 

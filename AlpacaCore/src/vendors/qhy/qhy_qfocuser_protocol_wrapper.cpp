@@ -153,11 +153,14 @@ void configure_tty(struct termios& tty) { util::make_raw_8n1(tty, B9600); }
 // (a stale partial reply, a reboot-notice fragment) is discarded. Sets
 // link_dead = true (and returns
 // empty at once) when the port has gone away -- a hangup, EOF, or a hard
-// errno (EIO/ENXIO/ENODEV/EBADF) -- so the caller can fail the transaction
-// immediately instead of re-kicking at 100% CPU until the deadline (a bare
-// "return {}" on those looks like an ordinary silent slice). An ordinary
-// empty/timeout leaves link_dead false.
-std::string read_json_object(int fd, int timeout_ms, bool& link_dead) {
+// errno that util::is_serial_loss_errno() counts (EIO/ENXIO/ENODEV/EBADF) -- so
+// the caller can fail the transaction immediately instead of re-kicking at 100%
+// CPU until the deadline (a bare "return {}" on those looks like an ordinary
+// silent slice). An ordinary empty/timeout leaves link_dead false.
+// `read_byte` has util::tty_read()'s contract for one byte: the connected path
+// passes util::SerialLink::read(), which also latches the link's verdict (#2262).
+template <typename ReadByte>
+std::string read_json_object(ReadByte read_byte, int timeout_ms, bool& link_dead) {
     link_dead = false;
     std::string buf;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -167,12 +170,10 @@ std::string read_json_object(int fd, int timeout_ms, bool& link_dead) {
         char ch = 0;
         // tty_read reports a hangup (EOF, POLLHUP with nothing to read) as
         // -1/EIO and a closed fd (POLLNVAL) as -1/EBADF, never as a quiet 0.
-        const ssize_t n = util::tty_read(fd, &ch, 1, static_cast<int>(remaining > 0 ? remaining : 0));
+        const ssize_t n = read_byte(&ch, static_cast<int>(remaining > 0 ? remaining : 0));
         if (n == 0) continue;  // nothing within the window; the deadline check ends the loop
         if (n < 0) {
-            if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF) {
-                link_dead = true;
-            }
+            link_dead = util::is_serial_loss_errno(errno);
             return {};
         }
         if (buf.empty()) {
@@ -286,7 +287,8 @@ bool probe_qfocuser_port(const std::string& port_path, QFocuserDeviceInfo& info)
         static const char kick = '\n';
         (void)util::tty_write_all(fd, &kick, sizeof(kick));
         bool link_dead = false;
-        const std::string reply = read_json_object(fd, kProbeTimeoutMs, link_dead);
+        const std::string reply = read_json_object([fd](char* c, int ms) { return util::tty_read(fd, c, 1, ms); },
+                                                   kProbeTimeoutMs, link_dead);
         if (link_dead) break;  // node vanished mid-probe; not our device
         if (reply.empty()) continue;
         QFocuserDeviceInfo parsed;
@@ -425,9 +427,8 @@ public:
             throw AlpacaException("Q-Focuser already connected", AlpacaError::InvalidOperation);
         }
         config_ = config;
-        link_lost_.store(false);
         last_reply_idx_ = -2;
-        open_port_locked();
+        open_port_locked();  // a newly opened link: its loss verdict starts clear
 
         QFocuserDeviceInfo info;
         bool success = false;
@@ -435,6 +436,10 @@ public:
         in_connect_ = true;
         for (int attempt = 0; attempt < kHandshakeRetries && !success; ++attempt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(attempt == 0 ? 100 : 500));
+#ifndef _WIN32
+            // Each attempt judges the link afresh: the one-off hangup an earlier attempt met must not fail this one.
+            link_.clear_loss();
+#endif
             try {
                 // INDI retries once when the first reply is not idx 1: the
                 // firmware can answer a fresh open with a stale or reboot
@@ -449,6 +454,11 @@ public:
             }
         }
         in_connect_ = false;
+#ifndef _WIN32
+        // The handshake retries absorb a half-enumerated node's one-off hangup at open (see fail_link_locked()), so
+        // a loss seen inside it is not a loss of this connection, and a connect that failed keeps none either.
+        link_.clear_loss();
+#endif
         if (!success) {
             close_port_locked();
             throw AlpacaException("Q-Focuser handshake failed after " + std::to_string(kHandshakeRetries) +
@@ -467,6 +477,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;  // state first, then the close (#1202)
         close_port_locked();
+#ifndef _WIN32
+        link_.clear_loss();  // decision 0009 rule 5: a Disconnect clears the verdict
+#endif
     }
 
     bool is_connected() const {
@@ -475,8 +488,15 @@ public:
     }
 
     // Lock-free on purpose: the driver's get_connected() is a FAST-timing
-    // property and must not queue behind an in-flight transaction.
-    bool link_alive() const noexcept { return !link_lost_.load(); }
+    // property and must not queue behind an in-flight transaction. The latch is
+    // the util::SerialLink verdict (#2262), kept across the port release.
+    bool link_alive() const noexcept {
+#ifndef _WIN32
+        return !link_.lost();
+#else
+        return true;
+#endif
+    }
 
     std::int32_t get_position() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -589,19 +609,19 @@ private:
     // skipped until the deadline.
     // The port is gone (unplug / re-enumeration): the #445 shape. A removed
     // node never comes back on this fd, and holding it keeps the kernel from
-    // reusing the name when the focuser is replugged, so release it now,
-    // latch link_lost_ (a lock-free flag the driver's Connected getter reads,
-    // since this is a request/response wrapper with no background reader to
-    // keep link health current), and fail the call with NotConnected. Only a
-    // new connect() clears the latch. While connect() itself is still inside
-    // its handshake loop the port is NOT released and nothing is latched: a
-    // half-enumerated CDC-ACM node can POLLHUP once at open time, and the
-    // retry loop exists to absorb exactly that; connect() closes the port
-    // itself if every attempt fails. Caller holds mutex_. Always throws.
+    // reusing the name when the focuser is replugged, so release it now and
+    // fail the call with NotConnected. The link has already latched its
+    // verdict (util::SerialLink::lost(), #2262), a lock-free flag the driver's
+    // Connected getter reads, since this is a request/response wrapper with no
+    // background reader to keep link health current; the release keeps it, and
+    // only a new connect() or a disconnect() clears it. While connect() itself is still inside
+    // its handshake loop the port is NOT released: a half-enumerated CDC-ACM
+    // node can POLLHUP once at open time, and the retry loop exists to absorb
+    // exactly that; connect() clears the verdict after the loop and closes the
+    // port itself if every attempt fails. Caller holds mutex_. Always throws.
     [[noreturn]] void fail_link_locked() {
         if (!in_connect_) {
             ALPACA_LOG_ERROR(kLogTag, "Q-Focuser link lost on " + config_.serial_port + " (port released)");
-            link_lost_.store(true);
             connected_ = false;
             close_port_locked();
         }
@@ -618,11 +638,11 @@ private:
         }
         ALPACA_LOG_TRACE(kLogTag, "Q-Focuser command: " + cmd);
         tcflush(serial_fd_, TCIOFLUSH);
-        if (!util::tty_write_all(serial_fd_, cmd.c_str(), cmd.size())) {
+        if (!link_.write_all(cmd)) {
             const int err = errno;
             // A write is as good a witness of a removed node as a read
-            // (driver-lifecycle.instructions.md #445: EIO/ENXIO/ENODEV/EBADF from either side).
-            if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
+            // (driver-lifecycle.instructions.md #445; the link's verdict, util::is_serial_loss_errno()).
+            if (link_.lost()) fail_link_locked();
             throw AlpacaException("Q-Focuser write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
         // The bounded drain (util::tty_drain_bounded) forces the command out as
@@ -641,7 +661,8 @@ private:
                                   AlpacaError::DriverException);
         }
         static const char kick = '\n';
-        (void)util::tty_write_all(serial_fd_, &kick, sizeof(kick));
+        (void)link_.write_all(&kick, sizeof(kick));
+        if (link_.lost()) fail_link_locked();  // the kick met the removed node first
         // #2042: this command's idx repeats the last reply's, so the first matching reply is that stale one and
         // the kicked fresh one follows; `stale` holds the first match while the read goes on for the second.
         // last_reply_idx_ is -2 after a connect and the default alt_idx is -2 too: a reply idx is never negative
@@ -664,7 +685,8 @@ private:
                 }
                 slice_ms = static_cast<int>(std::min<long long>(slice_ms, left.count()));
             }
-            const std::string reply = read_json_object(serial_fd_, slice_ms, link_dead);
+            const std::string reply =
+                read_json_object([this](char* c, int ms) { return link_.read(c, 1, ms); }, slice_ms, link_dead);
             if (link_dead) fail_link_locked();
             if (reply.empty()) {
                 if (stale.has_value()) {
@@ -687,7 +709,8 @@ private:
                 if (slice_elapsed < std::chrono::milliseconds(kEmptyReplyPauseMs)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(kEmptyReplyPauseMs) - slice_elapsed);
                 }
-                (void)util::tty_write_all(serial_fd_, &kick, sizeof(kick));
+                (void)link_.write_all(&kick, sizeof(kick));
+                if (link_.lost()) fail_link_locked();
                 continue;
             }
             ALPACA_LOG_TRACE(kLogTag, "Q-Focuser reply: " + printable(reply));
@@ -734,16 +757,15 @@ private:
     mutable std::mutex mutex_;
     QFocuserConnectionConfig config_;
     bool connected_ = false;
-    // Latched by transact_locked() when the port dies mid-session; cleared by
-    // connect(). Atomic so link_alive() never takes mutex_ (issue #527).
-    std::atomic<bool> link_lost_{false};
     bool in_connect_ = false;  // guarded by mutex_; see fail_link_locked()
     // The idx of the last reply a transaction returned (#2042): the one the firmware re-transmits on the next
     // command's OUT. -2 after a connect (no reply yet); a timeout leaves it, since the firmware's held reply is
     // still that one. Guarded by mutex_.
     std::int32_t last_reply_idx_ = -2;
 #ifndef _WIN32
-    util::SerialLink link_;  // the connected port (#1202): registry claim + fd + TIOCEXCL
+    // The connected port (#1202): registry claim + fd + TIOCEXCL, and the lost-link verdict link_alive() reads
+    // (#2262, issue #527's latch), kept across the port release until the next connect() or a disconnect().
+    util::SerialLink link_;
     int serial_fd_ = -1;     // link_.fd() while the link is open, else -1
 #endif
 };
