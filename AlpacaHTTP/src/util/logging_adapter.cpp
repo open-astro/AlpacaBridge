@@ -24,6 +24,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -34,6 +35,8 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 namespace alpacahttp::util {
 
@@ -184,29 +187,39 @@ namespace {
     // Cutoff date (YYYY-MM-DD) for retention: files with an embedded date strictly less than it are eligible for
     // deletion. retention=0 returns an empty string and disables pruning.
     //
-    // The cutoff counts back from today, or from the day after the newest file logged before today when that is
-    // earlier (#2292). A clock set years ahead (a client's far-future synctime) would otherwise make every real log
-    // look older than the retention and delete them all; anchored on the last day the server logged, the history
-    // it kept stays until that many days of newer logs exist. In normal running the newest earlier file is
-    // yesterday's, so the anchor is today and nothing changes.
-    std::string retention_cutoff_locked(const std::optional<std::chrono::sys_days>& newest_earlier) {
+    // The cutoff counts back from today, unless the logs show a clock jump (#2292): a gap between two logged days
+    // longer than the retention itself. A clock set years ahead (a client's far-future synctime) would otherwise
+    // make every log kept before the jump look older than the retention and delete it all at the first rollover.
+    // Across such a gap the days logged since the jump count as if they had followed the last day logged before
+    // it, so the history before the jump stays until that many days of newer logs exist. In normal running no gap
+    // is that long and the anchor is today. @p earlier_days: the dates of the dated files before today.
+    std::string retention_cutoff_locked(std::vector<std::chrono::sys_days> earlier_days) {
         if (g_log_retention_days <= 0) {
             return "";
         }
-        auto anchor = parse_log_date(current_local_date());
-        if (!anchor) return "";
-        if (newest_earlier && *newest_earlier + std::chrono::days{1} < *anchor) {
-            anchor = *newest_earlier + std::chrono::days{1};
+        const auto today = parse_log_date(current_local_date());
+        if (!today) return "";
+        auto anchor = *today;
+        std::sort(earlier_days.begin(), earlier_days.end(), std::greater<>());
+        const std::chrono::days retention{g_log_retention_days};
+        auto newer = *today;  // walking back from today over the logged days
+        for (const auto day : earlier_days) {
+            if (newer - day > retention) {
+                // The jump lies between `day` (the last day logged before it) and `newer` (the first after it).
+                anchor = day + std::chrono::days{1} + (*today - newer);
+                break;
+            }
+            newer = day;
         }
-        return format_log_date(*anchor - std::chrono::days{g_log_retention_days});
+        return format_log_date(anchor - retention);
     }
 
     std::size_t prune_old_files_locked() {
         if (g_log_directory.empty() || g_log_retention_days <= 0) {
             return 0;
         }
-        // The newest dated file other than today's own, the cutoff's anchor.
-        std::optional<std::chrono::sys_days> newest_earlier;
+        // The dates of the dated files before today, which place the cutoff's anchor.
+        std::vector<std::chrono::sys_days> earlier_days;
         {
             std::error_code scan_ec;
             const std::string today = current_local_date();
@@ -216,10 +229,10 @@ namespace {
                 if (!std::regex_match(name, kLogFilenameRegex)) continue;
                 const auto day = parse_log_date(name.substr(13, 10));
                 if (!day || name.substr(13, 10) >= today) continue;
-                if (!newest_earlier || *day > *newest_earlier) newest_earlier = day;
+                earlier_days.push_back(*day);
             }
         }
-        const std::string cutoff = retention_cutoff_locked(newest_earlier);
+        const std::string cutoff = retention_cutoff_locked(std::move(earlier_days));
         if (cutoff.empty()) {
             return 0;
         }
