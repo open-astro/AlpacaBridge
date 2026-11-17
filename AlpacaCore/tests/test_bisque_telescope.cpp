@@ -1544,6 +1544,23 @@ TEST_CASE("Bisque hold window - a disconnect, an AbortSlew or a landing inside t
         rig.driver->set_connected(false);
         CHECK_FALSE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
     }
+    SECTION("a disconnect of a lost link") {
+        // The lost-link branch of set_connected(false) clears the window too. The loss is declared only once the
+        // fault has stood 30 s, past the 8 s window, so the deadline itself is read: cleared, not merely expired.
+        rig.mount.slew_polls_needed = 1000;
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
+        rig.mount.mute = true;
+        for (int i = 0; i < 3; ++i) CHECK(poll_now(*rig.driver));
+        rig.clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+        REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        CHECK_FALSE(poll_now(*rig.driver));
+        REQUIRE_FALSE(rig.driver->get_connected());
+        REQUIRE_FALSE(alpacacore::vendor::bisque::slew_hold_cleared_for_testing(*rig.driver));  // expired, not cleared
+        REQUIRE_NOTHROW(rig.driver->set_connected(false));
+        CHECK(alpacacore::vendor::bisque::slew_hold_cleared_for_testing(*rig.driver));
+        rig.mount.mute = false;
+    }
     SECTION("an AbortSlew") {
         rig.mount.slew_polls_needed = 1000;
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));

@@ -1210,6 +1210,11 @@ public:
         return slew_hold_.active(clock_.now());
     }
 
+    bool slew_hold_cleared_for_testing() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return slew_hold_.until() == util::HoldWindow::mono::min();
+    }
+
 private:
     // One axis of a guide-rate write, checked before the connection so a bad value is InvalidValue even while
     // disconnected (open-astro#1786). open-astro#775: 0..1x sidereal, the range the SynScan driver enforces.
@@ -1905,6 +1910,13 @@ void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<v
 bool slew_hold_active_for_testing(TelescopeDriver& driver) {
     if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
         return bisque->slew_hold_active_for_testing();
+    }
+    return false;
+}
+
+bool slew_hold_cleared_for_testing(TelescopeDriver& driver) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        return bisque->slew_hold_cleared_for_testing();
     }
     return false;
 }
