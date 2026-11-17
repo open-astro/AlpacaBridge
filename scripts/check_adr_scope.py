@@ -60,7 +60,7 @@ COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 SCOPE_LINE_RE = re.compile(r"^(\d{4}-[a-z0-9-]+\.md): rules (\d+(?:, \d+)*)$")
 # Consumers: the workflow step "Fold the decision-record checklist" in .github/workflows/claude-review.yml
 # imports fold_checklist (and through it CHECKLIST_RE, sign_off and the sign-off constants); rename them there too.
-CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(pass|defect|n/a)\s*:\s*\S", re.I)
+CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(pass|defect|n/a)\s*[:.]\s*\S", re.I)
 ISSUES_SIGN_OFF = "\u26a0\ufe0f Issues found"
 APPROVED_SIGN_OFF = "\u2705 Approved"
 
@@ -334,6 +334,10 @@ def self_test():
     expect(f == ["the review has no checklist line for 0005-task-clock.md rule 2"], "a missing rule is reported: %r" % f)
     f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: n/a"))
     expect(any("rule 2" in x for x in f), "a verdict with no reason does not count")
+    f = checklist_findings(scope, full.replace(": pass: no gate", ": pass. No gate").replace(": n/a: no driver", ": n/a. No driver"))
+    expect(f == [], "a verdict ended by a period before its reason counts (#2315): %r" % f)
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: n/a."))
+    expect(any("rule 2" in x for x in f), "a verdict with a period and no reason does not count")
     f = checklist_findings(scope, full.replace("rule 2: n/a", "rule 2: defect"))
     expect(any("as a defect" in x for x in f), "a defect under an Approved sign-off is reported")
     issues = full.replace("rule 2: n/a", "rule 2: defect").replace(ok, ISSUES_SIGN_OFF)

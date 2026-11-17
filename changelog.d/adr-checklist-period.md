@@ -1,0 +1,2 @@
+### Fixed (tooling)
+- **Review bot: a checklist verdict followed by a period now counts** (CI, `scripts/check_adr_scope.py`): the decision-record checklist gate accepted only `rule N: pass: reason`, so a review that wrote `rule N: pass. reason` had every rule reported missing and was never posted, even when it approved the PR (#2315 lost three approved reviews this way). The gate now accepts a colon or a period after the verdict; a verdict with no reason still fails.
