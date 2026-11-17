@@ -1309,17 +1309,11 @@ public:
                                       AlpacaError::DriverException);
             }
         };
-        const bool abort_now = session_.start(std::move(reservation),
-                                              static_cast<double>(exposure_us_long) / 1'000'000.0, std::move(body));
-        // An AbortExposure that arrived while this start was reserved was recorded, not dropped (rule 9): stop the
-        // exposure now that Exposing is published, the same way a direct AbortExposure does.
-        if (abort_now) {
-            try {
-                abort_exposure();
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne",
-                                "AbortExposure recorded during the start failed: " + std::string(e.what()));
-            }
+        // An AbortExposure that arrived while this start was reserved was recorded, not dropped (rule 9): the session
+        // applies it as it publishes the exposure, so the body never runs and no SDK exposure starts.
+        if (session_.start(std::move(reservation), static_cast<double>(exposure_us_long) / 1'000'000.0,
+                           std::move(body))) {
+            ALPACA_LOG_DEBUG("PlayerOne", "StartExposure ended by an AbortExposure that arrived while it started");
         }
     }
 

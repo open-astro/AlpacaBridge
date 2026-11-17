@@ -1510,7 +1510,7 @@ TEST_CASE("CaptureSession - a refused start releases the reservation", "[util][c
     CHECK_FALSE(h.session->settings_locked());
 }
 
-TEST_CASE("CaptureSession - an abort during the reservation is recorded and reported once Exposing is published",
+TEST_CASE("CaptureSession - an abort during the reservation ends the start as it publishes, and no body runs",
           "[util][capture-session][reserve]") {
     Harness h;
     CHECK_FALSE(h.session->record_abort());  // nothing reserved: nothing recorded
@@ -1519,14 +1519,19 @@ TEST_CASE("CaptureSession - an abort during the reservation is recorded and repo
     h.session->abort();  // abort() leaves the reservation held: an abort is not a disconnect
     CHECK(h.session->starting());
     auto p = std::make_shared<Probe>();
-    const bool abort_now = h.session->start(std::move(reservation), 10.0, polling_body(p));
-    CHECK(abort_now);
-    CHECK(h.session->camera_state() == CameraState::Exposing);  // the start went on
-    CHECK_FALSE(h.session->record_abort());                     // exposing: the driver stops it itself
-    h.session->abort();                                         // what the driver's stop ends in
+    CHECK(h.session->start(std::move(reservation), 10.0, instant_body(p, 6)));
+    // Applied in the same step that would publish Exposing: Idle at once, no frame, and the body never ran.
     CHECK(h.session->camera_state() == CameraState::Idle);
-    CHECK(p->accepted != 1);
     CHECK_FALSE(h.session->image_ready());
+    CHECK_FALSE(h.session->starting());
+    CHECK_FALSE(h.session->busy());
+    CHECK_FALSE(p->entered);
+    // The next start runs normally.
+    auto next = std::make_shared<Probe>();
+    CaptureReservation again = h.session->reserve();
+    CHECK_FALSE(h.session->start(std::move(again), 1.0, instant_body(next, 7)));
+    REQUIRE(eventually([&] { return h.session->image_ready(); }));
+    CHECK(h.session->image()->data.front() == 7);
 }
 
 TEST_CASE("CaptureSession - an abort recorded for a refused start does not reach the next exposure",
