@@ -2944,6 +2944,9 @@ private:
     // #2296 (items 5 and 6): a park or home the driver started that has not ended within kParkHomeBound fails. It
     // only reports: the driver sends no stop, as for its other timed-out waits (the synchronous slew's, the park_home_
     // settle), so a mount that is still moving is left to the client (AbortSlew) rather than stopped mid-park.
+    // The bound relies on the status poll running for as long as the driver is connected, so a park's end frame is
+    // read before the bound passes: a change that pauses the poll (while parked, say) must also pause the watch, or a
+    // finished park expires as failed.
     void expire_watched_motion_locked() const {
         if (!watched_motion_ || watched_motion_->motion == MotionKind::Slew ||
             clock_.now() - watched_motion_->started_at < kParkHomeBound) {

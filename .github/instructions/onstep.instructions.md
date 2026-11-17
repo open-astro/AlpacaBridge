@@ -574,7 +574,9 @@ command channel. Nothing scans the network; the host is typed in.
     until its restore decision, since its `:GU#` read may be the first to see the stop, then drops the watch and the
     failure (it is a new motion command), logging what the read decided at INFO only. On OnStepX it also sends no
     restore when its read shows a stop code, GOTO flag or not: a limit stop runs `goTo.abort()`, which keeps
-    `GS_GOTO` while the mount brakes, and has already turned tracking off. A GOTO that ends away from its target with no stop code (a handset abort)
+    `GS_GOTO` while the mount brakes, and has already turned tracking off. On OnStep 4.x the abort's read is judged
+    like any end: with an older stop code still latched (rare, since `:Te#` clears it), a slew aborted short of its
+    target reads as stopped short and also gets no restore. A GOTO that ends away from its target with no stop code (a handset abort)
     still reads as landed.
   - **A park** ends with no GOTO and no `I`; both firmwares go from parking to parked or failed in one step (OnStepX
     `Goto.cpp` `poll()` then `Park::requestDone()`, OnStep 4.x `MoveTo.ino`), so no healthy park shows that frame
