@@ -118,7 +118,7 @@ standalone `OnStepProtocolWrapper` and calls `connect()`/`disconnect()` on it, a
   state before it releases the clock, so its next connect times the outage whichever link it then joins, as the
   process-wide stamps did. A driver object rebuilt during an outage (an edited device) starts with no stamps.
 - **Focuser** (`onstep_focuser_driver.cpp`, OnStepX only): the config takes a focuser number 1-6 (default 1); the
-  factory refuses any other with `InvalidValue`. Connect reads `:GVP#` (an OnStep) and `:GVN#` (refused below
+  API field's 1-6 range refuses any other (the catalog clamps a saved value into it). Connect reads `:GVP#` (an OnStep) and `:GVN#` (refused below
   version 10: "The OnStep Focuser requires OnStepX firmware"), then `:F<n>T#` (else "OnStepX reports no focuser
   n"), the travel, the step size, the temperature and the compensation flag. Only the addressed `:F<n>...#` forms
   are sent: never `:FA<n>#` (the handset and the OnStepX web page use the active focuser) and never the bare rate

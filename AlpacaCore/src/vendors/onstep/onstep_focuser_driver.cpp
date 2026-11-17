@@ -171,7 +171,7 @@ public:
                 return "Link to the controller lost (" + reason + "); reconnect";
             }
         }
-        const std::string fault = state_.fault();
+        std::string fault = state_.fault();
         if (!fault.empty()) return fault;
         return state_.link_lost() ? "no answer to the state poll" : std::string();
     }
