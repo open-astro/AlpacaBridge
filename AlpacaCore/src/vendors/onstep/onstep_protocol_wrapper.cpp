@@ -366,6 +366,19 @@ MountStatus parse_status(const std::string& raw) {
     if (raw.size() >= 3 && raw[raw.size() - 3] >= '0' && raw[raw.size() - 3] <= '9') {
         status.pulse_guide_rate_select = raw[raw.size() - 3] - '0';
     }
+    // The general error closes the reply as '0' + code, 0-15, so '0' to '?' (#2296; 12, above the overhead limit, is
+    // '<'). Both firmwares write the three code characters after the mount-type and pier-side letters, so it is read
+    // only when the last three are all code characters; a reply without them reads as no error (-1).
+    const auto is_code_char = [](char c) { return c >= '0' && c <= '?'; };
+    if (raw.size() >= 3 && is_code_char(raw[raw.size() - 3]) && is_code_char(raw[raw.size() - 2]) &&
+        is_code_char(raw.back())) {
+        status.general_error = raw.back() - '0';
+    }
+    // 'F' takes the place of p/I/P when a park failed (OnStepX PS_PARK_FAILED, OnStep 4.x ParkFailed); no other
+    // :GU# flag is an uppercase F.
+    status.is_park_failed = raw.find('F') != std::string::npos;
+    // 'w' is the only lowercase w in both firmwares' :GU# (the pier side west is 'W').
+    status.is_waiting_at_home = raw.find('w') != std::string::npos;
     if (raw.find('T') != std::string::npos) {
         status.side_of_pier = 0;  // pier east
     } else if (raw.find('W') != std::string::npos) {

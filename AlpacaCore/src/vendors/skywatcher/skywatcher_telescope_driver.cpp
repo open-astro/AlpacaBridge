@@ -1763,6 +1763,13 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
+        // #2257: the argument checks run first, before the writable gate and the parked check.
+        if (duration < 0) {
+            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
+        }
+        if (direction < 0 || direction > 3) {
+            throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+        }
         // open-astro#620: serialize against the other async initiators
         // (Park, SlewToCoordinatesAsync) so PulseGuide's own
         // check -> reap -> spawn sequence cannot interleave with theirs.
@@ -1780,12 +1787,6 @@ public:
             StateLock lock(lock_gate_);
             check_writable_locked();
             check_not_parked_locked("PulseGuide");
-            if (duration < 0) {
-                throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
-            }
-            if (direction < 0 || direction > 3) {
-                throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-            }
             require_site_locked();  // the guide signs read the hemisphere
 
             const auto now = clock_.now();
@@ -2644,8 +2645,9 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        // axis is not validated until the lock below: nothing indexes the
-        // per-axis stop slots before it has been.
+        // #2257: the arguments are checked first, before the gate and the parked check; nothing indexes the
+        // per-axis stop slots before they have been.
+        validate_move_axis(axis, rate);
         constexpr double kStopEpsilon = 1e-9;
         // A stop is sent on a faulted link, a start is refused (open-astro#2068).
         const bool is_stop = std::abs(rate) <= kStopEpsilon;
@@ -2658,7 +2660,6 @@ public:
             StateLock lock(lock_gate_);
             check_gate();
             check_not_parked_locked("MoveAxis");
-            validate_move_axis(axis, rate);
             require_site_locked();  // MoveAxis is sky-referenced (#297)
             if (std::abs(rate) <= kStopEpsilon && !manual_axis_slewing_[axis]) {
                 invalidate_position_cache_locked(false);
@@ -2678,7 +2679,6 @@ public:
             StateLock lock(lock_gate_);
             check_gate();
             check_not_parked_locked("MoveAxis");
-            validate_move_axis(axis, rate);
 
             channel = axis == 0 ? kAxisRa : kAxisDec;
             // Whatever this call commands owns the axis from here: a stop-
@@ -6455,10 +6455,10 @@ private:
     //   returns with mutex_ held for the caller to run the goto itself.
     StateLock start_goto(const char* who, double ra, double dec,
                          std::function<void(util::OperationContext&, uint64_t)> body) {
+        util::validate_ra_dec(ra, dec, who);  // #2257: the argument check runs first
         const auto check_request_locked = [&] {
             check_writable_locked();
             check_not_parked_locked(who);
-            util::validate_ra_dec(ra, dec, who);
             require_site_locked();
             check_target_altitude_locked(ra, dec, who);
             // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation

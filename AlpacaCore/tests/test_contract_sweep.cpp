@@ -230,6 +230,27 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"slew_to_coordinates_async(0, 91)", [&] { t.slew_to_coordinates_async(0.0, 91.0); }});
             p.push_back({"set_guide_rate_right_ascension(-1)", [&] { t.set_guide_rate_right_ascension(-1.0); }});
             p.push_back({"set_guide_rate_declination(-1)", [&] { t.set_guide_rate_declination(-1.0); }});
+            // #2287: the members #2257 deferred, each with an argument invalid for every vendor.
+            p.push_back({"set_side_of_pier(5)", [&] { t.set_side_of_pier(5); }});
+            p.push_back({"set_tracking_rate(99)", [&] { t.set_tracking_rate(99); }});
+            p.push_back({"set_target_right_ascension(25)", [&] { t.set_target_right_ascension(25.0); }});
+            p.push_back({"set_target_declination(91)", [&] { t.set_target_declination(91.0); }});
+            p.push_back({"slew_to_alt_az(91, 0)", [&] { t.slew_to_alt_az(91.0, 0.0); }});
+            p.push_back({"slew_to_alt_az(45, 400)", [&] { t.slew_to_alt_az(45.0, 400.0); }});
+            p.push_back({"slew_to_alt_az_async(91, 0)", [&] { t.slew_to_alt_az_async(91.0, 0.0); }});
+            p.push_back({"slew_to_alt_az_async(45, 400)", [&] { t.slew_to_alt_az_async(45.0, 400.0); }});
+            p.push_back({"sync_to_coordinates(25, 0)", [&] { t.sync_to_coordinates(25.0, 0.0); }});
+            p.push_back({"sync_to_coordinates(0, 91)", [&] { t.sync_to_coordinates(0.0, 91.0); }});
+            p.push_back({"sync_to_alt_az(91, 0)", [&] { t.sync_to_alt_az(91.0, 0.0); }});
+            p.push_back({"sync_to_alt_az(45, 400)", [&] { t.sync_to_alt_az(45.0, 400.0); }});
+            p.push_back({"set_right_ascension_rate(NaN)",
+                         [&] { t.set_right_ascension_rate(std::numeric_limits<double>::quiet_NaN()); }});
+            p.push_back({"set_declination_rate(NaN)",
+                         [&] { t.set_declination_rate(std::numeric_limits<double>::quiet_NaN()); }});
+            p.push_back(
+                {"get_destination_side_of_pier(25, 0)", [&] { (void)t.get_destination_side_of_pier(25.0, 0.0); }});
+            p.push_back(
+                {"get_destination_side_of_pier(0, 91)", [&] { (void)t.get_destination_side_of_pier(0.0, 91.0); }});
             break;
         }
         case DeviceType::Switch: {
@@ -306,51 +327,17 @@ constexpr ProbeState kParked = ProbeState::Parked;
 
 // clang-format off
 const std::vector<ProbeExemption> kProbeExemptions = {
-    // Sky-Watcher: the writable gate (connected, then fault) and the parked check run before the argument checks.
-    {"skywatcher_telescope", kOff, "pulse_guide(9, 100)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "pulse_guide(0, -1)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "move_axis(5, 0.1)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "move_axis(0, NaN)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "slew_to_coordinates(25, 0)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "slew_to_coordinates(0, 91)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "slew_to_coordinates_async(25, 0)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "slew_to_coordinates_async(0, 91)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "pulse_guide(9, 100)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "pulse_guide(0, -1)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "move_axis(5, 0.1)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "move_axis(0, NaN)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "slew_to_coordinates(25, 0)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "slew_to_coordinates(0, 91)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "slew_to_coordinates_async(25, 0)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "slew_to_coordinates_async(0, 91)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "pulse_guide(9, 100)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "pulse_guide(0, -1)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "move_axis(5, 0.1)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "move_axis(0, NaN)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates(25, 0)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates(0, 91)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates_async(25, 0)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates_async(0, 91)", kKnown, "parked checked first (#2257)"},
-
     // Celestron NexStar: the guide rate needs the autoguider port, known only once connected.
     {"celestron_telescope", kOff, "set_guide_rate_right_ascension(-1)", kPermanent,
      "the rate depends on the autoguider port, known only once connected (#2257 decision 2026-11-16)"},
     {"celestron_telescope", kOff, "set_guide_rate_declination(-1)", kPermanent,
      "the rate depends on the autoguider port, known only once connected (#2257 decision 2026-11-16)"},
 
-    // OnStep: move_axis checks connected (then parked) before the axis and rate; the guide rate is read-only.
-    {"onstep_telescope", kOff, "move_axis(5, 0.1)", kKnown, "connection checked first (#2257)"},
-    {"onstep_telescope", kOff, "move_axis(0, NaN)", kKnown, "connection checked first (#2257)"},
+    // OnStep: the guide rate is read-only.
     {"onstep_telescope", kOff, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOff, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOn, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOn, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
-
-    // iOptron: the per-axis setters read the rate first (NotConnected while disconnected), then the setter clamps.
-    {"ioptron_telescope", kOff, "set_guide_rate_right_ascension(-1)", kKnown, "connection checked first (#2257)"},
-    {"ioptron_telescope", kOff, "set_guide_rate_declination(-1)", kKnown, "connection checked first (#2257)"},
-    {"ioptron_telescope", kOn, "set_guide_rate_right_ascension(-1)", kKnown, "rate clamped, not refused (#2257)"},
-    {"ioptron_telescope", kOn, "set_guide_rate_declination(-1)", kKnown, "rate clamped, not refused (#2257)"},
 
     // ZWO AM: the guide-rate setter takes std::abs of the rate, so a negative rate is accepted in either state.
     {"zwo_telescope", kOff, "set_guide_rate_right_ascension(-1)", kKnown, "negative rate accepted (#2257)"},
@@ -365,6 +352,160 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"celestron_telescope_cgx", kOff, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx", kOn, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
     {"celestron_telescope_cgx", kOn, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
+    // #2287, Sky-Watcher.
+    {"skywatcher_telescope", kOff, "set_declination_rate(NaN)", kKnown, "connection checked first (#2287)"},
+    {"skywatcher_telescope", kOn, "set_declination_rate(NaN)", kKnown, "NaN accepted (#2287)"},
+    {"skywatcher_telescope", kParked, "set_declination_rate(NaN)", kKnown, "NaN accepted (#2287)"},
+    {"skywatcher_telescope", kOff, "set_right_ascension_rate(NaN)", kKnown, "connection checked first (#2287)"},
+    {"skywatcher_telescope", kOn, "set_right_ascension_rate(NaN)", kKnown, "NaN accepted (#2287)"},
+    {"skywatcher_telescope", kParked, "set_right_ascension_rate(NaN)", kKnown, "NaN accepted (#2287)"},
+    {"skywatcher_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"skywatcher_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"skywatcher_telescope", kParked, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"skywatcher_telescope", kOff, "set_tracking_rate(99)", kKnown, "connection checked first (#2287)"},
+    {"skywatcher_telescope", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kParked, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kParked, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope", kParked, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope", kParked, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kParked, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kParked, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope", kOff, "sync_to_coordinates(0, 91)", kKnown, "connection checked first (#2287)"},
+    {"skywatcher_telescope", kParked, "sync_to_coordinates(0, 91)", kKnown, "parked checked first (#2287)"},
+    {"skywatcher_telescope", kOff, "sync_to_coordinates(25, 0)", kKnown, "connection checked first (#2287)"},
+    {"skywatcher_telescope", kParked, "sync_to_coordinates(25, 0)", kKnown, "parked checked first (#2287)"},
+    {"skywatcher_telescope_serial", kOn, "set_declination_rate(NaN)", kKnown, "NaN accepted (#2287)"},
+    {"skywatcher_telescope_serial", kParked, "set_declination_rate(NaN)", kKnown, "NaN accepted (#2287)"},
+    {"skywatcher_telescope_serial", kOn, "set_right_ascension_rate(NaN)", kKnown, "NaN accepted (#2287)"},
+    {"skywatcher_telescope_serial", kParked, "set_right_ascension_rate(NaN)", kKnown, "NaN accepted (#2287)"},
+    {"skywatcher_telescope_serial", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"skywatcher_telescope_serial", kParked, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"skywatcher_telescope_serial", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope_serial", kParked, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope_serial", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope_serial", kParked, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"skywatcher_telescope_serial", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope_serial", kParked, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope_serial", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope_serial", kParked, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"skywatcher_telescope_serial", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope_serial", kParked, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope_serial", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope_serial", kParked, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"skywatcher_telescope_serial", kParked, "sync_to_coordinates(0, 91)", kKnown, "parked checked first (#2287)"},
+    {"skywatcher_telescope_serial", kParked, "sync_to_coordinates(25, 0)", kKnown, "parked checked first (#2287)"},
+    // #2287, Celestron NexStar.
+    {"celestron_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"celestron_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"celestron_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"celestron_telescope", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"celestron_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"celestron_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"celestron_telescope", kOff, "set_tracking_rate(99)", kPermanent, "set_tracking_rate is not implemented"},
+    {"celestron_telescope", kOn, "set_tracking_rate(99)", kPermanent, "set_tracking_rate is not implemented"},
+    {"celestron_telescope", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope", kOff, "sync_to_coordinates(0, 91)", kKnown, "connection checked first (#2287)"},
+    {"celestron_telescope", kOff, "sync_to_coordinates(25, 0)", kKnown, "connection checked first (#2287)"},
+    // #2287, SynScan.
+    {"synscan_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"synscan_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"synscan_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"synscan_telescope", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"synscan_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"synscan_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"synscan_telescope", kOff, "set_tracking_rate(99)", kPermanent, "set_tracking_rate is not implemented"},
+    {"synscan_telescope", kOn, "set_tracking_rate(99)", kPermanent, "set_tracking_rate is not implemented"},
+    {"synscan_telescope", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"synscan_telescope", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"synscan_telescope", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"synscan_telescope", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"synscan_telescope", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"synscan_telescope", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"synscan_telescope", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"synscan_telescope", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"synscan_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"synscan_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"synscan_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"synscan_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    // #2287, iOptron.
+    {"ioptron_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"ioptron_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"ioptron_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"ioptron_telescope", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"ioptron_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"ioptron_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"ioptron_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"ioptron_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"ioptron_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"ioptron_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    // #2287, ZWO AM.
+    {"zwo_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"zwo_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"zwo_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"zwo_telescope", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"zwo_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"zwo_telescope", kOn, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"zwo_telescope", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"zwo_telescope", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"zwo_telescope", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"zwo_telescope", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"zwo_telescope", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"zwo_telescope", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"zwo_telescope", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"zwo_telescope", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"zwo_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"zwo_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"zwo_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"zwo_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    // #2287, Bisque.
+    {"bisque_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"bisque_telescope", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"bisque_telescope", kOff, "set_side_of_pier(5)", kPermanent, "set_side_of_pier is not implemented"},
+    {"bisque_telescope", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"bisque_telescope", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"bisque_telescope", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"bisque_telescope", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"bisque_telescope", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"bisque_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    // #2287, Celestron CGX.
+    {"celestron_telescope_cgx", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"celestron_telescope_cgx", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
+    {"celestron_telescope_cgx", kOff, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"celestron_telescope_cgx", kOn, "set_right_ascension_rate(NaN)", kPermanent, "set_right_ascension_rate is not implemented"},
+    {"celestron_telescope_cgx", kOff, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kOn, "slew_to_alt_az(45, 400)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kOff, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kOn, "slew_to_alt_az(91, 0)", kPermanent, "slew_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kOff, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx", kOn, "slew_to_alt_az_async(45, 400)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx", kOff, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx", kOn, "slew_to_alt_az_async(91, 0)", kPermanent, "slew_to_alt_az_async is not implemented"},
+    {"celestron_telescope_cgx", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    {"celestron_telescope_cgx", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
 };
 // clang-format on
 
@@ -4113,6 +4254,29 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
         CHECK((h.park_unavailable == nullptr || std::string(h.park_unavailable).size() > 0));
         CHECK((h.at_park_unreachable == nullptr || h.type == DeviceType::Telescope));
         CHECK((static_cast<bool>(h.failing) || std::string(h.failing_unavailable).size() > 0));
+    }
+    // #2257: every kProbeExemptions row names a real entry or host id of a compiled vendor and a real telescope
+    // probe, so a renamed probe or a mistyped id cannot leave a row that silently matches nothing.
+    std::set<std::string> vendors;
+    std::set<std::string> probe_names;
+    for (const auto& e : alpacacore::test::contract::contract_entries()) {
+        vendors.insert(e.vendor);
+        if (e.type == DeviceType::Telescope && probe_names.empty()) {
+            auto d = e.make(0);
+            REQUIRE(d != nullptr);
+            for (const auto& [name, fn] : invalid_value_probes(*d, e.type)) probe_names.insert(name);
+        }
+    }
+    for (const auto& x : kProbeExemptions) {
+        const std::string id = x.id;
+        const bool compiled = std::any_of(vendors.begin(), vendors.end(), [&](const std::string& v) {
+            return id.rfind(v + "_", 0) == 0;  // a vendor name may itself contain '_'
+        });
+        if (!compiled) continue;  // that vendor is not compiled in
+        INFO("kProbeExemptions row " << id << " " << x.probe);
+        CHECK((registry_ids.count(id) == 1 || host_ids.count(id) == 1));
+        CHECK(probe_names.count(x.probe) == 1);
+        CHECK(std::string(x.reason).size() > 0);
     }
     for (const auto& r : from_roster) {
         INFO("roster row {" << std::get<0>(r) << ", " << std::get<1>(r) << ", " << std::get<2>(r)
