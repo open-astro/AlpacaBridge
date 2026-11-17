@@ -14,6 +14,7 @@
 
 #include <alpacacore/util/task_clock.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -291,6 +292,20 @@ public:
     bool wait_for_waiters(std::size_t n, std::chrono::milliseconds real_timeout) {
         std::unique_lock<std::mutex> guard(mutex_);
         return count_cv_.wait_for(guard, real_timeout, [this, n] { return waiters_.size() >= n; });
+    }
+
+    /// Blocks the test thread until `thread` has a wait (wait_for or
+    /// sleep_for) registered on this clock, or until `real_timeout` of real
+    /// time passes; returns whether it did. wait_for_waiters() counts every
+    /// waiter, so it cannot tell a task that has just started its wait from
+    /// another thread that was already parked, such as a driver's status
+    /// poll; this names the thread.
+    bool wait_for_waiter_thread(std::thread::id thread, std::chrono::milliseconds real_timeout) {
+        std::unique_lock<std::mutex> guard(mutex_);
+        return count_cv_.wait_for(guard, real_timeout, [this, thread] {
+            return std::any_of(waiters_.begin(), waiters_.end(),
+                               [thread](const auto& waiter) { return waiter.second.thread == thread; });
+        });
     }
 
     /// The number of waiters (wait_for and sleep_for) registered now.

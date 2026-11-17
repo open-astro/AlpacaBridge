@@ -86,6 +86,34 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
     return pred();
 }
 
+// Starts a 200 ms East (RA) pulse and waits, in real time, until the pulse's stop body is parked on the clock.
+// advance_until() alone meets any clock waiter, and the status poll is always parked there, so on a loaded runner the
+// clock could step past the whole IsPulseGuiding window before the body had started its wait. The body then never ran:
+// a check that read the handset after the pulse missed its end, or passed without it when the case expected no
+// tracking command.
+void start_ra_pulse_parked(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver) {
+    auto body_thread = std::make_shared<std::promise<std::thread::id>>();
+    auto body_id = body_thread->get_future();
+    auto named = std::make_shared<std::atomic<bool>>(false);
+    alpacacore::vendor::synscan::set_pulse_spawn_for_testing(driver, [body_thread, named](std::function<void()> body) {
+        std::thread thread(std::move(body));
+        if (!named->exchange(true)) {
+            body_thread->set_value(thread.get_id());
+        }
+        return thread;
+    });
+    driver.pulse_guide(2, 200);  // East, RA
+    REQUIRE(body_id.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE(clock.wait_for_waiter_thread(body_id.get(), std::chrono::milliseconds(5000)));
+}
+
+// Steps the clock until the pulse is over: its IsPulseGuiding window has closed and `ended` (the command that ends the
+// pulse has reached the handset) holds, so a slow stop exchange cannot be read half done.
+bool advance_until_pulse_ended(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                               const std::function<bool()>& ended) {
+    return advance_until(clock, [&] { return !driver.get_is_pulse_guiding() && ended(); });
+}
+
 // The driver on a caller-owned task clock, so a case steps its waits with advance_until() instead of sleeping.
 std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock,
                                                          int timeout_ms = 1000) {
@@ -129,6 +157,14 @@ bool is_variable_rate_command(const std::string& command, int device) {
 
 bool is_zero_rate_command(const std::string& command) {
     return command.size() >= 6 && command[4] == 0 && command[5] == 0;
+}
+
+// Zero-rate RA (device 16) commands in the handset's log: how an RA pulse ends while the mount is not tracking.
+int zero_rate_ra_commands(FakeSynScanHandset& st) {
+    const auto commands = st.command_snapshot();
+    return static_cast<int>(std::count_if(commands.begin(), commands.end(), [](const std::string& command) {
+        return is_variable_rate_command(command, 16) && is_zero_rate_command(command);
+    }));
 }
 
 int last_goto_index(const std::vector<std::string>& commands) {
@@ -1312,8 +1348,8 @@ TEST_CASE("SynScan pulse guide - the next RA pulse restores tracking after a fai
         fail_tracking_restore(*driver, *st, how);
 
         const int writes_before = st->command_count('T');
-        driver->pulse_guide(2, 200);  // East, RA
-        REQUIRE(advance_until(clock, [&] { return !driver->get_is_pulse_guiding(); }));
+        start_ra_pulse_parked(clock, *driver);
+        REQUIRE(advance_until_pulse_ended(clock, *driver, [&] { return st->command_count('T') > writes_before; }));
         CHECK(st->command_count('T') == writes_before + 1);
         CHECK(last_tracking_write(*st) == 2);
         CHECK(st->tracking_mode.load() == 2);
@@ -1381,8 +1417,10 @@ TEST_CASE("SynScan Tracking - a failed Tracking=false after a failed restore kee
         } else if (stop == Stop::MoveAxisStop) {
             REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
         } else {
-            driver->pulse_guide(2, 200);  // East, RA
-            REQUIRE(advance_until(clock, [&] { return !driver->get_is_pulse_guiding(); }));
+            const int stops_before = zero_rate_ra_commands(*st);
+            start_ra_pulse_parked(clock, *driver);
+            REQUIRE(
+                advance_until_pulse_ended(clock, *driver, [&] { return zero_rate_ra_commands(*st) > stops_before; }));
         }
         CHECK(st->command_count('T') == writes_before);
         CHECK(st->tracking_mode.load() == 0);
