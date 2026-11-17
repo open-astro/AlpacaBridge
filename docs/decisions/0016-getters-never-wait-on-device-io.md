@@ -83,7 +83,7 @@ Symbol: `transition_mutex_`
 | ZWO rotator |  | `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp` | adopted |  |  |
 | ZWO switch |  | `AlpacaCore/src/vendors/zwo/zwo_switch_driver.cpp` | adopted |  |  |
 | ZWO telescope |  | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted |  |  |
-| remotealpaca (proxied devices) |  | — | planned | #1753 | snapshot-served; commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)) |
+| remotealpaca (proxied devices) |  | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_observingconditions_driver.cpp` | adopted | #1753 | snapshot-served; commands in `AsyncOperation` ([decision 0023](0023-outbound-clients-in-vendor-wrappers.md)); the I/O lock is the `RemoteAlpacaClient` call mutex |
 
 ## Alternatives rejected
 

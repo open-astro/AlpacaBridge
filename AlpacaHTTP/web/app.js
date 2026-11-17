@@ -3396,6 +3396,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('playerone-config').style.display = 'block';
     } else if (vendor === 'weewx') {
         document.getElementById('weewx-config').style.display = 'block';
+    } else if (vendor === 'remotealpaca') {
+        document.getElementById('remotealpaca-config').style.display = 'block';
     } else if (vendor === 'gemini') {
         document.getElementById('gemini-config').style.display = 'block';
         updateGeminiConfigFields();
@@ -5009,6 +5011,20 @@ document.getElementById('device-form').addEventListener('submit', async function
         const timeoutMs = readOptionalNumber(formData, 'timeoutMs');
         if (timeoutMs !== null) {
             deviceData.timeoutMs = timeoutMs;
+        }
+    } else if (deviceData.vendor === 'remotealpaca') {
+        deviceData.upstreamHost = (formData.get('remoteAlpacaHost') || '').trim();
+        const upstreamPort = readOptionalNumber(formData, 'remoteAlpacaPort');
+        if (upstreamPort !== null) {
+            deviceData.upstreamPort = upstreamPort;
+        }
+        const upstreamDeviceNumber = readOptionalNumber(formData, 'remoteAlpacaDeviceNumber');
+        if (upstreamDeviceNumber !== null) {
+            deviceData.upstreamDeviceNumber = upstreamDeviceNumber;
+        }
+        const pollPeriod = readOptionalNumber(formData, 'remoteAlpacaPollPeriod');
+        if (pollPeriod !== null) {
+            deviceData.pollPeriodSeconds = pollPeriod;
         }
     } else if (deviceData.vendor === 'gemini' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
         deviceData.switchType = 'pdh-adv3';

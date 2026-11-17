@@ -89,6 +89,7 @@
                         <option value="playerone">Player One</option>
                         <option value="onstep">OnStep</option>
                         <option value="qhy">QHY</option>
+                        <option value="remotealpaca">Remote Alpaca</option>
                         <option value="synscan">Sky-Watcher</option>
                         <option value="skywatcher">Sky-Watcher</option>
                         <option value="svbony">SVBONY</option>
@@ -1604,6 +1605,32 @@
                     <div class="form-group">
                         <label for="weewx-timeout">HTTP Timeout (ms):</label>
                         <input type="number" id="weewx-timeout" name="timeoutMs" data-config-key="timeoutMs" value="5000" min="1000">
+                    </div>
+                </div>
+
+                <!-- Remote Alpaca: a device of another Alpaca server (the upstream), served here as a device of this server -->
+                <div id="remotealpaca-config" data-vendor="remotealpaca" data-device-type="observingconditions" class="vendor-config" style="display: none;">
+                    <h3>Remote Alpaca Observing Conditions</h3>
+
+                    <div class="form-group">
+                        <label for="remotealpaca-host">Upstream Host:</label>
+                        <input type="text" id="remotealpaca-host" name="remoteAlpacaHost" data-config-key="upstreamHost" maxlength="253" placeholder="192.168.1.20">
+                        <small>The host name or IP address of the other Alpaca server, with no http:// in front. It must not be this server.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-port">Upstream Port:</label>
+                        <input type="number" id="remotealpaca-port" name="remoteAlpacaPort" data-config-key="upstreamPort" value="32323" min="1" max="65535">
+                        <small>The HTTP port of the other Alpaca server. The ASCOM Alpaca Simulators use 32323.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-device-number">Upstream Device Number:</label>
+                        <input type="number" id="remotealpaca-device-number" name="remoteAlpacaDeviceNumber" data-config-key="upstreamDeviceNumber" value="0" min="0" max="2147483647">
+                        <small>The device number of the ObservingConditions device on the other server, not on this one.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-poll-period">Poll Period (seconds):</label>
+                        <input type="number" id="remotealpaca-poll-period" name="remoteAlpacaPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
+                        <small>How often this server reads the other server, 1 to 60 seconds.</small>
                     </div>
                 </div>
 

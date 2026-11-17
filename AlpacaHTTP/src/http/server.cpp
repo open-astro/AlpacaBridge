@@ -45,9 +45,7 @@ using detail::join_or_abandon;
 
 }  // namespace
 
-Server::Server(const Config& config)
-    : config_(config)
-{
+Server::Server(const Config& config) : config_(config), router_(Router::CatalogExtension{}, config.http_port()) {
     router_.set_shutdown_callback([this]() { handle_shutdown_request(); });
     router_.set_restart_callback([this]() { handle_restart_request(); });
     router_.set_server_info(config_.server_name(), config_.manufacturer(), alpacahttp::kVersion, config_.location(),
@@ -642,6 +640,8 @@ void Server::run_server() {
     server_fd_.store(server_fd);
 
     util::log_info("Server listening on port " + std::to_string(resolved_port));
+    // Decision 0023 rule 4: with http_port 0 only now is the port known.
+    router_.set_listen_port(resolved_port);
 
     // The listener fd can go bad underneath us without stop() being called (a
     // stray double-close elsewhere in the process can free and then re-close

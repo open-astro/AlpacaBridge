@@ -130,6 +130,12 @@
 #include "fake_astroasis_hid.h"
 #include "locked_astroasis_hid_transport.h"
 #endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
+
+#include "alpaca_upstream_script.h"
+#include "fake_http_client.h"
+#endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
@@ -1591,6 +1597,21 @@ const std::map<std::string, StateType>* ascom_device_state_types(DeviceType type
           {"TimeStamp", T::String}}},
         {DeviceType::Focuser,
          {{"IsMoving", T::Bool}, {"Position", T::Int}, {"Temperature", T::Double}, {"TimeStamp", T::String}}},
+        {DeviceType::ObservingConditions,
+         {{"CloudCover", T::Double},
+          {"DewPoint", T::Double},
+          {"Humidity", T::Double},
+          {"Pressure", T::Double},
+          {"RainRate", T::Double},
+          {"SkyBrightness", T::Double},
+          {"SkyQuality", T::Double},
+          {"SkyTemperature", T::Double},
+          {"StarFWHM", T::Double},
+          {"Temperature", T::Double},
+          {"WindDirection", T::Double},
+          {"WindGust", T::Double},
+          {"WindSpeed", T::Double},
+          {"TimeStamp", T::String}}},
         {DeviceType::Rotator,
          {{"IsMoving", T::Bool}, {"MechanicalPosition", T::Double}, {"Position", T::Double}, {"TimeStamp", T::String}}},
         {DeviceType::FilterWheel, {{"Position", T::Int}, {"TimeStamp", T::String}}},
@@ -2275,6 +2296,47 @@ Tier2Host tier2_host_astroasis_focuser() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+// The scripted upstream behind FakeHttpClient (no socket), shared by the tier-2 host and the snapshot rig.
+struct RemoteUpstreamFake {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript script;
+    RemoteUpstreamFake() { script.install(http); }
+};
+
+// The proxied ObservingConditions over the scripted upstream. The hold is FakeHttpClient's per-call delay: the
+// Connect makes some sixty calls, so 5 ms each holds it open well past kHoldWindow. The failing leg is an upstream
+// that refuses every connection, as a stopped server does.
+Tier2Host tier2_host_remotealpaca_observingconditions() {
+    Tier2Host h{"remotealpaca_observingconditions",
+                "remotealpaca",
+                "observingconditions",
+                "fake_http_client.h",
+                DeviceType::ObservingConditions,
+                "remotealpaca_observingconditions",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto upstream = std::make_shared<RemoteUpstreamFake>();
+        if (hold) upstream->http.set_delay(std::chrono::milliseconds(5));
+        if (refuse) upstream->http.refuse_next(1000000);
+        alpacacore::vendor::remotealpaca::RemoteObservingConditionsConfig config;
+        config.host = "127.0.0.1";
+        config.port = 11111;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_observingconditions(
+            0, config, upstream->http.client(), {}, alpacacore::util::default_task_clock());
+        hosted.fake = upstream;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_GEMINI
 // FakeGeminiFocuser over a pty; its handshake delay is the hold knob that makes Connecting
 // deterministic (recipe of test_gemini_focuser.cpp).
@@ -2877,6 +2939,11 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_ASTROASIS(X)
 #endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB)
+#else
+#define CS2_REMOTEALPACA(X)
+#endif
 #ifdef ALPACACORE_ENABLE_QHY
 #define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
 #else
@@ -2925,6 +2992,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_SKYWATCHER(X) \
     CS2_IOPTRON(X) \
     CS2_ASTROASIS(X) \
+    CS2_REMOTEALPACA(X) \
     CS2_GEMINI(X) \
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
@@ -4104,6 +4172,10 @@ const std::vector<std::string>& name_brands_of(const std::string& vendor) {
         {"onstep", {"OnStep", "On-Step"}},
         {"playerone", {"Player One"}},
         {"qhy", {"QHY"}},
+        // Disconnected, "Remote Alpaca ObservingConditions"; connected, the upstream's own Name (decision 0023), which
+        // the tier-2 host's scripted upstream gives as "Alpaca Simulator Weather" (alpaca_upstream_script.h, an
+        // assumption, not OmniSim's text).
+        {"remotealpaca", {"Remote Alpaca", "Alpaca Simulator"}},
         {"skywatcher", {"Sky-Watcher"}},
         {"svbony", {"SVBONY"}},
         {"synscan", {"Sky-Watcher"}},
@@ -4404,6 +4476,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #ifdef ALPACACORE_ENABLE_ASTROASIS
     CS2_ENABLED("astroasis")
 #endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+    CS2_ENABLED("remotealpaca")
+#endif
 #ifdef ALPACACORE_ENABLE_GEMINI
     CS2_ENABLED("gemini")
 #endif
@@ -4680,6 +4755,9 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 #endif
 #ifdef ALPACACORE_ENABLE_WEEWX
     CS_EXPECT_VENDOR("WEEWX", "weewx");
+#endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+    CS_EXPECT_VENDOR("REMOTEALPACA", "remotealpaca");
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
     CS_EXPECT_VENDOR("GEMINI", "gemini");
@@ -5192,6 +5270,46 @@ std::unique_ptr<SnapshotRig> snapshot_rig_astroasis_focuser() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+// Recipe of test_remotealpaca_observingconditions.cpp: the scripted upstream behind FakeHttpClient, a 1 s poll (the
+// 1 to 60 s range's least, so the sweep's one-second steps are polls). The poll pause seam holds the frame; the loss
+// is the upstream timing out (a refusal would be a loss at once), so the latch and the bound decide it.
+std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_observingconditions() {
+    namespace remote = alpacacore::vendor::remotealpaca;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto upstream = std::make_shared<RemoteUpstreamFake>();
+    rig.fake = upstream;
+    remote::RemoteObservingConditionsConfig config;
+    config.host = "127.0.0.1";
+    config.port = 11111;
+    config.poll_period = snap_chrono::seconds(1);
+    rig.driver = remote::create_remotealpaca_observingconditions(0, config, upstream->http.client(), {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = static_cast<alpacacore::ObservingConditionsDriver*>(rig.driver.get());
+    rig.hold_frame = [driver] { remote::set_poll_paused_for_testing(*driver, true); };
+    rig.lose_link = [driver, upstream] {
+        upstream->http.fail_next(1000);
+        remote::set_poll_paused_for_testing(*driver, false);
+    };
+    return rig_owner;
+}
+
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_observingconditions_getters() {
+    using alpacacore::ObservingConditionsDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_OC(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<ObservingConditionsDriver&>(d).call); }});
+    SNAP_OC("Temperature", get_temperature())
+    SNAP_OC("Humidity", get_humidity())
+    SNAP_OC("Pressure", get_pressure())
+    SNAP_OC("AveragePeriod", get_average_period())
+#undef SNAP_OC
+    return g;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_ZWO
 std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
     namespace zwo = alpacacore::vendor::zwo;
@@ -5272,9 +5390,14 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #else
 #define CS3_ASTROASIS(X)
 #endif
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters())
+#else
+#define CS3_REMOTEALPACA(X)
+#endif
 #define CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(X) \
     CS3_ZWO(X) CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_ONSTEP(X) CS3_GEMINI(X) CS3_QHY(X) \
-        CS3_ASTROASIS(X)
+        CS3_ASTROASIS(X) CS3_REMOTEALPACA(X)
 // clang-format on
 
 // Every getter must answer on the live link first: a getter that throws here is a setup defect of the hook,

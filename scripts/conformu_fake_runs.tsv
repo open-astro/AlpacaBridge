@@ -36,6 +36,7 @@ wandererastro	filterwheel	fake_serial_streamer.h	pending	4	-
 wandererastro	switch	fake_serial_streamer.h	pending	6	-
 bisque	telescope	-	no-fake	6	-
 weewx	observingconditions	-	no-fake	6	-
+remotealpaca	observingconditions	fake_http_client.h	pending	6	-
 zwo	switch	-dewheater	no-fake	6	-
 zwo	switch	-asiair	no-fake	6	-
 zwo	switch	-asiair_plus	no-fake	6	-

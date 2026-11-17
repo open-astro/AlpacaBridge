@@ -232,8 +232,10 @@ if(TARGET alpacacore_http_client)
     list(APPEND TEST_SOURCES test_http_client.cpp)
 endif()
 if(TARGET alpacacore_remotealpaca)
-    # The upstream Alpaca client against the loopback fake Alpaca server (issue #1753).
-    list(APPEND TEST_SOURCES test_remotealpaca_client.cpp)
+    # The upstream Alpaca client against the loopback fake Alpaca server, the proxied ObservingConditions over the
+    # scripted HTTP client and its [stress] registration (issue #1753).
+    list(APPEND TEST_SOURCES test_remotealpaca_client.cpp test_remotealpaca_observingconditions.cpp
+         test_remotealpaca_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over the scripted HTTP client, #271, #1070, #1753.
@@ -383,6 +385,7 @@ if(TARGET alpacacore_http_client)
 endif()
 if(TARGET alpacacore_remotealpaca)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_remotealpaca)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_REMOTEALPACA)
 endif()
 if(TARGET alpacacore_weewx)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_weewx)

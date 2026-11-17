@@ -1,14 +1,19 @@
-# remotealpaca vendor: a client for one device of an upstream Alpaca server
-# (decision 0023, issue #1753). Slice 2 builds the client library only: no
-# driver, no catalog registration, no device type yet.
+# remotealpaca vendor: devices of an upstream Alpaca server served as proxied
+# devices (decision 0023, issue #1753): the upstream client, the self-loop check
+# and the ObservingConditions driver with its catalog factory.
 
 if(ALPACACORE_ENABLE_REMOTEALPACA)
     if(NOT TARGET alpacacore_http_client)
         message(FATAL_ERROR "ALPACACORE_ENABLE_REMOTEALPACA needs libcurl (util::HttpClient, decision 0023)")
     endif()
-    message(STATUS "Building remotealpaca upstream Alpaca client")
+    message(STATUS "Building remotealpaca proxied devices (upstream Alpaca client)")
 
-    add_library(alpacacore_remotealpaca STATIC remote_alpaca_client.cpp)
+    add_library(alpacacore_remotealpaca STATIC
+        remote_alpaca_client.cpp
+        self_loop.cpp
+        remotealpaca_observingconditions_driver.cpp
+        remotealpaca_catalog.cpp
+    )
 
     target_include_directories(alpacacore_remotealpaca PRIVATE
         ${CMAKE_SOURCE_DIR}/include
