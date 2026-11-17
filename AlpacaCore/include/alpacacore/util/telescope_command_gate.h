@@ -57,7 +57,8 @@ enum class GuideRateAxis : std::uint8_t { RightAscension, Declination };
 /// driver refuses that command on a faulted link through the wire, not through its latched fault.
 enum class ParkedFaultOrder : std::uint8_t { ParkedFirst, FaultFirst, NoFaultCheck };
 
-/// The InvalidValue texts of the argument checks, in the driver's own words. Two fields may hold one text.
+/// The InvalidValue texts of the argument checks, in the driver's own words. Two fields may hold one text. Each
+/// field points at a string literal (static storage): the gate keeps the pointer, never a copy.
 struct TelescopeArgumentTexts {
     const char* pulse_direction = "Invalid PulseGuide direction";
     const char* pulse_duration = "PulseGuide duration is out of range";
