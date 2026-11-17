@@ -101,6 +101,15 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConf
                 messages.push_back(std::move(message));
                 out.erase(f.key);  // Persisted: dropped to unset
             }
+        } else if (f.kind == FieldRef::Kind::String && (f.role == Role::Host || f.role == Role::PortPath)) {
+            // open-astro#2292 (ADR 0007 rule 4): a host name or device path has a byte bound.
+            const std::size_t limit = f.role == Role::Host ? kMaxHostBytes : kMaxPortPathBytes;
+            const std::size_t size = std::get<std::string>(*v).size();
+            if (size > limit) {
+                messages.push_back(name + " is " + std::to_string(size) + " bytes; the limit is " +
+                                   std::to_string(limit));
+                // Persisted: kept, so the connect refuses it instead of an empty path auto-detecting.
+            }
         } else if (f.kind == FieldRef::Kind::RecordList) {
             std::vector<DeviceConfig> records = std::get<std::vector<DeviceConfig>>(*v);
             for (std::size_t i = 0; i < records.size(); ++i) {

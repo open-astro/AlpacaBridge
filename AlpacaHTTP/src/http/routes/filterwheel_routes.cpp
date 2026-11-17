@@ -70,6 +70,9 @@ Response Router::dispatch_filterwheel_method(std::shared_ptr<alpacacore::FilterW
                     }
                 }
                 std::vector<std::string> names = names_val->get<std::vector<std::string>>();
+                for (const auto& name : names) {
+                    refuse_over_long("A filter name", name, kMaxNameBytes);
+                }
                 filterwheel->set_names(names);
                 return call.ok_void();
             } else if (method_name == "focusoffsets") {

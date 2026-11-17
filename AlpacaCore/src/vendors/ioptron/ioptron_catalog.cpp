@@ -70,7 +70,7 @@ std::unique_ptr<AlpacaDriver> create_telescope(const DeviceConfig& config, int d
         if (type == "network") {
             info.type = vendor::ioptron::ConnectionType::Network;
             info.host = config.get(kIoptronHost);
-            info.tcp_port = static_cast<int>(config.get(kIoptronTcpPort));
+            info.tcp_port = network_port_or_zero(config.get(kIoptronTcpPort));
         } else {
             info.type = vendor::ioptron::ConnectionType::Serial;
             info.port_path = config.get(kIoptronPortPath);
