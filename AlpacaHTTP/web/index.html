@@ -2041,6 +2041,21 @@
                     <p id="server-info-status" class="server-status"></p>
                 </div>
             </div>
+            <!-- Issue #1764 item 1: Shutdown sits in its own row, apart from Restart and the screen edge. -->
+            <div id="server-actions-section" class="section-card">
+                <div class="section-card-header">
+                    <h3>Server Actions</h3>
+                </div>
+                <div class="section-card-body">
+                    <div class="server-actions server-actions-card">
+                        <button class="btn btn-secondary" type="button" onclick="syncTime()">Sync Time</button>
+                        <button class="btn btn-secondary" type="button" onclick="restartServer()">Restart Server</button>
+                    </div>
+                    <div class="server-actions server-actions-danger">
+                        <button class="btn btn-danger" type="button" onclick="shutdownServer()">Shutdown Server</button>
+                    </div>
+                </div>
+            </div>
             <div id="update-section" class="section-card collapsed">
                 <div class="section-card-header">
                     <h3>Software Update</h3>
@@ -2197,11 +2212,9 @@
             </div>
         </div>
 
+        <!-- Issue #1764 item 1: only Refresh stays in the bar; the server actions are a card on Server Info. -->
         <div class="server-actions global-actions">
             <button id="global-refresh" class="btn btn-primary" onclick="globalRefresh()">Refresh</button>
-            <button class="btn btn-secondary" onclick="syncTime()">Sync Time</button>
-            <button class="btn btn-secondary" onclick="restartServer()">Restart Server</button>
-            <button class="btn btn-danger" onclick="shutdownServer()">Shutdown Server</button>
         </div>
     </div>
 
