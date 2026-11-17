@@ -981,26 +981,51 @@ public:
                                   AlpacaError::DriverException);
         }
     }
-    
-    void set_guide_rate(const GuideRate& rate) override {
-        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
-            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+
+    // #2257: the static check (finite, > 0) runs before the connection check.
+    static void validate_guide_rate_value(double value) {
+        if (!std::isfinite(value) || value <= 0.0) {
+            throw AlpacaException("GuideRate must be a finite number greater than 0", AlpacaError::InvalidValue);
         }
+    }
+
+    void set_guide_rate(const GuideRate& rate) override {
+        validate_guide_rate_value(rate.ra);
+        validate_guide_rate_value(rate.dec);
         StateLock lock(lock_gate_);
         check_connected();
-        
+
+        // The range depends on the calibration scale, known only once connected. Out of range is refused, never
+        // clamped (#2257); the clamp below only absorbs rounding inside kEps of a bound.
         const double scale_ra = guide_rate_calibrated_ ? guide_rate_scale_ra_ : 1.0;
         const double scale_dec = guide_rate_calibrated_ ? guide_rate_scale_dec_ : 1.0;
         const Wire protocol = wire();
         double ra_fraction = rate.ra / (kSiderealRateDegPerSec * scale_ra);
         double dec_fraction = rate.dec / (kSiderealRateDegPerSec * scale_dec);
+        constexpr double kEps = 1e-9;
+        if (ra_fraction < 0.01 - kEps || ra_fraction > 0.90 + kEps || dec_fraction < 0.10 - kEps ||
+            dec_fraction > 0.99 + kEps) {
+            throw AlpacaException("GuideRate must be 0.01-0.90 (RA) and 0.10-0.99 (Dec) of the sidereal rate",
+                                  AlpacaError::InvalidValue);
+        }
         ra_fraction = std::clamp(ra_fraction, 0.01, 0.90);
         dec_fraction = std::clamp(dec_fraction, 0.10, 0.99);
         protocol.set_guide_rates(ra_fraction, dec_fraction);
         cached_guide_rate_ = rate;
         guide_rate_valid_ = true;
     }
-    
+
+    // The base per-axis setters read the rate first, which throws NotConnected while disconnected: check the
+    // argument before it (#2257).
+    void set_guide_rate_right_ascension(double value) override {
+        validate_guide_rate_value(value);
+        TelescopeDriver::set_guide_rate_right_ascension(value);
+    }
+    void set_guide_rate_declination(double value) override {
+        validate_guide_rate_value(value);
+        TelescopeDriver::set_guide_rate_declination(value);
+    }
+
     double get_right_ascension() const override {
         return serve_cached_or_refill(
             [&] { return pulse_position_hold_[kRaAxis].active(clock_.now()) || position_cache_fresh_locked(); },
