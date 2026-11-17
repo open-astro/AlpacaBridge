@@ -1594,6 +1594,33 @@ TEST_CASE("iOptron Telescope Driver - non-finite guide rate is rejected", "[iopt
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
 }
 
+// #2257: an out-of-range guide rate is refused with InvalidValue, never clamped, and nothing reaches the mount.
+TEST_CASE("iOptron Telescope Driver - an out-of-range guide rate is refused, not clamped",
+          "[ioptron][telescope][unit][fake][guide-rate]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    const auto before = driver->get_guide_rate();
+    const int writes = mount.count(":RG");
+    require_alpaca_error([&]() { driver->set_guide_rate({2.0 * kSidereal, 0.5 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.5 * kSidereal, 0.05 * kSidereal}); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_right_ascension(0.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(mount.count(":RG") == writes);
+    CHECK(driver->get_guide_rate().ra == before.ra);
+    CHECK(driver->get_guide_rate().dec == before.dec);
+
+    // Rounding just past a bound is accepted and sent inside it (the wrapper refuses past the bound).
+    REQUIRE_NOTHROW(driver->set_guide_rate_right_ascension((0.90 + 5e-10) * kSidereal));
+    CHECK(mount.count(":RG") == writes + 1);
+    driver->set_connected(false);
+}
+
 // #627: the NaN path of iOptron's site latitude and longitude setters, over a
 // connected driver. The disconnected range case is in Target Range Validation.
 TEST_CASE("iOptron Telescope Driver - non-finite site latitude and longitude are rejected",
