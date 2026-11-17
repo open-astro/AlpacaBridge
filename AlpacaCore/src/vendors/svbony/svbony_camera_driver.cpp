@@ -1924,15 +1924,21 @@ private:
         return fn(camera_id_);
     }
 
+    // #2259 canonical order for the geometry setters: the static value check, the connection, the camera's
+    // supported values, then the exposing check. The supported list is the connected camera's (disconnect clears
+    // camera_info_valid_), so a disconnected write of a positive bin answers NotConnected.
     void set_bin_locked(int bin_x, int bin_y) {
+        if (bin_x <= 0 || bin_y <= 0) {
+            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
+        }
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!camera_info_valid_ || !supports_bin(camera_info_.supported_bins, bin_x)) {
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
-        ensure_connected_locked();
         // Geometry write: rejected mid-exposure, checked under the same
         // mutex_ hold that start_exposure sets exposure_starting_ under (M15).
         ensure_settings_safe_locked();

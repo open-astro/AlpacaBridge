@@ -186,6 +186,25 @@ after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek
 sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
 odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
 
+### Camera argument order (all camera vendors)
+
+A camera member refuses in one order on every brand (#2259), so a client writes one error handler:
+
+- **`StartExposure(duration, light)`**: (1) a NaN, negative or infinite duration, or one too large to convert to
+  microseconds, is `InvalidValue` (a static cap such as GPhoto's 3600 s belongs here too); (2) `NotConnected`; (3) a
+  duration below `ExposureMin`, 0 included, runs at `ExposureMin`, and one above `ExposureMax` is `InvalidValue`; (4) a
+  frame (NumX, NumY, StartX, StartY, bin) that does not fit the sensor is `InvalidValue`; (5) an exposure running or
+  starting is `InvalidOperation`.
+- **`BinX`, `BinY`, `NumX`, `NumY`, `StartX`, `StartY` setters**: (1) a bin, NumX or NumY of 0 or less, or a StartX or
+  StartY below 0, is `InvalidValue`; (2) `NotConnected`; (3) a bin the camera does not support is `InvalidValue`; (4) an
+  exposure running or starting is `InvalidOperation`. The setters do not check the sensor size: StartExposure does
+  (ConformU sets a NumX beyond the sensor and expects StartExposure to refuse it).
+
+The contract sweep probes these disconnected, connected and while an exposure runs (started through each camera's
+tier-3 recipe). `kProbeExemptions` in `test_contract_sweep.cpp` lists each camera that still drifts, and
+`kExposingRefusalExemptions` each camera that takes a good write or a second StartExposure while exposing; the fix
+deletes its rows.
+
 ### Camera PercentCompleted and cooler members (all camera vendors)
 
 - **AlpacaBridge supports `PercentCompleted` only while `CameraState` is `Exposing`.** ICameraV4 optionally permits
