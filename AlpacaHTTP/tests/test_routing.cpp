@@ -9276,46 +9276,66 @@ int main() {
         const auto json = nlohmann::json::parse(response.body(), nullptr, false);
         EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
         EXPECT(json.value("ClientTransactionID", 0) == 33);
+        // An all-vendors build registers the built-in serial identities and listers too: a built-in vendor that
+        // ships a CH340 adds its own candidates to the same port, and a built-in lister may add a device or an
+        // error. The test reads only the entries of its own vendors (yyy, xxx), in the order they were registered.
+        const auto own = [](const nlohmann::json& list, const char* key) {
+            nlohmann::json kept = nlohmann::json::array();
+            for (const auto& item : list) {
+                const std::string name = item.value(key, std::string());
+                if (name == "yyy" || name == "xxx" || name.rfind("yyy ", 0) == 0) kept.push_back(item);
+            }
+            return kept;
+        };
         const nlohmann::json devices = json["Value"].value("Devices", nlohmann::json::array());
-        EXPECT(devices.size() == 2);
-        if (devices.size() == 2) {
-            const auto& port = devices[0];
-            EXPECT(port.value("Kind", "") == "serial");
-            EXPECT(port.value("Port", "") == by_id);
-            EXPECT(port.value("Node", "") == node_canonical);
-            EXPECT(port.value("Name", "") == "usb-1a86_USB_Serial-if00-port0");
-            EXPECT(port["Candidates"] == nlohmann::json::array({{{"Vendor", "yyy"},
-                                                                 {"DeviceType", "Focuser"},
-                                                                 {"Config",
-                                                                  {{"vendor", "yyy"},
-                                                                   {"deviceType", "focuser"},
-                                                                   {"connectionType", "serial"},
-                                                                   {"portPath", by_id}}}},
-                                                                {{"Vendor", "xxx"},
-                                                                 {"DeviceType", "Telescope"},
-                                                                 {"Config",
-                                                                  {{"vendor", "xxx"},
-                                                                   {"deviceType", "telescope"},
-                                                                   {"connectionType", "serial"},
-                                                                   {"portPath", by_id}}}}}));
-            EXPECT(port.value("Configured", false));
-            EXPECT(port["ConfiguredAs"] ==
-                   nlohmann::json::array({{{"DeviceType", "Focuser"}, {"DeviceNumber", 9491}}}));
-            const auto& camera = devices[1];
-            EXPECT(camera.value("Kind", "") == "camera");
-            EXPECT(camera.value("Index", -1) == 0);
-            EXPECT(camera.value("SerialNumber", "") == "1a2b");
-            EXPECT(!camera.value("Configured", true));
-            EXPECT(camera["Candidates"][0]["Config"] ==
-                   nlohmann::json({{"vendor", "yyy"}, {"deviceType", "camera"}, {"cameraIndex", 0}}));
+        const nlohmann::json* port = nullptr;
+        const nlohmann::json* camera = nullptr;
+        for (const auto& device : devices) {
+            if (device.value("Port", "") == by_id) port = &device;
+            const auto candidates = device.value("Candidates", nlohmann::json::array());
+            if (device.value("Kind", "") == "camera" && !candidates.empty() &&
+                candidates[0].value("Vendor", "") == "yyy") {
+                camera = &device;
+            }
         }
-        EXPECT(json["Value"]["Errors"] ==
+        EXPECT(port != nullptr && camera != nullptr);
+        if (port != nullptr && camera != nullptr) {
+            EXPECT(port->value("Kind", "") == "serial");
+            EXPECT(port->value("Node", "") == node_canonical);
+            EXPECT(port->value("Name", "") == "usb-1a86_USB_Serial-if00-port0");
+            EXPECT(own((*port)["Candidates"], "Vendor") == nlohmann::json::array({{{"Vendor", "yyy"},
+                                                                                   {"DeviceType", "Focuser"},
+                                                                                   {"Config",
+                                                                                    {{"vendor", "yyy"},
+                                                                                     {"deviceType", "focuser"},
+                                                                                     {"connectionType", "serial"},
+                                                                                     {"portPath", by_id}}}},
+                                                                                  {{"Vendor", "xxx"},
+                                                                                   {"DeviceType", "Telescope"},
+                                                                                   {"Config",
+                                                                                    {{"vendor", "xxx"},
+                                                                                     {"deviceType", "telescope"},
+                                                                                     {"connectionType", "serial"},
+                                                                                     {"portPath", by_id}}}}}));
+            EXPECT(port->value("Configured", false));
+            EXPECT((*port)["ConfiguredAs"] ==
+                   nlohmann::json::array({{{"DeviceType", "Focuser"}, {"DeviceNumber", 9491}}}));
+            EXPECT(camera->value("Index", -1) == 0);
+            EXPECT(camera->value("SerialNumber", "") == "1a2b");
+            EXPECT(!camera->value("Configured", true));
+            EXPECT((*camera)["Candidates"] ==
+                   nlohmann::json::array(
+                       {{{"Vendor", "yyy"},
+                         {"DeviceType", "Camera"},
+                         {"Config", {{"vendor", "yyy"}, {"deviceType", "camera"}, {"cameraIndex", 0}}}}}));
+        }
+        EXPECT(own(json["Value"]["Errors"], "Source") ==
                nlohmann::json::array({{{"Source", "yyy HID lister"}, {"Message", "hid_init failed"}}}));
 
         // The unversioned alias answers the same; any verb but GET is 405.
         const auto alias =
             nlohmann::json::parse(route_request(router, "GET", "/management/attacheddevices").body(), nullptr, false);
-        EXPECT(!alias.is_discarded() && alias["Value"].value("Devices", nlohmann::json::array()).size() == 2);
+        EXPECT(!alias.is_discarded() && alias["Value"]["Devices"] == json["Value"]["Devices"]);
         const auto put = route_request(router, "PUT", "/management/v1/attacheddevices", "");
         EXPECT(put.status_code() == 405);
         EXPECT(put.get_header("Allow") == "GET");

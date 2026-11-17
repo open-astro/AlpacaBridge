@@ -121,16 +121,16 @@ std::vector<ConfiguredDeviceRef> configured_on_port(const DeviceCatalog& catalog
                                                     const std::string& port, const std::string& node) {
     std::vector<ConfiguredDeviceRef> refs;
     for (const ConfiguredDevice& device : configured) {
-        const auto view = catalog.describe(device.key);
-        if (!view) continue;
-        for (const FieldRef& field : view->fields) {
+        const auto found = catalog.describe(device.key);
+        if (!found) continue;
+        const DescriptorView& view = *found;
+        for (const FieldRef& field : view.fields) {
             if (field.role != Role::PortPath) continue;
-            if (field.applies_when &&
-                string_value(device.config, view->fields, field.applies_when->discriminator_key) !=
-                    field.applies_when->value) {
+            if (const auto& when = field.applies_when;
+                when && string_value(device.config, view.fields, when->discriminator_key) != when->value) {
                 continue;
             }
-            const std::string value = string_value(device.config, view->fields, field.key);
+            const std::string value = string_value(device.config, view.fields, field.key);
             if (value.empty()) continue;
             const bool same = value == port || (!node.empty() && (value == node || canonical_or_empty(value) == node));
             if (same) {
@@ -248,8 +248,9 @@ void list_cameras(const DeviceCatalog& catalog, const std::vector<ConfiguredDevi
                   AttachedDeviceList& list) {
     for (const std::string& vendor : catalog.camera_lister_vendors()) {
         const DeviceKey key{vendor, DeviceType::Camera};
-        const auto view = catalog.describe(key);
-        if (!view) continue;
+        const auto described = catalog.describe(key);
+        if (!described) continue;
+        const DescriptorView& view = *described;
         std::optional<std::vector<AttachedCamera>> found;
         try {
             found = catalog.list_cameras(vendor);
@@ -268,10 +269,10 @@ void list_cameras(const DeviceCatalog& catalog, const std::vector<ConfiguredDevi
             device.serial_number = camera.serial;
             device.camera_index = camera.index;
             device.name = camera.name;
-            device.candidates.push_back(camera_candidate(*view, camera));
+            device.candidates.push_back(camera_candidate(view, camera));
             if (!camera.serial.empty()) {
                 for (const ConfiguredDevice& entry : configured) {
-                    if (entry.key == key && string_value(entry.config, view->fields, "serialNumber") == camera.serial) {
+                    if (entry.key == key && string_value(entry.config, view.fields, "serialNumber") == camera.serial) {
                         device.configured_as.push_back({entry.key.type, entry.device_number});
                     }
                 }
