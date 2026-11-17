@@ -236,6 +236,8 @@ public:
     bool get_switch(int id) const override {
         validate_id(id);
         ensure_connected();
+        // A wrapper's get_value() is never negative (0-1, or a 0-100 duty), so
+        // "above 0" and "not 0" are the same test on every board.
         return wrapper_.get_value(static_cast<std::size_t>(id)) > 0;
     }
 

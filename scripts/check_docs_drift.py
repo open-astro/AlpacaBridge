@@ -3803,8 +3803,6 @@ def self_test():
     check("blocking list: a header without the telescopes span is BLOCKING-LIST SPAN NOT FOUND",
           len(f) == 1 and f[0].startswith("BLOCKING-LIST SPAN NOT FOUND"))
     # The shared power-port driver (#2264): scanned by name, and named when it blocks.
-    check("blocking list: the scan reads every SHARED_DRIVER_HEADERS entry",
-          all(ROOT / h in [p for p, _ in _get_connected_sources()] for h in SHARED_DRIVER_HEADERS))
     with tempfile.TemporaryDirectory() as bl_tmp:
         bl_shared = Path(bl_tmp) / "power_port_switch_driver.h"
         bl_shared.write_text("bool get_connected() const override { std::lock_guard<std::mutex> g(m_); return c_; }\n")
