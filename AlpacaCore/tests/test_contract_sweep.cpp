@@ -602,7 +602,8 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"celestron_telescope_cgx", kOff, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
-    {"celestron_telescope_cgx", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},    // #2259, cameras: PR 2 fixes ToupTek/Altair, QHY, GPhoto and iGuider and deletes these rows.
+    {"celestron_telescope_cgx", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
+    // #2259, cameras: PR 2 fixes ToupTek/Altair, QHY, GPhoto and iGuider and deletes these rows.
     {"touptek_camera", kOff, "set_bin_x(0)", kKnown, "connection checked first (#2259)"},
     {"touptek_camera", kOff, "set_bin_x(-1)", kKnown, "connection checked first (#2259)"},
     {"touptek_camera", kOff, "set_bin_y(0)", kKnown, "connection checked first (#2259)"},

@@ -140,10 +140,12 @@ public:
         return download_cv_.wait_for(lock, timeout, [this] { return download_entered_; });
     }
 
-    // The last value written to a control (the exposure register in microseconds, for one).
+    // The last value written to a control (the exposure register in microseconds, for one); 0 when none was.
+    // A lookup, not operator[], so reading a control never adds an entry to the fake.
     long control_value(ControlType type) {
         std::lock_guard lock(mutex_);
-        return controls_[type];
+        const auto it = controls_.find(type);
+        return it == controls_.end() ? 0 : it->second;
     }
 
     int call_count(const std::string& name) const {
