@@ -37,9 +37,7 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
-#include <optional>
 #include <set>
-#include <sstream>
 #include <thread>
 
 #ifndef _WIN32
