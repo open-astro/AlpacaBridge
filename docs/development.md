@@ -372,7 +372,8 @@ Use the [`/driver-build` skill](#driver-build--guided-driver-implementation) for
 user's `dialout`, `plugdev` and `gpio` groups, creating `gpio` (and `plugdev`) on a stock Debian that
 lacks it. The udev rules are installed tightened (`scripts/tighten_udev_rules.sh`, issue #2290): a
 vendor rule's `MODE="0666"` becomes `GROUP="plugdev", MODE="0660"`, so only `plugdev` members open the
-USB devices. `ALPACA_ADD_DIALOUT=OFF`, `ALPACA_ADD_PLUGDEV=OFF` and `ALPACA_ADD_GPIO=OFF` skip the
+USB devices. A world-mode rule's own `GROUP` is replaced too (today only `users`, on the ZWO EAF, EFW and CAA rules), so a
+future vendor rule that picks a group on purpose loses it. `ALPACA_ADD_DIALOUT=OFF`, `ALPACA_ADD_PLUGDEV=OFF` and `ALPACA_ADD_GPIO=OFF` skip the
 group changes. A group change applies to
 the service at its next start, which the script does.
 

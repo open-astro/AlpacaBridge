@@ -118,7 +118,7 @@ run_install() {
 run_install install SHIM_GROUPS="testuser" SHIM_HAS_GPIO=0 SHIM_HAS_PLUGDEV=0
 check "fresh host: udev rules installed" yes '^install -m 644 .*\.rules /etc/udev/rules\.d/'
 check "fresh host: gpio group created" yes '^groupadd -f gpio$'
-check "fresh host: plugdev group created" yes '^groupadd -f plugdev$'
+check "fresh host: plugdev group created" yes '^groupadd -f -r plugdev$'
 check "fresh host: user added to dialout" yes '^usermod -aG dialout testuser$'
 check "fresh host: user added to plugdev" yes '^usermod -aG plugdev testuser$'
 check "fresh host: user added to gpio" yes '^usermod -aG gpio testuser$'
@@ -158,7 +158,7 @@ check "opt-out: no usermod" no '^usermod'
 # update sets the groups up too (a host installed before the fix gets them on its next update).
 run_install update SHIM_GROUPS="testuser" SHIM_HAS_GPIO=0 SHIM_HAS_PLUGDEV=1
 check "update: gpio group created" yes '^groupadd -f gpio$'
-check "update: an existing plugdev group is not created again" no '^groupadd -f plugdev$'
+check "update: an existing plugdev group is not created again" no '^groupadd -f -r plugdev$'
 check "update: user added to dialout" yes '^usermod -aG dialout testuser$'
 check "update: user added to plugdev" yes '^usermod -aG plugdev testuser$'
 check "update: user added to gpio" yes '^usermod -aG gpio testuser$'

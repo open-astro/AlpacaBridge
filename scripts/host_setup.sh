@@ -150,7 +150,7 @@ host_setup_ensure_plugdev() {
   user="$(id -un)"
   if ! getent group plugdev >/dev/null; then
     echo "Creating plugdev group (the udev rules give USB devices to it)."
-    sudo groupadd -f plugdev
+    sudo groupadd -f -r plugdev  # a system group, as Debian's own plugdev (GID 46) and the postinst's addgroup --system
   fi
   if ! id -nG | tr ' ' '\n' | grep -q '^plugdev$'; then
     echo "Adding ${user} to the plugdev group (required for USB cameras, filter wheels and focusers)."
