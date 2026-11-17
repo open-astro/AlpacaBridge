@@ -52,7 +52,7 @@ Symbol: `transition_mutex_`
 | iOptron iFR focuser |  | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_focuser_driver.cpp` | adopted | #2002 | the I/O lock is the shared `IfrLink` session's, under the status cache |
 | iOptron iFR rotator |  | `AlpacaCore/src/vendors/ioptron/ioptron_ifr_rotator_driver.cpp` | adopted | #2002 | the I/O lock is the shared `IfrLink` session's, under the status cache |
 | iOptron iGuider camera |  | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted |  |  |
-| iOptron switch |  | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp` | adopted |  |  |
+| iOptron switch |  | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h` | adopted |  |  |
 | iOptron telescope |  | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1829 | `util::LockGate` drops `mutex_` per exchange; a getter whose TTL cache lapsed takes the I/O lock for that read |
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | | `util::LockGate` drops `mutex_` per exchange |
 | Player One camera |  | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted |  |  |
@@ -75,8 +75,8 @@ Symbol: `transition_mutex_`
 | WandererAstro filter wheel |  | `AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_driver.cpp` | adopted |  | writes with no reply wait under `state_mutex_` (Alternatives rejected) |
 | WandererAstro rotator |  | `AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_driver.cpp` | adopted |  |  |
 | WeeWX observing conditions |  | `AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp` | adopted |  |  |
-| ZWO ASIAIR Plus switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp` | adopted |  |  |
-| ZWO ASIAIR switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp` | adopted |  |  |
+| ZWO ASIAIR Plus switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h` | adopted |  |  |
+| ZWO ASIAIR switch |  | `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h` | adopted |  |  |
 | ZWO camera |  | `AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp` | adopted |  |  |
 | ZWO filter wheel |  | `AlpacaCore/src/vendors/zwo/zwo_filterwheel_driver.cpp` | adopted |  |  |
 | ZWO focuser |  | `AlpacaCore/src/vendors/zwo/zwo_focuser_driver.cpp` | adopted |  |  |
