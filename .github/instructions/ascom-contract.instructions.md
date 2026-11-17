@@ -90,6 +90,10 @@ Syncs and Alt/Az slews are exempt. A driver test of an equatorial slew turns Tra
 and assert only that the slew threw. An Alt/Az slew test in a driver that refuses Alt/Az slews while Tracking is true
 (ITelescopeV4; OnStep and the iOptron mount since #1377) turns Tracking off first instead.
 
+### Telescope refusal order (all mount drivers)
+
+A telescope member refuses in this order: argument (`InvalidValue`), connected, parked, link fault, tracking (#2257). Out of range always throws `InvalidValue`; no mount driver clamps a client argument (drivers that still drift are listed in `kProbeExemptions` until their fix lands). The parked-against-fault order is per driver (Sky-Watcher checks the fault first). The contract sweep probes PulseGuide, MoveAxis, SlewToCoordinates(Async) and the guide-rate setters disconnected, connected and parked; `kProbeExemptions` in `test_contract_sweep.cpp` lists each known failure (deleted by the fix) and each member a driver does not implement.
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |
