@@ -17,6 +17,7 @@
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
+#include <alpacacore/util/sexagesimal.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -188,162 +189,6 @@ std::string trim_copy(std::string value) {
         }).base(),
         value.end());
     return value;
-}
-
-bool parse_hms(const std::string& value, double& hours) {
-    static const std::regex kPattern(R"(^\s*(\d{1,3})[:](\d{1,2})[:](\d{1,2})\s*$)");
-    std::smatch match;
-    if (!std::regex_match(value, match, kPattern)) {
-        return false;
-    }
-
-    const int h = std::stoi(match[1].str());
-    const int m = std::stoi(match[2].str());
-    const int s = std::stoi(match[3].str());
-    if (m > 59 || s > 59) {
-        return false;
-    }
-
-    hours = static_cast<double>(h) + static_cast<double>(m) / 60.0 + static_cast<double>(s) / 3600.0;
-    return true;
-}
-
-bool parse_angle_triplet(const std::string& value, bool require_sign, double& degrees_out) {
-    if (value.empty()) {
-        return false;
-    }
-
-    std::size_t pos = 0;
-    bool negative = false;
-    if (value[pos] == '+' || value[pos] == '-') {
-        negative = value[pos] == '-';
-        ++pos;
-    } else if (require_sign) {
-        return false;
-    }
-
-    std::vector<int> parts;
-    int current = 0;
-    bool in_number = false;
-    for (; pos < value.size(); ++pos) {
-        const unsigned char ch = static_cast<unsigned char>(value[pos]);
-        if (std::isdigit(ch)) {
-            current = (current * 10) + (ch - static_cast<unsigned char>('0'));
-            in_number = true;
-            continue;
-        }
-        if (in_number) {
-            parts.push_back(current);
-            current = 0;
-            in_number = false;
-        }
-    }
-    if (in_number) {
-        parts.push_back(current);
-    }
-
-    if (parts.size() < 3) {
-        return false;
-    }
-    if (parts[1] > 59 || parts[2] > 59) {
-        return false;
-    }
-
-    double degrees = static_cast<double>(parts[0]) +
-                     static_cast<double>(parts[1]) / 60.0 +
-                     static_cast<double>(parts[2]) / 3600.0;
-    if (negative) {
-        degrees = -degrees;
-    }
-
-    degrees_out = degrees;
-    return true;
-}
-
-std::string format_hms(double hours) {
-    if (!std::isfinite(hours)) {
-        return "00:00:00";
-    }
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped < 0.0) {
-        wrapped += 24.0;
-    }
-
-    int total_seconds = static_cast<int>(std::round(wrapped * 3600.0));
-    total_seconds %= (24 * 3600);
-    if (total_seconds < 0) {
-        total_seconds += 24 * 3600;
-    }
-
-    const int h = total_seconds / 3600;
-    const int m = (total_seconds % 3600) / 60;
-    const int s = total_seconds % 60;
-
-    std::ostringstream oss;
-    oss << std::setfill('0') << std::setw(2) << h << ':'
-        << std::setfill('0') << std::setw(2) << m << ':'
-        << std::setfill('0') << std::setw(2) << s;
-    return oss.str();
-}
-
-std::string format_angle_colon(double degrees, int width_degrees) {
-    if (!std::isfinite(degrees)) {
-        degrees = 0.0;
-    }
-
-    const char sign = degrees < 0.0 ? '-' : '+';
-    const double abs_deg = std::abs(degrees);
-    int total_seconds = static_cast<int>(std::round(abs_deg * 3600.0));
-    const int d = total_seconds / 3600;
-    const int m = (total_seconds % 3600) / 60;
-    const int s = total_seconds % 60;
-
-    std::ostringstream oss;
-    oss << sign
-        << std::setfill('0') << std::setw(width_degrees) << d << ':'
-        << std::setfill('0') << std::setw(2) << m << ':'
-        << std::setfill('0') << std::setw(2) << s;
-    return oss.str();
-}
-
-std::string format_angle_star_colon(double degrees, int width_degrees) {
-    if (!std::isfinite(degrees)) {
-        degrees = 0.0;
-    }
-
-    const char sign = degrees < 0.0 ? '-' : '+';
-    const double abs_deg = std::abs(degrees);
-    int total_seconds = static_cast<int>(std::round(abs_deg * 3600.0));
-    const int d = total_seconds / 3600;
-    const int m = (total_seconds % 3600) / 60;
-    const int s = total_seconds % 60;
-
-    std::ostringstream oss;
-    oss << sign
-        << std::setfill('0') << std::setw(width_degrees) << d << '*'
-        << std::setfill('0') << std::setw(2) << m << ':'
-        << std::setfill('0') << std::setw(2) << s;
-    return oss.str();
-}
-
-std::string format_angle_star(double degrees, int width_degrees) {
-    if (!std::isfinite(degrees)) {
-        degrees = 0.0;
-    }
-
-    const char sign = degrees < 0.0 ? '-' : '+';
-    const double abs_deg = std::abs(degrees);
-    int total_seconds = static_cast<int>(std::round(abs_deg * 3600.0));
-    const int d = total_seconds / 3600;
-    const int m = (total_seconds % 3600) / 60;
-    const int s = total_seconds % 60;
-
-    std::ostringstream oss;
-    oss << sign
-        << std::setfill('0') << std::setw(width_degrees) << d << '*'
-        << std::setfill('0') << std::setw(2) << m << ':'
-        << std::setfill('0') << std::setw(2) << s;
-    return oss.str();
 }
 
 // Protocol uses inverted sign for UTC offsets (UTC+8 is encoded as -08:00).
@@ -1609,15 +1454,19 @@ EquatorialCoordinates ZWOMountProtocolWrapper::get_current_equatorial(int timeou
 
     const std::string ra_response = send_command(":GR", true, timeout_ms_override);
     throw_if_mount_error(ra_response, ":GR");
-    if (!parse_hms(ra_response, out.ra_hours)) {
+    const auto ra = util::parse_hms(ra_response);
+    if (!ra) {
         throw AlpacaException("Invalid RA response from ZWO mount", AlpacaError::DriverException);
     }
+    out.ra_hours = *ra;
 
     const std::string dec_response = send_command(":GD", true, timeout_ms_override);
     throw_if_mount_error(dec_response, ":GD");
-    if (!parse_angle_triplet(dec_response, true, out.dec_degrees)) {
+    const auto dec = util::parse_angle_triplet(dec_response, true);
+    if (!dec) {
         throw AlpacaException("Invalid Dec response from ZWO mount", AlpacaError::DriverException);
     }
+    out.dec_degrees = *dec;
 
     return out;
 }
@@ -1627,15 +1476,19 @@ HorizontalCoordinates ZWOMountProtocolWrapper::get_current_horizontal() {
 
     const std::string az_response = send_command(":GZ");
     throw_if_mount_error(az_response, ":GZ");
-    if (!parse_angle_triplet(az_response, false, out.azimuth_degrees)) {
+    const auto az = util::parse_angle_triplet(az_response, false);
+    if (!az) {
         throw AlpacaException("Invalid Azimuth response from ZWO mount", AlpacaError::DriverException);
     }
+    out.azimuth_degrees = *az;
 
     const std::string alt_response = send_command(":GA");
     throw_if_mount_error(alt_response, ":GA");
-    if (!parse_angle_triplet(alt_response, true, out.altitude_degrees)) {
+    const auto alt = util::parse_angle_triplet(alt_response, true);
+    if (!alt) {
         throw AlpacaException("Invalid Altitude response from ZWO mount", AlpacaError::DriverException);
     }
+    out.altitude_degrees = *alt;
 
     return out;
 }
@@ -1645,15 +1498,19 @@ EquatorialCoordinates ZWOMountProtocolWrapper::get_target_equatorial() {
 
     const std::string ra_response = send_command(":Gr");
     throw_if_mount_error(ra_response, ":Gr");
-    if (!parse_hms(ra_response, out.ra_hours)) {
+    const auto ra = util::parse_hms(ra_response);
+    if (!ra) {
         throw AlpacaException("Invalid target RA response from ZWO mount", AlpacaError::DriverException);
     }
+    out.ra_hours = *ra;
 
     const std::string dec_response = send_command(":Gd");
     throw_if_mount_error(dec_response, ":Gd");
-    if (!parse_angle_triplet(dec_response, true, out.dec_degrees)) {
+    const auto dec = util::parse_angle_triplet(dec_response, true);
+    if (!dec) {
         throw AlpacaException("Invalid target Dec response from ZWO mount", AlpacaError::DriverException);
     }
+    out.dec_degrees = *dec;
 
     return out;
 }
@@ -1663,7 +1520,7 @@ void ZWOMountProtocolWrapper::set_target_ra(double ra_hours) {
         throw AlpacaException("RA must be in [0,24) hours", AlpacaError::InvalidValue);
     }
 
-    const std::string command = ":Sr" + format_hms(ra_hours);
+    const std::string command = ":Sr" + util::format_hms(ra_hours);
     const std::string response = send_command(command, false);
     throw_if_mount_error(response, ":Sr");
     if (!response.empty() && response[0] != '1') {
@@ -1676,7 +1533,7 @@ void ZWOMountProtocolWrapper::set_target_dec(double dec_degrees) {
         throw AlpacaException("Dec must be in [-90,+90] degrees", AlpacaError::InvalidValue);
     }
 
-    const std::string command = ":Sd" + format_angle_colon(dec_degrees, 2);
+    const std::string command = ":Sd" + util::format_dms(dec_degrees, 2, ':');
     const std::string response = send_command(command, false);
     throw_if_mount_error(response, ":Sd");
     if (!response.empty() && response[0] != '1') {
@@ -1692,8 +1549,7 @@ void ZWOMountProtocolWrapper::sync_target_equatorial(double ra_hours, double dec
         throw AlpacaException("Dec must be in [-90,+90] degrees", AlpacaError::InvalidValue);
     }
 
-    const std::string command = ":SMMC" + format_hms(ra_hours) + "&" +
-                                format_angle_star_colon(dec_degrees, 2);
+    const std::string command = ":SMMC" + util::format_hms(ra_hours) + "&" + util::format_dms(dec_degrees, 2, '*');
     const std::string response = trim_copy(send_command(command, false));
     throw_if_mount_error(response, ":SMMC");
     if (response.empty() || response == "N/A") {
@@ -1975,10 +1831,13 @@ SiteInfo ZWOMountProtocolWrapper::get_site_info() {
     const std::string lat = response.substr(0, separator);
     const std::string lon = response.substr(separator + 1);
 
-    if (!parse_angle_triplet(lat, true, info.latitude_degrees) ||
-        !parse_angle_triplet(lon, true, info.longitude_degrees)) {
+    const auto latitude = util::parse_angle_triplet(lat, true);
+    const auto longitude = util::parse_angle_triplet(lon, true);
+    if (!latitude || !longitude) {
         throw AlpacaException("Unable to parse site coordinates", AlpacaError::DriverException);
     }
+    info.latitude_degrees = *latitude;
+    info.longitude_degrees = *longitude;
 
     // ZWO wire longitude is west-positive; SiteInfo follows ASCOM's east-positive convention.
     info.longitude_degrees = -info.longitude_degrees;
@@ -1993,8 +1852,8 @@ void ZWOMountProtocolWrapper::set_site_info(const SiteInfo& info) {
         throw AlpacaException("Longitude must be in [-180,+180]", AlpacaError::InvalidValue);
     }
 
-    const std::string lat = format_angle_star(info.latitude_degrees, 2);
-    const std::string lon = format_angle_star(-info.longitude_degrees, 3);
+    const std::string lat = util::format_dms(info.latitude_degrees, 2, '*');
+    const std::string lon = util::format_dms(-info.longitude_degrees, 3, '*');
 
     const std::string response = trim_copy(send_command(":SMGE" + lat + "&" + lon, false));
     throw_if_mount_error(response, ":SMGE");
@@ -2082,11 +1941,11 @@ double ZWOMountProtocolWrapper::get_sidereal_time_hours() {
     const std::string response = send_command(":GS");
     throw_if_mount_error(response, ":GS");
 
-    double hours = 0.0;
-    if (!parse_hms(response, hours)) {
+    const auto hours = util::parse_hms(response);
+    if (!hours) {
         throw AlpacaException("Invalid sidereal time response", AlpacaError::DriverException);
     }
-    return hours;
+    return *hours;
 }
 
 char ZWOMountProtocolWrapper::get_mount_direction() {
