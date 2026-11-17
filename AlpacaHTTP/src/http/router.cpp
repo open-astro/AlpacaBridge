@@ -6234,6 +6234,17 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
                 enabled = e->get<bool>();
             }
             ok.value = wifi.set_ap(ssid, passphrase, band, channel, enabled);
+        } else if (sub == "adapter" && is_put) {
+            // Issue #856: the client adapter preference, a permanent MAC or "" to
+            // clear. The manager validates the form before it touches the bus; the
+            // length cap bounds the string first (decision 0007 rule 4).
+            auto body = body_json();
+            const auto* mac = find_json_value(body, "Mac");
+            if (!mac || !mac->is_string()) throw util::WifiError("Mac (string) is required");
+            if (mac->get_ref<const std::string&>().size() > 17) {
+                throw util::WifiError("Mac must be six hex pairs separated by ':' (or empty to clear)");
+            }
+            ok.value = wifi.set_client_adapter(mac->get<std::string>());
         } else if (sub == "country" && is_get) {
             ok.value = wifi.get_country();
         } else if (sub == "country" && is_put) {

@@ -5583,6 +5583,7 @@ async function wifiRefresh() {
 
         const countrySel = wifiEl('wifi-country');
         if (countrySel && status.Country !== undefined) countrySel.value = status.Country || '';
+        wifiRenderAdapters(status);
 
         try {
             const ap = await wifiApi('/ap');
@@ -5602,6 +5603,49 @@ async function wifiRefresh() {
             line.classList.remove('wifi-status-active');
             line.textContent = 'WiFi status unavailable: ' + e.message;
         }
+    }
+}
+
+// Issue #856: the Client adapter select, rebuilt from the status reply. Left
+// alone while the operator has it open.
+function wifiRenderAdapters(status) {
+    const sel = wifiEl('wifi-adapter');
+    if (!sel || document.activeElement === sel) return;
+    const { options, selected } = wifiAdapterOptions(status);
+    sel.textContent = '';
+    for (const o of options) {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label;
+        opt.disabled = o.disabled;
+        sel.appendChild(opt);
+    }
+    sel.value = selected;
+    wifiState.adapter = selected;
+}
+
+// Changing the client adapter re-pins every saved network, so it asks first.
+async function wifiApplyAdapter(sel) {
+    const previous = wifiState.adapter || '';
+    const mac = sel.value;
+    const confirmed = await confirmDialog({
+        title: 'Change the client adapter?',
+        body: (mac ? 'The device will join networks with the adapter ' + mac
+                   : 'The device will pick the adapter that joins networks itself') +
+              '. Every saved network is pinned to it, and a network joined now may drop while it switches.',
+        confirmLabel: 'Change' });
+    if (!confirmed) {
+        sel.value = previous;
+        return;
+    }
+    try {
+        await wifiApi('/adapter', 'PUT', { Mac: mac });
+        wifiState.adapter = mac;
+        wifiMessage(mac ? 'Client adapter set to ' + mac + '.' : 'Client adapter set to automatic.');
+        setTimeout(wifiRefresh, 1000);
+    } catch (e) {
+        wifiMessage('Client adapter: ' + e.message, true);
+        sel.value = previous;
     }
 }
 
@@ -5897,6 +5941,9 @@ function wifiInit() {
             }
         });
     }
+
+    const adapterSel = wifiEl('wifi-adapter');
+    if (adapterSel) adapterSel.addEventListener('change', () => wifiApplyAdapter(adapterSel));
 
     const radioToggle = wifiEl('wifi-radio-toggle');
     if (radioToggle) {

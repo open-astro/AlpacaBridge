@@ -2143,6 +2143,16 @@
                         <select id="wifi-country" class="wifi-country-select"></select>
                     </div>
 
+                    <!-- Issue #856: the radio that joins networks, stored as its permanent MAC. -->
+                    <div class="wifi-row">
+                        <div class="wifi-row-label">
+                            <span>Client adapter</span>
+                            <small>The radio that joins networks</small>
+                            <button class="info-btn" type="button" aria-label="About the client adapter" data-info-title="Client adapter" data-info-text="On a board with more than one WiFi radio, pick the one that joins your networks, for example a USB adapter, while the hotspot stays where it is. The choice is the adapter's hardware address, so it survives a reboot or a different USB port. Every saved network is pinned to it. If the adapter is unplugged, the device picks one itself.">i</button>
+                        </div>
+                        <select id="wifi-adapter" class="wifi-country-select" aria-label="Client adapter"></select>
+                    </div>
+
                     <div class="wifi-group-title">Join a Network<button class="info-btn" type="button" aria-label="About joining a network" data-info-title="Join a Network" data-info-text="Networks the device can see right now. Tap one to join it. The device remembers networks you join and reconnects automatically. A checkmark shows the network in use. Joining a network turns off the hotspot (the radio does one thing at a time); a wired ethernet connection is never affected.">i</button></div>
                     <div id="wifi-networks" class="wifi-list"><p class="wifi-substatus">Turn WiFi on to see nearby networks.</p></div>
                     <div class="wifi-actions-right"><button class="btn btn-secondary btn-small" type="button" onclick="wifiScanClicked()">Scan Again</button></div>

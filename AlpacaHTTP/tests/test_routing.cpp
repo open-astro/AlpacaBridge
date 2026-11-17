@@ -7859,6 +7859,37 @@ int main() {
     }
 
     {
+        // case: PUT wifi/adapter refuses a missing or malformed Mac before NetworkManager, and a cross-origin write
+        // (#856)
+        alpacahttp::Router router;
+        for (const char* body : {"{}", "{\"Mac\": 5}", "{\"Mac\": \"wlan1\"}", "{\"Mac\": \"aa:bb:cc:dd:ee\"}",
+                                 "{\"Mac\": \"aa:bb:cc:dd:ee:ff:00:11\"}", "not json"}) {
+            const auto response = route_request(router, "PUT", "/management/v1/wifi/adapter", body);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            const auto message = json.is_discarded() ? std::string{} : json.value("ErrorMessage", std::string{});
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            // The refusal names the field: it came from the validation, not from a missing system bus.
+            EXPECT(message.find("Mac") != std::string::npos || message.find("JSON object") != std::string::npos);
+        }
+        // GET is not a route for it: a state change is never a GET (decision 0007 rule 1).
+        const auto get =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/wifi/adapter").body(), nullptr, false);
+        EXPECT(!get.is_discarded() && get.value("ErrorMessage", "").find("Unknown wifi endpoint") != std::string::npos);
+
+        alpacahttp::Request cross_origin;
+        const std::string body = "{\"Mac\": \"aa:bb:cc:dd:ee:ff\"}";
+        std::ostringstream raw;
+        raw << "PUT /management/v1/wifi/adapter HTTP/1.1\r\n"
+            << "Host: localhost\r\n"
+            << "Origin: http://evil.example\r\n"
+            << "Content-Type: application/json\r\n"
+            << "Content-Length: " << body.size() << "\r\n\r\n"
+            << body;
+        EXPECT(cross_origin.parse(raw.str()));
+        EXPECT(router.route(cross_origin, 1).status_code() == 403);
+    }
+
+    {
         // case: a Wi-Fi integer outside its field's type is refused by name, never wrapped (#1476, ADR 0007)
         // get<int>() wrapped Priority 4294967296 to 0 and get<uint32_t>() Channel
         // 4294967297 to 1. A wrapped call still fails later in NetworkManager,
