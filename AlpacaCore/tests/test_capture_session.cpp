@@ -1639,3 +1639,79 @@ TEST_CASE("CaptureSession - reserve applies the watchdog to an exposure past its
     CHECK(static_cast<bool>(reservation));
     CHECK(h.session->failure().has_value());
 }
+
+// Issue #1736: a body that learns its download length only after the exposure (QHY's slow readout modes) moves the
+// watchdog deadline later, never earlier, and only while it owns the session.
+
+TEST_CASE("CaptureSession - extend_deadline moves the watchdog deadline later", "[util][capture-session][extend]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    std::atomic<int> extended{-1};
+    h.session->start(1.0, [&, p](CaptureControl& c) {
+        c.exposure_started();
+        extended = c.extend_deadline(10s) ? 1 : 0;
+        p->entered = true;
+        while (c.wait_for(50ms)) {
+        }
+        p->exited = true;
+    });
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    CHECK(extended == 1);
+    // 1 s + the 2 s margin would have failed it by 3 s; the extension holds it to 10 s from the call.
+    for (int i = 0; i < 18; ++i) {
+        REQUIRE(h.clock.wait_for_waiters(1, kBound));
+        h.clock.advance(500ms);
+    }
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    CHECK_FALSE(h.session->failure().has_value());
+    h.clock.advance(2s);  // past the extended deadline
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK(h.session->failure().has_value());
+}
+
+TEST_CASE("CaptureSession - extend_deadline never shortens the deadline", "[util][capture-session][extend]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    h.session->start(10.0, [p](CaptureControl& c) {
+        c.exposure_started();
+        (void)c.extend_deadline(1s);
+        p->entered = true;
+        while (c.wait_for(50ms)) {
+        }
+        p->exited = true;
+    });
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+    h.clock.advance(5s);  // past the 1 s asked for, inside 10 s + the margin
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    CHECK_FALSE(h.session->failure().has_value());
+    h.session->abort();
+}
+
+TEST_CASE("CaptureSession - a body that no longer owns the session cannot extend the deadline",
+          "[util][capture-session][extend]") {
+    Harness h;
+    auto gate = h.gate();
+    std::atomic<int> extended{-1};
+    std::atomic<bool> held{false};
+    h.session->start(1.0, [&, gate](CaptureControl& c) {
+        c.exposure_started();
+        held = true;
+        gate->wait();  // in the SDK, ignoring the cancel
+        extended = c.extend_deadline(60s) ? 1 : 0;
+    });
+    REQUIRE(eventually([&] { return held.load(); }));
+    h.clock.advance(3s);  // the watchdog fails it while the body is still in the SDK
+    REQUIRE(h.session->failure().has_value());
+    gate->open();
+    REQUIRE(eventually([&] { return extended.load() != -1; }));
+    CHECK(extended == 0);
+    // The next exposure keeps its own deadline: 1 s + the 2 s margin.
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+    auto p = std::make_shared<Probe>();
+    h.session->start(1.0, polling_body(p));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+    h.clock.advance(4s);
+    CHECK(h.session->failure().has_value());
+}
