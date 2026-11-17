@@ -3998,8 +3998,8 @@ TEST_CASE("OnStep home watch - a tangent-arm or sector-gear mount's FindHome end
 // repeats the GOTO gets the failure every time, but the log has one WARN per reason and code, whichever member started
 // it; the repeats are INFO, and a status with another code arms the WARN again.
 // Falsified by: fail_watched_motion_locked() and the landed path logging every stop at WARN again (no
-// log_motion_stop_locked()), log_motion_stop_locked() keyed on the code alone (the third section), or keyed on the
-// whole message, which names the member (the last).
+// log_motion_stop_locked()), log_motion_stop_locked() keyed on the code alone (the third section), keeping only the
+// last key logged at WARN (the fourth), or keyed on the whole message, which names the member (the last).
 TEST_CASE("OnStep limit stop - GOTOs repeated into a standing meridian limit log one WARN, the repeats at INFO",
           "[onstep][telescope][snapshot][limit-stop]") {
     Rig rig;
@@ -4045,6 +4045,25 @@ TEST_CASE("OnStep limit stop - GOTOs repeated into a standing meridian limit log
         show(rig, "nNpEW187#");  // stopped short, with the same code
         CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first == alpacacore::AlpacaError::DriverException);
         CHECK(counter.warn() == 1);
+    }
+    SECTION("a client alternating a landing GOTO and a stopped one gets one WARN for each") {
+        goto_started(rig);
+        LevelCounter counter("general error 7");
+        for (int i = 0; i < 3; ++i) {
+            rig.mount->set_position(2.0, 20.0);  // at the target: lands, with the code
+            if (i > 0) {
+                goto_again(rig, "NpEW187#");
+            }
+            show(rig, "nNpEW187#");
+            CHECK_NOTHROW(rig.driver->get_slewing());
+            rig.mount->set_position(12.0, 45.0);  // away from it: stopped short
+            goto_again(rig, "NpEW187#");
+            show(rig, "nNpEW187#");
+            CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first ==
+                  alpacacore::AlpacaError::DriverException);
+        }
+        CHECK(counter.warn() == 2);
+        CHECK(counter.info() == 4);
     }
     SECTION("a client alternating SlewToCoordinatesAsync and SlewToTargetAsync gets one WARN") {
         goto_started(rig);

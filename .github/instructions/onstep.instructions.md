@@ -35,7 +35,7 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:GX94#` | meridian flips switch (OnStepX, #2179) | `<n>#` flips on, `<n> N#` off (n 0 none, 1 east, 2 west) | `#`-terminated; strict, else unknown |
 | `:GXE9#` / `:GXEA#` | meridian limit east / west (OnStepX, #2179) | whole minutes past the meridian `#`, may be 0 or negative | `#`-terminated; whole number, else unknown |
 | `:GXEe#` / `:GXEw#` | RA-axis limit min / max (OnStepX, #2179) | whole degrees `#` | `#`-terminated; whole number, else unknown |
-| `:GXEF#` / `:GXEG#` | tangent arm / sector gear (FindHome, #2296; 4.x answers `:GXEF#` only, and is not asked `:GXEG#` once its version reads) | `1`/`0` bare digit | read at the first FindHome of a session; an unknown command answers `0`; a reply that is neither digit is read again at the next |
+| `:GXEF#` / `:GXEG#` | tangent arm / sector gear (FindHome, #2296; 4.x answers `:GXEF#` only, and is not asked `:GXEG#` once its version reads) | `1`/`0` bare digit | read at the first FindHome of a session that is not a no-op, also when the home is then refused; an unknown command answers `0`; a reply that is neither digit is read again at the next |
 | `:GX93#` / `:GXE4#` | base slew period in us/step / axis 1 steps per degree (park and home bound, #2296) | `n.nnn#` / `n#` | `#`-terminated, at connect; a reply that does not parse, or `0`, keeps 20 minutes |
 | `:MNe#` / `:MNw#` | GOTO the current RA/Dec on the east / west side of the pier (the flip, #2179; OnStepX) | one digit, codes as `:MS#` | bare digit, no `#` (suppressFrame, like `:MS#`); `0` accepted; with the flips off the firmware answers the unknown-command `0`, so only a `CanSetPierSide` mount sends it |
 | `:GRa#` / `:GDe#` | RA / Dec | `HH:MM:SS.SSSS#` / `sDD*MM:SS.SSS#` | `#`-terminated. Not in the reference: aliases of `:GRH#`/`:GDH#` (OnStepX `Mount.command.cpp`, the `'a'`/`'e'` parameter) |
@@ -549,8 +549,8 @@ command channel. Nothing scans the network; the host is typed in.
   motion it did not start, until a status shows it ended. A failure is kept as a `Park`/`FindHome` refusal is (the
   Park and FindHome bullets below) and raised by `Slewing`, and by `AtPark` (a park's) or `AtHome` (a home's), as
   `DriverException` "<member> failed: ...", until the next motion command or a reconnect; a synchronous slew throws it.
-  The log line is WARN the first time a reason (or a landing) with a stop code appears, whichever member started the
-  motion, and INFO for each repeat of it until a status shows another code (decision 0007 rule 9: a client can repeat
+  The log line is WARN the first time each reason (or a landing) appears with a stop code, whichever member started
+  the motion, and INFO for each repeat of one already logged, until a status shows another code (decision 0007 rule 9: a client can repeat
   a GOTO into a limit that stands, such as the meridian limit).
   Every status read is checked (the poll's before its restore decision, the control paths' through
   `note_status_read_locked()`), so `Slewing` never reads an end before it is judged. From the firmware sources (OnStepX
@@ -620,7 +620,7 @@ command channel. Nothing scans the network; the host is typed in.
     connect), never under 20 minutes and never over 24 hours. Both firmwares move a park or home at no less than a quarter of the base: the
     slowest preset halves it (`Goto.cpp`, 4.x `Initialize.ino`), and the 4.x switch search halves it again
     (`Home.ino`). A move is at most 180 degrees twice (1440 s at a quarter of 1 deg/s), with half again for margin;
-    the quarter also covers an OnStepX `AXIS2_SLEW_RATE_PERCENT` down to 50 at the slowest preset. A mount whose rate does not read keeps 20 minutes. The bound is fixed when the
+    the quarter also covers an OnStepX `AXIS2_SLEW_RATE_PERCENT` down to 50 at the slowest preset. A mount whose rate does not read keeps 20 minutes, which is less than the 36 minutes the derivation gives a 1 deg/s base (it covers that base at half rate, as before #2296). The bound is fixed when the
     command is taken, and a relink keeps it. A status showing `w` (a GOTO waiting at home for the user) restarts it.
     It only reports: nothing is sent, as for the driver's other timed-out waits, and the client can `AbortSlew`.
     INDI's `lx200_OnStep` uses 300 s from `:hP#`.

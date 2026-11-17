@@ -50,6 +50,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace alpacacore::vendor::onstep {
 
@@ -409,7 +410,8 @@ constexpr double kSiderealPerSolar = 1.00273790935;
 // guideRates[8]). A move is at most 180 degrees twice (a visit-home flip, or a search and the offset move), so 1440 s
 // at a quarter of 1 deg/s of base, and half again for margin gives 2160 s; the quarter also covers an OnStepX
 // AXIS2_SLEW_RATE_PERCENT down to 50 at the slowest preset, which no command reports. A mount whose rate does not read
-// keeps the floor, which is never lowered: 20 minutes covers a 1 deg/s base and the near-destination refine. The time a
+// keeps the floor, which is never lowered. That is less than the 36 minutes this derivation gives a 1 deg/s base: 20
+// minutes covers a 1 deg/s base at half rate with margin (1080 s), not its quarter-rate worst case. The time a
 // GOTO waits at home ('w') is not counted.
 constexpr auto kParkHomeBoundFloor = std::chrono::minutes(20);
 constexpr double kParkHomeTravelSeconds = 2160.0;  // seconds at 1 deg/s of base slew rate
@@ -2822,7 +2824,8 @@ private:
     }
 
     // Whether this mount's FindHome centres a tangent arm or a sector gear (:GXEF#, :GXEG#), read at the first FindHome
-    // that sends a home and kept for the session. Neither firmware reports 'H' after such a home (OnStep 4.x
+    // that is not a no-op (at home or homing), before the park-and-home start that can still refuse it, and kept for
+    // the session. Neither firmware reports 'H' after such a home (OnStep 4.x
     // MoveTo.ino sets atHome only without a tangent arm; OnStepX Home::request() moves the axis with no home state, and
     // guideDone() keeps its coordinate), so that home is not watched. A '1' from either is enough; otherwise both
     // must answer '0' (a firmware identified as 4.x is not asked :GXEG#; one whose version did not read is). A read
@@ -2996,20 +2999,26 @@ private:
     }
 
     // Decision 0007 rule 9: a client can repeat a GOTO, park or home into a limit that stands, so a stop with a code is
-    // logged at WARN once per `key` and code, and its repeats at INFO until a status shows another code (reset in
-    // note_motion_end_locked()). `key` is what the read decided (the failure's reason, or a landing), not the member
-    // that started the motion, so a client alternating SlewToCoordinatesAsync and SlewToTargetAsync into the limit
-    // still gets one WARN; a landing and a stop with the same code are different keys, so a stop after a landing on a
-    // 4.x latched code still warns.
+    // logged at WARN once per `key` while that code stands, and every repeat of a key already logged at INFO, until a
+    // status shows another code (reset in note_motion_end_locked()). `key` is what the read decided (the failure's
+    // reason, or a landing), not the member that started the motion, so a client alternating SlewToCoordinatesAsync
+    // and SlewToTargetAsync into the limit gets one WARN. A landing and a stop with the same code are different keys,
+    // so a stop after a landing on a 4.x latched code still warns once; every key seen is kept, so a client
+    // alternating a landing GOTO with a stopped one, or a park with a GOTO, gets one WARN for each and no more.
     void log_motion_stop_locked(const std::string& message, const std::string& key, int stop_code) const {
-        if (stop_code != 0 && stop_code == warned_stop_code_ && key == warned_stop_key_) {
+        if (stop_code == 0) {
+            ALPACA_LOG_WARN("OnStep", message);
+            return;
+        }
+        if (stop_code != warned_stop_code_) {
+            warned_stop_code_ = stop_code;
+            warned_stop_keys_.clear();
+        }
+        if (std::find(warned_stop_keys_.begin(), warned_stop_keys_.end(), key) != warned_stop_keys_.end()) {
             ALPACA_LOG_INFO("OnStep", message + " (repeated; logged at WARN when first seen)");
             return;
         }
-        if (stop_code != 0) {
-            warned_stop_code_ = stop_code;
-            warned_stop_key_ = key;
-        }
+        warned_stop_keys_.push_back(key);
         ALPACA_LOG_WARN("OnStep", message);
     }
 
@@ -3093,7 +3102,7 @@ private:
         if (warned_stop_code_ != 0 && status.general_error != warned_stop_code_) {
             // Another code (or none): the next stop with a code is logged at WARN again (log_motion_stop_locked()).
             warned_stop_code_ = 0;
-            warned_stop_key_.clear();
+            warned_stop_keys_.clear();
         }
         expire_watched_motion_locked();
         if (!watched_motion_) {
@@ -3336,7 +3345,7 @@ private:
         park_home_bound_ = kParkHomeBoundFloor;
         home_moves_one_axis_.reset();
         warned_stop_code_ = 0;
-        warned_stop_key_.clear();
+        warned_stop_keys_.clear();
         snapshot_.reset();  // decision 0010: also drops a poll tick in flight
         link_health_.reset();
         set_link_fault_text("");
@@ -4906,10 +4915,10 @@ private:
     // #2296: whether this mount's FindHome centres a tangent arm or a sector gear (read_home_geometry_locked()), so a
     // home is not watched; unknown until a FindHome that sends a home reads both flags. Under mutex_.
     std::optional<bool> home_moves_one_axis_;
-    // The stop code and key last logged at WARN for a motion stop (log_motion_stop_locked(), decision 0007 rule 9): a
-    // repeat with that key while the code stands is logged at INFO. Under mutex_.
+    // The standing stop code and the keys already logged at WARN with it (log_motion_stop_locked(), decision 0007 rule
+    // 9): a repeat of one of those keys while the code stands is logged at INFO. Under mutex_.
     mutable int warned_stop_code_ = 0;
-    mutable std::string warned_stop_key_;
+    mutable std::vector<std::string> warned_stop_keys_;
     // True while AbortSlew's own :GU# read judges the watched slew: a failure there is logged at INFO (#2296).
     // Under mutex_.
     mutable bool judging_abort_ = false;
