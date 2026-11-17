@@ -316,6 +316,19 @@ TEST_CASE("SkyWatcher Telescope Driver - non-finite guide rate is rejected",
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
 }
 
+// #2287: the rate-offset setters refuse a non-finite rate before the connection
+// check. The sweep probes NaN; this pins +/-Inf, which the same isfinite check refuses.
+TEST_CASE("SkyWatcher Telescope Driver - infinite rate offsets are rejected before NotConnected",
+          "[skywatcher][telescope][unit][nonfinite]") {
+    auto driver = make_driver();
+
+    const double inf = std::numeric_limits<double>::infinity();
+    for (double bad : {inf, -inf}) {
+        require_alpaca_error([&] { driver->set_right_ascension_rate(bad); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->set_declination_rate(bad); }, alpacacore::AlpacaError::InvalidValue);
+    }
+}
+
 // open-astro#1786: the guide-rate range check (0 to 1x sidereal, per axis) ran
 // after the connection check, so a disconnected mount answered an out-of-range
 // GuideRateRightAscension or GuideRateDeclination write with NotConnected.
