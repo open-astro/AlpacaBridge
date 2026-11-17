@@ -302,9 +302,6 @@ inline bool tty_drain_bounded(int fd, int timeout_ms) {
 /// VMIN/VTIME are ignored (the fd is non-blocking).
 using SerialLineConfigure = std::function<void(struct termios&)>;
 
-/// 8N1, raw, no flow control, CLOCAL|CREAD, at @p baud: the shape almost every
-/// wrapper builds by hand. Callers that need more (HUPCL off, RTS/CTS) start
-/// from this and adjust.
 /**
  * @brief The one rule for a lost serial link (issue #2262, decision 0009 point 2a).
  *
@@ -318,6 +315,9 @@ constexpr bool is_serial_loss_errno(int e) noexcept { return e == EIO || e == EN
 /// The fault text a lost serial link keeps: "Serial link lost (errno N)".
 inline std::string serial_link_lost_text(int err) { return "Serial link lost (errno " + std::to_string(err) + ")"; }
 
+/// 8N1, raw, no flow control, CLOCAL|CREAD, at @p baud: the shape almost every
+/// wrapper builds by hand. Callers that need more (HUPCL off, RTS/CTS) start
+/// from this and adjust.
 inline void make_raw_8n1(struct termios& tty, speed_t baud) {
     cfmakeraw(&tty);
     cfsetispeed(&tty, baud);
