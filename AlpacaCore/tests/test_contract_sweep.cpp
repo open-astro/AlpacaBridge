@@ -327,14 +327,7 @@ constexpr ProbeState kParked = ProbeState::Parked;
 
 // clang-format off
 const std::vector<ProbeExemption> kProbeExemptions = {
-    // Celestron NexStar: SlewToCoordinates(Async) checks connected and parked before validate_ra_dec; the guide-rate
-    // setter checks only that the rate is finite, so a negative rate is sent to the mount.
-    {"celestron_telescope", kOff, "slew_to_coordinates(25, 0)", kKnown, "connection checked first (#2257)"},
-    {"celestron_telescope", kOff, "slew_to_coordinates(0, 91)", kKnown, "connection checked first (#2257)"},
-    {"celestron_telescope", kOff, "slew_to_coordinates_async(25, 0)", kKnown, "connection checked first (#2257)"},
-    {"celestron_telescope", kOff, "slew_to_coordinates_async(0, 91)", kKnown, "connection checked first (#2257)"},
-    {"celestron_telescope", kOn, "set_guide_rate_right_ascension(-1)", kKnown, "negative rate accepted (#2257)"},
-    {"celestron_telescope", kOn, "set_guide_rate_declination(-1)", kKnown, "negative rate accepted (#2257)"},
+    // Celestron NexStar: the guide rate needs the autoguider port, known only once connected.
     {"celestron_telescope", kOff, "set_guide_rate_right_ascension(-1)", kPermanent,
      "the rate depends on the autoguider port, known only once connected (#2257 decision 2026-11-16)"},
     {"celestron_telescope", kOff, "set_guide_rate_declination(-1)", kPermanent,

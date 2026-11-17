@@ -182,6 +182,10 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
     }
     require_alpaca_error([&] { driver->sync_to_coordinates(5.0, 20.0); }, alpacacore::AlpacaError::InvalidWhileParked);
+    // #2257: a bad argument is InvalidValue even while parked; the argument check comes first.
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(25.0, 20.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->slew_to_coordinates(5.0, 91.0); }, alpacacore::AlpacaError::InvalidValue);
+    REQUIRE(driver->get_slewing());  // neither touched the park in flight
     try {
         driver->move_axis(0, 0.5);
     } catch (const alpacacore::AlpacaException& ex) {
