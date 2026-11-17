@@ -156,7 +156,8 @@ public:
     /// InvalidOperation while exposing or while another start holds a reservation. It does not wait for a body
     /// that is only returning: start() does, within kStartTimeout.
     CaptureReservation reserve() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
+        apply_watchdog(lock);  // an exposure past its deadline is not "in progress", as in start()
         if (!open_) {
             throw AlpacaException(name_ + ": the camera is not connected", AlpacaError::NotConnected);
         }

@@ -952,6 +952,7 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
         std::atomic<int> inside{0};  // bodies that have entered and not returned
         std::atomic<int> inside_after_disconnect{0};
         std::atomic<long> seen{0};
+        std::atomic<bool> reserving{false};  // the start thread waits for the driver mutex to reserve
     };
     struct Inside {
         explicit Inside(std::atomic<int>& n) : count(n) { ++count; }
@@ -993,20 +994,30 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
             threads.emplace_back([&] {
                 // Every result feeds `seen`, so no read is optimised away.
                 while (!s.done) {
-                    std::lock_guard<std::mutex> lock(s.driver);
-                    int seen = static_cast<int>(h.session->camera_state());
-                    seen += h.session->busy() ? 1 : 0;
-                    seen += error_of([&] { seen += h.session->image_ready() ? 1 : 0; });
-                    seen += error_of([&] {
-                        const auto image = h.session->image();
-                        seen += image ? image->data.front() : 0;
-                    });
-                    seen += static_cast<int>(h.session->percent_completed());
-                    seen += h.session->failure().has_value() ? 1 : 0;
-                    seen += error_of([&] { seen += static_cast<int>(h.session->last_exposure_duration()); });
-                    seen += h.session->settings_locked() ? 1 : 0;  // rule 9: under the driver mutex
-                    seen += h.session->starting() ? 1 : 0;
-                    s.seen += seen;
+                    if (s.reserving) {
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(s.driver);
+                        int seen = static_cast<int>(h.session->camera_state());
+                        seen += h.session->busy() ? 1 : 0;
+                        seen += error_of([&] { seen += h.session->image_ready() ? 1 : 0; });
+                        seen += error_of([&] {
+                            const auto image = h.session->image();
+                            seen += image ? image->data.front() : 0;
+                        });
+                        seen += static_cast<int>(h.session->percent_completed());
+                        seen += h.session->failure().has_value() ? 1 : 0;
+                        seen += error_of([&] { seen += static_cast<int>(h.session->last_exposure_duration()); });
+                        seen += h.session->settings_locked() ? 1 : 0;  // rule 9: under the driver mutex
+                        seen += h.session->starting() ? 1 : 0;
+                        s.seen += seen;
+                    }
+                    // std::mutex is not fair: two readers that re-take the driver mutex the moment they drop it
+                    // starve the start thread's reserve() under it (past the 30 s bound on the CI build, #2337), so
+                    // they step aside while it waits for the mutex.
+                    std::this_thread::yield();
                 }
             });
         }
@@ -1056,7 +1067,9 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
                 // Rule 9: reserve under the driver mutex, start without it.
                 CaptureReservation reservation;
                 {
+                    s.reserving = true;
                     std::lock_guard<std::mutex> lock(s.driver);
+                    s.reserving = false;
                     reservation = h.session->reserve();
                 }
                 (void)h.session->start(std::move(reservation), 0.05, body(i % 3));
@@ -1604,4 +1617,20 @@ TEST_CASE("CaptureSession - a failed body still returning keeps the settings loc
     sdk->open();
     REQUIRE(eventually([&] { return !h.session->busy(); }));
     CHECK_FALSE(h.session->settings_locked());
+}
+
+// An exposure past its watchdog deadline is not in progress: reserve() applies the watchdog first, as start() and the
+// state getters do, so a StartExposure right after a deadline passes is not refused as "already in progress".
+TEST_CASE("CaptureSession - reserve applies the watchdog to an exposure past its deadline",
+          "[util][capture-session][reserve]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    h.session->start(1.0, polling_body(p));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+    h.clock.advance(4s);  // past 1 s + the 2 s margin; no getter has run since
+    CaptureReservation reservation;
+    CHECK(error_of([&] { reservation = h.session->reserve(); }) == -1);
+    CHECK(static_cast<bool>(reservation));
+    CHECK(h.session->failure().has_value());
 }
