@@ -219,6 +219,17 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"get_can_move_axis(-1)", [&] { (void)t.get_can_move_axis(-1); }});
             p.push_back({"get_can_move_axis(3)", [&] { (void)t.get_can_move_axis(3); }});
             p.push_back({"set_slew_settle_time(-1)", [&] { t.set_slew_settle_time(-1); }});
+            // #2257: arguments invalid for every vendor; no probe depends on a vendor's own maximum.
+            p.push_back({"pulse_guide(9, 100)", [&] { t.pulse_guide(9, 100); }});
+            p.push_back({"pulse_guide(0, -1)", [&] { t.pulse_guide(0, -1); }});
+            p.push_back({"move_axis(5, 0.1)", [&] { t.move_axis(5, 0.1); }});
+            p.push_back({"move_axis(0, NaN)", [&] { t.move_axis(0, std::numeric_limits<double>::quiet_NaN()); }});
+            p.push_back({"slew_to_coordinates(25, 0)", [&] { t.slew_to_coordinates(25.0, 0.0); }});
+            p.push_back({"slew_to_coordinates(0, 91)", [&] { t.slew_to_coordinates(0.0, 91.0); }});
+            p.push_back({"slew_to_coordinates_async(25, 0)", [&] { t.slew_to_coordinates_async(25.0, 0.0); }});
+            p.push_back({"slew_to_coordinates_async(0, 91)", [&] { t.slew_to_coordinates_async(0.0, 91.0); }});
+            p.push_back({"set_guide_rate_right_ascension(-1)", [&] { t.set_guide_rate_right_ascension(-1.0); }});
+            p.push_back({"set_guide_rate_declination(-1)", [&] { t.set_guide_rate_declination(-1.0); }});
             break;
         }
         case DeviceType::Switch: {
@@ -268,6 +279,119 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
 // 0..MaxStep (contract_sweep.h with_clamping_focuser).
 std::vector<Probe> invalid_value_probes(AlpacaDriver& d, const ContractEntry& e) {
     return invalid_value_probes(d, e.type);
+}
+
+// #2257: the state an InvalidValue probe runs in.
+enum class ProbeState { Disconnected, Connected, Parked };
+
+// A probe a driver fails today, by id (ContractEntry::id while disconnected, Tier2Host::id otherwise).
+// - Known: a drift a driver PR fixes. That PR deletes its lines. The probe must still not answer InvalidValue,
+//   so a fix that lands without deleting its lines fails the sweep.
+// - Permanent: a member the driver does not implement. It keeps today's answer (NotConnected while
+//   disconnected, NotImplemented once connected) and is never deleted.
+// One block per driver, so parallel driver PRs each delete their own hunk.
+struct ProbeExemption {
+    const char* id;
+    ProbeState state;
+    const char* probe;
+    bool permanent;
+    const char* reason;
+};
+
+constexpr bool kKnown = false;
+constexpr bool kPermanent = true;
+constexpr ProbeState kOff = ProbeState::Disconnected;
+constexpr ProbeState kOn = ProbeState::Connected;
+constexpr ProbeState kParked = ProbeState::Parked;
+
+// clang-format off
+const std::vector<ProbeExemption> kProbeExemptions = {
+    // Sky-Watcher: the writable gate (connected, then fault) and the parked check run before the argument checks.
+    {"skywatcher_telescope", kOff, "pulse_guide(9, 100)", kKnown, "connection checked first (#2257)"},
+    {"skywatcher_telescope", kOff, "pulse_guide(0, -1)", kKnown, "connection checked first (#2257)"},
+    {"skywatcher_telescope", kOff, "move_axis(5, 0.1)", kKnown, "connection checked first (#2257)"},
+    {"skywatcher_telescope", kOff, "move_axis(0, NaN)", kKnown, "connection checked first (#2257)"},
+    {"skywatcher_telescope", kOff, "slew_to_coordinates(25, 0)", kKnown, "connection checked first (#2257)"},
+    {"skywatcher_telescope", kOff, "slew_to_coordinates(0, 91)", kKnown, "connection checked first (#2257)"},
+    {"skywatcher_telescope", kOff, "slew_to_coordinates_async(25, 0)", kKnown, "connection checked first (#2257)"},
+    {"skywatcher_telescope", kOff, "slew_to_coordinates_async(0, 91)", kKnown, "connection checked first (#2257)"},
+    {"skywatcher_telescope", kParked, "pulse_guide(9, 100)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope", kParked, "pulse_guide(0, -1)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope", kParked, "move_axis(5, 0.1)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope", kParked, "move_axis(0, NaN)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope", kParked, "slew_to_coordinates(25, 0)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope", kParked, "slew_to_coordinates(0, 91)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope", kParked, "slew_to_coordinates_async(25, 0)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope", kParked, "slew_to_coordinates_async(0, 91)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope_serial", kParked, "pulse_guide(9, 100)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope_serial", kParked, "pulse_guide(0, -1)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope_serial", kParked, "move_axis(5, 0.1)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope_serial", kParked, "move_axis(0, NaN)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates(25, 0)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates(0, 91)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates_async(25, 0)", kKnown, "parked checked first (#2257)"},
+    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates_async(0, 91)", kKnown, "parked checked first (#2257)"},
+
+    // Celestron NexStar: SlewToCoordinates(Async) checks connected and parked before validate_ra_dec; the guide-rate
+    // setter checks only that the rate is finite, so a negative rate is sent to the mount.
+    {"celestron_telescope", kOff, "slew_to_coordinates(25, 0)", kKnown, "connection checked first (#2257)"},
+    {"celestron_telescope", kOff, "slew_to_coordinates(0, 91)", kKnown, "connection checked first (#2257)"},
+    {"celestron_telescope", kOff, "slew_to_coordinates_async(25, 0)", kKnown, "connection checked first (#2257)"},
+    {"celestron_telescope", kOff, "slew_to_coordinates_async(0, 91)", kKnown, "connection checked first (#2257)"},
+    {"celestron_telescope", kOn, "set_guide_rate_right_ascension(-1)", kKnown, "negative rate accepted (#2257)"},
+    {"celestron_telescope", kOn, "set_guide_rate_declination(-1)", kKnown, "negative rate accepted (#2257)"},
+    {"celestron_telescope", kOff, "set_guide_rate_right_ascension(-1)", kPermanent,
+     "the rate depends on the autoguider port, known only once connected (#2257 decision 2026-11-16)"},
+    {"celestron_telescope", kOff, "set_guide_rate_declination(-1)", kPermanent,
+     "the rate depends on the autoguider port, known only once connected (#2257 decision 2026-11-16)"},
+
+    // OnStep: move_axis checks connected (then parked) before the axis and rate; the guide rate is read-only.
+    {"onstep_telescope", kOff, "move_axis(5, 0.1)", kKnown, "connection checked first (#2257)"},
+    {"onstep_telescope", kOff, "move_axis(0, NaN)", kKnown, "connection checked first (#2257)"},
+    {"onstep_telescope", kOff, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
+    {"onstep_telescope", kOff, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
+    {"onstep_telescope", kOn, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
+    {"onstep_telescope", kOn, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
+
+    // iOptron: the per-axis setters read the rate first (NotConnected while disconnected), then the setter clamps.
+    {"ioptron_telescope", kOff, "set_guide_rate_right_ascension(-1)", kKnown, "connection checked first (#2257)"},
+    {"ioptron_telescope", kOff, "set_guide_rate_declination(-1)", kKnown, "connection checked first (#2257)"},
+    {"ioptron_telescope", kOn, "set_guide_rate_right_ascension(-1)", kKnown, "rate clamped, not refused (#2257)"},
+    {"ioptron_telescope", kOn, "set_guide_rate_declination(-1)", kKnown, "rate clamped, not refused (#2257)"},
+
+    // ZWO AM: the guide-rate setter takes std::abs of the rate, so a negative rate is accepted in either state.
+    {"zwo_telescope", kOff, "set_guide_rate_right_ascension(-1)", kKnown, "negative rate accepted (#2257)"},
+    {"zwo_telescope", kOff, "set_guide_rate_declination(-1)", kKnown, "negative rate accepted (#2257)"},
+    {"zwo_telescope", kOn, "set_guide_rate_right_ascension(-1)", kKnown, "negative rate accepted (#2257)"},
+    {"zwo_telescope", kOn, "set_guide_rate_declination(-1)", kKnown, "negative rate accepted (#2257)"},
+
+    // Celestron CGX: CanSlew is false (only the async slew) and MoveAxis is not implemented; both check the axis first.
+    {"celestron_telescope_cgx", kOff, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
+    {"celestron_telescope_cgx", kOn, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
+    {"celestron_telescope_cgx", kOff, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx", kOff, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx", kOn, "slew_to_coordinates(25, 0)", kPermanent, "CanSlew is false on the CGX"},
+    {"celestron_telescope_cgx", kOn, "slew_to_coordinates(0, 91)", kPermanent, "CanSlew is false on the CGX"},
+};
+// clang-format on
+
+// Runs one InvalidValue probe and checks the code its exemption, if any, allows.
+void check_invalid_value_probe(const std::string& id, ProbeState state, const Probe& probe) {
+    const auto& [name, fn] = probe;
+    const int code = thrown_code(fn);
+    const auto ex = std::find_if(kProbeExemptions.begin(), kProbeExemptions.end(), [&](const ProbeExemption& x) {
+        return id == x.id && state == x.state && name == x.probe;
+    });
+    if (ex == kProbeExemptions.end()) {
+        INFO(id << " " << name);
+        CHECK(code == err::InvalidValue);
+    } else if (ex->permanent) {
+        INFO(id << " " << name << " is not implemented (" << ex->reason << "): keeps today's answer");
+        CHECK(code == (state == ProbeState::Disconnected ? err::NotConnected : err::NotImplemented));
+    } else {
+        INFO(id << " " << name << " is a known failure (" << ex->reason << "): delete its line once fixed");
+        CHECK(code != err::InvalidValue);
+    }
 }
 
 // Operational properties and methods that must throw NotConnected while
@@ -600,10 +724,7 @@ bool has_can_subject(const ContractEntry& e) {
     // Registered only for an entry with probes (has_invalid_subject); the guard case pins that.
     const auto probes = invalid_value_probes(*d, e);
     REQUIRE_FALSE(probes.empty());
-    for (const auto& [name, fn] : probes) {
-        INFO(e.id << " " << name);
-        CHECK(thrown_code(fn) == err::InvalidValue);
-    }
+    for (const auto& p : probes) check_invalid_value_probe(e.id, ProbeState::Disconnected, p);
 }
 
 [[maybe_unused]] void case_operations_throw_not_connected(const ContractEntry& e) {
@@ -813,6 +934,9 @@ struct Tier2Host {
     // Likewise for MoveAxis(axis, 0) on a row whose fake does not answer the rate command. A row whose driver
     // reports CanMoveAxis false on every axis needs no reason: there is no call to time.
     const char* move_axis_unavailable = nullptr;
+    // A telescope row whose fake accepts park() but never reports AtPark says why here, and the parked
+    // InvalidValue case (#2257) then skips it.
+    const char* at_park_unreachable = nullptr;
 };
 
 using Clock = std::chrono::steady_clock;
@@ -964,10 +1088,26 @@ Hosted connected_host(const Tier2Host& h) {
     // out-of-range input states why through invalid_probe_reason_for() in contract_sweep.h, checked by the guard.
     const auto probes = invalid_value_probes(*hosted.driver, h.type);
     REQUIRE_FALSE(probes.empty());
-    for (const auto& [name, fn] : probes) {
-        INFO(h.id << " " << name);
-        CHECK(thrown_code(fn) == err::InvalidValue);
+    for (const auto& p : probes) check_invalid_value_probe(h.id, ProbeState::Connected, p);
+}
+
+// #2257: the same probes while connected and parked. The case parks the mount itself and waits for AtPark.
+[[maybe_unused]] void case_t2_invalid_value_parked(const Tier2Host& h) {
+    REQUIRE(h.type == DeviceType::Telescope);
+    const char* skip = h.park_unavailable != nullptr ? h.park_unavailable : h.at_park_unreachable;
+    if (skip != nullptr) {
+        INFO(h.id << " cannot reach AtPark: " << skip);
+        CHECK(std::string(skip).size() > 0);
+        return;
     }
+    Hosted hosted = connected_host(h);
+    auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+    REQUIRE(t.get_can_park());
+    t.park();
+    const auto deadline = Clock::now() + std::chrono::seconds(30);
+    while (!t.get_at_park() && Clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE(t.get_at_park());
+    for (const auto& p : invalid_value_probes(t, h.type)) check_invalid_value_probe(h.id, ProbeState::Parked, p);
 }
 
 // Case 4. Connected DeviceState is non-empty and carries TimeStamp (base classes, PR #625).
@@ -1323,7 +1463,7 @@ std::unique_ptr<AlpacaDriver> zwo_telescope_over(int port, bool hold, alpacacore
 // Recipe of test_zwo_concurrency_stress.cpp: LX200 replies, tracking reported on.
 // Knob, no fake change: the responder also accepts :Sr/:Sd so the target setters succeed.
 Tier2Host tier2_host_zwo_telescope() {
-    return mount_server_host(
+    Tier2Host h = mount_server_host(
         "zwo_telescope", "zwo", "zwo_telescope",
         [](const std::string& chunk) -> std::string {
             if (chunk.find(":GVP#") != std::string::npos) return "AM5#";
@@ -1339,6 +1479,10 @@ Tier2Host tier2_host_zwo_telescope() {
                        : "0#";
         },
         on_default_clock<zwo_telescope_over>);
+    h.at_park_unreachable =
+        "the fixed responder answers :GU# 'NG#' and :Gps# '0#', so the mount never moves or reports parked and Park "
+        "fails (this recipe)";
+    return h;
 }
 
 Tier2Host tier2_host_zwo_camera() {
@@ -1487,6 +1631,9 @@ Tier2Host tier2_host_celestron_cgx_telescope() {
         "",
         "Firmware replies are immediate; Connecting may complete before its first poll (fake protocol timing)",
         err::InvalidOperation};
+    host.at_park_unreachable =
+        "FakeCelestronCgxMount models no park state, so AtPark never reads true "
+        "(fake_celestron_cgx_mount.h)";
     return host;
 }
 
@@ -1569,8 +1716,10 @@ Tier2Host tier2_host_onstep_telescope() {
         }
         return fallback(chunk);
     };
-    return mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
-                             on_default_clock<onstep_telescope_over>);
+    Tier2Host h = mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
+                                    on_default_clock<onstep_telescope_over>);
+    h.at_park_unreachable = ":GU always answers 'nNp#' (not parked), so AtPark never reads true (idle_onstep above)";
+    return h;
 }
 #endif
 
@@ -1672,6 +1821,9 @@ Tier2Host tier2_host_ioptron_telescope() {
         return host_over(mount, [&](const alpacacore::test::FakeIoptronMount& m) { return make(m.port()); });
     };
     h.failing = [make]() { return host_over_held_port(SOCK_STREAM, make); };
+    h.at_park_unreachable =
+        "the :GLS# system status stays 1 (tracking) unless a test sets it, so AtPark never reads true "
+        "(fake_ioptron_mount.h)";
     return h;
 }
 
@@ -3666,7 +3818,9 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
 #define CS2_CONNECTING(id, kind) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
 #define CS2_HOOKS(id, kind) CS2_CASE(id, "firmware and SDK hooks do not block", case_t2_firmware_sdk_hooks)
 #define CS2_INITIATORS(id, kind) CS2_INITIATORS_##kind(id)
-#define CS2_INITIATORS_TEL(id) CS2_CASE(id, "Park and MoveAxis return at once", case_t2_async_initiators)
+#define CS2_INITIATORS_TEL(id)                                                 \
+    CS2_CASE(id, "Park and MoveAxis return at once", case_t2_async_initiators) \
+    CS2_CASE(id, "InvalidValue wins while parked", case_t2_invalid_value_parked)
 #define CS2_INITIATORS_PRB(id)
 #define CS2_INITIATORS_NPR(id)
 #define CS2_INITIATORS_CAM(id)
@@ -3964,6 +4118,7 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
             ((h.park_unavailable == nullptr && h.move_axis_unavailable == nullptr) || h.type == DeviceType::Telescope));
         CHECK((h.move_axis_unavailable == nullptr || std::string(h.move_axis_unavailable).size() > 0));
         CHECK((h.park_unavailable == nullptr || std::string(h.park_unavailable).size() > 0));
+        CHECK((h.at_park_unreachable == nullptr || h.type == DeviceType::Telescope));
         CHECK((static_cast<bool>(h.failing) || std::string(h.failing_unavailable).size() > 0));
     }
     for (const auto& r : from_roster) {
