@@ -369,8 +369,11 @@ Use the [`/driver-build` skill](#driver-build--guided-driver-implementation) for
 
 `install` and `update` set up the host the same way `build_and_run.sh` does (both source
 `scripts/host_setup.sh`): the vendor udev rules, QHY firmware and vendor libraries, and the service
-user's `dialout` and `gpio` groups, creating `gpio` on a stock Debian that lacks it.
-`ALPACA_ADD_DIALOUT=OFF` and `ALPACA_ADD_GPIO=OFF` skip the group changes. A group change applies to
+user's `dialout`, `plugdev` and `gpio` groups, creating `gpio` (and `plugdev`) on a stock Debian that
+lacks it. The udev rules are installed tightened (`scripts/tighten_udev_rules.sh`, issue #2290): a
+vendor rule's `MODE="0666"` becomes `GROUP="plugdev", MODE="0660"`, so only `plugdev` members open the
+USB devices. `ALPACA_ADD_DIALOUT=OFF`, `ALPACA_ADD_PLUGDEV=OFF` and `ALPACA_ADD_GPIO=OFF` skip the
+group changes. A group change applies to
 the service at its next start, which the script does.
 
 For production use, prefer the apt package from [apt.openastro.net](https://apt.openastro.net).
