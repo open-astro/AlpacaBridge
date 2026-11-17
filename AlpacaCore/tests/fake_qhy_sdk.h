@@ -226,6 +226,9 @@ public:
     std::deque<int> cfw_position_script;
     bool read_directly = false;  // start_single_frame's return
     bool frame_ok = true;        // get_single_frame's return
+    // When set, get_single_frame throws this NotConnected text instead of returning, as the real wrapper does for a
+    // handle closed under the call (#2292).
+    std::optional<std::string> frame_throw;
     std::vector<uint8_t> frame_bytes;
     std::optional<uint32_t> mem_length_override;
     std::optional<uint32_t> frame_width;
@@ -594,6 +597,7 @@ public:
                           uint32_t& bpp, uint32_t& channels) override {
         hit("get_single_frame");
         require_open(camera_id);
+        if (frame_throw) throw AlpacaException(*frame_throw, AlpacaError::NotConnected);
         // Returns IMMEDIATELY — see rule 1 in the class comment. The real call
         // blocks for the whole exposure; a fake that did would strand the
         // driver's detachable exposure worker.

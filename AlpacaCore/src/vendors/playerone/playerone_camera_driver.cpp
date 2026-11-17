@@ -974,6 +974,10 @@ public:
         if (duration <= 0) {
             throw AlpacaException("Invalid pulse guide duration", AlpacaError::InvalidValue);
         }
+        if (duration > kDefaultMaxPulseGuideMs) {  // #2292
+            throw AlpacaException("Pulse guide duration must be <= " + std::to_string(kDefaultMaxPulseGuideMs) + " ms",
+                                  AlpacaError::InvalidValue);
+        }
         PlayerOneGuideDirection dir = PlayerOneGuideDirection::North;
         switch (direction) {
             case 0:

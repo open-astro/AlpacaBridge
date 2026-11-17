@@ -222,6 +222,8 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             // #2257: arguments invalid for every vendor; no probe depends on a vendor's own maximum.
             p.push_back({"pulse_guide(9, 100)", [&] { t.pulse_guide(9, 100); }});
             p.push_back({"pulse_guide(0, -1)", [&] { t.pulse_guide(0, -1); }});
+            // #2292: above every vendor's bound (the largest, the CGX's, is 600 s; with none, kDefaultMaxPulseGuideMs).
+            p.push_back({"pulse_guide(0, INT_MAX)", [&] { t.pulse_guide(0, std::numeric_limits<int>::max()); }});
             p.push_back({"move_axis(5, 0.1)", [&] { t.move_axis(5, 0.1); }});
             p.push_back({"move_axis(0, NaN)", [&] { t.move_axis(0, std::numeric_limits<double>::quiet_NaN()); }});
             p.push_back({"slew_to_coordinates(25, 0)", [&] { t.slew_to_coordinates(25.0, 0.0); }});

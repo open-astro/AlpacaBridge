@@ -874,6 +874,23 @@ TEST_CASE("SVBONY Camera Driver - a removal error on a control write drops Conne
 }
 
 // Rule 1: the pulse-guide call-site group (a call made without the driver mutex).
+// Issue #2292: a PulseGuide Duration had no upper bound; above kDefaultMaxPulseGuideMs it is InvalidValue, before any
+// pulse starts.
+TEST_CASE("SVBONY Camera Driver - a PulseGuide longer than the bound is InvalidValue and starts no pulse (#2292)",
+          "[svbony][camera][unit][fake-sdk][issue2292]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    int code = 0;
+    try {
+        camera->pulse_guide(0, alpacacore::kDefaultMaxPulseGuideMs + 1);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(camera->get_is_pulse_guiding());
+    camera->set_connected(false);
+}
+
 TEST_CASE("SVBONY Camera Driver - a removal error from a pulse guide drops Connected",
           "[svbony][camera][unit][fake-sdk][link]") {
     alpacacore::test::FakeSVBSDK sdk;

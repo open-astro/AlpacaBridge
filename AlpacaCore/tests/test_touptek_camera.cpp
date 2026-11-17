@@ -451,6 +451,27 @@ TEST_CASE("ToupTek Camera Driver - exposure deadline reads the task clock", "[to
     driver->set_connected(false);
 }
 
+// Issue #2292: a PulseGuide Duration had no upper bound; above kDefaultMaxPulseGuideMs it is InvalidValue, before any
+// pulse starts.
+TEST_CASE("ToupTek Camera Driver - a PulseGuide longer than the bound is InvalidValue and starts no pulse (#2292)",
+          "[touptek][camera][unit][issue2292]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera(true);
+    fake.guiding = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_can_pulse_guide());
+    int code = 0;
+    try {
+        driver->pulse_guide(0, alpacacore::kDefaultMaxPulseGuideMs + 1);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
 TEST_CASE("ToupTek Camera Driver - pulse guide timer waits on the task clock", "[touptek][camera][unit][taskclock]") {
     alpacacore::test::FakeTaskClock clock;
     auto fake = make_fake_camera(true);
