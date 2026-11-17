@@ -91,6 +91,10 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
 // clock could step past the whole IsPulseGuiding window before the body had started its wait. The body then never ran:
 // a check that read the handset after the pulse missed its end, or passed without it when the case expected no
 // tracking command.
+// Each call installs its own hook and names the first thread spawned through it, which is this call's pulse body
+// (pulse_guide() spawns one thread per pulse), so a case may call it once per pulse on the same driver. A pulse started
+// afterwards with a bare pulse_guide() runs through the stale hook unnamed and gets no rendezvous: start every pulse a
+// case steps the clock through with this helper.
 void start_ra_pulse_parked(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver) {
     auto body_thread = std::make_shared<std::promise<std::thread::id>>();
     auto body_id = body_thread->get_future();

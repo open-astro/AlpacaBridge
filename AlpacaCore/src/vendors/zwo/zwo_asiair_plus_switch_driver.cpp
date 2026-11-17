@@ -31,6 +31,8 @@ util::PowerPortProfile asiair_plus_profile(const AsiairPlusSwitchConfig& config)
     profile.unique_id_prefix = "ZWO_ASIAIR_PLUS_RK3568_";
     profile.log_category = kLogCategory;
     profile.not_connected_message = "ASIAIR Plus switch not connected";
+    // Logged only when close() throws. This wrapper's close() logs a failed settle instead of throwing, so only an
+    // unexpected exception (a failed thread join or allocation) reaches it.
     profile.destruction_warning = "Error during ASIAIR Plus switch destruction: ";
     profile.power_on_state = config.power_on_state;
     for (std::size_t i = 0; i < config.ports.size(); ++i) {

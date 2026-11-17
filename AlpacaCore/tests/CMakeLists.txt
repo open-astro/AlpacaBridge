@@ -38,6 +38,7 @@ set(TEST_SOURCES
     test_atomic_file.cpp
     test_device_location_store.cpp
     test_power_port_state_store.cpp
+    test_power_port_switch_driver.cpp
     test_rotator_sync_offset_store.cpp
     test_unique_id.cpp
     test_polled_state.cpp

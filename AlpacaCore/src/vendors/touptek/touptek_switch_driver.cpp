@@ -49,6 +49,7 @@ public:
     void open() { box_.open(); }
     void close() { box_.close(); }
     bool is_open() const { return box_.is_open(); }
+    std::size_t port_count() const { return box_.port_count(); }
     int get_value(std::size_t index) const { return box_.get_value(index); }
     void set_value(std::size_t index, int value) { box_.set_value(index, value); }
 
@@ -60,8 +61,7 @@ private:
 
 using StellaVitaSwitchDriver = util::PowerPortSwitchDriver<StellaVitaPowerbox>;
 
-// Takes the config by value: the injected factory hands it over, and the port names move out of it.
-util::PowerPortProfile stellavita_profile(TouptekSwitchConfig config) {
+util::PowerPortProfile stellavita_profile(const TouptekSwitchConfig& config) {
     util::PowerPortProfile profile;
     profile.name = "ToupTek " + config.model_name;
     profile.description = "ToupTek " + config.model_name + " DC power switch (" + config.gpio_chip_path + ")";
@@ -71,9 +71,9 @@ util::PowerPortProfile stellavita_profile(TouptekSwitchConfig config) {
     profile.not_connected_message = "StellaVita not connected";
     profile.destruction_warning = "Error during StellaVita switch destruction: ";
     profile.power_on_state = config.power_on_state;
-    for (auto& p : config.ports) {
+    for (const auto& p : config.ports) {
         util::PowerPortProfilePort port;
-        port.name = std::move(p.name);
+        port.name = p.name;
         port.description = "StellaVita DC power port on GPIO " + std::to_string(p.gpio_line) + " (" +
                            util::power_port_mode_text(p.pwm_enabled) + ")";
         port.range_error = "Switch value out of range [0," + std::to_string(p.pwm_enabled ? 100 : 1) + "]";
@@ -105,18 +105,13 @@ TouptekSwitchConfig default_stellavita_config() {
 
 std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config) {
     auto profile = stellavita_profile(config);
-    return std::make_unique<StellaVitaSwitchDriver>(device_number, std::move(profile), config.gpio_chip_path,
+    return std::make_unique<StellaVitaSwitchDriver>(device_number, std::move(profile), std::move(config.gpio_chip_path),
                                                     std::move(config.ports), config.pwm_frequency_hz);
 }
 
-std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config,
+std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, const TouptekSwitchConfig& config,
                                                     TouptekPowerboxSDK& powerbox) {
-    if (powerbox.port_count() != config.ports.size()) {
-        throw AlpacaException("StellaVita power box has " + std::to_string(powerbox.port_count()) +
-                                  " ports but the configuration lists " + std::to_string(config.ports.size()),
-                              AlpacaError::InvalidValue);
-    }
-    return std::make_unique<StellaVitaSwitchDriver>(device_number, stellavita_profile(std::move(config)), powerbox);
+    return std::make_unique<StellaVitaSwitchDriver>(device_number, stellavita_profile(config), powerbox);
 }
 
 }  // namespace alpacacore::vendor::touptek

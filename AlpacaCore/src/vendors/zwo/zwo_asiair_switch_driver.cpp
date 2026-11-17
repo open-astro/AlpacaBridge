@@ -31,6 +31,8 @@ util::PowerPortProfile asiair_profile(const AsiairSwitchConfig& config) {
     profile.unique_id_prefix = "ZWO_ASIAIR_";
     profile.log_category = kLogCategory;
     profile.not_connected_message = "ASIAIR switch not connected";
+    // Logged only when close() throws. This wrapper's close() logs a failed settle instead of throwing, so only an
+    // unexpected exception (a failed thread join or allocation) reaches it.
     profile.destruction_warning = "Error during ASIAIR switch destruction: ";
     profile.power_on_state = config.power_on_state;
     for (const auto& p : config.ports) {

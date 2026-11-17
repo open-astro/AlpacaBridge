@@ -296,10 +296,20 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
     return p;
 }
 
-// The tier-1 probe list is the type's probes; a focuser adds none, since every focuser clamps a Move to
-// 0..MaxStep (contract_sweep.h with_clamping_focuser).
+// The tier-1 probe list is the type's probes, plus a switch's SetSwitchValue range probes when its entry states a
+// static range (with_static_switch_range); a focuser adds none, since every focuser clamps a Move to 0..MaxStep
+// (contract_sweep.h with_clamping_focuser).
 std::vector<Probe> invalid_value_probes(AlpacaDriver& d, const ContractEntry& e) {
-    return invalid_value_probes(d, e.type);
+    auto p = invalid_value_probes(d, e.type);
+    if (e.type == DeviceType::Switch && e.switch_static_max_value >= 0.0) {
+        auto& s = dynamic_cast<alpacacore::SwitchDriver&>(d);
+        const int id = e.switch_writable_id;
+        const double over = e.switch_static_max_value + 1.0;
+        p.push_back(
+            {"set_switch_value(writable id, MaxSwitchValue + 1)", [&s, id, over] { s.set_switch_value(id, over); }});
+        p.push_back({"set_switch_value(writable id, -1)", [&s, id] { s.set_switch_value(id, -1.0); }});
+    }
+    return p;
 }
 
 // #2257: the state an InvalidValue probe runs in.
@@ -849,6 +859,12 @@ bool has_can_subject(const ContractEntry& e) {
     auto d = e.make(0);
     REQUIRE(d != nullptr);
     REQUIRE_FALSE(d->get_connected());
+    // A stale static max would turn the range probes into in-range writes, which answer NotConnected.
+    if (e.type == DeviceType::Switch && e.switch_static_max_value >= 0.0) {
+        INFO(e.id);
+        CHECK(dynamic_cast<alpacacore::SwitchDriver&>(*d).get_max_switch_value(e.switch_writable_id) ==
+              e.switch_static_max_value);
+    }
     // Registered only for an entry with probes (has_invalid_subject); the guard case pins that.
     const auto probes = invalid_value_probes(*d, e);
     REQUIRE_FALSE(probes.empty());
