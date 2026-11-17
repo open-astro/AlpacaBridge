@@ -211,6 +211,7 @@ TEST_CASE("Remote Alpaca client - a malformed upstream is refused when the clien
     CHECK(refused({"bad host", 11111, "observingconditions", 0}));
     CHECK(refused({"http://host", 11111, "observingconditions", 0}));
     CHECK(refused({"host/path", 11111, "observingconditions", 0}));
+    CHECK(refused({"10.0.0.5:11111", 11111, "observingconditions", 0}));  // a port in the host is not IPv6
     CHECK(refused({"host", 0, "observingconditions", 0}));
     CHECK(refused({"host", 65536, "observingconditions", 0}));
     CHECK(refused({"host", 11111, "ObservingConditions", 0}));
@@ -220,4 +221,23 @@ TEST_CASE("Remote Alpaca client - a malformed upstream is refused when the clien
     CHECK(ipv6.member_url("issafe") == "http://[::1]:32323/api/v1/safetymonitor/2/issafe");
     RemoteAlpacaClient named(http.client(), {"omnisim.local", 32323, "safetymonitor", 0}, 1);
     CHECK(named.member_url("issafe") == "http://omnisim.local:32323/api/v1/safetymonitor/0/issafe");
+}
+
+TEST_CASE("Remote Alpaca client - a malformed member name is refused before any request", "[remotealpaca][client]") {
+    FakeAlpacaServer server;
+    server.set_value("temperature", "21.5");
+    RemoteAlpacaClient client(curl_client(), upstream_at(server.port()), 1);
+    const auto invalid = [](auto&& fn) {
+        const auto [transport, error] = thrown_by(fn);
+        return !transport && error.error_code() == AlpacaError::InvalidValue;
+    };
+
+    CHECK(invalid([&] { (void)client.get_double("Temperature"); }));
+    CHECK(invalid([&] { (void)client.get_bool("is_safe"); }));
+    CHECK(invalid([&] { (void)client.get_string("temperature/../x"); }));
+    CHECK(invalid([&] { client.put(""); }));
+    CHECK(server.requests().empty());
+
+    CHECK(client.get_double("temperature") == 21.5);  // the next good call is still sent
+    CHECK(server.requests().size() == 1);
 }

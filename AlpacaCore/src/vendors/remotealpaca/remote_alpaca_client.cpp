@@ -330,7 +330,8 @@ bool lower_letters(std::string_view text) {
     return !text.empty() && std::all_of(text.begin(), text.end(), [](unsigned char c) { return c >= 'a' && c <= 'z'; });
 }
 
-bool is_ipv6_literal(std::string_view host) { return host.find(':') != std::string_view::npos; }
+// Two colons at least: "10.0.0.5:11111" is a host with a port typed into it, not an IPv6 address.
+bool is_ipv6_literal(std::string_view host) { return std::count(host.begin(), host.end(), ':') >= 2; }
 
 // A host name (letters, digits, '-', '.'), an IPv4 address, or an IPv6 address (hex digits, ':', '.').
 bool host_valid(std::string_view host) {
