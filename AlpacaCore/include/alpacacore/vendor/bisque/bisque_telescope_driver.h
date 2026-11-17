@@ -53,5 +53,8 @@ bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs `hook` on the SlewToCoordinates thread once IsSlewComplete has answered true and the position is published,
 /// before the wait applies Slewing false; no driver lock is held. An empty hook removes it.
 void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Whether the 8 s Slewing hold (decision 0022) is open now, on the driver's task clock. A Slewing read cannot tell
+/// once the slew's own flag is down, so the clear sites that lower it too (a disconnect, a landing) are pinned here.
+bool slew_hold_active_for_testing(TelescopeDriver& driver);
 
 } // namespace alpacacore::vendor::bisque

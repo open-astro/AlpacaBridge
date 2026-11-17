@@ -1459,6 +1459,106 @@ TEST_CASE("Bisque hold window - a retarget inside the hold asks TheSkyX nothing 
     CHECK(rig.mount.slew_complete_queries.load() == 1);
 }
 
+// Decision 0022 rule 2: the window is armed before SlewToRaDec goes out, so a client that reads Slewing while the
+// command is on the wire already reads true, in both slew forms (#1832).
+TEST_CASE("Bisque hold window - Slewing reads true while SlewToRaDec is on the wire",
+          "[bisque][telescope][hold-window]") {
+    const bool async = GENERATE(false, true);
+    ClockedBisque rig;
+    std::atomic<int> seen{-1};
+    rig.mount.on_slew_command = [&] { seen = rig.driver->get_slewing() ? 1 : 0; };
+    if (async) {
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    } else {
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates(5.5, 20.0));  // TheSkyX reports it complete at the first poll
+    }
+    CHECK(seen.load() == 1);
+}
+
+// A SlewToRaDec that TheSkyX refuses started nothing: the slew it would have been leaves no Slewing and no window
+// behind, and the status poll past 8 s asks TheSkyX nothing about it.
+TEST_CASE("Bisque hold window - a slew whose SlewToRaDec fails leaves Slewing false and no window",
+          "[bisque][telescope][hold-window]") {
+    const bool async = GENERATE(false, true);
+    ClockedBisque rig;
+    rig.mount.fail_slew_commands = 1;
+    if (async) {
+        CHECK_THROWS_AS(rig.driver->slew_to_coordinates_async(5.5, 20.0), alpacacore::AlpacaException);
+    } else {
+        CHECK_THROWS_AS(rig.driver->slew_to_coordinates(5.5, 20.0), alpacacore::AlpacaException);
+    }
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK_FALSE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
+    rig.clock.advance(std::chrono::seconds(9));
+    CHECK(poll_now(*rig.driver));
+    CHECK(rig.mount.slew_complete_queries.load() == 0);
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// A refused retarget leaves the accepted slew's window as it was: it still closes 8 s after that slew's command,
+// not 8 s after the refused one.
+TEST_CASE("Bisque hold window - a failed retarget keeps the accepted slew's window",
+          "[bisque][telescope][hold-window]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 1000;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    rig.clock.advance(std::chrono::seconds(3));
+    rig.mount.fail_slew_commands = 1;
+    CHECK_THROWS_AS(rig.driver->slew_to_coordinates_async(6.0, 25.0), alpacacore::AlpacaException);
+    CHECK(rig.driver->get_slewing());
+    rig.clock.advance(std::chrono::milliseconds(4999));
+    CHECK(poll_now(*rig.driver));
+    CHECK(rig.mount.slew_complete_queries.load() == 0);
+    CHECK(rig.driver->get_slewing());
+    rig.clock.advance(std::chrono::milliseconds(1));
+    CHECK(poll_now(*rig.driver));
+    CHECK(rig.mount.slew_complete_queries.load() == 1);
+    CHECK(rig.driver->get_slewing());
+}
+
+// The refused retarget also leaves the accepted SlewToCoordinates that is waiting for its slew the owner of Slewing:
+// when that slew completes, the wait lowers Slewing at once, without a status poll.
+TEST_CASE("Bisque hold window - a failed retarget leaves a waiting SlewToCoordinates the owner of Slewing",
+          "[bisque][telescope][hold-window]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 100000;
+    auto slewed = std::async(std::launch::async, [&] { rig.driver->slew_to_coordinates(5.5, 20.0); });
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the wait loop sleeps between its polls
+    rig.mount.fail_slew_commands = 1;
+    CHECK_THROWS_AS(rig.driver->slew_to_coordinates_async(6.0, 25.0), alpacacore::AlpacaException);
+    rig.mount.slew_polls_needed = 0;
+    CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
+    CHECK_NOTHROW(slewed.get());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// Rule 2's clear sites past the slew's own flag: a disconnect, an AbortSlew and the landing a SlewToCoordinates
+// sees inside the hold each close the window (a Slewing read cannot tell, as each also lowers the flag).
+TEST_CASE("Bisque hold window - a disconnect, an AbortSlew or a landing inside the hold closes the window",
+          "[bisque][telescope][hold-window]") {
+    ClockedBisque rig;
+    SECTION("a disconnect") {
+        rig.mount.slew_polls_needed = 1000;
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
+        rig.driver->set_connected(false);
+        CHECK_FALSE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
+    }
+    SECTION("an AbortSlew") {
+        rig.mount.slew_polls_needed = 1000;
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
+        REQUIRE_NOTHROW(rig.driver->abort_slew());
+        CHECK_FALSE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
+    }
+    SECTION("a SlewToCoordinates landing") {
+        REQUIRE_NOTHROW(rig.driver->slew_to_coordinates(5.5, 20.0));  // TheSkyX reports it complete at the first poll
+        CHECK(rig.virtual_elapsed() < std::chrono::seconds(8));
+        CHECK_FALSE(rig.driver->get_slewing());
+        CHECK_FALSE(alpacacore::vendor::bisque::slew_hold_active_for_testing(*rig.driver));
+    }
+}
+
 // Decision 0010 replaces the 2 s position cache: a read is served from the snapshot however old it is (stale is
 // not lost), and only a status tick asks TheSkyX again.
 TEST_CASE("Bisque snapshot - a position read never asks TheSkyX, however old the frame",
