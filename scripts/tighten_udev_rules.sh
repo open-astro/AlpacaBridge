@@ -13,7 +13,7 @@
 #
 # Tighten vendor udev rules in place (issue #2290). A rule whose MODE lets every local user open the
 # device (a last octal digit that is not 0, such as the vendors' MODE="0666") is rewritten to
-# GROUP="plugdev", MODE="0660" (keeping its = or := operator): a GROUP already on the line becomes
+# GROUP="plugdev", MODE="0660" (keeping each = or := operator): a GROUP already on the line becomes
 # plugdev, and a line with none gets one. Comment lines and rules that already keep other users out are left alone.
 #
 # The vendor files under AlpacaCore/external are regenerated on every SDK bump, so they are never
@@ -34,8 +34,8 @@ for rules in "$@"; do
   sed -E -i \
     -e '/^[[:space:]]*#/b' \
     -e "/${world_mode}/!b" \
-    -e 's/GROUP[[:space:]]*:?=[[:space:]]*"[^"]*"/GROUP="plugdev"/g' \
-    -e '/GROUP="plugdev"/!s/MODE[[:space:]]*:?=/GROUP="plugdev", &/' \
+    -e 's/GROUP([[:space:]]*:?=[[:space:]]*)"[^"]*"/GROUP\1"plugdev"/g' \
+    -e '/GROUP[[:space:]]*:?=[[:space:]]*"plugdev"/!s/MODE[[:space:]]*:?=/GROUP="plugdev", &/' \
     -e 's/(MODE[[:space:]]*:?=[[:space:]]*)"0?[0-7]{2}[1-7]"/\1"0660"/g' \
     -e 's/(MODE[[:space:]]*:?=[[:space:]]*)0?[0-7]{2}[1-7]([^0-7]|$)/\1"0660"\2/g' \
     "${rules}"

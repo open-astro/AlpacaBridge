@@ -41,15 +41,26 @@ host_setup_install_vendor_runtime() {
   if [[ ${#rules_src[@]} -eq 0 ]]; then
     echo "No udev rules found under ${core_dir}/external"
   else
-    local staged
+    local staged failed=0
     staged="$(mktemp -d)"
+    # A failed copy, tighten or install still removes the staged copies before the error returns.
     for rule in "${rules_src[@]}"; do
-      cp "${rule}" "${staged}/"
-      bash "${HOST_SETUP_DIR}/tighten_udev_rules.sh" "${staged}/$(basename "${rule}")"
+      if ! cp "${rule}" "${staged}/" \
+          || ! bash "${HOST_SETUP_DIR}/tighten_udev_rules.sh" "${staged}/$(basename "${rule}")"; then
+        failed=1
+        break
+      fi
       echo "Installing udev rule: ${rule} (world access tightened to plugdev 0660)"
-      sudo install -m 644 "${staged}/$(basename "${rule}")" /etc/udev/rules.d/
+      if ! sudo install -m 644 "${staged}/$(basename "${rule}")" /etc/udev/rules.d/; then
+        failed=1
+        break
+      fi
     done
     rm -rf "${staged}"
+    if [[ ${failed} -ne 0 ]]; then
+      echo "Installing the udev rules failed" >&2
+      return 1
+    fi
   fi
 
   # QHY cameras need firmware the udev rules load with fxload. The apt fxload has no -t fx3 (FX3-based

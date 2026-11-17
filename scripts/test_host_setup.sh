@@ -173,16 +173,38 @@ echo a > "${fake_core}/external/Altair/libaltaircam.so"
 echo b > "${fake_core}/external/PlayerOne/libPlayerOnePW.so"
 echo c > "${fake_core}/external/QHY/lib/firmware/qhy/QHY5III.img"
 base_hash="$(host_setup_input_hash "${fake_core}")"
-# The tighten script is an input too: a change to it must re-run the rules install (#2290).
-cp "${ROOT}/scripts/tighten_udev_rules.sh" "${tmp}/tighten.saved"
-echo '# changed' >> "${ROOT}/scripts/tighten_udev_rules.sh"
-if [[ "$(host_setup_input_hash "${fake_core}")" == "${base_hash}" ]]; then
+# The tighten script is an input too: a change to it must re-run the rules install (#2290). The test
+# edits a copy (HOST_SETUP_DIR pointed at it), so an interrupted run never leaves the checkout dirty.
+setup_copy="${tmp}/setup-copy"
+mkdir -p "${setup_copy}"
+cp "${ROOT}/scripts/tighten_udev_rules.sh" "${setup_copy}/"
+real_setup_dir="${HOST_SETUP_DIR}"
+HOST_SETUP_DIR="${setup_copy}"
+copy_hash="$(host_setup_input_hash "${fake_core}")"
+echo '# changed' >> "${setup_copy}/tighten_udev_rules.sh"
+if [[ "$(host_setup_input_hash "${fake_core}")" == "${copy_hash}" ]]; then
   echo "[FAIL] setup stamp: a change to scripts/tighten_udev_rules.sh does not change the hash"
   failures=$((failures + 1))
 else
   echo "[PASS] setup stamp covers scripts/tighten_udev_rules.sh"
 fi
-cp "${tmp}/tighten.saved" "${ROOT}/scripts/tighten_udev_rules.sh"
+
+# A tighten script that fails leaves no staged copy behind, and the rules install reports the failure.
+printf '#!/usr/bin/env bash\nexit 1\n' > "${setup_copy}/tighten_udev_rules.sh"
+fail_core="${tmp}/core-fail"  # its own tree, so the stamp cases below still compare against base_hash
+mkdir -p "${fail_core}/external/V" "${tmp}/tmpdir"
+echo 'SUBSYSTEM=="usb", MODE="0666"' > "${fail_core}/external/V/v.rules"
+if (TMPDIR="${tmp}/tmpdir" PATH="${shims}:${PATH}" host_setup_install_vendor_runtime "${fail_core}") \
+    > /dev/null 2>&1; then
+  echo "[FAIL] udev install: a failing tighten script did not fail the install"
+  failures=$((failures + 1))
+elif [[ -n "$(ls -A "${tmp}/tmpdir")" ]]; then
+  echo "[FAIL] udev install: a failed tighten left its staged copies in ${tmp}/tmpdir"
+  failures=$((failures + 1))
+else
+  echo "[PASS] udev install: a failed tighten fails the install and removes its staged copies"
+fi
+HOST_SETUP_DIR="${real_setup_dir}"
 for f in Altair/libaltaircam.so PlayerOne/libPlayerOnePW.so QHY/lib/firmware/qhy/QHY5III.img; do
   cp "${fake_core}/external/${f}" "${tmp}/saved"
   echo changed-and-longer >> "${fake_core}/external/${f}"

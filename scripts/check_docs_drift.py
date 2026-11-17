@@ -3182,6 +3182,8 @@ UDEV_TIGHTEN_SCRIPT = "scripts/tighten_udev_rules.sh"
 _UDEV_RULE_SRC_RE = re.compile(r"\$\((CURDIR|QHY_SDK_DIR)\)(/[^\s\\]+?\.rules)(?=\s)")
 _UDEV_TIGHTEN_CALL_RE = re.compile(
     r"scripts/tighten_udev_rules\.sh\s+\$\(STAGING\)/usr/lib/udev/rules\.d/\*\.rules")
+# Any install into the staged rules directory, whatever its source ($(GPHOTO_STAGE), debian/ files too).
+_UDEV_RULE_DEST_RE = re.compile(r"\$\(STAGING\)/usr/lib/udev/rules\.d/")
 # A MODE whose last octal digit is not 0 grants access to every user.
 _UDEV_WORLD_MODE_RE = re.compile(r'\bMODE\s*:?=\s*"?0?[0-7]{2}[1-7](?![0-7])')
 
@@ -3218,6 +3220,11 @@ def check_installed_udev_rules_not_world(root=ROOT):
     if not sources:
         return ["no udev rule installed from the tree found in debian/rules: the extractor is stale"]
     call = _UDEV_TIGHTEN_CALL_RE.search(rules)
+    # The last install counts every rule copied into the staged directory, not only the tree sources the
+    # check reads back, so a tighten call moved above the libgphoto2 or debian/ rule installs is caught too.
+    for dm in _UDEV_RULE_DEST_RE.finditer(rules):
+        if call is None or not call.start() <= dm.start() < call.end():
+            last_install = max(last_install, dm.start())
     if call is None:
         findings.append("debian/rules does not run %s over $(STAGING)/usr/lib/udev/rules.d/*.rules, so the vendor "
                         "rules install with their own MODE" % UDEV_TIGHTEN_SCRIPT)
@@ -4594,16 +4601,18 @@ def self_test():
         a = (ud / "AlpacaCore/external/V/a.rules").read_text(encoding="utf-8")
         check("udev modes: the check never edits the vendor rules in the tree", a.count('MODE="0666"') == 3)
         out = ud / "out.rules"
-        out.write_text(a + 'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"\nX, MODE:="0664"\n', encoding="utf-8")
+        out.write_text(a + 'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"\nX, MODE:="0664"\n'
+                       'Y, GROUP:="users", MODE="0666"\n', encoding="utf-8")
         subprocess.run(["bash", str(ud / UDEV_TIGHTEN_SCRIPT), str(out)], check=False)
-        check("udev modes: the script gives each world rule plugdev 0660, keeps := and leaves the rest",
+        check("udev modes: the script gives each world rule plugdev 0660, keeps each := and leaves the rest",
               out.read_text(encoding="utf-8").splitlines() == [
                   "# If you think permissions of 0666 are too loose, see the README",
                   'SUBSYSTEM=="usb", ATTRS{idVendor}=="0547", GROUP="plugdev", MODE="0660"',
                   'ACTION=="add", ATTRS{idVendor}=="03c3", ATTRS{idProduct}=="1f10", GROUP="plugdev", MODE="0660"',
                   'SUBSYSTEMS=="usb", ATTR{idVendor}=="03c3", GROUP="plugdev", MODE="0660" ',
                   'KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"',
-                  'X, GROUP="plugdev", MODE:="0660"'])
+                  'X, GROUP="plugdev", MODE:="0660"',
+                  'Y, GROUP:="plugdev", MODE="0660"'])
         (ud / "debian/rules").write_text(ud_install, encoding="utf-8")
         f = check_installed_udev_rules_not_world(ud)
         check("udev modes: no tighten call in debian/rules is a finding",
@@ -4611,6 +4620,12 @@ def self_test():
         (ud / "debian/rules").write_text(ud_call + ud_install, encoding="utf-8")
         f = check_installed_udev_rules_not_world(ud)
         check("udev modes: a tighten call before the last rule install is a finding",
+              any("before its last rule install" in x for x in f))
+        (ud / "debian/rules").write_text(
+            ud_install + ud_call + "\tinstall -m 644 $(GPHOTO_STAGE)/usr/lib/udev/rules.d/61-x.rules \\\n"
+            "\t  $(STAGING)/usr/lib/udev/rules.d/\n", encoding="utf-8")
+        f = check_installed_udev_rules_not_world(ud)
+        check("udev modes: a rule installed from outside the tree after the tighten call is a finding",
               any("before its last rule install" in x for x in f))
         (ud / "debian/rules").write_text(ud_install + ud_call, encoding="utf-8")
         (ud / UDEV_TIGHTEN_SCRIPT).unlink(missing_ok=True)
