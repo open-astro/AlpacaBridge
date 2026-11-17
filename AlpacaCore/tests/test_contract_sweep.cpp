@@ -4135,7 +4135,10 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
     }
     for (const auto& x : kProbeExemptions) {
         const std::string id = x.id;
-        if (vendors.count(id.substr(0, id.find('_'))) == 0) continue;  // that vendor is not compiled in
+        const bool compiled = std::any_of(vendors.begin(), vendors.end(), [&](const std::string& v) {
+            return id.rfind(v + "_", 0) == 0;  // a vendor name may itself contain '_'
+        });
+        if (!compiled) continue;  // that vendor is not compiled in
         INFO("kProbeExemptions row " << id << " " << x.probe);
         CHECK((registry_ids.count(id) == 1 || host_ids.count(id) == 1));
         CHECK(probe_names.count(x.probe) == 1);
