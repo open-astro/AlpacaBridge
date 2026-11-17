@@ -569,6 +569,32 @@ function deviceStatus(device) {
     return { state: 'error', text: 'Status unavailable' };
 }
 
+// The stale-data banner (issue #1764 item 5). `failures` is the count of
+// consecutive failed device status polls (refused, timed out, non-OK, not JSON
+// or a non-zero ErrorNumber), `lastGoodAt` the browser time (ms) of the last
+// good poll or null, `now` the browser time. The banner and the rows' stale
+// marker show from the first failure and clear on the next good poll. The age
+// is whole seconds on the browser's own clock, never the server's. The delay
+// before the next poll backs off 5, 5, 10, then 15 s (the cap) after 1, 2, 3
+// and 4 or more failures; a good poll resets it to 5 s. With the 4 s request
+// timeout a stopped server shows the banner within 10 s: a refused poll fails
+// at most 5 s after the stop, a hung one at most 9 s.
+const STATUS_POLL_MS = 5000;
+const STATUS_POLL_TIMEOUT_MS = 4000;
+const STATUS_POLL_BACKOFF_MS = [5000, 5000, 10000, 15000];
+
+function linkStatus(failures, lastGoodAt, now) {
+    if (!(failures > 0)) return { banner: false, stale: false, text: '', nextDelayMs: STATUS_POLL_MS };
+    const step = Math.min(failures, STATUS_POLL_BACKOFF_MS.length) - 1;
+    let text = 'Connection to the bridge lost, retrying. ';
+    if (typeof lastGoodAt === 'number' && Number.isFinite(lastGoodAt)) {
+        text += 'Last update ' + Math.max(0, Math.floor((now - lastGoodAt) / 1000)) + ' s ago.';
+    } else {
+        text += 'No device data received yet.';
+    }
+    return { banner: true, stale: true, text, nextDelayMs: STATUS_POLL_BACKOFF_MS[step] };
+}
+
 // Site coordinates in the Configured Settings list: finite numbers print at a
 // fixed 6 decimals (about 0.11 m); display only, the stored value keeps full
 // precision. Any other type returns null so the caller keeps its own path.
@@ -979,7 +1005,8 @@ if (typeof module !== 'undefined' && module.exports) {
                        channelSelectorState, channelDowngradeNotice, channelSwitchText,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, discoveryPortSetting, settingsSaveError,
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError, asiairRepeatedGpioPort,
-                        normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
+                        normalizeAlignmentMode, deviceStatus, linkStatus, STATUS_POLL_MS, STATUS_POLL_TIMEOUT_MS,
+                        formatSiteCoordinate,
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
                         zwoCameraOptions, zwoCameraSelection, zwoCameraHint, configureWarning,
                         deviceSettingShown,

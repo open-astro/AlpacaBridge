@@ -28,6 +28,10 @@
             <span id="server-clock" class="server-clock" title="Live server (SBC) clock in the server's own time zone (the zone its log lines use); shown in this browser's zone if the server does not report one, or UTC if the browser cannot format it">--:--:--</span>
         </header>
 
+        <!-- Stale-data banner (issue #1764): shown by the device status poll in app.js
+             when the bridge stops answering; a polite live region. -->
+        <div id="link-banner" class="link-banner" role="status" aria-live="polite" hidden></div>
+
         <nav class="tabs" role="tablist" aria-label="Sections">
             <button class="tab active" type="button" role="tab" id="devices-tab-button" data-tab="devices" aria-selected="true" aria-controls="devices-tab" onclick="showTab('devices')">Devices</button>
             <button class="tab" type="button" role="tab" id="configure-tab-button" data-tab="configure" aria-selected="false" aria-controls="configure-tab" tabindex="-1" onclick="showTab('configure')">Configure</button>
@@ -38,7 +42,7 @@
         <div id="devices-tab" class="tab-content active" role="tabpanel" aria-labelledby="devices-tab-button">
             <h2>Configured Devices</h2>
             <div id="devices-list" class="devices-list">
-                <p class="loading">Loading devices...</p>
+                <div class="device-card skeleton" role="status" aria-busy="true"><span class="skeleton-line skeleton-title"></span><span class="skeleton-line"></span><span class="visually-hidden">Loading devices</span></div>
             </div>
         </div>
 

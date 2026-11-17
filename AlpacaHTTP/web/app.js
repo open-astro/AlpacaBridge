@@ -723,10 +723,14 @@ async function fetchFailedDevices() {
     }
 }
 
+// The loading state of the device list; index.html carries the same markup.
+const DEVICE_LIST_SKELETON = '<div class="device-card skeleton" role="status" aria-busy="true"><span class="skeleton-line skeleton-title"></span><span class="skeleton-line"></span><span class="visually-hidden">Loading devices</span></div>';
+
 // Load devices
 async function loadDevices() {
     const devicesList = document.getElementById('devices-list');
-    devicesList.innerHTML = '<p class="loading">Loading devices...</p>';
+    // Issue #1764: a skeleton row while the list loads, not a line of text.
+    devicesList.innerHTML = DEVICE_LIST_SKELETON;
 
     try {
         const response = await fetch(
@@ -784,6 +788,7 @@ async function loadDevices() {
         }
         
         devices = devices.concat(await fetchFailedDevices());
+        noteBridgeAnswered();  // the stale-data banner counts the age from this answer
 
         if (devices.length === 0) {
             currentDevices = [];
@@ -1697,26 +1702,88 @@ async function startEditDevice(device) {
 }
 
 // Light poll of the Devices listing: updates only the status dots in place, so
-// expanded cards and scroll position survive. Runs only while the Devices tab
-// is shown and the page is visible.
-const DEVICE_STATUS_POLL_MS = 5000;
+// expanded cards and scroll position survive. It runs on every tab while the
+// page is visible, because it also drives the stale-data banner (issue #1764
+// item 5): a refused, timed-out, non-OK or malformed answer shows the banner,
+// keeps each dot's last state with a stale marker, and backs off the next poll
+// (linkStatus() in format.js). A hidden page does not poll.
 let deviceStatusPollTimer = null;
 let deviceStatusPollInFlight = false;
+let deviceStatusFailures = 0;
+let deviceStatusLastGoodAt = null;
+
+function scheduleDeviceStatusPoll(delayMs) {
+    if (deviceStatusPollTimer !== null) clearTimeout(deviceStatusPollTimer);
+    deviceStatusPollTimer = setTimeout(pollDeviceStatus, delayMs);
+}
+
+// The banner text carries the age of the last good data, so it is redrawn
+// every second while it shows, not only on a poll.
+function renderLinkBanner() {
+    const banner = document.getElementById('link-banner');
+    if (!banner) return;
+    const link = linkStatus(deviceStatusFailures, deviceStatusLastGoodAt, Date.now());
+    if (banner.textContent !== link.text) banner.textContent = link.text;
+    banner.hidden = !link.banner;
+}
+
+// Marks every dot stale (a class plus its label, not colour alone) without
+// dropping its last state, or clears the marker.
+function markStatusDotsStale(stale) {
+    document.querySelectorAll('.status-dot').forEach(dot => {
+        if (stale) {
+            if (!dot.classList.contains('stale')) dot.dataset.statusText = dot.getAttribute('aria-label') || '';
+            const label = 'Stale, the bridge is not answering. Last known: ' + (dot.dataset.statusText || '');
+            dot.classList.add('stale');
+            dot.title = label;
+            dot.setAttribute('aria-label', label);
+        } else if (dot.classList.contains('stale')) {
+            dot.classList.remove('stale');
+            dot.title = dot.dataset.statusText || '';
+            dot.setAttribute('aria-label', dot.dataset.statusText || '');
+        }
+    });
+}
+
+// Called after any good answer from the bridge, so the age counts from it.
+function noteBridgeAnswered() {
+    deviceStatusFailures = 0;
+    deviceStatusLastGoodAt = Date.now();
+    markStatusDotsStale(false);
+    renderLinkBanner();
+}
+
+// One status listing, refused after STATUS_POLL_TIMEOUT_MS so a hung request
+// counts as a failure and never holds the in-flight guard. Resolves to the
+// device rows, or throws.
+async function fetchDeviceStatusRows() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), STATUS_POLL_TIMEOUT_MS);
+    try {
+        const response = await fetch(API_BASE + '/management/v1/configureddevices?ts=' + Date.now(),
+                                     { cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const data = await response.json();
+        if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) throw new Error('bad listing');
+        return data.Value;
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 async function pollDeviceStatus() {
-    const tab = document.getElementById('devices-tab');
-    if (document.hidden || !tab || !tab.classList.contains('active')) {
+    deviceStatusPollTimer = null;
+    if (document.hidden) {
+        scheduleDeviceStatusPoll(STATUS_POLL_MS);
         return;
     }
     // A listing can stall behind a driver mutex during a connect; never queue a second request.
     if (deviceStatusPollInFlight) return;
     deviceStatusPollInFlight = true;
     try {
-        const response = await fetch(API_BASE + '/management/v1/configureddevices?ts=' + Date.now(), { cache: 'no-store' });
-        if (!response.ok) return;
-        const data = await response.json();
-        if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return;
-        for (const device of data.Value.concat(await fetchFailedDevices())) {
+        const rows = await fetchDeviceStatusRows();
+        noteBridgeAnswered();
+        for (const device of rows.concat(await fetchFailedDevices())) {
             const status = deviceStatus(device);
             document.querySelectorAll('.status-dot').forEach(dot => {
                 if (dot.dataset.deviceType === String(device.DeviceType) &&
@@ -1728,16 +1795,22 @@ async function pollDeviceStatus() {
             });
         }
     } catch (e) {
-        // Next tick retries; the dots keep their last state.
+        deviceStatusFailures += 1;
+        markStatusDotsStale(true);
+        renderLinkBanner();
     } finally {
         deviceStatusPollInFlight = false;
+        scheduleDeviceStatusPoll(linkStatus(deviceStatusFailures, deviceStatusLastGoodAt, Date.now()).nextDelayMs);
     }
 }
 
+let deviceStatusPollStarted = false;
+
 function startDeviceStatusPoll() {
-    if (deviceStatusPollTimer === null) {
-        deviceStatusPollTimer = setInterval(pollDeviceStatus, DEVICE_STATUS_POLL_MS);
-    }
+    if (deviceStatusPollStarted) return;
+    deviceStatusPollStarted = true;
+    scheduleDeviceStatusPoll(STATUS_POLL_MS);
+    setInterval(renderLinkBanner, 1000);
 }
 
 // Refresh devices
