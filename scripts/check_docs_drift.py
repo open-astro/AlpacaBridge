@@ -3877,6 +3877,9 @@ def self_test():
     f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\tfake_bisque_mount.h\tno-fake\t6\t-\n")
     check("conformu runs: a no-fake record that names a fake header is flagged",
           len(f) == 1 and "names a fake header" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("run\t1\t", "run\t\t"))
+    check("conformu runs: a run record with no slice is flagged",
+          len(f) == 1 and "a run record names the slice" in f[0])
 
     rx_ok = 'static const std::regex kX(R"(a)");\n'
     check("static regex: a static const regex is clean", _static_regex_findings(rx_ok) == [])
