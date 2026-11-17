@@ -194,7 +194,8 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     REQUIRE(driver->get_slewing());  // the park is still in flight
     // #2287: a bad sync argument is InvalidValue even while parked; the argument check comes first.
     require_alpaca_error([&] { driver->sync_to_coordinates(25.0, 20.0); }, alpacacore::AlpacaError::InvalidValue);
-    REQUIRE(driver->get_slewing());  // the refused sync left the park in flight
+    require_alpaca_error([&] { driver->sync_to_coordinates(5.0, 91.0); }, alpacacore::AlpacaError::InvalidValue);
+    REQUIRE(driver->get_slewing());  // the refused syncs left the park in flight
     driver->abort_slew();            // ...but AbortSlew may cancel it
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
