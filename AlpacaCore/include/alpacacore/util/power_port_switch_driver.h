@@ -64,7 +64,10 @@ inline const char* power_port_mode_text(bool pwm_enabled) { return pwm_enabled ?
 // is_open(), get_value(index) and set_value(index, int). It is built in place
 // from the arguments after the profile, so each factory passes what its
 // wrapper's constructor takes. The general rules are in the GPIO section of
-// ascom-contract.instructions.md and in decision 0021.
+// ascom-contract.instructions.md and in decision 0021. A board added from a
+// new vendor directory also goes into SHARED_DRIVER_HEADERS in
+// scripts/check_docs_drift.py and DELEGATING_FACTORIES in
+// scripts/check_stress_registration.py, or those gates miss it.
 template <typename Wrapper>
 class PowerPortSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
