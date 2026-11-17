@@ -1069,6 +1069,7 @@ TEST_CASE("ZWO individual guide-rate writes update the shared rate without a get
     rig.connect();
     error([&] { write(2.0 * kSidereal); }, AlpacaError::InvalidValue);  // connected: refused, not clamped to 0.90x
     REQUIRE_NOTHROW(write((0.90 + 5e-10) * kSidereal));                 // rounding just past the bound is accepted
+    REQUIRE_NOTHROW(write((0.10 - 5e-10) * kSidereal));                 // and just under the low bound
     write(0.003);
     const auto before = rig.driver->get_guide_rate();
     write(0.001);
