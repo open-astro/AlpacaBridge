@@ -26,6 +26,7 @@
 
 namespace {
 
+using alpacacore::test::alpaca_error_message;
 using alpacacore::test::require_alpaca_error;
 
 }  // namespace
@@ -88,6 +89,21 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Not connected throws", "[ioptr
     // Writing a *writable* port while disconnected throws NotConnected.
     require_alpaca_error([&]() { driver->set_switch(1, true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_switch_value(2, 1.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Falsified by: ioptron_switch_driver.cpp imate_profile() editing not_connected_message or a port's range_error.
+TEST_CASE("iOptron iMate PowerBox Switch Driver - error texts", "[ioptron][switch][unit]") {
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.ports[2].pwm_enabled = true;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg);
+    REQUIRE_FALSE(driver->get_connected());
+
+    CHECK(alpaca_error_message([&]() { driver->get_switch(1); }, alpacacore::AlpacaError::NotConnected) ==
+          "iMate PowerBox not connected");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(1, 2.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range [0,1]");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(2, 101.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range [0,100]");
 }
 
 // 4. Unsupported actions

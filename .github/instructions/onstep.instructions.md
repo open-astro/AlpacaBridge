@@ -35,6 +35,8 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:GX94#` | meridian flips switch (OnStepX, #2179) | `<n>#` flips on, `<n> N#` off (n 0 none, 1 east, 2 west) | `#`-terminated; strict, else unknown |
 | `:GXE9#` / `:GXEA#` | meridian limit east / west (OnStepX, #2179) | whole minutes past the meridian `#`, may be 0 or negative | `#`-terminated; whole number, else unknown |
 | `:GXEe#` / `:GXEw#` | RA-axis limit min / max (OnStepX, #2179) | whole degrees `#` | `#`-terminated; whole number, else unknown |
+| `:GXEF#` / `:GXEG#` | tangent arm / sector gear (FindHome, #2296; 4.x answers `:GXEF#` only, and is not asked `:GXEG#` once its version reads) | `1`/`0` bare digit | read at the first FindHome of a session; an unknown command answers `0`; a reply that is neither digit is read again at the next |
+| `:GX93#` / `:GXE4#` | base slew period in us/step / axis 1 steps per degree (park and home bound, #2296) | `n.nnn#` / `n#` | `#`-terminated, at connect; a reply that does not parse, or `0`, keeps 20 minutes |
 | `:MNe#` / `:MNw#` | GOTO the current RA/Dec on the east / west side of the pier (the flip, #2179; OnStepX) | one digit, codes as `:MS#` | bare digit, no `#` (suppressFrame, like `:MS#`); `0` accepted; with the flips off the firmware answers the unknown-command `0`, so only a `CanSetPierSide` mount sends it |
 | `:GRa#` / `:GDe#` | RA / Dec | `HH:MM:SS.SSSS#` / `sDD*MM:SS.SSS#` | `#`-terminated. Not in the reference: aliases of `:GRH#`/`:GDH#` (OnStepX `Mount.command.cpp`, the `'a'`/`'e'` parameter) |
 | `:GA#` / `:GZ#` | altitude / azimuth | `sDD*MM#` or `sDD*MM'SS#` / `DDD*MM#` or `DDD*MM'SS#` | `#`-terminated |
@@ -547,6 +549,9 @@ command channel. Nothing scans the network; the host is typed in.
   motion it did not start, until a status shows it ended. A failure is kept as a `Park`/`FindHome` refusal is (the
   Park and FindHome bullets below) and raised by `Slewing`, and by `AtPark` (a park's) or `AtHome` (a home's), as
   `DriverException` "<member> failed: ...", until the next motion command or a reconnect; a synchronous slew throws it.
+  The log line is WARN the first time a reason (or a landing) with a stop code appears, whichever member started the
+  motion, and INFO for each repeat of it until a status shows another code (decision 0007 rule 9: a client can repeat
+  a GOTO into a limit that stands, such as the meridian limit).
   Every status read is checked (the poll's before its restore decision, the control paths' through
   `note_status_read_locked()`), so `Slewing` never reads an end before it is judged. From the firmware sources (OnStepX
   `83857454`, OnStep 4.x `3b73bffcfb` and the `release-4.24` tip), not seen on a rig. Tests: the `OnStep limit stop -`,
@@ -555,29 +560,39 @@ command channel. Nothing scans the network; the host is typed in.
     same way on both firmwares, since the code alone is not evidence: OnStepX writes the limits as they stand, so a
     GOTO that lands close to a limit (a target may lie right at it: `Limits::validateTarget()` refuses only one beyond)
     and then tracks across it shows the code in its first end frame, and OnStep 4.x latches the code, so a GOTO can
-    start with an older stop's code. Within 1 degree of the target it landed and a WARN names the code; away from it,
-    or with a position that cannot be read (a stop code is never read as a landing without the position that shows
-    it), the mount stopped short: "<member> failed: OnStep stopped the GOTO at the horizon limit (:GU# general error
-    2)". A GOTO started with tracking off (the Alt/Az slews) holds its target's hour angle on both firmwares (OnStepX
-    `Goto.cpp` moves the target only while tracking; OnStep 4.x likewise), so its target RA is advanced by the sidereal
+    start with an older stop's code. Within 1 degree of the target it landed and the log names the code (at WARN the
+    first time, as above); away from it, or with a position that cannot be read (a stop code is never read as a landing
+    without the position that shows it), the mount stopped short: "<member> failed: OnStep stopped the GOTO at the
+    horizon limit (:GU# general error 2)". A GOTO started with tracking off (the Alt/Az slews) holds its target's
+    hour angle on both firmwares (OnStepX `Goto.cpp` moves the target only while tracking; OnStep 4.x likewise), so its target RA is advanced by the sidereal
     time since the command before the comparison: a slow Alt/Az slew that sits at the requested Alt/Az lands. A flip
     is judged against the position it slews back to and, when the frame reports a side, the requested pier side; the
     side alone is not enough, since OnStepX derives it from axis2 and a flip stopped part-way can already show it. 1 degree is generous on purpose (the driver had no
     landing tolerance; other drivers here use 3 to 600 arcseconds, and it is 4 minutes of a stopped mount's RA drift),
-    so a landing is never read as a stop; a stop that ends inside it reads as a landing. The frame's position decides
-    on the poll; a control-path read without one reads `:GRa#`/`:GDe#` at once (the only new exchange, and only then),
-    and if that fails the next status decides. No #1230 tracking restore follows a stop code on OnStepX, landed or not:
+    so a landing is never read as a stop; a stop that ends inside it reads as a landing. It is not tightened, for the
+    same reasons a GOTO that ends with no stop code is not judged by its position (below), and the log names the code.
+    The frame's position decides on the poll; a control-path read without one reads `:GRa#`/`:GDe#` at once (the only
+    new exchange, and only then), and if that fails the next status decides. No #1230 tracking restore follows a stop code on OnStepX, landed or not:
     it stops tracking at the horizon and overhead limits only on the crossing (`!lastError.altitude.min &&
     error.altitude.min`) and does not limit-check `:Te#`, so a restore would track on past them. On OnStep 4.x a landing
     keeps its restore, since 4.x re-checks its limits on every pass and stops tracking again past one (`OnStep.ino`
     safety checks); a slew that stopped short gets none. `AbortSlew` keeps the watched slew through its own supersede
     until its restore decision, since its `:GU#` read may be the first to see the stop, then drops the watch and the
-    failure (it is a new motion command), logging what the read decided at INFO only. On OnStepX it also sends no
-    restore when its read shows a stop code, GOTO flag or not: a limit stop runs `goTo.abort()`, which keeps
-    `GS_GOTO` while the mount brakes, and has already turned tracking off. On OnStep 4.x the abort's read is judged
-    like any end: with an older stop code still latched (rare, since `:Te#` clears it), a slew aborted short of its
-    target reads as stopped short and also gets no restore. A GOTO that ends away from its target with no stop code (a handset abort)
-    still reads as landed.
+    failure (it is a new motion command), also when a stop fails: a `:Q#` that fails may still have reached the mount
+    (the wrapper writes it, then drains, and a hangup in the drain fails it), so a kept watch could report the client's
+    own abort as a limit stop, on OnStep 4.x from an older held code. A link lost before the call fails it with
+    `NotConnected` before the watch is touched, and a relink inside the preserve window still judges that GOTO. The
+    abort logs what its read decided at INFO only. On OnStepX it also sends no restore when its read shows a stop code,
+    GOTO flag or not: a limit stop runs `goTo.abort()`, which keeps `GS_GOTO` while the mount brakes, and has already
+    turned tracking off. On OnStep 4.x the abort's read is judged like any end: with an older stop code still latched
+    (it is held until an unpark, a home reset, a reboot or an accepted `:Te#`; the driver starts 4.x tracking with
+    `:ST60.164275#`, which does not clear it, so it can be held long after the stop), a slew aborted short of its
+    target reads as stopped short and also gets no restore. A GOTO that ends away from its target with no stop code (a
+    handset abort) still reads as landed: with no code the end position would be the only evidence, and a healthy GOTO can end away
+    from the target the driver sent. OnStepX takes a `Tracking` write during a GOTO (`:Te#`/`:Td#` have no GOTO
+    refusal), which changes whether the firmware holds the target's RA or its hour angle; a tracking OnStepX GOTO
+    follows the RA and Dec rate offsets on its final approach (`Goto.cpp` `poll()`); and a relink judges a GOTO the user
+    may have moved on from with the handset during the outage.
   - **A park** ends with no GOTO and no `I`; both firmwares go from parking to parked or failed in one step (OnStepX
     `Goto.cpp` `poll()` then `Park::requestDone()`, OnStep 4.x `MoveTo.ino`), so no healthy park shows that frame
     unparked. Parked succeeded; `F`, a stop code, or (once a status showed the park running) an end without either, a
@@ -589,14 +604,26 @@ command channel. Nothing scans the network; the host is typed in.
     not judged from such a frame: after the switches OnStepX moves on to the sense offset (up to
     180 degrees, `Home.command.cpp` `:hC1`/`:hC2`) as an axis move with nothing in `:GU#` (`Home.cpp` `guideDone()`),
     and OnStep 4.x is idle between its fast and slow search (`Home.ino` `FH_IDLE`). Neither is a home not yet seen
-    running. Those are left to the bound.
-  - **The bound**: a park or home not ended 20 minutes after the command fails ("the mount did not finish the park
-    within 20 minutes"), checked on every status read and by the getters, on the task clock (decision 0005). OnStepX
-    slews at no less than half its base rate (`:SX92`, `usPerStepBase` x 2; 1 deg/s by default, `Config.h`), so a
-    180-degree move takes at most 6 minutes there; 20 minutes also covers a 0.3 deg/s base rate and a home's two
-    searches. A status showing `w` (a GOTO waiting at home for the user) restarts it. It only reports: nothing is sent,
-    as for the driver's other timed-out waits, and the client can `AbortSlew`. INDI's `lx200_OnStep` uses 300 s from
-    `:hP#`.
+    running. Those are left to the bound. A switch home that fails is not always seen. An OnStepX search that a
+    handset or ST4 stop ends, or that reaches its 600 s `GUIDE_HOME_TIME_LIMIT`, re-zeroes the axes at the home position
+    where they stopped (`Home.cpp` `guideDone(false)` calls `reset()`). `H` is a match of the axis coordinates with home
+    (`Mount.h` `isHome()`), so the end frame shows `H` and the driver reports the home reached. OnStepX keeps the
+    failure (`home.failed`) out of `:GU#` and every `:GX` reply. A mount with absolute encoders, or one whose reset the
+    sync threshold refuses, shows no `H`, so the bound fails it. OnStep 4.x latches error `3` on a timed-out search and
+    does not set `atHome` (`Home.ino` `checkHome()`), so the bound fails it. On a mount built with a tangent arm or a
+    sector gear (`:GXEF#`/`:GXEG#` answer `1`), FindHome centres that axis and neither firmware then reports `H`
+    (OnStep 4.x `MoveTo.ino` sets `atHome` only without a tangent arm; OnStepX `Home::request()` moves the axis with no
+    home state). So that home is not watched: `AtHome` stays false and no failure is kept.
+  - **The bound**: a park or home not ended within its bound after the command fails ("the mount did not finish the
+    park within N minutes"), checked on every status read and by the getters, on the task clock (decision 0005). The
+    bound is 2160 s divided by the base slew rate in deg/s (`:GX93#` us/step and `:GXE4#` steps per degree, read at
+    connect), never under 20 minutes and never over 24 hours. Both firmwares move a park or home at no less than a quarter of the base: the
+    slowest preset halves it (`Goto.cpp`, 4.x `Initialize.ino`), and the 4.x switch search halves it again
+    (`Home.ino`). A move is at most 180 degrees twice (1440 s at a quarter of 1 deg/s), with half again for margin;
+    the quarter also covers an OnStepX `AXIS2_SLEW_RATE_PERCENT` down to 50 at the slowest preset. A mount whose rate does not read keeps 20 minutes. The bound is fixed when the
+    command is taken, and a relink keeps it. A status showing `w` (a GOTO waiting at home for the user) restarts it.
+    It only reports: nothing is sent, as for the driver's other timed-out waits, and the client can `AbortSlew`.
+    INDI's `lx200_OnStep` uses 300 s from `:hP#`.
   - **Across a relink** (#521): a relink that leaves the motion running, inside the preserve window, or a park past it
     (#1289), keeps the watch, and the relink's first `:GU#` (the connect's seed frame, with its position) judges it at
     once by the rules above, so a stop during the outage still fails it. When that frame has no position the check
@@ -734,7 +761,7 @@ command channel. Nothing scans the network; the host is typed in.
     the park or home. `Slewing` reads true meanwhile.
   - **Code 22 is retried** every 200 ms for 3 s in that task, also when the first try on a still mount
     met it. A refusal the task meets, or a park or home the mount takes and then stops, abandons or does not finish
-    within the 20-minute bound (#2296, the stop bullet above), is kept and raised by `Slewing`, and by `AtPark` (a park's) or
+    within its bound (#2296, the stop bullet above), is kept and raised by `Slewing`, and by `AtPark` (a park's) or
     `AtHome` (a home's), until the next motion command (`MoveAxis`, `AbortSlew`, a GOTO, `Unpark`,
     `Park`, `FindHome`; a `Park` or `FindHome` that is a no-op because the mount is already parked,
     parking, home or homing clears it too) or a reconnect clears it; those also end a task still running, without

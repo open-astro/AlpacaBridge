@@ -44,7 +44,15 @@ Checks:
      stated anywhere the globs below reach: a number is a second source of
      truth for a list that is already gated by name, and it is what went
      stale before. CHANGELOG.md is exempt -- its entries describe what was
-     true when they were written.
+     true when they were written. A driver class shared by several vendors
+     (SHARED_DRIVER_HEADERS, today PowerPortSwitchDriver) is scanned through
+     the vendor directories its tuple lists, so the check also holds each
+     tuple to the vendor directories under AlpacaCore/src/vendors and
+     AlpacaCore/include/alpacacore/vendor that instantiate the header's class
+     template: SHARED DRIVER VENDOR UNLISTED for an instantiating vendor the
+     tuple misses (its is_open() would go unread), STALE SHARED DRIVER VENDOR
+     for a listed vendor that no longer instantiates it, and SHARED DRIVER
+     CLASS NOT FOUND when the header defines no class template to look for.
   6. The QHYSDK seam's three parallel lists agree: every pure virtual on the
      interface has a LockedQHYSDK override, every override actually takes the
      shared mutex through the one-argument locked() -- except two: cancel_exposure(),
@@ -525,6 +533,8 @@ DRIVER_PROSE_NAMES = {
 # against "lock-free", as a vendor driver's own directory does). Without the
 # entry, the power-port switches would have left the gate when their
 # get_connected() moved into the shared header (#2264).
+# shared_driver_vendor_findings() holds each tuple to the vendor directories
+# that instantiate the class, in both directions.
 SHARED_DRIVER_HEADERS = {
     "AlpacaCore/include/alpacacore/util/power_port_switch_driver.h": ("zwo", "ioptron", "touptek"),
 }
@@ -661,6 +671,72 @@ def _get_connected_sources():
     return sources
 
 
+SHARED_DRIVER_CLASS_RE = re.compile(r"template\s*<[^>]*>\s*class\s+(\w+)")
+
+
+def _strip_cpp_comments(text):
+    """text without /* */ blocks and // line comments (string literals are not special-cased)."""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+def shared_driver_vendor_findings(vendor_roots=None, shared=None):
+    """[finding] for each SHARED_DRIVER_HEADERS entry whose vendor tuple disagrees
+    with the vendor sources that instantiate its class.
+
+    Pure over the paths given, so --self-test can drive it. vendor_roots is
+    AlpacaCore/src/vendors and AlpacaCore/include/alpacacore/vendor by default
+    (a vendor alias declared in a wrapper header counts too); the vendor is the
+    first directory under the root. shared is SHARED_DRIVER_HEADERS by default;
+    a relative key resolves against the repo root, an absolute one is used as is.
+    A missing header is skipped: check 5 already reports it as
+    GET_CONNECTED SOURCE MISSING.
+    """
+    if vendor_roots is None:
+        vendor_roots = [ROOT / "AlpacaCore" / "src" / "vendors",
+                        ROOT / "AlpacaCore" / "include" / "alpacacore" / "vendor"]
+    if shared is None:
+        shared = SHARED_DRIVER_HEADERS
+    sources = []
+    for root in vendor_roots:
+        root = Path(root)
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and path.suffix in (".cpp", ".h", ".hpp"):
+                text = _strip_cpp_comments(path.read_text(encoding="utf-8", errors="replace"))
+                sources.append((path.relative_to(root).parts[0], path, text))
+    findings = []
+    for header, listed in shared.items():
+        header_path = Path(header)
+        if not header_path.is_absolute():
+            header_path = ROOT / header_path
+        if not header_path.is_file():
+            continue
+        shown = _display_path(header_path)
+        classes = SHARED_DRIVER_CLASS_RE.findall(header_path.read_text(encoding="utf-8", errors="replace"))
+        if not classes:
+            findings.append(
+                "SHARED DRIVER CLASS NOT FOUND: %s defines no class template; update "
+                "SHARED_DRIVER_CLASS_RE or the entry" % shown)
+            continue
+        users = {}
+        for cls in classes:
+            use_re = re.compile(r"\b%s\s*<" % re.escape(cls))
+            for vendor, path, text in sources:
+                if vendor not in users and use_re.search(text):
+                    users[vendor] = (path, cls)
+        for vendor in sorted(set(users) - set(listed)):
+            path, cls = users[vendor]
+            findings.append(
+                "SHARED DRIVER VENDOR UNLISTED: %s instantiates %s (%s) but SHARED_DRIVER_HEADERS does not "
+                "list '%s'; add it, or check 5 never reads that vendor's is_open()"
+                % (_display_path(path), cls, shown, vendor))
+        for vendor in sorted(set(listed) - set(users)):
+            findings.append(
+                "STALE SHARED DRIVER VENDOR: '%s' is listed for %s but nothing under its vendor directories "
+                "instantiates %s" % (vendor, shown, ", ".join(classes)))
+    return findings
+
+
 def classify_get_connected_bodies(sources=None):
     """({basename: kind}, [findings]) for every vendor get_connected() override.
 
@@ -788,6 +864,7 @@ def blocking_list_findings(header, kinds):
 
 def check_blocking_get_connected_list():
     kinds, failures = classify_get_connected_bodies()
+    failures.extend(shared_driver_vendor_findings())
     if not kinds:
         return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
 
@@ -3835,6 +3912,41 @@ def self_test():
     f = blocking_list_findings(bl_header.replace("switch drivers ()", "switch drivers (PowerPortSwitchDriver)"),
                                dict(bl_kinds, **{"power_port_switch_driver.h": "driver-mutex"}))
     check("blocking list: the re-locked shared getter named in the switches list reports nothing", f == [])
+    # check 5: each SHARED_DRIVER_HEADERS tuple against the vendors that instantiate the class.
+    with tempfile.TemporaryDirectory() as sd_tmp:
+        sd = Path(sd_tmp)
+        sd_hdr = sd / "foo.h"
+        sd_hdr.write_text("template <typename W>\nclass FooDriver {};\n")
+        sd_vendors = sd / "vendors"
+        (sd_vendors / "a").mkdir(parents=True)
+        (sd_vendors / "b").mkdir()
+        (sd_vendors / "a" / "x.cpp").write_text("using D = util::FooDriver<AW>;\n")
+        (sd_vendors / "b" / "y.cpp").write_text("auto d = std::make_unique<util::FooDriver<BW>>(1);\n")
+        f = shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a",)})
+        check("shared driver vendors: a vendor that instantiates the class but is not listed is "
+              "SHARED DRIVER VENDOR UNLISTED",
+              len(f) == 1 and f[0].startswith("SHARED DRIVER VENDOR UNLISTED") and "'b'" in f[0])
+        f = shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b", "c")})
+        check("shared driver vendors: a listed vendor that no longer instantiates the class is "
+              "STALE SHARED DRIVER VENDOR",
+              len(f) == 1 and f[0].startswith("STALE SHARED DRIVER VENDOR") and "'c'" in f[0])
+        check("shared driver vendors: a tuple that matches the instantiations reports nothing",
+              shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")}) == [])
+        (sd_vendors / "c").mkdir()
+        (sd_vendors / "c" / "z.cpp").write_text(
+            "// util::FooDriver<CW> is not used here\n/* FooDriver<CW> */\n")
+        check("shared driver vendors: a mention in a comment is not an instantiation",
+              shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")}) == [])
+        sd_inc = sd / "inc"
+        (sd_inc / "d").mkdir(parents=True)
+        (sd_inc / "d" / "w.h").write_text("using X = util::FooDriver<DW>;\n")
+        f = shared_driver_vendor_findings([sd_vendors, sd_inc], {sd_hdr: ("a", "b")})
+        check("shared driver vendors: an alias in a second root (a vendor header) counts",
+              len(f) == 1 and f[0].startswith("SHARED DRIVER VENDOR UNLISTED") and "'d'" in f[0])
+        sd_hdr.write_text("struct NotATemplate {};\n")
+        f = shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")})
+        check("shared driver vendors: a header with no class template is SHARED DRIVER CLASS NOT FOUND",
+              len(f) == 1 and f[0].startswith("SHARED DRIVER CLASS NOT FOUND"))
 
     # check 4: VERSION vs README badge, with the ~betaN suffix.
     b_readme = "#### [5.0.0~beta2] - 2026-11-01 &middot; [Changelog](CHANGELOG.md)\n"

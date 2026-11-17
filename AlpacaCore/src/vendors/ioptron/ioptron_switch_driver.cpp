@@ -32,6 +32,8 @@ util::PowerPortProfile imate_profile(const IoptronSwitchConfig& config) {
     profile.unique_id_prefix = "iOptron_iMate_PowerBox_";
     profile.log_category = kLogCategory;
     profile.not_connected_message = "iMate PowerBox not connected";
+    // Logged only when close() throws. This wrapper's close() logs a failed settle instead of throwing, so only an
+    // unexpected exception (a failed thread join or allocation) reaches it.
     profile.destruction_warning = "Error during iMate PowerBox switch destruction: ";
     profile.power_on_state = config.power_on_state;
     for (const auto& p : config.ports) {

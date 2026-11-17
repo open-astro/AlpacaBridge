@@ -41,6 +41,7 @@ using alpacacore::test::ioctl_stub;
 using alpacacore::test::IoctlStub;
 using alpacacore::test::StubDeviceFile;
 
+using alpacacore::test::alpaca_error_message;
 using alpacacore::test::require_alpaca_error;
 
 } // namespace
@@ -110,6 +111,22 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - value range is InvalidValue while dis
     // A PWM port takes 0-100.
     require_alpaca_error([&]() { driver->set_switch_value(3, 101.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_switch_value(3, 100.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Falsified by: zwo_asiair_plus_switch_driver.cpp asiair_plus_profile() editing not_connected_message or a port's
+// range_error.
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - error texts", "[zwo][switch][asiair-plus][unit]") {
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    REQUIRE_FALSE(driver->get_connected());
+
+    CHECK(alpaca_error_message([&]() { driver->get_switch(0); }, alpacacore::AlpacaError::NotConnected) ==
+          "ASIAIR Plus switch not connected");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(2, 2.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range");
+    CHECK(alpaca_error_message([&]() { driver->set_switch_value(3, 101.0); }, alpacacore::AlpacaError::InvalidValue) ==
+          "Switch value out of range");
 }
 
 TEST_CASE("ZWO ASIAIR Plus Switch Driver - Unsupported actions",

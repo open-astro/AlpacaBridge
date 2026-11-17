@@ -174,6 +174,10 @@ struct ContractEntry {
     DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
     int switch_writable_id = -1;
     const char* switch_caps_source = "";
+    // Switch only (with_static_switch_range): the MaxSwitchValue of switch_writable_id from static configuration, or
+    // -1 when the range is read from the device. When set, the sweep probes SetSwitchValue just outside 0..max while
+    // disconnected and requires InvalidValue (value checks precede the connection check).
+    double switch_static_max_value = -1.0;
 };
 
 // Platform 7 interface versions per device type.
@@ -251,6 +255,11 @@ inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_swit
     return e;
 }
 
+inline ContractEntry with_static_switch_range(ContractEntry e, double max_value) {
+    e.switch_static_max_value = max_value;
+    return e;
+}
+
 // Source strings, kept short so every entry states one.
 inline constexpr const char* kSrcAgents =
     "protocol document: driver-lifecycle.instructions.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
@@ -324,28 +333,32 @@ inline ContractEntry contract_entry_zwo_switch() {
 // Second and third backends behind the same (zwo, switch) router pair: the on-board GPIO switch of the
 // ASIAIR Pro and Plus (Pi CM4), and the ASIAIR Plus (RK3568) switch.
 inline ContractEntry contract_entry_zwo_switch_asiair() {
-    return with_switch_caps(make_entry(
-                                "zwo_switch_asiair", "zwo", "switch", DeviceType::Switch,
-                                [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                    return vendor::zwo::create_zwo_asiair_switch(
-                                        n, vendor::zwo::default_asiair_pro_config());
-                                },
-                                kSrcAgents),
-                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "util::PowerPortSwitchDriver<AsiairProtocolWrapper>: MaxSwitch is the configured "
-                            "port count; CanWrite is true and CanAsync false, both after validate_id only");
+    return with_static_switch_range(
+        with_switch_caps(make_entry(
+                             "zwo_switch_asiair", "zwo", "switch", DeviceType::Switch,
+                             [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                 return vendor::zwo::create_zwo_asiair_switch(n,
+                                                                              vendor::zwo::default_asiair_pro_config());
+                             },
+                             kSrcAgents),
+                         DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                         "util::PowerPortSwitchDriver<AsiairProtocolWrapper>: MaxSwitch is the configured "
+                         "port count; CanWrite is true and CanAsync false, both after validate_id only"),
+        1.0);
 }
 inline ContractEntry contract_entry_zwo_switch_asiair_plus() {
-    return with_switch_caps(make_entry(
-                                "zwo_switch_asiair_plus", "zwo", "switch", DeviceType::Switch,
-                                [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                    return vendor::zwo::create_zwo_asiair_plus_switch(
-                                        n, vendor::zwo::default_asiair_plus_rk3568_config());
-                                },
-                                kSrcAgents),
-                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "util::PowerPortSwitchDriver<AsiairPlusProtocolWrapper>: MaxSwitch is the configured "
-                            "port count; CanWrite is true and CanAsync false, both after validate_id only");
+    return with_static_switch_range(
+        with_switch_caps(make_entry(
+                             "zwo_switch_asiair_plus", "zwo", "switch", DeviceType::Switch,
+                             [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                 return vendor::zwo::create_zwo_asiair_plus_switch(
+                                     n, vendor::zwo::default_asiair_plus_rk3568_config());
+                             },
+                             kSrcAgents),
+                         DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                         "util::PowerPortSwitchDriver<AsiairPlusProtocolWrapper>: MaxSwitch is the configured "
+                         "port count; CanWrite is true and CanAsync false, both after validate_id only"),
+        1.0);
 }
 #endif
 
@@ -441,16 +454,18 @@ inline ContractEntry contract_entry_iguider_camera() {
 
 #if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
 inline ContractEntry contract_entry_ioptron_switch() {
-    return with_switch_caps(make_entry(
-                                "ioptron_switch", "ioptron", "switch", DeviceType::Switch,
-                                [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                    return vendor::ioptron::create_ioptron_switch(
-                                        n, vendor::ioptron::default_imate_powerbox_config());
-                                },
-                                kSrcAgents),
-                            DisconnectedRead::Static, DisconnectedRead::Static, 1,
-                            "util::PowerPortSwitchDriver<IoptronPowerboxWrapper> and default_imate_powerbox_config(): "
-                            "static port table; id 0 (DC3 always on) is read-only, id 1 (DC1) is writable");
+    return with_static_switch_range(
+        with_switch_caps(make_entry(
+                             "ioptron_switch", "ioptron", "switch", DeviceType::Switch,
+                             [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                 return vendor::ioptron::create_ioptron_switch(
+                                     n, vendor::ioptron::default_imate_powerbox_config());
+                             },
+                             kSrcAgents),
+                         DisconnectedRead::Static, DisconnectedRead::Static, 1,
+                         "util::PowerPortSwitchDriver<IoptronPowerboxWrapper> and default_imate_powerbox_config(): "
+                         "static port table; id 0 (DC3 always on) is read-only, id 1 (DC1) is writable"),
+        1.0);
 }
 #endif
 
@@ -724,16 +739,18 @@ inline ContractEntry contract_entry_touptek_switch_thermal() {
 
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 inline ContractEntry contract_entry_touptek_switch() {
-    return with_switch_caps(make_entry(
-                                "touptek_switch", "touptek", "switch", DeviceType::Switch,
-                                [](int n) -> std::unique_ptr<AlpacaDriver> {
-                                    return vendor::touptek::create_touptek_switch(
-                                        n, vendor::touptek::default_stellavita_config());
-                                },
-                                kSrcAgents),
-                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "util::PowerPortSwitchDriver and default_stellavita_config(): static port table, "
-                            "all four ports writable");
+    return with_static_switch_range(
+        with_switch_caps(make_entry(
+                             "touptek_switch", "touptek", "switch", DeviceType::Switch,
+                             [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                 return vendor::touptek::create_touptek_switch(
+                                     n, vendor::touptek::default_stellavita_config());
+                             },
+                             kSrcAgents),
+                         DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                         "util::PowerPortSwitchDriver and default_stellavita_config(): static port table, "
+                         "all four ports writable"),
+        1.0);
 }
 #endif
 
