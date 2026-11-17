@@ -133,7 +133,7 @@ jobs:
           path: |
             ~/.local/share/claude
             ~/.local/bin/claude
-          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+          key: claude-code-cli-2.1.325-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install the Claude Code CLI on a cache miss
         if: steps.claude_cli_cache.outputs.cache-hit != 'true'
@@ -143,7 +143,7 @@ jobs:
           set -o pipefail
           # Longer backoff than the action's own installer: 15, 30, 60, 120 s.
           for wait in 15 30 60 120 stop; do
-            if curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.302; then
+            if curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.325; then
               exit 0
             fi
             if [ "${wait}" = stop ]; then
@@ -158,9 +158,9 @@ jobs:
         run: |
           reported="$("${HOME}/.local/bin/claude" --version)" || reported="(claude did not run)"
           case "${reported}" in
-            2.1.302\ *|2.1.302) echo "Claude Code CLI ${reported}" ;;
+            2.1.325\ *|2.1.325) echo "Claude Code CLI ${reported}" ;;
             *)
-              echo "::error::Expected Claude Code CLI 2.1.302, got: ${reported}"
+              echo "::error::Expected Claude Code CLI 2.1.325, got: ${reported}"
               exit 1
               ;;
           esac
@@ -172,7 +172,7 @@ jobs:
           path: |
             ~/.local/share/claude
             ~/.local/bin/claude
-          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+          key: claude-code-cli-2.1.325-${{ runner.os }}-${{ runner.arch }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
