@@ -155,8 +155,8 @@ TEST_CASE("LockedHttpClient over FakeHttpClient - requests forward one at a time
     std::vector<std::thread> threads;
     for (int i = 0; i < 4; ++i) {
         threads.emplace_back([&locked, &good_bodies, i] {
-            const auto r = (i % 2 == 0) ? locked.get("http://x/", kTimeout)
-                                        : locked.put_form("http://x/", "a=1", kTimeout);
+            const auto r =
+                (i % 2 == 0) ? locked.get("http://x/", kTimeout) : locked.put_form("http://x/", "a=1", kTimeout);
             if (r.body == "body") ++good_bodies;
         });
     }
