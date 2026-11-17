@@ -832,17 +832,22 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        if (!std::isfinite(duration) || duration <= 0.0) {
-            throw AlpacaException("Exposure duration must be positive", AlpacaError::InvalidValue);
+        // #2259 canonical order: a duration invalid whatever the camera is, then the connection, then the camera's own
+        // range. 0 (a bias frame) and anything below the SDK minimum run at the minimum (ExposureMin).
+        if (!std::isfinite(duration) || duration < 0.0) {
+            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
+        }
+        const double exposure_us_value = duration * 1'000'000.0;
+        if (!std::isfinite(exposure_us_value) ||
+            exposure_us_value >= static_cast<double>(std::numeric_limits<long>::max())) {
+            throw AlpacaException("Exposure duration is out of range", AlpacaError::InvalidValue);
         }
         ensure_connected();
         auto caps = get_control_caps_or_throw(ZWOControlType::Exposure);
-        const double exposure_us_value = duration * 1'000'000.0;
-        if (!std::isfinite(exposure_us_value) || exposure_us_value < static_cast<double>(caps.min_value) ||
-            exposure_us_value > static_cast<double>(caps.max_value)) {
+        if (exposure_us_value > static_cast<double>(caps.max_value)) {
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
-        const long exposure_us = static_cast<long>(std::lround(exposure_us_value));
+        const long exposure_us = std::max(static_cast<long>(std::lround(exposure_us_value)), caps.min_value);
 
         ExposureRequest request;
         request.exposure_us = exposure_us;
@@ -1885,20 +1890,25 @@ private:
         return fn(camera_id_.value());
     }
 
+    // #2259 canonical order for the geometry setters: the static value check, the connection, the camera's
+    // supported values, then the exposing check.
     void set_bin_locked(int bin_x, int bin_y) {
-        ensure_connected();
+        if (bin_x <= 0 || bin_y <= 0) {
+            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
+        }
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_id_.has_value()) {
             throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
-        ensure_frame_geometry_mutable_locked();
-        const int active_camera_id = camera_id_.value();
         if (!camera_info_valid_ || !supports_bin(camera_info_.supported_bins, bin_x)) {
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
+        ensure_frame_geometry_mutable_locked();
+        const int active_camera_id = camera_id_.value();
         bin_x_ = bin_x;
         bin_y_ = bin_y;
         int max_width = camera_info_.max_width / bin_x_;
@@ -1926,6 +1936,9 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
+        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
+            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
+        }
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_id_.has_value()) {
@@ -1956,6 +1969,9 @@ private:
     }
 
     void set_start_pos_locked(std::optional<int> start_x_opt, std::optional<int> start_y_opt) {
+        if ((start_x_opt && *start_x_opt < 0) || (start_y_opt && *start_y_opt < 0)) {
+            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
+        }
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_id_.has_value()) {
