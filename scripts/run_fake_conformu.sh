@@ -72,9 +72,15 @@ run_row() {
     return 1
   fi
 
-  curl -fsS -X POST -H 'Content-Type: application/json' \
-    -d "{\"vendor\":\"${vendor}-fake\",\"deviceType\":\"${device_type}\",\"deviceNumber\":0}" \
-    "$base/management/v1/configuredevice" | tee "$row_dir/register.json"
+  # run_row runs under `if !`, where set -e does not apply: a failed registration stops the row here, not after a
+  # ConformU run against a device that does not exist.
+  if ! curl -fsS -X POST -H 'Content-Type: application/json' \
+      -d "{\"vendor\":\"${vendor}-fake\",\"deviceType\":\"${device_type}\",\"deviceNumber\":0}" \
+      "$base/management/v1/configuredevice" | tee "$row_dir/register.json"; then
+    echo "registering ${vendor}-fake $device_type 0 failed" >&2
+    stop_server
+    return 1
+  fi
   echo
 
   raw="$row_dir/conformu-raw.txt"
@@ -106,6 +112,7 @@ failed=0
 # The list is read on fd 3, so nothing a row runs can read it from stdin.
 while IFS=$'\t' read -r vendor device_type fake_header status _slice report_path <&3; do
   [ "$vendor" = "vendor" ] && continue  # the header
+  case "$vendor" in "" | "#"*) continue ;; esac  # blank and comment lines, as check 29 skips them
   [ "$status" = "run" ] || continue
   rows=$((rows + 1))
   echo "== ConformU: $vendor $device_type over $fake_header -> $report_path"
