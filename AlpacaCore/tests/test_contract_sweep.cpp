@@ -413,8 +413,6 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"celestron_telescope", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
-    {"celestron_telescope", kOff, "sync_to_coordinates(0, 91)", kKnown, "connection checked first (#2287)"},
-    {"celestron_telescope", kOff, "sync_to_coordinates(25, 0)", kKnown, "connection checked first (#2287)"},
     // #2287, SynScan.
     {"synscan_telescope", kOff, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
     {"synscan_telescope", kOn, "set_declination_rate(NaN)", kPermanent, "set_declination_rate is not implemented"},
