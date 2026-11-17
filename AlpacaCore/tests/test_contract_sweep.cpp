@@ -4262,6 +4262,29 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
         CHECK((h.at_park_unreachable == nullptr || h.type == DeviceType::Telescope));
         CHECK((static_cast<bool>(h.failing) || std::string(h.failing_unavailable).size() > 0));
     }
+    // #2257: every kProbeExemptions row names a real entry or host id of a compiled vendor and a real telescope
+    // probe, so a renamed probe or a mistyped id cannot leave a row that silently matches nothing.
+    std::set<std::string> vendors;
+    std::set<std::string> probe_names;
+    for (const auto& e : alpacacore::test::contract::contract_entries()) {
+        vendors.insert(e.vendor);
+        if (e.type == DeviceType::Telescope && probe_names.empty()) {
+            auto d = e.make(0);
+            REQUIRE(d != nullptr);
+            for (const auto& [name, fn] : invalid_value_probes(*d, e.type)) probe_names.insert(name);
+        }
+    }
+    for (const auto& x : kProbeExemptions) {
+        const std::string id = x.id;
+        const bool compiled = std::any_of(vendors.begin(), vendors.end(), [&](const std::string& v) {
+            return id.rfind(v + "_", 0) == 0;  // a vendor name may itself contain '_'
+        });
+        if (!compiled) continue;  // that vendor is not compiled in
+        INFO("kProbeExemptions row " << id << " " << x.probe);
+        CHECK((registry_ids.count(id) == 1 || host_ids.count(id) == 1));
+        CHECK(probe_names.count(x.probe) == 1);
+        CHECK(std::string(x.reason).size() > 0);
+    }
     for (const auto& r : from_roster) {
         INFO("roster row {" << std::get<0>(r) << ", " << std::get<1>(r) << ", " << std::get<2>(r)
                             << "} has no tier-2 host in CONTRACT_SWEEP_TIER2_HOSTS");
