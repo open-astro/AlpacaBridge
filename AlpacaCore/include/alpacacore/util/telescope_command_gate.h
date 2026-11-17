@@ -15,6 +15,7 @@
 #include <alpacacore/util/pointing.h>
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <string_view>
 
@@ -45,7 +46,7 @@
 namespace alpacacore::util {
 
 /// The argument a gate refused, so the driver throws it in its own words.
-enum class TelescopeArgument {
+enum class TelescopeArgument : std::uint8_t {
     PulseDirection,         ///< PulseGuide direction outside 0-3
     PulseDuration,          ///< PulseGuide duration below 0 or above TelescopeCommandLimits::pulse_guide_max_ms
     MoveAxisAxis,           ///< a MoveAxis axis outside 0 .. move_axis_axes - 1
@@ -55,7 +56,7 @@ enum class TelescopeArgument {
 
 /// Which of the parked and link-fault checks a member family runs first. #2257 leaves this order as each driver has
 /// it, so it is per driver and member family.
-enum class ParkedFaultOrder { ParkedFirst, FaultFirst };
+enum class ParkedFaultOrder : std::uint8_t { ParkedFirst, FaultFirst };
 
 /// A driver's protocol limits and orders. Every field defaults to "no limit"; the PulseGuide direction range (0-3)
 /// and the lower bounds (duration 0, axis 0) are universal and not fields.
