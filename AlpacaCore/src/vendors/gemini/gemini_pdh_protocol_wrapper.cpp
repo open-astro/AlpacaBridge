@@ -143,17 +143,15 @@ void configure_pdh_line(struct termios& tty) {
     tty.c_cflag &= ~HUPCL;  // keep DTR high on close -- avoids CH340 MCU reset on reopen
 }
 
-// The errno of a tty whose device is gone (decision 0009 point 2a). EBADF is
-// not one: the fd is only ever bad because this process closed it.
-bool is_hangup_errno(int err) { return err == EIO || err == ENXIO || err == ENODEV; }
-
 // Read one '#'-terminated frame (terminator stripped, CR/LF skipped) within
 // timeout_ms. @p carry preserves a partial frame across calls so a frame that
-// straddles two poll windows keeps its leading bytes. With @p hangup set, a
-// read that reports the tty hung up (EIO/ENXIO/ENODEV) ends the call at once
-// and stores the errno there; without it (the probe) the read backs off and
-// keeps trying until the window ends.
-std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry, int* hangup = nullptr) {
+// straddles two poll windows keeps its leading bytes. The read goes through
+// @p link, whose verdict judges a failure (util::SerialLink, #2262: EIO,
+// ENXIO, ENODEV, EBADF). With @p hangup set, a read the link judges lost ends
+// the call at once and stores the errno there; without it (the probe) the read
+// backs off and keeps trying until the window ends.
+std::optional<std::string> read_frame(util::SerialLink& link, int timeout_ms, std::string& carry,
+                                      int* hangup = nullptr) {
     std::string frame = std::move(carry);
     carry.clear();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -163,7 +161,7 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         // Bounded by poll() (util::tty_read), never by VMIN/VTIME: a port
         // another program retunes to VMIN=1 cannot park this read (#1202).
-        const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(std::max<long long>(remaining.count(), 0)));
+        const ssize_t r = link.read(&ch, 1, static_cast<int>(std::max<long long>(remaining.count(), 0)));
         if (r == 1) {
             if (ch == '#') {
                 return frame;
@@ -182,7 +180,7 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
             // (decision 0009); the probe backs off instead of spinning. A 0
             // is the window running out, which ends the loop.
             const int err = errno;
-            if (hangup != nullptr && is_hangup_errno(err)) {
+            if (hangup != nullptr && link.lost()) {
                 *hangup = err;
                 carry = std::move(frame);
                 return std::nullopt;
@@ -194,11 +192,11 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
     return std::nullopt;
 }
 
-bool write_line(int fd, const std::string& cmd) {
+// Through @p link, whose verdict judges a failure (#2262); errno is kept.
+bool write_line(util::SerialLink& link, const std::string& cmd) {
     // The vendor driver sends every command via SerialPort.WriteLine(), i.e.
     // ">X#\n". Mirror it exactly: the firmware is only proven against that.
-    const std::string payload = cmd + "\n";
-    return util::tty_write_all(fd, payload.data(), payload.size());
+    return link.write_all(cmd + "\n");
 }
 
 // Probe a serial port with the hub's identity handshake. Returns true only
@@ -223,7 +221,7 @@ bool probe_pdh_port(const std::string& port_path) {
         // First attempt waits out the post-DTR-reset boot (vendor: 2 s flat).
         std::this_thread::sleep_for(std::chrono::seconds(attempt == 0 ? 2 : 1));
         tcflush(fd, TCIOFLUSH);
-        if (!write_line(fd, ">H#")) {
+        if (!write_line(link, ">H#")) {
             continue;
         }
         // The firmware may interleave a streamed status frame before the
@@ -233,7 +231,7 @@ bool probe_pdh_port(const std::string& port_path) {
         while (std::chrono::steady_clock::now() < deadline) {
             const auto remaining =
                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
-            auto frame = read_frame(fd, static_cast<int>(std::max<long long>(remaining.count(), 1)), carry);
+            auto frame = read_frame(link, static_cast<int>(std::max<long long>(remaining.count(), 1)), carry);
             if (!frame.has_value()) continue;
             if (is_pdh_handshake_reply(*frame)) {
                 found = true;
@@ -677,17 +675,18 @@ private:
     }
 
 #ifndef _WIN32
-    // Caller holds io_mutex_. A write that meets a hung-up tty is a lost link
-    // (decision 0009 point 2a): NotConnected, and once connected the loss is
-    // latched. Any other failure stays a DriverException.
+    // Caller holds io_mutex_. A write the link judges lost (a hung-up tty, or
+    // EBADF on its fd: util::SerialLink, #2262) is a lost link (decision 0009
+    // point 2a): NotConnected, and once connected the loss is latched. Any
+    // other failure stays a DriverException.
     void write_locked(const std::string& cmd) {
         if (!link_.is_open()) {
             throw AlpacaException("Gemini power hub serial port is not open", AlpacaError::NotConnected);
         }
         ALPACA_LOG_TRACE("Gemini", "Power hub command: " + cmd);
-        if (!write_line(link_.fd(), cmd)) {
+        if (!write_line(link_, cmd)) {
             const int err = errno;
-            if (is_hangup_errno(err)) {
+            if (link_.lost()) {
                 note_hangup_locked(err);
                 throw AlpacaException(lost_text(err), AlpacaError::NotConnected);
             }
@@ -695,7 +694,7 @@ private:
         }
     }
 
-    static std::string lost_text(int err) { return "Serial link lost (errno " + std::to_string(err) + ")"; }
+    static std::string lost_text(int err) { return util::serial_link_lost_text(err); }
 
     // Caller holds io_mutex_. Once connected, latch the loss; during the
     // connect, record the errno for throw_if_lost_during_connect() and wake a
@@ -843,7 +842,9 @@ private:
                 return;  // closed under us
             }
             int hangup = 0;
-            auto frame = read_frame(fd, kReadWindowMs, carry, &hangup);
+            // link_ itself, not a copy of its fd: the read feeds the link's verdict. Only this thread closes it
+            // (release_lost_link_locked), and teardown joins this thread before it closes.
+            auto frame = read_frame(link_, kReadWindowMs, carry, &hangup);
             if (frame.has_value()) {
                 dispatch_frame(*frame);
             }
@@ -870,9 +871,9 @@ private:
                     std::lock_guard<std::mutex> lock(io_mutex_);
                     if (connected_ && link_.is_open()) {
                         polled = true;
-                        if (!write_line(link_.fd(), ">G#")) {
+                        if (!write_line(link_, ">G#")) {
                             const int err = errno;
-                            if (is_hangup_errno(err)) {
+                            if (link_.lost()) {
                                 note_hangup_locked(err);
                                 release_lost_link_locked();
                                 return;
@@ -1013,6 +1014,7 @@ private:
         connect_hangup_errno_.store(0);
 #ifndef _WIN32
         close_serial_locked();
+        link_.clear_loss();  // the link's own verdict too (#2262)
 #endif
     }
 
@@ -1027,7 +1029,11 @@ private:
     std::string firmware_;  // "3.0.8", from >V#
     std::chrono::steady_clock::time_point last_frame_{};
     util::PolledLinkHealth health_;             // the #237 fault latch, stamped on clock_ (decision 0009)
-    std::string lost_reason_;                   // why the link was lost; kept until the next connect or disconnect
+    // Why the link was lost; kept until the next connect or disconnect. The wrapper publishes its own latch rather
+    // than read link_.lost(): Connected must not read false before the cache and firmware are cleared (rule 3, one
+    // critical section), and a fault past the staleness bound is a loss with no errno. The errno verdict itself is
+    // the link's (util::SerialLink, #2262).
+    std::string lost_reason_;
     std::atomic<bool> link_lost_{false};        // lock-free for link_alive(); set under both mutexes
     std::atomic<int> connect_hangup_errno_{0};  // a hangup seen before connected_, set under io_mutex_
 
