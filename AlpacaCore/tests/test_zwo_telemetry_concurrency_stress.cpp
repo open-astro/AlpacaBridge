@@ -1059,9 +1059,16 @@ TEST_CASE("ZWO individual guide-rate writes update the shared rate without a get
     };
     error([&] { write(50.0); }, AlpacaError::InvalidValue);
     error([&] { write(std::numeric_limits<double>::quiet_NaN()); }, AlpacaError::InvalidValue);
+    // #2257: a negative rate and a non-zero rate outside 0.10-0.90 x sidereal are refused, never clamped.
+    constexpr double kSidereal = 360.0 / 86164.0905;
+    error([&] { write(-0.002); }, AlpacaError::InvalidValue);
+    error([&] { write(2.0 * kSidereal); }, AlpacaError::InvalidValue);
+    error([&] { write(0.05 * kSidereal); }, AlpacaError::InvalidValue);
     REQUIRE_NOTHROW(write(0.002));
     error([&] { rig.driver->get_guide_rate(); }, AlpacaError::NotConnected);
     rig.connect();
+    error([&] { write(2.0 * kSidereal); }, AlpacaError::InvalidValue);  // connected: refused, not clamped to 0.90x
+    REQUIRE_NOTHROW(write((0.90 + 5e-10) * kSidereal));                 // rounding just past the bound is accepted
     write(0.003);
     const auto before = rig.driver->get_guide_rate();
     write(0.001);

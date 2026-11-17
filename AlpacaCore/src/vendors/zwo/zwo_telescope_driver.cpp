@@ -984,15 +984,22 @@ public:
             throw AlpacaException("GuideRate values must be finite", AlpacaError::InvalidValue);
         }
 
-        const double effective = std::max(std::abs(rate.ra), std::abs(rate.dec));
-        if (effective < 0.0 || effective > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("GuideRate must be in [0, max axis rate] deg/sec", AlpacaError::InvalidValue);
+        // #2257: a negative rate, or a non-zero rate outside the mount's 0.10-0.90 x sidereal, is refused before
+        // any other check and never clamped. 0 keeps its old meaning (stored, not sent).
+        if (rate.ra < 0.0 || rate.dec < 0.0) {
+            throw AlpacaException("GuideRate must not be negative", AlpacaError::InvalidValue);
         }
+        const double effective = std::max(rate.ra, rate.dec);
+        constexpr double kEps = 1e-9;
+        const double raw_multiple = effective / kSiderealRateDegPerSec;
+        if (effective > 0.0 && (raw_multiple < 0.10 - kEps || raw_multiple > 0.90 + kEps)) {
+            throw AlpacaException("GuideRate must be 0 or 0.10-0.90 x sidereal", AlpacaError::InvalidValue);
+        }
+        // Only rounding within kEps of a bound reaches this clamp; the wrapper refuses anything past [0.10, 0.90].
+        const double guide_rate_multiple = std::clamp(raw_multiple, 0.10, 0.90);
         check_writable_state();
 
         if (connected_.load() && effective > 0.0) {
-            double guide_rate_multiple = effective / kSiderealRateDegPerSec;
-            guide_rate_multiple = std::clamp(guide_rate_multiple, 0.10, 0.90);
             // set_guide_rate() returns the readback value from its internal
             // verification — no extra round-trip needed.
             const double actual_multiple = protocol_.set_guide_rate(guide_rate_multiple);
