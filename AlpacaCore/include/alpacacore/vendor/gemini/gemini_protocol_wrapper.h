@@ -56,6 +56,11 @@ struct GeminiPortInfo {
  */
 std::vector<GeminiPortInfo> enumerate_gemini_ports();
 
+/// The USB descriptor tokens of a Gemini focuser adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& gemini_focuser_usb_tokens();
+
 /**
  * @brief Protocol wrapper for the Gemini Automatic Astro Focuser Pro.
  *

@@ -265,8 +265,7 @@ namespace {
 bool raw_port_looks_like_flatpanel_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"1a86", "303a", "CH340", "CH341", "Espressif", "USB_Serial", "USB Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, gemini_flatpanel_usb_tokens());
 }
 }  // namespace
 #endif
@@ -949,5 +948,11 @@ FlatPanelMotorizedStatus GeminiFlatPanelProtocolWrapper::get_motorized_status() 
 void GeminiFlatPanelProtocolWrapper::open_cover() { impl_->open_cover(); }
 
 void GeminiFlatPanelProtocolWrapper::close_cover() { impl_->close_cover(); }
+
+const std::vector<std::string>& gemini_flatpanel_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86",      "303a",       "CH340",     "CH341",
+                                                 "Espressif", "USB_Serial", "USB Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::gemini

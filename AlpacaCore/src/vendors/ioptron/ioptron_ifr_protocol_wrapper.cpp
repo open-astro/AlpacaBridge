@@ -176,7 +176,7 @@ namespace {
 bool raw_port_looks_like_ifr_candidate(const std::string& port_path) {
     auto descriptor = util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return util::usb_tty_descriptor_matches(*descriptor, {"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"});
+    return util::usb_tty_descriptor_matches(*descriptor, ifr_usb_tokens());
 }
 }  // namespace
 #endif
@@ -601,6 +601,11 @@ IfrAck IfrLink::rotator_set_reverse(bool reversed) { return impl_->command(rever
 void reset_ifr_link_registry_for_testing() {
     std::lock_guard<std::mutex> lock(registry_mutex());
     registry().clear();
+}
+
+const std::vector<std::string>& ifr_usb_tokens() {
+    static const std::vector<std::string> tokens{"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"};
+    return tokens;
 }
 
 }  // namespace alpacacore::vendor::ioptron

@@ -279,7 +279,7 @@ std::optional<std::string> detail::raw_rotator_skip_reason(const std::optional<u
     if (!descriptor) {
         return std::string("USB descriptor unreadable");
     }
-    if (util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"})) {
+    if (util::usb_tty_descriptor_matches(*descriptor, wanderer_rotator_usb_tokens())) {
         return std::nullopt;
     }
     return "not a CH340/CH341 device (vendor " + descriptor->vendor_id + ", product \"" + descriptor->product + "\")";
@@ -922,5 +922,10 @@ void WandererRotatorProtocolWrapper::set_reverse(bool reverse) { impl_->set_reve
 void WandererRotatorProtocolWrapper::set_backlash(double degrees) { impl_->set_backlash(degrees); }
 
 void WandererRotatorProtocolWrapper::set_zero() { impl_->set_zero(); }
+
+const std::vector<std::string>& wanderer_rotator_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86", "CH340", "CH341", "USB_Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::wandererastro

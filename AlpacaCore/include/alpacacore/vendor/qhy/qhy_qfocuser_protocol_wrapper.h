@@ -92,6 +92,11 @@ std::map<std::string, std::string> parse_qfocuser_reply(std::string_view text);
  */
 std::vector<QFocuserPortInfo> enumerate_qfocuser_ports();
 
+/// The USB descriptor tokens of a Q-Focuser adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& qfocuser_usb_tokens();
+
 /**
  * @brief The scan's probe of one port: the {"cmd_id":1} handshake under a probe
  * claim (#1202). True, with @p info filled, only for a reply with idx 1 and a

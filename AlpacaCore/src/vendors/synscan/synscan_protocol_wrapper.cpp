@@ -167,8 +167,7 @@ std::string probe_synscan_port(const std::string& port_path) {
 bool raw_port_looks_like_synscan_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, synscan_usb_tokens());
 }
 
 // Issue #1202: whether the scan may probe @p resolved. A port another
@@ -1384,6 +1383,12 @@ TimeInfo SynScanProtocolWrapper::get_time() {
 
 void SynScanProtocolWrapper::set_time(const TimeInfo& info) {
     pimpl_->set_time(info);
+}
+
+const std::vector<std::string>& synscan_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",     "067b",      "FTDI",
+                                                 "CP210",    "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 } // namespace alpacacore::vendor::synscan

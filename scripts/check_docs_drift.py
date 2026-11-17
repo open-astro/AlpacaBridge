@@ -246,6 +246,14 @@ Checks:
      check list: `// NOLINT(bugprone-empty-catch): the poll retries` (issue
      #2059). A suppression with no reason cannot be reviewed, and `git grep
      NOLINT` shows only that line. NOLINTEND is exempt.
+ 29. A serial device's USB identity has one home (issue #2312): the wrapper's
+     `<x>_usb_tokens()`. Under AlpacaCore/src/vendors, no raw-node filter
+     passes a braced token list to usb_tty_descriptor_matches(); every
+     `<x>_usb_tokens()` a wrapper defines is matched by that wrapper's own
+     filter and registered by a *_catalog.cpp through add_usb_serial_identity();
+     and every name a catalog registers is defined. Otherwise the
+     attacheddevices listing and the connect-time scan could disagree about
+     which adapters a device ships with, or the listing could miss a device.
 """
 
 import glob
@@ -1811,6 +1819,7 @@ HELPER_FAKES = {
     "fake_http_client.h": "scripted util::HttpClient injected through the WeeWX factory overload; no transport of its own to roster",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
     "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
+    "fake_usb_serial_tree.h": "fake /dev, by-id and sysfs tree for the attacheddevices listing (#2312); no driver connects through it",
 }
 
 
@@ -3192,6 +3201,75 @@ def check_nolint_reasons(root=ROOT):
     return _nolint_reason_findings(files)
 
 
+# --- check 29: a serial device's USB identity has one home (issue #2312) ------
+
+USB_TOKENS_DEF_RE = re.compile(r"^const std::vector<std::string>& (\w+_usb_tokens)\(\) \{", re.MULTILINE)
+USB_TOKENS_NAME_RE = re.compile(r"\b(\w+_usb_tokens)\(\)")
+USB_MATCH_CALL_RE = re.compile(r"\busb_tty_descriptor_matches\(")
+USB_IDENTITY_CALL_RE = re.compile(r"\badd_usb_serial_identity\(")
+
+
+def _call_args(code, pattern):
+    """(start, argument text) of each call to `pattern`, the arguments read up
+    to the matching parenthesis, so a call inside an `if (...)` is whole."""
+    calls = []
+    for m in pattern.finditer(code):
+        depth = 0
+        for i in range(m.end() - 1, len(code)):
+            if code[i] == "(":
+                depth += 1
+            elif code[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append((m.start(), code[m.end():i]))
+                    break
+    return calls
+# A floor, not a count: 17 wrappers define a list today. Lower it when one goes.
+MIN_USB_TOKEN_LISTS = 15
+
+
+def _usb_identity_findings(wrappers, catalogs, floor=MIN_USB_TOKEN_LISTS):
+    """Check 29 over {path: text} maps of wrapper and catalog sources. Pure, so
+    --self-test can drive it."""
+    findings = []
+    defined = {}
+    for path, text in sorted(wrappers.items()):
+        code = _strip_comments(text)
+        matched = set()
+        for start, args in _call_args(code, USB_MATCH_CALL_RE):
+            if "{" in args:
+                findings.append("%s:%d: a raw-node filter passes a braced token list to usb_tty_descriptor_matches(); "
+                                "move it into the wrapper's <x>_usb_tokens() so the catalog's USB identity reads the "
+                                "same list (#2312)" % (path, code.count("\n", 0, start) + 1))
+            matched.update(USB_TOKENS_NAME_RE.findall(args))
+        for name in USB_TOKENS_DEF_RE.findall(code):
+            defined[name] = path
+            if name not in matched:
+                findings.append("%s defines %s() but its raw-node filter does not match it: the listing and the "
+                                "connect-time scan would read different lists" % (path, name))
+    registered = set()
+    for _, text in sorted(catalogs.items()):
+        for _, args in _call_args(_strip_comments(text), USB_IDENTITY_CALL_RE):
+            registered.update(USB_TOKENS_NAME_RE.findall(args))
+    for name in sorted(set(defined) - registered):
+        findings.append("%s defines %s() but no *_catalog.cpp registers it with add_usb_serial_identity(): the "
+                        "attacheddevices listing would miss that device" % (defined[name], name))
+    for name in sorted(registered - set(defined)):
+        findings.append("a *_catalog.cpp registers %s() but no wrapper under AlpacaCore/src/vendors defines it" % name)
+    if len(defined) < floor:
+        findings.insert(0, "found only %d <x>_usb_tokens() definition(s) under AlpacaCore/src/vendors (floor %d): "
+                           "the definition pattern or the file listing regressed" % (len(defined), floor))
+    return findings
+
+
+def check_usb_identity_single_source(root=ROOT):
+    wrappers, catalogs = {}, {}
+    for path in sorted(Path(root).glob("AlpacaCore/src/vendors/*/*.cpp")):
+        rel = path.relative_to(root).as_posix()
+        (catalogs if rel.endswith("_catalog.cpp") else wrappers)[rel] = read(rel, root)
+    return _usb_identity_findings(wrappers, catalogs)
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -3223,6 +3301,7 @@ CHECKS = [
     ("Celestron CGX state-frame writers match the pinned callers", check_cgx_frame_writers),
     ("Every workflow job sets timeout-minutes", check_workflow_job_timeouts),
     ("Every NOLINT in first-party C/C++ gives its reason", check_nolint_reasons),
+    ("Each serial device's USB identity is its wrapper's token list", check_usb_identity_single_source),
 ]
 
 
@@ -4575,6 +4654,32 @@ def self_test():
     check("cgx writers: a new writer call is reported", any("sync() calls write_frame() 1 time(s), pinned 0" in x for x in f))
     f = _cgx_frame_writer_findings(writer_src, {**writer_pins, ("gone", "write_frame"): (1, "")})
     check("cgx writers: a pinned caller that no longer writes is reported", any("gone() calls write_frame() 0" in x for x in f))
+
+    # check 29: one home for a serial device's USB identity (literal fixtures).
+    usb_wrapper = ("namespace {\nbool raw(const D& d) {\n    // usb_tty_descriptor_matches(d, {\"x\"}); in a comment\n"
+                   "    return util::usb_tty_descriptor_matches(*d, foo_usb_tokens());\n}\n}  // namespace\n"
+                   "const std::vector<std::string>& foo_usb_tokens() {\n    static const std::vector<std::string> t{\"1a86\"};\n"
+                   "    return t;\n}\n")
+    usb_catalog = "    catalog.add_usb_serial_identity({DeviceKey{\"foo\", DeviceType::Focuser}, vendor::foo::foo_usb_tokens(), {}});\n"
+    check("usb identity: a wrapper list matched by its filter and registered by a catalog is clean",
+          _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": usb_catalog}, floor=1) == [])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper + "bool r2(const D& d) {\n    return usb_tty_descriptor_matches(\n"
+                                "        *d, {\"CH340\", \"USB_Serial\"});\n}\n"}, {"c_catalog.cpp": usb_catalog}, floor=1)
+    check("usb identity: a braced token list in a filter is reported by file and line",
+          len(f) == 1 and f[0].startswith("w.cpp:12:") and "braced token list" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": ""}, floor=1)
+    check("usb identity: a token list no catalog registers is reported",
+          len(f) == 1 and "no *_catalog.cpp registers it" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper},
+                               {"c_catalog.cpp": usb_catalog + usb_catalog.replace("foo_usb", "bar_usb")}, floor=1)
+    check("usb identity: a registered name no wrapper defines is reported",
+          len(f) == 1 and "bar_usb_tokens() but no wrapper" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper.replace("matches(*d, foo_usb_tokens())", "matches(*d, other)")},
+                               {"c_catalog.cpp": usb_catalog}, floor=1)
+    check("usb identity: a token list its own filter does not match is reported",
+          len(f) == 1 and "does not match it" in f[0])
+    f = _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": usb_catalog}, floor=2)
+    check("usb identity: fewer definitions than the floor is a finding", len(f) == 1 and "floor 2" in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

@@ -94,6 +94,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/thermal_camera_choice.cpp
     src/catalog/device_config.cpp
     src/catalog/device_catalog.cpp
+    src/catalog/attached_devices.cpp
 )
 
 # Management sources
