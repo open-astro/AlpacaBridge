@@ -353,12 +353,6 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"onstep_telescope", kOn, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOn, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
 
-    // iOptron: the per-axis setters read the rate first (NotConnected while disconnected), then the setter clamps.
-    {"ioptron_telescope", kOff, "set_guide_rate_right_ascension(-1)", kKnown, "connection checked first (#2257)"},
-    {"ioptron_telescope", kOff, "set_guide_rate_declination(-1)", kKnown, "connection checked first (#2257)"},
-    {"ioptron_telescope", kOn, "set_guide_rate_right_ascension(-1)", kKnown, "rate clamped, not refused (#2257)"},
-    {"ioptron_telescope", kOn, "set_guide_rate_declination(-1)", kKnown, "rate clamped, not refused (#2257)"},
-
     // ZWO AM: the guide-rate setter takes std::abs of the rate, so a negative rate is accepted in either state.
     {"zwo_telescope", kOff, "set_guide_rate_right_ascension(-1)", kKnown, "negative rate accepted (#2257)"},
     {"zwo_telescope", kOff, "set_guide_rate_declination(-1)", kKnown, "negative rate accepted (#2257)"},
