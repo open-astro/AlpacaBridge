@@ -674,10 +674,15 @@ def _get_connected_sources():
 SHARED_DRIVER_CLASS_RE = re.compile(r"template\s*<[^>]*>\s*class\s+(\w+)")
 
 
+_CPP_COMMENT_OR_LITERAL_RE = re.compile(
+    r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'", re.S)
+
+
 def _strip_cpp_comments(text):
-    """text without /* */ blocks and // line comments (string literals are not special-cased)."""
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//[^\n]*", "", text)
+    """text without /* */ blocks, // line comments and string or character literals,
+    scanned in one pass so a "//" inside a string does not start a comment (raw
+    string literals are not special-cased)."""
+    return _CPP_COMMENT_OR_LITERAL_RE.sub(" ", text)
 
 
 def shared_driver_vendor_findings(vendor_roots=None, shared=None):
@@ -3936,6 +3941,10 @@ def self_test():
         (sd_vendors / "c" / "z.cpp").write_text(
             "// util::FooDriver<CW> is not used here\n/* FooDriver<CW> */\n")
         check("shared driver vendors: a mention in a comment is not an instantiation",
+              shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")}) == [])
+        (sd_vendors / "c" / "s.cpp").write_text(
+            'const char* k = "util::FooDriver<CW>"; // not "here"\nconst char q = \'"\';\n')
+        check("shared driver vendors: a mention in a string literal is not an instantiation",
               shared_driver_vendor_findings([sd_vendors], {sd_hdr: ("a", "b")}) == [])
         sd_inc = sd / "inc"
         (sd_inc / "d").mkdir(parents=True)

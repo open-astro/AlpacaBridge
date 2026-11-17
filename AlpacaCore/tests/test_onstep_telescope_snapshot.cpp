@@ -3891,7 +3891,7 @@ void base_rate(Rig& rig, const char* us_per_step, const char* steps_per_degree) 
 // A firmware whose version did not read at connect is asked :GXEG# too: only one identified as 4.x has no sector gear.
 // Falsified by: finish_park_or_home_locked() watching every home again (dropping the home_moves_one_axis_ check),
 // read_home_geometry_locked() caching a reply that is neither digit as false (the fourth section), or asking :GXEG#
-// only when onstepx_ is set (the last).
+// only when onstepx_ is set (the last), or get_bare_flag() comparing a '#'-framed reply with its '#' (the fifth).
 TEST_CASE("OnStep home watch - a tangent-arm or sector-gear mount's FindHome ends without AtHome and is not failed",
           "[onstep][telescope][snapshot][limit-stop]") {
     Rig rig;
@@ -3958,6 +3958,23 @@ TEST_CASE("OnStep home watch - a tangent-arm or sector-gear mount's FindHome end
         show(rig, "nNpEW180#");  // ended, with no 'H'
         CHECK_NOTHROW(rig.driver->get_at_home());
         CHECK_FALSE(rig.driver->get_at_home());
+    }
+    SECTION("a flag answered with a '#' is read as the digit, and leaves nothing behind") {
+        {
+            std::lock_guard<std::mutex> lock(rig.mount->mutex);
+            rig.mount->gxef = "1#";  // a build that frames the reply: the bare read stops at the '#' and drops it
+        }
+        connect_rates(rig, "4.24s");
+        show(rig, "NpEW180#");
+        rig.driver->find_home();
+        show(rig, "nphEW180#");
+        show(rig, "nNpEW180#");
+        // Not watched (read as a tangent arm), and the home and status exchanges after the flag read are not shifted
+        // by a stray '#': a leftover would end the next '#' reply at once and fail the home.
+        CHECK(rig.mount->count(":GXEF") == 1);
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        CHECK_FALSE(rig.driver->get_at_home());
+        CHECK_NOTHROW(rig.driver->get_slewing());
     }
     SECTION("an OnStepX sector gear whose firmware version did not read is still asked") {
         {
