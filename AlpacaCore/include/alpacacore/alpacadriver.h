@@ -225,52 +225,75 @@ public:
      */
     virtual std::vector<DeviceState> get_device_state() const { return {}; }
 
-    /**
-     * @brief Get the supported actions.
-     */
-    virtual std::vector<std::string> get_supported_actions() const = 0;
+    // The six ASCOM common members below have the "not implemented" answer as their default (issue #1757). A driver
+    // overrides one only to give it real behaviour (a vendor action, a Command* pass-through to its protocol). They
+    // are defined here, inline: an out-of-line virtual would become this class's key function and break the
+    // per-vendor static-library link. The codes are the ones every copy used: ActionNotImplemented for Action and
+    // 0x400 (MethodNotImplemented, the same value as NotImplemented) for Command*.
 
     /**
-     * @brief Invoke an action.
+     * @brief Get the supported actions. Default: none.
+     */
+    virtual std::vector<std::string> get_supported_actions() const { return {}; }
+
+    /**
+     * @brief Invoke an action. Default: ActionNotImplemented, naming the action.
      *
      * @param action_name Action name
      * @param action_parameters Action parameters (JSON string)
      * @return Action result (JSON string)
      */
-    virtual std::string action(std::string_view action_name,
-                               std::string_view action_parameters) = 0;
+    virtual std::string action(std::string_view action_name, std::string_view action_parameters) {
+        (void)action_parameters;
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+    }
 
     /**
-     * @brief Get whether an action is supported.
+     * @brief Get whether an action is supported. Default: false.
      */
-    virtual bool can_action(std::string_view action_name) const = 0;
+    virtual bool can_action(std::string_view action_name) const {
+        (void)action_name;
+        return false;
+    }
 
     /**
-     * @brief Get the command blind result.
+     * @brief Get the command blind result. Default: MethodNotImplemented.
      *
      * @param command Command string
      * @param raw Whether to return raw response
      * @return Command result
      */
-    virtual std::string command_blind(std::string_view command, bool raw = false) = 0;
+    virtual std::string command_blind(std::string_view command, bool raw = false) {
+        (void)command;
+        (void)raw;
+        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
+    }
 
     /**
-     * @brief Get the command bool result.
+     * @brief Get the command bool result. Default: MethodNotImplemented.
      *
      * @param command Command string
      * @param raw Whether to return raw response
      * @return Command result
      */
-    virtual bool command_bool(std::string_view command, bool raw = false) = 0;
+    virtual bool command_bool(std::string_view command, bool raw = false) {
+        (void)command;
+        (void)raw;
+        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
+    }
 
     /**
-     * @brief Get the command string result.
+     * @brief Get the command string result. Default: MethodNotImplemented.
      *
      * @param command Command string
      * @param raw Whether to return raw response
      * @return Command result
      */
-    virtual std::string command_string(std::string_view command, bool raw = false) = 0;
+    virtual std::string command_string(std::string_view command, bool raw = false) {
+        (void)command;
+        (void)raw;
+        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
+    }
 
 protected:
     /**

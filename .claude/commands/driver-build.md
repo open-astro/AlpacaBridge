@@ -618,7 +618,7 @@ All 8 are mandatory; cases 3 and 4 come from the driver's `contract_sweep.h` ent
      ```
 
 4. **Unsupported actions** `"<Vendor> <Device> Driver - Unsupported actions"` `[<vendor>][<device>][unit]`
-   - `CHECK(driver.get_supported_actions().empty());` (unless the driver defines custom actions)
+   - `CHECK(driver.get_supported_actions().empty());` (unless the driver defines custom actions). Do not write these six members for a driver without actions or pass-through: `AlpacaDriver` already answers them (issue #1757).
    - `CHECK(driver.can_action("anything") == false);`
    - Assert the exact codes with the `require_alpaca_error` helper (case 6), not `CHECK_THROWS_AS(..., alpacacore::AlpacaException)`, which passes for any code: `action()` with an unlisted name is `ActionNotImplemented` (0x40C), and the three `command_*` methods are `MethodNotImplemented` (0x400) unless the driver implements command pass-through. A pass-through driver checks the connection first, so disconnected it throws `NotConnected` (0x407): assert that code for its three `command_*` calls instead of the `MethodNotImplemented` lines below.
      ```cpp

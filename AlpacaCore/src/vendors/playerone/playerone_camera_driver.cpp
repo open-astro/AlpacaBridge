@@ -525,15 +525,6 @@ public:
         const std::string name = to_lower_copy(action_name);
         return name == "getheaterpower" || name == "setheaterpower" || name == "getfanpower" || name == "setfanpower";
     }
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
 
     int get_bayer_offset_x() const override {
         ensure_connected();

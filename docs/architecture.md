@@ -97,7 +97,7 @@ Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY
 
 - Concrete driver implementation
 - Uses wrapper layer, never touches raw SDK directly
-- Implements all pure virtual methods from Layer 1
+- Implements all pure virtual methods from Layer 1; the six ASCOM common members (`SupportedActions`, `Action`, `CanAction` and the three `Command*`) default to their not-implemented answer in `AlpacaDriver`, so a driver overrides them only to give them real behaviour (issue #1757)
 
 See the [Development Guide](development.md) for step-by-step implementation.
 

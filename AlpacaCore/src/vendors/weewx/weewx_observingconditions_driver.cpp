@@ -374,30 +374,6 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
-
-    std::string action(std::string_view, std::string_view) override {
-        throw AlpacaException("Action not supported", AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view) const override {
-        return false;
-    }
-
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::NotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::NotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::NotImplemented);
-    }
-
     // WeeWX serves instantaneous readings, so the only valid AveragePeriod is 0.
     double get_average_period() const override { return 0.0; }
 

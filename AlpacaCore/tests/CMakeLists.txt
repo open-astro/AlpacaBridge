@@ -29,6 +29,7 @@ set(TEST_SOURCES
     test_catalog_builtins.cpp
     test_device_registry.cpp
     test_device_state.cpp
+    test_alpacadriver_defaults.cpp
     test_error_handling.cpp
     test_fake_pty_write.cpp
     test_host_clock.cpp

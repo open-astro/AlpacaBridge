@@ -193,18 +193,6 @@ public:
         return util::same_action_name(action_name, util::kFocuserSetZeroAction);
     }
 
-    std::string command_blind(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    bool command_bool(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
-    std::string command_string(std::string_view, bool) override {
-        throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
-    }
-
     // --- Focuser interface ---
 
     bool get_absolute() const override { return true; }

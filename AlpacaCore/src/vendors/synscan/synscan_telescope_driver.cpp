@@ -434,20 +434,6 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
-
-    std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view action_name) const override {
-        (void)action_name;
-        return false;
-    }
-
     // The raw pass-through commands check the connection under mutex_ and send with it released (the wrapper
     // serialises the wire).
     std::string command_blind(std::string_view command, bool raw) override {
