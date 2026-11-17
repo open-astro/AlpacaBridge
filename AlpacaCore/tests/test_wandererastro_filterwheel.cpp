@@ -563,3 +563,40 @@ TEST_CASE("WandererAstro FilterWheel Driver - Connect fails at once when the por
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());  // a connect that never completed is not a lost session
 }
+
+namespace {
+// Real time: what the case waits for is the reader thread meeting the dead fd.
+template <typename Pred>
+bool wait_for_2262(Pred pred, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return pred();
+}
+}  // namespace
+
+// Issue #2262: EBADF on the device's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": its reader counted the read as a silent one and
+// Connected kept reading true until the silence fault, then the staleness bound, caught up.
+TEST_CASE("WandererAstro FilterWheel Driver - EBADF on the device's fd loses the link at once",
+          "[wandererastro][filterwheel][unit][fake][link-lost][issue2262]") {
+    alpacacore::test::FakeTaskClock clock;  // never advanced: only the EBADF can end the link
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    const std::string port = wheel.slave_path();
+    const auto before = alpacacore::test::fds_open_on(port);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, port, 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(port));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unusable(fd));  // the reader's read and a command's write both meet EBADF
+
+    CHECK(wait_for_2262([&] { return !driver->get_connected(); }, std::chrono::milliseconds(2000)));
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 9)");
+    CHECK(
+        wait_for_2262([&] { return !alpacacore::util::is_serial_port_in_use(port); }, std::chrono::milliseconds(2000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
+}
