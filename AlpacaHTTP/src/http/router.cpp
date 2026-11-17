@@ -4258,52 +4258,6 @@ Response Router::dispatch_dome_method(std::shared_ptr<alpacacore::DomeDriver> do
     });
 }
 
-Response Router::dispatch_covercalibrator_method(std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
-                                                 const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    return call.run("cover calibrator method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "brightness") {
-                return call.ok(covercalibrator->get_brightness());
-            } else if (method_name == "calibratorchanging") {
-                return call.ok(covercalibrator->get_calibrator_changing());
-            } else if (method_name == "calibratorstate") {
-                return call.ok(static_cast<int>(covercalibrator->get_calibrator_state()));
-            } else if (method_name == "covermoving") {
-                return call.ok(covercalibrator->get_cover_moving());
-            } else if (method_name == "coverstate") {
-                return call.ok(static_cast<int>(covercalibrator->get_cover_state()));
-            } else if (method_name == "maxbrightness") {
-                return call.ok(covercalibrator->get_max_brightness());
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "calibratoron") {
-                int brightness = call.get_int("Brightness");
-                covercalibrator->calibrator_on(brightness);
-                return call.ok_void();
-            } else if (method_name == "calibratoroff") {
-                covercalibrator->calibrator_off();
-                return call.ok_void();
-            } else if (method_name == "opencover") {
-                covercalibrator->open_cover();
-                return call.ok_void();
-            } else if (method_name == "closecover") {
-                covercalibrator->close_cover();
-                return call.ok_void();
-            } else if (method_name == "haltcover") {
-                covercalibrator->halt_cover();
-                return call.ok_void();
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for CoverCalibrator");
-    });
-}
-
 Response Router::dispatch_observingconditions_method(
     std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions, const std::string& method_name,
     const DeviceCall& call) {

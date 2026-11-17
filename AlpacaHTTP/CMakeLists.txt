@@ -258,6 +258,7 @@ set(ALPACAHTTP_SOURCES
     src/core/json_utils.cpp
     src/core/catalog_json.cpp
     src/http/router.cpp
+    src/http/routes/covercalibrator_routes.cpp
     src/http/routes/safetymonitor_routes.cpp
     src/http/device_call.cpp
     src/http/image_payload.cpp
