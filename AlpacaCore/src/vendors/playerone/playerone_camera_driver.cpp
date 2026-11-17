@@ -936,7 +936,12 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
             const CameraState state = session_.camera_state();
-            if (state != CameraState::Exposing && state != CameraState::Download) return;
+            if (state != CameraState::Exposing && state != CameraState::Download) {
+                // A StartExposure between its settings snapshot and Exposing: the session records the abort and
+                // that start stops the exposure once it runs (decision 0020 rule 9). Otherwise nothing runs.
+                (void)session_.record_abort();
+                return;
+            }
             if (state == CameraState::Download || (sdk_exposure_started_ && sdk_.image_ready(camera_info_.camera_id))) {
                 throw AlpacaException("AbortExposure is not possible while the image is being downloaded",
                                       AlpacaError::InvalidOperation);
@@ -1084,14 +1089,14 @@ public:
         bool dirty_format = false;
         bool dirty_roi = false;
         PlayerOneImageFormat active_format = PlayerOneImageFormat::Raw16;
+        // Decision 0020 rule 9: reserved under mutex_ with the settings snapshot, so a gain/offset/geometry write
+        // cannot slip in before session_.start() has published Exposing (M15). A refused or throwing start releases
+        // it; an exposure running or starting refuses the reservation with InvalidOperation.
+        util::CaptureReservation reservation;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             validate_exposure_request_locked(exposure_us_long);
-            const CameraState state = session_.camera_state();
-            if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
-                throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
-                                      AlpacaError::InvalidOperation);
-            }
+            reservation = session_.reserve();
             // Retries the stop a failed earlier exposure left running.
             const std::string exposure_stop_error = stop_sdk_exposure_locked();
             if (!exposure_stop_error.empty()) {
@@ -1108,17 +1113,7 @@ public:
             dirty_format = format_dirty_;
             dirty_roi = roi_dirty_;
             active_format = active_format_;
-            // Holds the settings (ensure_not_exposing_locked) from this snapshot until session_.start() has
-            // published Exposing, so a gain/offset/geometry write cannot slip in between (M15).
-            exposure_starting_ = true;
         }
-        struct StartingDone {
-            PlayerOneCameraDriver& driver;
-            ~StartingDone() {
-                std::lock_guard<std::mutex> lock(driver.mutex_);
-                driver.exposure_starting_ = false;
-            }
-        } starting_done{*this};
 
         auto body = [this, id, exposure_us_long, active_bin, active_start_x, active_start_y, active_num_x, active_num_y,
                      sensor_width, sensor_height, dirty_format, dirty_roi, active_format](util::CaptureControl& c) {
@@ -1313,7 +1308,18 @@ public:
                                       AlpacaError::DriverException);
             }
         };
-        session_.start(static_cast<double>(exposure_us_long) / 1'000'000.0, std::move(body));
+        const bool abort_now = session_.start(std::move(reservation),
+                                              static_cast<double>(exposure_us_long) / 1'000'000.0, std::move(body));
+        // An AbortExposure that arrived while this start was reserved was recorded, not dropped (rule 9): stop the
+        // exposure now that Exposing is published, the same way a direct AbortExposure does.
+        if (abort_now) {
+            try {
+                abort_exposure();
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("PlayerOne",
+                                "AbortExposure recorded during the start failed: " + std::string(e.what()));
+            }
+        }
     }
 
     void stop_exposure() override {
@@ -1354,8 +1360,6 @@ private:
     bool format_dirty_{false};
     PlayerOneImageFormat active_format_{PlayerOneImageFormat::Raw16};
 
-    // True from a StartExposure's settings snapshot until session_.start() has published Exposing.
-    bool exposure_starting_{false};
     // An SDK exposure is running that the SDK has not yet been told to stop.
     bool sdk_exposure_started_{false};
 
@@ -1384,24 +1388,16 @@ private:
     // Reject runtime sensor-register / geometry writes while a frame is
     // integrating: the exposure body polls/downloads holding no lock, so a
     // mid-exposure write would race the live integration. Requires mutex_
-    // held — the same lock start_exposure sets exposure_starting_ under,
-    // closing the check/publish TOCTOU (M15; driver-lifecycle.instructions.md rule, matching
-    // the ToupTek driver's ensure_not_exposing).
-    // A cancelled or failed body can still be configuring the camera (ROI, format, start position), so
-    // the settings stay locked while the session is busy, except once the frame is Ready (the body is
-    // only returning then).
+    // held — the same lock start_exposure reserves its start under (M15;
+    // decision 0020 rule 9). The session answers for the reservation, Exposing,
+    // Download and a cancelled or failed body still returning with no frame ready;
+    // Player One adds its own SDK term: an SDK exposure not yet told to stop.
     void ensure_not_exposing_locked() const {
-        const CameraState state = session_.camera_state();
-        bool frame_ready = false;
-        try {
-            frame_ready = session_.image_ready();
-        } catch (const AlpacaException&) {
-            frame_ready = false;  // a kept failure: not ready
+        if (sdk_exposure_started_) {  // the session's own refusal text, so every path reads the same
+            throw AlpacaException("PlayerOne: cannot change camera settings during an exposure",
+                                  AlpacaError::InvalidOperation);
         }
-        if (exposure_starting_ || sdk_exposure_started_ || state == CameraState::Exposing ||
-            state == CameraState::Download || (session_.busy() && !frame_ready)) {
-            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
-        }
+        session_.ensure_settings_unlocked();
     }
 
     void validate_exposure_request_locked(long& exposure_us) const {
@@ -1662,7 +1658,7 @@ private:
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
         // Geometry write: rejected mid-exposure, checked under the same
-        // mutex_ hold that start_exposure sets exposure_starting_ (M15).
+        // mutex_ hold that start_exposure reserves its start under (M15; decision 0020 rule 9).
         ensure_not_exposing_locked();
         if (bin_ == bin_x) return;
         bin_ = bin_x;

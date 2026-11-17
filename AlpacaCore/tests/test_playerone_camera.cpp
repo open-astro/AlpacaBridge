@@ -1884,6 +1884,59 @@ TEST_CASE("Player One Camera Driver - settings stay locked while a cancelled bod
     driver->set_connected(false);
 }
 
+// Issue #2260 (decision 0020 rule 9): an AbortExposure that arrives while a StartExposure is reserved, waiting in
+// session_.start() behind a body the watchdog left in setup, is recorded and stops that exposure once Exposing is
+// published. The driver dropped it: abort_exposure() returned when the state was not Exposing, and the new exposure
+// ran to its end and served a frame.
+TEST_CASE("Player One Camera Driver - an AbortExposure during a StartExposure still in flight is not dropped",
+          "[playerone][camera][unit][capture-session][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock, 80ms);
+    driver->set_num_x(12);  // makes the ROI dirty so the body reads the start position back
+    sdk.set_hold_start_readback(true);
+    driver->start_exposure(0.020, true);
+    REQUIRE(eventually([&] { return sdk.start_readback_started(); }));
+    clock.advance(500ms);  // past the 20 ms + 80 ms deadline: the watchdog fails it, its body stays in setup
+    REQUIRE(eventually([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+
+    // The second StartExposure reserves its start and waits in session_.start() for the held body.
+    std::atomic<int> start_error{-1};
+    std::thread starter([&] {
+        try {
+            driver->start_exposure(0.020, true);
+            start_error = 0;
+        } catch (const alpacacore::AlpacaException& e) {
+            start_error = e.error_code();
+        }
+    });
+    const bool start_waiting = clock.wait_for_waiter_thread(starter.get_id(), 5s);
+    std::atomic<bool> abort_returned{false};
+    if (start_waiting) {
+        driver->abort_exposure();  // the start window: nothing is Exposing yet
+        abort_returned = true;
+    }
+    sdk.set_hold_start_readback(false);  // the first body returns; the waiting start goes on
+    starter.join();
+    REQUIRE(start_waiting);
+    CHECK(abort_returned);
+    CHECK(start_error.load() == 0);
+    // The recorded abort stopped the new exposure: it never serves a frame, however long the clock runs.
+    for (int i = 0; i < 20; ++i) {
+        clock.advance(50ms);
+        std::this_thread::sleep_for(5ms);  // room for a missed exposure's poll to publish its frame
+    }
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    bool frame = false;
+    try {
+        frame = driver->get_image_ready();
+    } catch (const alpacacore::AlpacaException&) {
+        frame = false;
+    }
+    CHECK_FALSE(frame);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One Camera Driver - ImageArray before any exposure is asked too early", "[playerone][camera][unit]") {
     alpacacore::test::FakePlayerOneSDK sdk;
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);

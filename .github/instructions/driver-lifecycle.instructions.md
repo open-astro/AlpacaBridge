@@ -201,9 +201,14 @@ vendor-agnostic; do them in the driver from the start.
 - A runtime register write during a live exposure corrupts the frame. Guard it with
   an exposure-in-progress state, checked **under the same lock that publishes it**.
   GPhoto: `start_exposure` sets an `exposure_active_` flag and the setters check it
-  under the same lock. ToupTek: the `util::CaptureSession` is the state; `start_exposure`
-  sets `exposure_starting_` under `mutex_` until `session_.start()` (which runs without the lock)
-  publishes Exposing, and the setters' `ensure_not_exposing()` reads the session under `mutex_`. Checking the state *before* taking that lock is a TOCTOU.
+  under the same lock. A `util::CaptureSession` adopter reserves the start with `session_.reserve()`
+  under `mutex_` while it snapshots its settings, then calls `session_.start(reservation, ...)` without the
+  lock; the setters call `session_.ensure_settings_unlocked()` under `mutex_` (reserved, Exposing, Download,
+  or a failed body still returning), and an AbortExposure that finds only a reservation calls
+  `session_.record_abort()`, which `start()` reports so the driver stops the exposure once it runs
+  ([decision 0020](../../docs/decisions/0020-capture-session.md) rule 9, issue #2260). Player One does this;
+  ZWO, SVBONY and ToupTek still keep their own `exposure_starting_` flag until #2260 moves them. Checking the
+  state *before* taking that lock is a TOCTOU.
 - Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
   joining the worker — setting a flag alone makes `join()` block for the whole
   remaining operation (a 10-min frame → a 10-min abort).
