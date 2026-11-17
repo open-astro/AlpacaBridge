@@ -214,7 +214,7 @@ namespace {
 bool raw_port_looks_like_cfw3_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"10c4", "Silicon Labs", "CP210"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, cfw3_usb_tokens());
 }
 }  // namespace
 #endif
@@ -663,5 +663,10 @@ std::optional<std::chrono::steady_clock::time_point> Cfw3ProtocolWrapper::consum
 }
 int Cfw3ProtocolWrapper::get_position() { return impl_->get_position(); }
 int Cfw3ProtocolWrapper::goto_slot(int slot, const std::atomic<bool>& cancel) { return impl_->goto_slot(slot, cancel); }
+
+const std::vector<std::string>& cfw3_usb_tokens() {
+    static const std::vector<std::string> tokens{"10c4", "Silicon Labs", "CP210"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::qhy

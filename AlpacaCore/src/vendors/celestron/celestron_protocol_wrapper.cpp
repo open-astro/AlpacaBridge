@@ -136,8 +136,7 @@ std::string probe_nexstar_port(const std::string& port_path) {
 bool raw_port_looks_like_celestron_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, celestron_usb_tokens());
 }
 
 // Issue #1202: whether the scan may probe @p resolved. A port another
@@ -1895,6 +1894,12 @@ TimeInfo CelestronProtocolWrapper::get_time() {
 
 void CelestronProtocolWrapper::set_time(const TimeInfo& info) {
     pimpl_->set_time(info);
+}
+
+const std::vector<std::string>& celestron_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",     "067b",      "FTDI",
+                                                 "CP210",    "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 } // namespace alpacacore::vendor::celestron

@@ -134,7 +134,7 @@ namespace {
 bool raw_port_looks_like_focuser_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, gemini_focuser_usb_tokens());
 }
 }  // namespace
 #endif
@@ -955,6 +955,11 @@ void GeminiProtocolWrapper::sync_position(int position) {
 
 void GeminiProtocolWrapper::set_speed(int speed) {
     impl_->set_speed(speed);
+}
+
+const std::vector<std::string>& gemini_focuser_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86", "CH340", "CH341", "USB_Serial"};
+    return tokens;
 }
 
 } // namespace alpacacore::vendor::gemini

@@ -261,7 +261,7 @@ bool probe_pdh_port(const std::string& port_path) {
 bool raw_port_looks_like_pdh_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, gemini_pdh_usb_tokens());
 }
 #endif  // _WIN32
 
@@ -1081,5 +1081,10 @@ void GeminiPdhProtocolWrapper::set_dew_enabled(int channel, bool on) { impl_->se
 void GeminiPdhProtocolWrapper::set_dew_mode(int channel, PdhDewMode mode) { impl_->set_dew_mode(channel, mode); }
 
 void GeminiPdhProtocolWrapper::request_status() { impl_->request_status(); }
+
+const std::vector<std::string>& gemini_pdh_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86", "CH340", "CH341", "USB_Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::gemini

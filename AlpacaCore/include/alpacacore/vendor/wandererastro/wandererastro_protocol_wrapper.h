@@ -87,6 +87,11 @@ struct WandererStatus {
  */
 std::vector<WandererPortInfo> enumerate_wanderer_ports();
 
+/// The USB descriptor tokens of a WandererCover adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& wanderer_cover_usb_tokens();
+
 /**
  * @brief Protocol wrapper for the WandererCover V4 (Pro / EC / EC-IR).
  *

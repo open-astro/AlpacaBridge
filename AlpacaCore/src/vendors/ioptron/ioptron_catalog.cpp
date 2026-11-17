@@ -25,9 +25,13 @@
 
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ieaf_protocol_wrapper.h>
+#include <alpacacore/vendor/ioptron/ioptron_iefw_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_ifr_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ifr_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_ifr_rotator_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #ifdef ALPACACORE_IOPTRON_POWERBOX
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
@@ -215,6 +219,17 @@ void register_ioptron_factory(DeviceCatalog& catalog) {
         ifr.create = entry.create;
         catalog.add(std::move(ifr));
     }
+
+    // The attacheddevices listing (#2312): each serial device's USB identity is the
+    // token list its raw-node scan filter matches, read from the wrapper.
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"ioptron", DeviceType::Telescope}, vendor::ioptron::ioptron_mount_usb_tokens(), {}});
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"ioptron", DeviceType::Focuser}, vendor::ioptron::ieaf_usb_tokens(), {}});
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"ioptron", DeviceType::FilterWheel}, vendor::ioptron::iefw_usb_tokens(), {}});
+    catalog.add_usb_serial_identity({DeviceKey{"ifr", DeviceType::Focuser}, vendor::ioptron::ifr_usb_tokens(), {}});
+    catalog.add_usb_serial_identity({DeviceKey{"ifr", DeviceType::Rotator}, vendor::ioptron::ifr_usb_tokens(), {}});
 }
 
 }  // namespace alpacacore::catalog

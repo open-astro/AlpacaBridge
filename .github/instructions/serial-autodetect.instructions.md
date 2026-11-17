@@ -258,7 +258,12 @@ independently broken the same way, before it was centralised:
   (`USB_Serial`), but the raw sysfs strings keep their spaces (`USB Serial`) —
   the helper matches patterns against both spellings, so udev-style patterns
   copied from a by-id name filter are fine, but don't "simplify" that
-  double-match away.
+  double-match away. Pass the wrapper's own `<x>_usb_tokens()` list, never a
+  braced list: the vendor's `<vendor>_catalog.cpp` registers the same list as the
+  device's USB identity (`DeviceCatalog::add_usb_serial_identity`), which
+  `GET /management/v1/attacheddevices` matches ports against without opening them
+  (issue #2312), and docs-drift check 29 fails on a braced list or a list no
+  catalog registers.
 - **`alpacacore::util::path_exists(path)`** instead of bare
   `std::filesystem::exists(path)` anywhere in an `enumerate_*` scan. The plain
   overload throws `filesystem_error` on a traversal error (e.g. EACCES on a

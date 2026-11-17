@@ -115,6 +115,11 @@ struct GeminiFlatPanelPortInfo {
  */
 std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports();
 
+/// The USB descriptor tokens of a Gemini flat panel adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& gemini_flatpanel_usb_tokens();
+
 /**
  * @brief The auto-detect identity probe of one serial port (>H# at 9600 baud).
  *

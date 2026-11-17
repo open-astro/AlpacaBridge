@@ -26,6 +26,7 @@ set(TEST_SOURCES
     test_driver_rig.cpp
     test_async_connectable.cpp
     test_device_catalog.cpp
+    test_attached_devices.cpp
     test_catalog_builtins.cpp
     test_device_registry.cpp
     test_device_state.cpp

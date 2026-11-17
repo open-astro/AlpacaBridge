@@ -28,6 +28,11 @@ struct SynScanPortInfo {
 
 std::vector<SynScanPortInfo> enumerate_synscan_ports();
 
+/// The USB descriptor tokens of a SynScan mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& synscan_usb_tokens();
+
 enum class ConnectionType {
     Serial,
     Network

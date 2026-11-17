@@ -282,7 +282,7 @@ bool probe_box_port(const std::string& port_path, BoxPortInfo& info) {
 bool raw_port_looks_like_box_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, wandererbox_usb_tokens());
 }
 #endif  // _WIN32
 
@@ -793,5 +793,10 @@ void WandererBoxProtocolWrapper::set_dc8_9(bool on) { impl_->set_dc8_9(on); }
 void WandererBoxProtocolWrapper::set_dc10_11(bool on) { impl_->set_dc10_11(on); }
 
 void WandererBoxProtocolWrapper::set_usb(int group, bool on) { impl_->set_usb(group, on); }
+
+const std::vector<std::string>& wandererbox_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86", "CH340", "CH341", "USB_Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::wandererastro

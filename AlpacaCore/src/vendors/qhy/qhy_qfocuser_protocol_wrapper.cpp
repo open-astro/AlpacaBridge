@@ -311,7 +311,7 @@ namespace {
 bool raw_port_looks_like_qfocuser_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"28e9", "GigaDevice", "GD32"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, qfocuser_usb_tokens());
 }
 }  // namespace
 #endif
@@ -766,5 +766,10 @@ void QFocuserProtocolWrapper::set_reverse(bool reversed) { impl_->set_reverse(re
 void QFocuserProtocolWrapper::set_speed(int speed) { impl_->set_speed(speed); }
 void QFocuserProtocolWrapper::set_hold_force(bool enabled) { impl_->set_hold_force(enabled); }
 void QFocuserProtocolWrapper::set_hold_current(int ihold, int irun) { impl_->set_hold_current(ihold, irun); }
+
+const std::vector<std::string>& qfocuser_usb_tokens() {
+    static const std::vector<std::string> tokens{"28e9", "GigaDevice", "GD32"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::qhy

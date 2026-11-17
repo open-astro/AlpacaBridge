@@ -18,10 +18,14 @@
 // only under ALPACACORE_ENABLE_WANDERERASTRO (unlike wandererastro_schema.cpp),
 // so the vendor headers are fine here.
 
+#include <alpacacore/vendor/wandererastro/wandererastro_box_protocol_wrapper.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_protocol_wrapper.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_protocol_wrapper.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "wandererastro_fields.h"
@@ -98,6 +102,19 @@ void register_wandererastro_factory(DeviceCatalog& catalog) {
             device_number, static_cast<int>(config.get(kWandererBoxIndex)));
     };
     catalog.add(std::move(box));
+
+    // The attacheddevices listing (#2312): each serial device's USB identity is the
+    // token list its raw-node scan filter matches, read from the wrapper.
+    catalog.add_usb_serial_identity({DeviceKey{"wandererastro", DeviceType::CoverCalibrator},
+                                     vendor::wandererastro::wanderer_cover_usb_tokens(),
+                                     {}});
+    catalog.add_usb_serial_identity({DeviceKey{"wandererastro", DeviceType::FilterWheel},
+                                     vendor::wandererastro::wanderer_filterwheel_usb_tokens(),
+                                     {}});
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"wandererastro", DeviceType::Rotator}, vendor::wandererastro::wanderer_rotator_usb_tokens(), {}});
+    catalog.add_usb_serial_identity(
+        {DeviceKey{"wandererastro", DeviceType::Switch}, vendor::wandererastro::wandererbox_usb_tokens(), {}});
 }
 
 }  // namespace alpacacore::catalog

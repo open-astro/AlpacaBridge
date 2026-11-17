@@ -132,6 +132,11 @@ struct GeminiPdhPortInfo {
  */
 std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports();
 
+/// The USB descriptor tokens of a Gemini PDH adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& gemini_pdh_usb_tokens();
+
 /**
  * @brief The auto-detect identity probe of one serial port (>H# at 19200 baud).
  *
