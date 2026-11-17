@@ -704,6 +704,11 @@ public:
                                    std::memory_order_relaxed);
         bool ok = info.type == ConnectionType::Serial ? connect_serial(info) : connect_udp(info);
         connected_ = ok;
+#ifndef _WIN32
+        // A connect, failed or done, leaves the serial link's verdict clear (#2262); a loss in the driver's
+        // handshake that follows latches it again.
+        link_.clear_loss();
+#endif
         return ok;
     }
 
@@ -721,10 +726,15 @@ public:
     }
 
     // The client's own connect or disconnect settles a loss (decision 0009,
-    // point 5): the kept fault text and the sticky flag go; the lost-at stamp
-    // stays for the relink's outage-length decision.
+    // point 5): the kept fault text and the sticky flag go, and so does the
+    // serial link's own verdict (#2262; disconnect_locked(), the port release
+    // after a loss, keeps it); the lost-at stamp stays for the relink's
+    // outage-length decision.
     void clear_loss_locked() {
         link_lost_.store(false);
+#ifndef _WIN32
+        link_.clear_loss();
+#endif
         std::lock_guard<std::mutex> lock(health_mutex_);
         lost_fault_.clear();
     }
@@ -1113,6 +1123,18 @@ private:
         struct stat st {};
         return ::fstat(serial_fd_, &st) != 0 || st.st_nlink == 0;
     }
+
+    // Whether a failed serial write, poll or read lost the link. The errno
+    // verdict is the link's (util::SerialLink, #2262: EIO, ENXIO, ENODEV and
+    // EBADF on its fd); this wrapper keeps no serial errno list. Its own
+    // poll()-bounded loops run behind the serial_read_/serial_write_ seams
+    // rather than link_.read()/write_all() (decision 0017 rule 5), so each
+    // failure's errno, a seam's included, is fed to the link here. A removed
+    // node is a loss with no errno, judged by the wrapper as before.
+    bool serial_failure_lost_locked(int err) {
+        (void)link_.note_error(err);
+        return link_.lost() || serial_node_removed_locked();
+    }
 #endif
 
     bool connect_serial(const ConnectionInfo& info) {
@@ -1412,7 +1434,7 @@ private:
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             if (!write_all_bounded(frame.data(), frame.size(), deadline)) {
                 const int err = errno;
-                if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                if (serial_failure_lost_locked(err)) {
                     lose_serial_link_locked("Serial write failed: " + util::errno_string(err));
                 }
                 // A non-blocking write can stop part-way (deadline hit after a partial
@@ -1445,7 +1467,7 @@ private:
                         continue;
                     }
                     const int err = errno;
-                    if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                    if (serial_failure_lost_locked(err)) {
                         lose_serial_link_locked("Serial poll failed: " + util::errno_string(err));
                     }
                     throw AlpacaException("Serial poll failed: " + util::errno_string(err));
@@ -1465,7 +1487,7 @@ private:
                     }
                 } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
                     const int err = errno;
-                    if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                    if (serial_failure_lost_locked(err)) {
                         lose_serial_link_locked("Serial read failed: " + util::errno_string(err));
                     }
                     throw AlpacaException("Serial read failed: " + util::errno_string(err));
