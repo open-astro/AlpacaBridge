@@ -1805,7 +1805,7 @@ HELPER_FAKES = {
     "fake_celestron_handset.h": "stateful NexStar hand-controller responder plugged into FakeMountServer for the Celestron async cases; the Celestron roster row stays on fake_mount_server.h",
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
-    "fake_weewx_fetcher.h": "scripted WeeWxFetcher injected through the WeeWX factory overload; no transport of its own to roster",
+    "fake_http_client.h": "scripted util::HttpClient injected through the WeeWX factory overload; no transport of its own to roster",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
     "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
 }

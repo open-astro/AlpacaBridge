@@ -21,7 +21,9 @@ if(ALPACACORE_ENABLE_WEEWX)
     # links down to it, never the reverse (open-astro#710).
     target_link_libraries(alpacacore_weewx PRIVATE alpacacore)
 
-    target_link_libraries(alpacacore_weewx PRIVATE CURL::libcurl)
+    # HTTP only through util::HttpClient (decision 0023): the seam's libcurl
+    # implementation is alpacacore_http_client, built when CURL is found.
+    target_link_libraries(alpacacore_weewx PRIVATE alpacacore_http_client)
 
     message(STATUS "WeeWX driver: HTTP JSON feed support enabled")
 endif()

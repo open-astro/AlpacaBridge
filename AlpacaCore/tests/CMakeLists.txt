@@ -220,8 +220,13 @@ if(TARGET alpacacore_onstep)
     # Getters and DeviceState served from the polled snapshot (issue #1783).
     list(APPEND TEST_SOURCES test_onstep_telescope_snapshot.cpp)
 endif()
+if(TARGET alpacacore_http_client)
+    # The util::HttpClient libcurl implementation against a loopback server, and its
+    # test-only locked decorator (decision 0023, issue #1753).
+    list(APPEND TEST_SOURCES test_http_client.cpp)
+endif()
 if(TARGET alpacacore_weewx)
-    # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
+    # ObservingConditions [stress] coverage over the scripted HTTP client, #271, #1070, #1753.
     list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp test_weewx_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_gemini)
@@ -362,6 +367,9 @@ endif()
 if(TARGET alpacacore_onstep)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_onstep)
     target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ONSTEP)
+endif()
+if(TARGET alpacacore_http_client)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_http_client)
 endif()
 if(TARGET alpacacore_weewx)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_weewx)

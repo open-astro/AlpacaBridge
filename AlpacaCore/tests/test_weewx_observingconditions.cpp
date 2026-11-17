@@ -15,11 +15,6 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #include <alpacacore/version.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -36,112 +31,21 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_http_client.h"
 #include "fake_task_clock.h"
-#include "fake_weewx_fetcher.h"
+#include "loopback_http_server.h"
 
 namespace {
 
-// Loopback HTTP server standing in for the WeeWX JSON feed: answers every
-// request with the current body, then closes the connection. Modes make it
-// harsher than a healthy station: Stall accepts and reads the request but never
-// replies and never closes (a hung WeeWX or a dead Wi-Fi link behind an open
-// socket), DropAfterAccept closes with no bytes, ServerError answers 500.
-class FakeWeeWxFeed {
-public:
-    FakeWeeWxFeed() {
-        fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        REQUIRE(fd_ >= 0);
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = 0;
-        REQUIRE(::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-        socklen_t len = sizeof(addr);
-        REQUIRE(::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
-        port_ = ntohs(addr.sin_port);
-        REQUIRE(::listen(fd_, 8) == 0);
-        thread_ = std::thread([this] { run(); });
-    }
+// The WeeWX JSON feed over real HTTP on loopback (the shared helper, issue #1753).
+using FakeWeeWxFeed = alpacacore::test::LoopbackHttpServer;
 
-    ~FakeWeeWxFeed() {
-        stop_ = true;
-        thread_.join();
-        for (const int held : stalled_) {
-            ::close(held);
-        }
-        ::close(fd_);
-    }
-
-    FakeWeeWxFeed(const FakeWeeWxFeed&) = delete;
-    FakeWeeWxFeed& operator=(const FakeWeeWxFeed&) = delete;
-
-    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/current"; }
-
-    enum class Mode { Normal, Stall, DropAfterAccept, ServerError };
-
-    void set_mode(Mode mode) { mode_ = mode; }
-
-    // Requests accepted so far, in any mode.
-    int requests() const { return requests_; }
-
-    void set_body(std::string body) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        body_ = std::move(body);
-    }
-
-private:
-    void run() {
-        while (!stop_) {
-            pollfd p{fd_, POLLIN, 0};
-            if (::poll(&p, 1, 50) <= 0) {
-                continue;
-            }
-            const int client = ::accept(fd_, nullptr, nullptr);
-            if (client < 0) {
-                continue;
-            }
-            char buf[2048];
-            (void)::recv(client, buf, sizeof(buf), 0);
-            ++requests_;
-            const Mode mode = mode_;
-            if (mode == Mode::Stall) {
-                stalled_.push_back(client);  // held open, never answered
-                continue;
-            }
-            if (mode == Mode::DropAfterAccept) {
-                ::close(client);
-                continue;
-            }
-            if (mode == Mode::ServerError) {
-                const std::string err =
-                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                (void)::send(client, err.data(), err.size(), MSG_NOSIGNAL);
-                ::close(client);
-                continue;
-            }
-            std::string body;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                body = body_;
-            }
-            const std::string response =
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) +
-                "\r\nConnection: close\r\n\r\n" + body;
-            (void)::send(client, response.data(), response.size(), MSG_NOSIGNAL);
-            ::close(client);
-        }
-    }
-
-    int fd_ = -1;
-    int port_ = 0;
-    std::atomic<bool> stop_{false};
-    std::atomic<Mode> mode_{Mode::Normal};
-    std::atomic<int> requests_{0};
-    std::vector<int> stalled_;  // touched only by the server thread, then the destructor
-    std::thread thread_;
-    std::mutex mutex_;
-    std::string body_;
-};
+// The scripted HTTP client's canned feed: temperature (50 F = 10 C) and humidity, observed now.
+std::string canned_feed() {
+    const long long now = static_cast<long long>(std::time(nullptr));
+    return R"({"lcd_datasheet":{"current":{"outTemp":{"value":50.0},"outHumidity":{"value":40.0},"dateTime":{"value":)" +
+           std::to_string(now) + "}}}}";
+}
 
 // Temperature and humidity only, observed now.
 std::string weewx_payload() {
@@ -192,12 +96,12 @@ std::string alpaca_message_of(const std::function<void()>& fn) {
 constexpr std::chrono::milliseconds kRendezvous{5000};
 
 std::unique_ptr<alpacacore::ObservingConditionsDriver> make_fake_driver(
-    alpacacore::test::FakeWeeWxFetcher& fake, alpacacore::test::FakeTaskClock& clock,
+    alpacacore::test::FakeHttpClient& fake, alpacacore::test::FakeTaskClock& clock,
     std::chrono::seconds poll = std::chrono::seconds(1)) {
     alpacacore::vendor::weewx::WeeWxHttpConfig config;
     config.url = "http://localhost:9999/dummy";
     config.poll_interval = poll;
-    return alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fake.fetcher(), clock);
+    return alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fake.client(), clock);
 }
 
 void connect_parked(alpacacore::AlpacaDriver& driver, alpacacore::test::FakeTaskClock& clock) {
@@ -210,7 +114,7 @@ void poll_once(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds 
     REQUIRE(clock.wait_for_woken_settled(kRendezvous));
 }
 
-// Three failed polls `period` apart: the third latches the fault. The fetcher must be failing.
+// Three failed polls `period` apart: the third latches the fault. The fake client must be failing.
 void latch_fault(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds period = std::chrono::seconds(1)) {
     for (int i = 0; i < 3; ++i) {
         poll_once(clock, period);
@@ -532,7 +436,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - connect refuses malformed replies"
     CHECK(driver->get_connected() == false);
 
     // Every refusal left the driver reusable: a healthy feed connects.
-    feed.set_mode(Mode::Normal);
+    feed.set_mode(Mode::Answer);
     driver->set_connected(true);
     CHECK(driver->get_connected());
     driver->set_connected(false);
@@ -563,8 +467,8 @@ TEST_CASE(
     "WeeWX ObservingConditions Driver - feed stalls after connect: the third failure latches a fault that refuses "
     "reads, the staleness bound drops Connected",
     "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     auto driver = make_fake_driver(fake, clock);
     connect_parked(*driver, clock);
     const double before = driver->get_time_since_last_update("Temperature");
@@ -624,7 +528,7 @@ TEST_CASE(
 // Decision 0009 rule 1 (#1984): no HTTP failure is positive evidence the feed is gone. A connection the server drops
 // (a libcurl error), a 500 and a body that does not parse each count as one failed exchange, through the real
 // libcurl fetch; three in a row of any kind latch, and one good fetch in between starts the count again.
-// Falsified by: weewx_observingconditions_driver.cpp http_get() refusing only a status above 500 (the 500 replies
+// Falsified by: weewx_observingconditions_driver.cpp fetch_snapshot() refusing only a status above 500 (the 500 replies
 // never count, so they never latch); also note_poll_reply() not calling link_health_.on_reply() (a good fetch in
 // between does not reset the count).
 TEST_CASE("WeeWX ObservingConditions Driver - every kind of failed poll fetch counts as one failed exchange",
@@ -641,7 +545,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - every kind of failed poll fetch co
 
     using Mode = FakeWeeWxFeed::Mode;
     const auto fail_by = [&](int kind) {
-        feed.set_mode(Mode::Normal);
+        feed.set_mode(Mode::Answer);
         feed.set_body(full_payload());
         if (kind == 0) {
             feed.set_mode(Mode::DropAfterAccept);  // libcurl: "HTTP request failed: ..."
@@ -652,7 +556,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - every kind of failed poll fetch co
         }
     };
     const auto heal = [&] {
-        feed.set_mode(Mode::Normal);
+        feed.set_mode(Mode::Answer);
         feed.set_body(full_payload());
         poll_once(clock);
         REQUIRE(driver->get_link_fault().empty());
@@ -695,7 +599,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - every kind of failed poll fetch co
     }
     CHECK(driver->get_link_fault().empty());
     CHECK(std::abs(driver->get_temperature() - 10.0) < 1e-6);
-    feed.set_mode(Mode::Normal);
+    feed.set_mode(Mode::Answer);
     driver->set_connected(false);
 }
 
@@ -705,8 +609,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - every kind of failed poll fetch co
 // (the standing fault survives the good Refresh).
 TEST_CASE("WeeWX ObservingConditions Driver - a failed Refresh does not count, a good one clears the fault",
           "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     auto driver = make_fake_driver(fake, clock);
     connect_parked(*driver, clock);
 
@@ -740,8 +644,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - a failed Refresh does not count, a
 // return (the Connect stops the poll, fetches the failing feed and throws).
 TEST_CASE("WeeWX ObservingConditions Driver - three consecutive failed polls latch a fault that refuses reads",
           "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     auto driver = make_fake_driver(fake, clock);
     connect_parked(*driver, clock);
     const int driver_exception = alpacacore::AlpacaError::DriverException;
@@ -756,7 +660,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - three consecutive failed polls lat
     poll_once(clock);
     CHECK(driver->get_connected());
     const std::string fault = driver->get_link_fault();
-    CHECK(fault == "scripted WeeWX fetch failure (3 consecutive failures)");
+    CHECK(fault == "scripted HTTP request failure (3 consecutive failures)");
     CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == driver_exception);
     CHECK(alpaca_error_of([&] { (void)driver->get_humidity(); }) == driver_exception);
     CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == driver_exception);
@@ -793,8 +697,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - three consecutive failed polls lat
 // Falsified by: weewx_observingconditions_driver.cpp note_poll_failure() losing the feed on a failure count
 // (link_health_.consecutive_failures() >= 10) instead of link_health_.fault_stale().
 TEST_CASE("WeeWX ObservingConditions Driver - the feed is lost only at the staleness bound", "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     auto driver = make_fake_driver(fake, clock);
     connect_parked(*driver, clock);
 
@@ -819,8 +723,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - the feed is lost only at the stale
 // Falsified by: weewx_observingconditions_driver.cpp loss_bound() returning util::kLinkStalenessBound alone (a 20 s
 // poll loses the feed 39.999 s after the latch).
 TEST_CASE("WeeWX ObservingConditions Driver - the staleness bound grows with the poll interval", "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     auto driver = make_fake_driver(fake, clock, std::chrono::seconds(20));
     connect_parked(*driver, clock);
 
@@ -839,8 +743,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - the staleness bound grows with the
 // Falsified by: weewx_observingconditions_driver.cpp poll_loop() going on after note_poll_failure() returns true
 // (the poll keeps fetching after the loss).
 TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops Connected and its poll ends", "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     auto driver = make_fake_driver(fake, clock);
     connect_parked(*driver, clock);
     const int not_connected = alpacacore::AlpacaError::NotConnected;
@@ -850,7 +754,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops Connected and it
     CHECK_FALSE(driver->get_connected());
     CHECK_FALSE(driver->get_connecting());
     const std::string fault = driver->get_link_fault();
-    CHECK(fault.find("scripted WeeWX fetch failure") != std::string::npos);
+    CHECK(fault.find("scripted HTTP request failure") != std::string::npos);
     CHECK(alpaca_error_of([&] { (void)driver->get_temperature(); }) == not_connected);
     CHECK(alpaca_error_of([&] { (void)driver->get_humidity(); }) == not_connected);
     CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
@@ -876,8 +780,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops Connected and it
 // Falsified by: weewx_observingconditions_driver.cpp set_connected(true) without link_health_.reset() (the failed
 // Connect over the lost feed still reports the old fault text).
 TEST_CASE("WeeWX ObservingConditions Driver - only the client's Connect relinks a lost feed", "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     auto driver = make_fake_driver(fake, clock);
     connect_parked(*driver, clock);
 
@@ -885,11 +789,11 @@ TEST_CASE("WeeWX ObservingConditions Driver - only the client's Connect relinks 
     lose_feed(clock);
     REQUIRE_FALSE(driver->get_connected());
 
-    // The feed is still down: Connect re-runs the connect fetch, fails with its error (the scripted fetcher throws a
+    // The feed is still down: Connect re-runs the connect fetch, fails with its error (the scripted client throws a
     // plain std::runtime_error; libcurl's fetch throws DriverException, "connect refuses a feed that never answers")
     // and leaves the driver down.
     const int before_connect = fake.calls();
-    CHECK_THROWS_WITH(driver->set_connected(true), "scripted WeeWX fetch failure");
+    CHECK_THROWS_WITH(driver->set_connected(true), "scripted HTTP request failure");
     CHECK(fake.calls() == before_connect + 1);
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());  // rule 5: the Connect ended the kept text; its own error is the reason
@@ -933,8 +837,8 @@ TEST_CASE("WeeWX ObservingConditions Driver - only the client's Connect relinks 
 // once the feed is lost).
 TEST_CASE("WeeWX ObservingConditions Driver - the link fault text is kept until the next Connect or Disconnect",
           "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     auto driver = make_fake_driver(fake, clock);
     connect_parked(*driver, clock);
     CHECK(driver->get_link_fault().empty());
@@ -942,7 +846,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - the link fault text is kept until 
     fake.fail_next(1000);
     latch_fault(clock);
     const std::string fault = driver->get_link_fault();
-    CHECK(fault == "scripted WeeWX fetch failure (3 consecutive failures)");
+    CHECK(fault == "scripted HTTP request failure (3 consecutive failures)");
     poll_once(clock, alpacacore::util::kLinkStalenessBound);
     REQUIRE_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault() == fault);
@@ -970,10 +874,10 @@ TEST_CASE("WeeWX ObservingConditions Driver - the link fault text is kept until 
 // Falsified by: weewx_observingconditions_driver.cpp lose_feed_locked() not clearing property_last_update_ (Humidity
 // keeps its pre-loss update time after the reconnect).
 TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops its cached sensor times", "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher state outlive the driver
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client state outlive the driver
     std::atomic<bool> failing{false};
     std::atomic<bool> humidity{true};
-    alpacacore::vendor::weewx::WeeWxFetcher fetcher = [&](const std::string&, std::chrono::milliseconds) {
+    alpacacore::test::FakeHttpClient fetcher{[&]() -> std::string {
         if (failing.load()) {
             throw std::runtime_error("scripted WeeWX fetch failure");
         }
@@ -981,11 +885,11 @@ TEST_CASE("WeeWX ObservingConditions Driver - a lost feed drops its cached senso
         const std::string rh = humidity.load() ? R"("outHumidity":{"value":40.0},)" : "";
         return R"({"lcd_datasheet":{"current":{"outTemp":{"value":50.0},)" + rh + R"("dateTime":{"value":)" + now +
                "}}}}";
-    };
+    }};
     alpacacore::vendor::weewx::WeeWxHttpConfig config;
     config.url = "http://localhost:9999/dummy";
     config.poll_interval = std::chrono::seconds(1);
-    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fetcher, clock);
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fetcher.client(), clock);
     connect_parked(*driver, clock);
     REQUIRE(driver->get_time_since_last_update("Humidity") >= 0.0);
 
@@ -1108,13 +1012,13 @@ TEST_CASE("WeeWX ObservingConditions Driver - async connect to a stalled feed re
     CHECK_FALSE(driver->get_last_connect_error().empty());
 }
 
-TEST_CASE("WeeWX ObservingConditions Driver - empty fetcher is refused at construction", "[weewx]") {
+TEST_CASE("WeeWX ObservingConditions Driver - a null HTTP client is refused at construction", "[weewx]") {
     alpacacore::vendor::weewx::WeeWxHttpConfig config;
     config.url = "http://localhost:9999/dummy";
 
     CHECK(alpaca_error_of([&] {
               (void)alpacacore::vendor::weewx::create_weewx_observingconditions(
-                  0, config, alpacacore::vendor::weewx::WeeWxFetcher{});
+                  0, config, std::shared_ptr<alpacacore::util::HttpClient>{});
           }) == alpacacore::AlpacaError::InvalidValue);
 }
 
@@ -1123,12 +1027,12 @@ TEST_CASE("WeeWX ObservingConditions Driver - empty fetcher is refused at constr
 // Falsified by: weewx_observingconditions_driver.cpp poll_loop() waiting on a wall-clock condition variable
 // (advancing the fake clock makes no poll).
 TEST_CASE("WeeWX ObservingConditions Driver - the poll waits on the task clock and a disconnect ends it", "[weewx]") {
-    alpacacore::test::FakeTaskClock clock;  // first: it and the fetcher outlive the driver
-    alpacacore::test::FakeWeeWxFetcher fake;
+    alpacacore::test::FakeTaskClock clock;  // first: it and the fake client outlive the driver
+    alpacacore::test::FakeHttpClient fake{canned_feed};
     alpacacore::vendor::weewx::WeeWxHttpConfig config;
     config.url = "http://localhost:9999/dummy";
     config.poll_interval = std::chrono::seconds(60);
-    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fake.fetcher(), clock);
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config, fake.client(), clock);
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the poll is waiting out its interval
     const int before = fake.calls();
