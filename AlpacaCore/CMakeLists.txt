@@ -29,6 +29,7 @@ option(ALPACACORE_ENABLE_SYNSCAN "Enable SynScan vendor support" OFF)
 option(ALPACACORE_ENABLE_SKYWATCHER "Enable SkyWatcher motor controller vendor support" OFF)
 option(ALPACACORE_ENABLE_ONSTEP "Enable OnStep vendor support" OFF)
 option(ALPACACORE_ENABLE_WEEWX "Enable WeeWX vendor support" OFF)
+option(ALPACACORE_ENABLE_REMOTEALPACA "Enable the remotealpaca upstream Alpaca client (decision 0023)" OFF)
 option(ALPACACORE_ENABLE_GEMINI "Enable Gemini vendor support (focuser, flat panel)" OFF)
 option(ALPACACORE_ENABLE_SVBONY "Enable SVBONY vendor support" OFF)
 option(ALPACACORE_ENABLE_CELESTRON "Enable Celestron NexStar vendor support" OFF)
@@ -58,6 +59,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_SKYWATCHER ON)
     set(ALPACACORE_ENABLE_ONSTEP ON)
     set(ALPACACORE_ENABLE_WEEWX ON)
+    set(ALPACACORE_ENABLE_REMOTEALPACA ON)
     set(ALPACACORE_ENABLE_GEMINI ON)
     set(ALPACACORE_ENABLE_SVBONY ON)
     set(ALPACACORE_ENABLE_CELESTRON ON)
@@ -227,6 +229,13 @@ if(ALPACACORE_ENABLE_WEEWX)
         # registration compiles empty even though alpacacore_weewx links fine.
         target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_WEEWX)
     endif()
+endif()
+
+# The upstream Alpaca client library (issue #1753 slice 2). No catalog
+# registration yet, so alpacacore_builtins does not link it; the proxied device
+# slices add that with their factories.
+if(ALPACACORE_ENABLE_REMOTEALPACA)
+    add_subdirectory(src/vendors/remotealpaca)
 endif()
 
 if(ALPACACORE_ENABLE_GEMINI)
@@ -438,6 +447,15 @@ endif()
 
 if(ALPACACORE_ENABLE_WEEWX AND TARGET alpacacore_weewx)
     install(TARGETS alpacacore_weewx
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_REMOTEALPACA AND TARGET alpacacore_remotealpaca)
+    install(TARGETS alpacacore_remotealpaca
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

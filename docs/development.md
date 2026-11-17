@@ -139,6 +139,7 @@ cmake --build AlpacaHTTP/build --parallel
 | `ALPACACORE_ENABLE_PLAYERONE` | `OFF` | Player One cameras |
 | `ALPACACORE_ENABLE_GEMINI` | `OFF` | Losmandy Gemini focusers |
 | `ALPACACORE_ENABLE_WEEWX` | `OFF` | WeeWX observing conditions |
+| `ALPACACORE_ENABLE_REMOTEALPACA` | `OFF` | The `remotealpaca` upstream Alpaca client library (decision 0023; needs libcurl); no device type yet |
 | `ALPACACORE_ENABLE_ONSTEP` | `OFF` | OnStep mounts |
 | `ALPACACORE_ENABLE_SKYWATCHER` | `OFF` | Sky-Watcher mounts direct to the motor controller (EQMOD) |
 | `ALPACACORE_ENABLE_BISQUE` | `OFF` | Bisque/Paramount (TheSkyX) telescope support |
