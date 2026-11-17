@@ -193,7 +193,7 @@ public:
 
     /**
      * @brief False once an exchange over serial has seen the port gone (a hangup on a read, a blind command's ack
-     *        drain included, or EIO/ENXIO/ENODEV on a write), or lose_link() was called; the port is then already
+     *        drain included, or EIO/ENXIO/ENODEV/EBADF on a write), or lose_link() was called; the port is then already
      *        released and the exchange threw NotConnected (decision 0009 rule 2). Over TCP a hangup stays a
      *        DriverException. Cleared by the next successful connect(). Lock-free.
      */
