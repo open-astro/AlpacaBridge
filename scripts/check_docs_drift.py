@@ -121,13 +121,15 @@ Checks:
      follow-up PR to #571, so today this check pins the list, not any case. HELPER_FAKES names the
      fakes that are not a driver's connect path, each with a reason, and a
      helper that has since been given a roster row is itself a finding.
- 14. Every std::regex in AlpacaHTTP/src/http/router.cpp is a static object
-     (issue #657, from #646). Router::route once built a std::regex per
+ 14. Every std::regex in AlpacaHTTP/src/http/router.cpp and in each per-type
+     routes source, AlpacaHTTP/src/http/routes/*.cpp (issue #2081), is a static
+     object (issue #657, from #646). Router::route once built a std::regex per
      request, which made a device-path request about 14x a management request
      (30x under ASan). This replaces a wall-clock ratio test, which was coarse
      in Release and flaky under load. A construction with no `static` in its
      statement, or an unnamed temporary, is a finding, and so is finding no
-     construction at all (the extractor is stale or the regexes moved).
+     construction in any of those files together (the extractor is stale or the
+     regexes moved); a routes source with no regex is not a finding.
  15. The README headline ("N validated devices. <Word> brands. One server."
      plus the brand list) agrees with SUPPORTED-DRIVERS.md (issue #684). N is
      recomputed with the row filter this script owns, count_validated_device_rows
@@ -605,10 +607,11 @@ def _strip_comments(text):
     whose prose contains parentheses and identifiers, and both patterns above
     scan across whitespace -- without this a sentence in a comment is matched
     as a method signature. Written for the two QHY headers, which hold no raw
-    string literals. Check 14 also runs it over router.cpp, which does (R"(...)"
-    regexes) and holds "://" (origin.find), so LINE_COMMENT_RE blanks the rest of
-    that line; that is harmless only while no std::regex sits on such a line or
-    after a stray /* -- re-check both if the gate ever misses one."""
+    string literals. Check 14 also runs it over router.cpp and routes/*.cpp; the
+    router does hold them (R"(...)" regexes) and "://" (origin.find), so
+    LINE_COMMENT_RE blanks the rest of that line; that is harmless only while no
+    std::regex sits on such a line or after a stray /* -- re-check both if the
+    gate ever misses one."""
     text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     return LINE_COMMENT_RE.sub("", text)
 
@@ -1863,7 +1866,12 @@ STD_REGEX_TEMP_RE = re.compile(r"\bstd::regex\s*[({]")
 STD_REGEX_NAMED_RE = re.compile(r"\bstd::regex\s+(?:const\s+)?(\w+)\s*[({=]")
 
 
-def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
+ROUTER_SOURCE = "AlpacaHTTP/src/http/router.cpp"
+ROUTES_GLOB = "AlpacaHTTP/src/http/routes/*.cpp"
+
+
+def _static_regex_scan(text, path):
+    """(findings, constructions seen) for one source; the floor is the caller's."""
     code = _strip_comments(text)
     findings = []
     seen = 0
@@ -1881,13 +1889,32 @@ def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
             findings.append("%s:%d: std::regex %s is not static -- a per-request build costs 14x a "
                             "management request (#646); the gate wants the static keyword and does not model "
                             "scope, so a namespace-scope regex needs it too" % (path, line, m.group(1)))
+    return findings, seen
+
+
+def _static_regex_findings(text, path=ROUTER_SOURCE):
+    findings, seen = _static_regex_scan(text, path)
     if seen == 0:
         findings.append("no std::regex construction found in %s: the extractor is stale or the regexes moved" % path)
     return findings
 
 
 def check_router_regexes_static(root=ROOT):
-    return _static_regex_findings(read("AlpacaHTTP/src/http/router.cpp", root))
+    """The router and every per-type routes source (#2081). A routes source with no
+    regex is not a finding: the floor applies to the union, so it still fires when
+    the regexes leave every scanned file."""
+    paths = [ROUTER_SOURCE] + sorted(Path(p).relative_to(root).as_posix()
+                                     for p in glob.glob(str(root / ROUTES_GLOB)))
+    findings = []
+    seen = 0
+    for path in paths:
+        f, n = _static_regex_scan(read(path, root), path)
+        findings.extend(f)
+        seen += n
+    if seen == 0:
+        findings.append("no std::regex construction found in %s or %s: the extractor is stale or the "
+                        "regexes moved" % (ROUTER_SOURCE, ROUTES_GLOB))
+    return findings
 
 # --- check 15: README headline counts vs SUPPORTED-DRIVERS.md (issue #684) --
 #
@@ -3180,7 +3207,7 @@ CHECKS = [
     ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
     ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
     ("Fake-connectable roster matches the fakes on disk", check_fake_roster_matches_disk),
-    ("Every std::regex in router.cpp is built once (static)", check_router_regexes_static),
+    ("Every std::regex in router.cpp and routes/*.cpp is built once (static)", check_router_regexes_static),
     ("README headline counts match SUPPORTED-DRIVERS.md", check_readme_headline_counts),
     ("SUPPORTED-DRIVERS.md Updated date is not behind the README release date", check_supported_drivers_updated_date),
     ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
@@ -3756,6 +3783,29 @@ def self_test():
     f = _static_regex_findings("int x = 1;\n")
     check("static regex: no construction at all is a floor finding, not a pass",
           len(f) == 1 and "extractor is stale" in f[0])
+    # #2081: the per-type dispatch moves to AlpacaHTTP/src/http/routes/<type>_routes.cpp, so the
+    # check reads the router and every routes source, with the floor over the union.
+    with tempfile.TemporaryDirectory() as rx_tmp:
+        rx_root = Path(rx_tmp)
+        rx_http = rx_root / "AlpacaHTTP" / "src" / "http"
+        (rx_http / "routes").mkdir(parents=True)
+        (rx_http / "router.cpp").write_text(rx_ok, encoding="utf-8")
+        (rx_http / "routes" / "dome_routes.cpp").write_text("int dispatch = 0;\n", encoding="utf-8")
+        check("static regex: a routes source with no regex adds no finding",
+              check_router_regexes_static(rx_root) == [])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text('const std::regex kF("a");\n', encoding="utf-8")
+        f = check_router_regexes_static(rx_root)
+        check("static regex: a non-static regex in a routes source is reported with its path",
+              len(f) == 1 and "routes/focuser_routes.cpp:1" in f[0] and "kF is not static" in f[0])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text('static const std::regex kF("a");\n',
+                                                               encoding="utf-8")
+        (rx_http / "router.cpp").write_text("int x = 1;\n", encoding="utf-8")
+        check("static regex: the floor counts the routes sources too (a regex there is a construction)",
+              check_router_regexes_static(rx_root) == [])
+        (rx_http / "routes" / "focuser_routes.cpp").write_text("int y = 2;\n", encoding="utf-8")
+        f = check_router_regexes_static(rx_root)
+        check("static regex: no construction in the router or any routes source is one floor finding",
+              len(f) == 1 and "extractor is stale" in f[0] and "routes" in f[0])
 
     # check 15: README headline vs SUPPORTED-DRIVERS.md (issue #684).
     hl_map = {"Alpha": "Alpha", "Beta Motor": "Beta", "Beta Handset": "Beta", "GPhoto": "DSLRs (via libgphoto2)"}

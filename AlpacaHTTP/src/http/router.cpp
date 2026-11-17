@@ -4392,25 +4392,6 @@ Response Router::dispatch_observingconditions_method(
     });
 }
 
-Response Router::dispatch_safetymonitor_method(std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
-                                               const std::string& method_name, const DeviceCall& call) {
-    const Request& request = call.request();
-
-    // No SafetyMonitor method reads a parameter today, so the 400 text path of run()
-    // is unreachable here. Kept so a method that adds one answers 400 text like the
-    // other dispatchers.
-    return call.run("safety monitor method '" + method_name + "'", [&]() -> Response {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "issafe") {
-                return call.ok(safetymonitor->get_is_safe());
-            }
-        }
-
-        return call.error(util::ErrorCode::NOT_IMPLEMENTED,
-                          "Method '" + method_name + "' not yet implemented for SafetyMonitor");
-    });
-}
-
 Response Router::handle_root(const Request& request, std::uint32_t server_tx_id) {
     Response response;
     response.set_content_type("application/json");
