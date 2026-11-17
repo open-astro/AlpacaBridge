@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -2352,7 +2353,7 @@ private:
     // Tracking check releases for its handset read; the other families never call that check.
     struct GateChecks {
         const SynScanTelescopeDriver& driver;
-        const char* who;
+        const char* who = nullptr;
         std::unique_lock<std::mutex>* lock = nullptr;
 
         void check_connected() const { driver.check_connected(); }
@@ -2361,6 +2362,7 @@ private:
         // open-astro#775: ITelescopeV4 raises InvalidOperation when a slew is requested with Tracking false. The
         // handset is asked, with mutex_ released.
         void check_tracking() const {
+            assert(lock != nullptr && "a slew's GateChecks carries its held mutex_");
             driver.refresh_tracking_mode_locked(*lock);
             if (!driver.get_tracking_locked(*lock)) {
                 throw AlpacaException(std::string(who) + " requires Tracking to be true",
