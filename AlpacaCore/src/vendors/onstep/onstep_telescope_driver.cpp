@@ -348,6 +348,61 @@ bool same_status(const MountStatus& a, const MountStatus& b) {
            a.is_pulse_guide_active == b.is_pulse_guide_active && a.side_of_pier == b.side_of_pier;
 }
 
+// The motion a kept error or a watch belongs to (#2296): AtPark raises only a park's, AtHome only a home's.
+enum class MotionKind : std::uint8_t { Slew, Park, Home };
+
+// Why the mount stopped, for the :GU# general error codes that stop it (OnStepX Limits::errorCode() and stop()/
+// stopAxis1()/stopAxis2(), which abort the GOTO; OnStep 4.x OnStep.ino stopSlewingAndTracking()); nullptr for the
+// others: 0 none, 8 sync and 9 park (obsolete), 10 goto sync (4.x ends a slew that does not settle and syncs it),
+// 11 unspecified, 13-15 weather, site and NV init.
+const char* limit_stop_reason(int code) {
+    switch (code) {
+        case 1:
+            return "on a motor or driver fault";
+        case 2:
+            return "at the horizon limit";
+        case 3:
+            return "at a limit switch";
+        case 4:
+            return "at the Dec axis limit";
+        case 5:
+            return "at the azimuth axis limit";
+        case 6:
+            return "at the RA axis limit (under the pole)";
+        case 7:
+            return "at the meridian limit";
+        case 12:
+            return "at the overhead limit";
+        default:
+            return nullptr;
+    }
+}
+
+// The great-circle angle between two RA/Dec positions, in degrees (#2296).
+double separation_degrees(double ra1_hours, double dec1_degrees, double ra2_hours, double dec2_degrees) {
+    constexpr double kRad = std::numbers::pi / 180.0;
+    const double d1 = dec1_degrees * kRad;
+    const double d2 = dec2_degrees * kRad;
+    const double c =
+        (std::sin(d1) * std::sin(d2)) + (std::cos(d1) * std::cos(d2) * std::cos((ra1_hours - ra2_hours) * 15.0 * kRad));
+    return std::acos(std::clamp(c, -1.0, 1.0)) / kRad;
+}
+
+// #2296: a GOTO whose end frame carries a stop code landed when the mount is this close to its target. The driver has
+// no landing tolerance of its own (landing is a :GU# with no GOTO), so this is generous: 1 degree is 4 minutes of a
+// stopped mount's RA drift, far beyond the arcseconds an OnStep GOTO lands within (other drivers here use 3 to 600
+// arcseconds), so a landing is never read as a stop; a limit stop that ends inside it is read as a landing (logged).
+constexpr double kStopLandedToleranceDegrees = 1.0;
+
+// Sidereal seconds per SI second: a target held at a fixed hour angle moves this fast in RA (#2296).
+constexpr double kSiderealPerSolar = 1.00273790935;
+
+// #2296: a park or home the driver started that has not ended within this time fails. Generous on purpose: OnStepX
+// slews at no less than half its base rate (Goto.command.cpp :SX92, usPerStepBase x 2), 1 deg/s by default, so a
+// 180-degree move at 0.5 deg/s takes 6 minutes; 20 minutes also covers a base rate of 0.3 deg/s, a home with switches
+// (a fast and a slow search) and the near-destination refine. The time a GOTO waits at home ('w') is not counted.
+constexpr auto kParkHomeBound = std::chrono::minutes(20);
+
 }  // namespace
 
 class OnStepTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
@@ -723,6 +778,9 @@ public:
             stop_status_poller();
         }
         StateLock lock(lock_gate_);
+        // #2296: the watch on a GOTO, park or home the driver started, kept through a relink that leaves the motion
+        // running (stop_motion_after_long_outage_locked()), so its end is still checked. Its kept failure is not.
+        std::optional<WatchedMotion> relink_watch;
         // A Connected=true against a lost link must reconnect, not return as
         // already connected (decision 0009 point 4, #1241).
         if (connected && connected_ && !protocol.link_alive()) {
@@ -730,6 +788,7 @@ public:
             published_connected_ = false;
             connected_ = false;  // before the close: a getter during it reads NotConnected (decision 0016)
             protocol.disconnect();
+            relink_watch = watched_motion_;
             reset_session_state_locked();
         }
         // Base gates BEFORE the idempotency check: a sync disconnect during
@@ -774,7 +833,9 @@ public:
                     "OnStep");
             });
             connected_ = true;
-            stop_motion_after_long_outage_locked();
+            if (stop_motion_after_long_outage_locked()) {
+                relink_watch.reset();  // the driver stopped the motion: its end is the driver's own
+            }
             snapshot_.reset();
             site_latitude_known_ = false;
             site_longitude_known_ = false;
@@ -919,6 +980,25 @@ public:
             // fast-response targets, #1242), and the mount's site when the
             // config did not set both coordinates.
             seed_snapshot_locked();
+            if (relink_watch) {
+                // #2296: the relink left the watched motion running. Its first status since the outage decides at
+                // once, by the same end rules as any other (a stop during the outage still fails it), else the watch
+                // goes on. The park and home bound still runs from the command.
+                watched_motion_ = relink_watch;
+                const auto seeded = snapshot_.read();
+                if (seeded && seeded->value.status_known) {
+                    try {
+                        note_motion_end_locked(
+                            seeded->value.status,
+                            seeded->value.equatorial_known
+                                ? std::optional<Position>(Position{seeded->value.ra_hours, seeded->value.dec_degrees})
+                                : std::nullopt);
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the link check below decides
+                        // Only a lost link escapes it (its position read): the link check below fails the connect as
+                        // for any seed read that loses it (#1895).
+                    }
+                }
+            }
             seed_rate_state_locked();
             // The seed takes each failed read as a silent mount's, so a link lost during the connect (decision
             // 0009) shows only here: Connect fails instead of returning while Connected reads false (#1895).
@@ -1045,14 +1125,14 @@ public:
     bool get_at_home() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
-        raise_park_home_error_locked(true);
+        raise_motion_error_locked(MotionKind::Home);
         return served_status_locked().is_at_home;
     }
 
     bool get_at_park() const override {
         StateLock lock(lock_gate_, StateLock::Mode::State);
         check_connected();
-        raise_park_home_error_locked(false);
+        raise_motion_error_locked(MotionKind::Park);
         return served_status_locked().is_parked;
     }
 
@@ -1352,6 +1432,11 @@ public:
         dispatch_goto_locked(
             who, side == 0 ? ":MNe#" : ":MNw#", [](const Wire&) {},
             [letter](const Wire& protocol) { return protocol.goto_current_position_on_side(letter); });
+        if (watched_motion_) {
+            // #2296: the flip's target is the side and the position it slews back to.
+            watched_motion_->target_side = side;
+            watched_motion_->target = std::make_pair(position.ra_hours, position.dec_degrees);
+        }
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
@@ -1498,7 +1583,7 @@ public:
             throw_if_faulted_locked();
             return true;  // stopping, settling or retrying a Park or FindHome (#1430)
         }
-        raise_park_home_error_locked(std::nullopt);
+        raise_motion_error_locked(std::nullopt);
         return get_slewing_locked();
     }
 
@@ -1677,7 +1762,7 @@ public:
         check_not_parked_locked("FindHome");
         refresh_status_locked();  // a control-path read, written through (decision 0010)
         if (const MountStatus status = frame_status_locked(); status.is_at_home || status.is_homing) {
-            park_home_error_.reset();  // a new command: an earlier body's refusal is not this call's
+            motion_error_.reset();  // a new command: an earlier failure is not this call's
             return;  // there, or on its way
         }
         start_park_or_home_locked(lock, "FindHome", true);
@@ -1689,7 +1774,7 @@ public:
         refuse_while_faulted_locked("Park");
         refresh_status_locked();  // a control-path read, written through (decision 0010)
         if (const MountStatus status = frame_status_locked(); status.is_parked || status.is_parking) {
-            park_home_error_.reset();  // a new command: an earlier body's refusal is not this call's
+            motion_error_.reset();  // a new command: an earlier failure is not this call's
             return;  // ASCOM: Park() on an already-parked mount is a no-op; one already parking too.
         }
         start_park_or_home_locked(lock, "Park", false);
@@ -2082,7 +2167,20 @@ public:
         StateLock lock(lock_gate_);
         check_connected();
         check_not_parked_locked("AbortSlew", /*stop=*/true);
+        // #2296: a watched slew outlives the supersede until the tracking decision below, so a GOTO the mount already
+        // stopped at a limit, which this call's :GU# read is the first to see, gets no restore. The abort is a new
+        // motion command: on every way out it drops the watch and the failure that read kept.
+        const std::optional<WatchedMotion> watched_slew =
+            watched_motion_ && watched_motion_->motion == MotionKind::Slew ? watched_motion_ : std::nullopt;
+        struct DropWatch {  // runs while `lock` (declared first) still holds mutex_
+            const OnStepTelescopeDriver* driver;
+            ~DropWatch() {
+                driver->watched_motion_.reset();
+                driver->motion_error_.reset();
+            }
+        } drop_watch{this};
         supersede_park_or_home_locked();  // also ends a Park or FindHome still finishing (#1430)
+        watched_motion_ = watched_slew;
         // Every stop on its own, so one lost command cannot skip the others (#781).
         const std::string stop_error = send_stops_locked(true, {0, 1, 2, 3});
         if (!stop_error.empty()) {
@@ -2108,6 +2206,12 @@ public:
                     throw AlpacaException("faulted", AlpacaError::DriverException);
                 }
                 refresh_status_locked();
+                // #2296: OnStepX stops a GOTO at a limit through goTo.abort(), so the GOTO flag stays set while it
+                // brakes (GG_READY_ABORT), and turns tracking off; a stop code in this read means no restore, GOTO
+                // flag or not (the abort is the client's own stop, so nothing fails).
+                if (onstepx_ && limit_stop_reason(frame_status_locked().general_error) != nullptr) {
+                    tracking_before_slew_ = false;
+                }
                 finish_slew_tracking_from_frame_locked();
             } catch (const AlpacaException& ex) {
                 tracking_before_slew_ = false;  // status unknown: never restart blind
@@ -2685,6 +2789,8 @@ private:
     // The mount took the park or home: it now moves to it with tracking off.
     void finish_park_or_home_locked(bool home) {
         tracking_before_slew_ = false;  // never restart tracking afterwards (#1218)
+        // #2296: a limit can stop it on the way; before the write-through, from the status read.
+        watch_motion_locked(home ? MotionKind::Home : MotionKind::Park, home ? "FindHome" : "Park");
         // #2241: the mount moves away from the rate-offset model.
         drop_offset_model_locked();
         write_status_locked([home](MountStatus& status) {  // decision 0010 write-through
@@ -2775,27 +2881,199 @@ private:
             }
         } catch (const AlpacaException& ex) {
             if (still_ours()) {
-                park_home_error_ = KeptParkHomeError{home, ex.what(), ex.error_code()};
+                motion_error_ = KeptMotionError{home ? MotionKind::Home : MotionKind::Park, ex.what(), ex.error_code()};
             }
         }
     }
 
     // A newer motion command or a reconnect: a Park or FindHome still
-    // finishing ends without sending anything, and its kept refusal is
-    // dropped. cancel() never blocks, so mutex_ may be held (rule 10).
+    // finishing ends without sending anything, and its kept failure is
+    // dropped, as is the watch on a motion the driver started (#2296).
+    // cancel() never blocks, so mutex_ may be held (rule 10).
     void supersede_park_or_home_locked() {
-        park_home_error_.reset();
+        motion_error_.reset();
+        watched_motion_.reset();
         ++park_home_claim_;
         park_home_request_.reset();
         park_home_.cancel();
     }
 
-    // Raises a refusal the park_home_ body kept: any for Slewing, only a
-    // park's for AtPark and a home's for AtHome.
-    void raise_park_home_error_locked(std::optional<bool> home) const {
-        if (park_home_error_ && (!home || *home == park_home_error_->home)) {
-            throw AlpacaException(park_home_error_->message, park_home_error_->code);
+    // Raises a failure kept for a motion (a refusal the park_home_ body met, or an end note_motion_end_locked()
+    // found): any for Slewing, only a park's for AtPark and a home's for AtHome. A park or home past its bound fails
+    // here first, so a getter sees the bound without waiting for a poll tick (no I/O: the task clock and mutex_ only).
+    void raise_motion_error_locked(std::optional<MotionKind> motion) const {
+        expire_watched_motion_locked();
+        if (motion_error_ && (!motion || *motion == motion_error_->motion)) {
+            throw AlpacaException(motion_error_->message, motion_error_->code);
         }
+    }
+
+    // A GOTO, park or home the mount has taken: watched until a status shows it ended (#2296). Only a motion the
+    // driver started is watched; a park or slew from a handset or another program is not.
+    void watch_motion_locked(MotionKind motion, const char* who) const {
+        const auto now = clock_.now();
+        watched_motion_ =
+            WatchedMotion{motion, who, now, std::nullopt, -1, false, false, now, !frame_status_locked().is_tracking};
+    }
+
+    // Ends the watch with a kept failure: "<who> failed: <why>".
+    void fail_watched_motion_locked(const std::string& why) const {
+        if (!watched_motion_) {
+            return;
+        }
+        const std::string message = std::string(watched_motion_->who) + " failed: " + why;
+        ALPACA_LOG_ERROR("OnStep", message);
+        motion_error_ = KeptMotionError{watched_motion_->motion, message, AlpacaError::DriverException};
+        watched_motion_.reset();
+    }
+
+    // #2296 (items 5 and 6): a park or home the driver started that has not ended within kParkHomeBound fails. It
+    // only reports: the driver sends no stop, as for its other timed-out waits (the synchronous slew's, the park_home_
+    // settle), so a mount that is still moving is left to the client (AbortSlew) rather than stopped mid-park.
+    void expire_watched_motion_locked() const {
+        if (!watched_motion_ || watched_motion_->motion == MotionKind::Slew ||
+            clock_.now() - watched_motion_->started_at < kParkHomeBound) {
+            return;
+        }
+        const bool park = watched_motion_->motion == MotionKind::Park;
+        fail_watched_motion_locked(
+            std::string("the mount did not finish the ") + (park ? "park" : "home") + " within " +
+            std::to_string(std::chrono::duration_cast<std::chrono::minutes>(kParkHomeBound).count()) + " minutes");
+    }
+
+    // " (:GU# general error <n>, <reason>)" for a stop code, else "".
+    static std::string stop_code_suffix(int code, const char* reason) {
+        return reason == nullptr ? std::string() : " (:GU# general error " + std::to_string(code) + ", " + reason + ")";
+    }
+
+    // #2296: the watched motion ends at the first status read after it that shows it ended, and that status decides,
+    // the same way on OnStepX and OnStep 4.x:
+    // - A slew ends with no GOTO. With no stop code (limit_stop_reason()) it landed, as before. With one, where the
+    //   mount is decides, since a stop code alone is not evidence: OnStepX writes the limits as they stand (a GOTO
+    //   that lands close to a limit and then tracks across it shows the code in its first end frame), and OnStep 4.x
+    //   latches the code until :Te#, an unpark, a home reset or a reboot (a code from an older stop). Within
+    //   kStopLandedToleranceDegrees of the target (a flip: on the requested pier side) it landed, and a WARN names the
+    //   code; away from it the mount stopped short, and the slew fails. Either way the #1230 tracking restore is not
+    //   sent: the code says a limit stopped tracking or is standing, and OnStepX does not limit-check :Te#.
+    // - A park ends with no GOTO and no 'I' (both firmwares go from parking to parked or failed in one step: OnStepX
+    //   Goto.cpp poll() then Park::requestDone(), OnStep 4.x MoveTo.ino). Parked succeeded. Otherwise it failed: 'F',
+    //   a stop code, or, once the park was seen running, an end without either (a handset abort, a park that gave up).
+    //   An end with no sign that the park ran is left to the bound: both firmwares show 'I' from the :hP# answer.
+    // - A home ends with no GOTO, no 'h' and no 'g'. At home ('H') succeeded. A home that ran as a GOTO and ended
+    //   elsewhere failed. A home with switches ('h' or 'g' without a GOTO) is left to the bound: after the switches
+    //   OnStepX moves the axes on to the sense offset (up to 180 degrees, Home.cpp guideDone(), Home.command.cpp :hC1)
+    //   with nothing in :GU#, and OnStep 4.x has an idle moment between its fast and slow search (Home.ino FH_IDLE).
+    //   So is a home not yet seen running.
+    // Every status read reaches here: the poll's before its restore decision, and the control paths' through
+    // note_status_read_locked(). `position` is where the mount was read with the status (the poll's frame); without
+    // it a slew that needs it reads :GRa#/:GDe# now (every caller holds the operation lock), and if that fails the
+    // watch stays for the next status.
+    void note_motion_end_locked(const MountStatus& status, std::optional<Position> position = std::nullopt) const {
+        expire_watched_motion_locked();
+        if (!watched_motion_) {
+            return;
+        }
+        WatchedMotion& watched = *watched_motion_;
+        const bool park = watched.motion == MotionKind::Park;
+        const bool home = watched.motion == MotionKind::Home;
+        if (status.is_waiting_at_home) {
+            watched.started_at = clock_.now();  // waiting for the user: the bound does not run
+        }
+        const bool switch_home = home && !status.is_slewing && (status.is_homing || status.is_guide_active);
+        if (status.is_slewing || (park && status.is_parking) || switch_home) {
+            watched.saw_motion = true;
+            watched.saw_switch_home = watched.saw_switch_home || switch_home;
+            return;  // still running
+        }
+        const char* reason = limit_stop_reason(status.general_error);
+        const std::string code = stop_code_suffix(status.general_error, reason);
+        if (park) {
+            if (status.is_parked) {
+                watched_motion_.reset();
+            } else if (status.is_park_failed) {
+                fail_watched_motion_locked("the mount reports that the park failed (:GU# 'F')" + code);
+            } else if (reason != nullptr || watched.saw_motion) {
+                fail_watched_motion_locked("the mount ended the park without parking" + code);
+            }
+            return;
+        }
+        if (home) {
+            if (status.is_at_home) {
+                watched_motion_.reset();
+            } else if (!watched.saw_switch_home && (reason != nullptr || watched.saw_motion)) {
+                fail_watched_motion_locked("the mount ended the home without reaching home" + code);
+            }
+            return;
+        }
+        if (reason == nullptr) {
+            watched_motion_.reset();  // landed
+            return;
+        }
+        if (onstepx_) {
+            // OnStepX stops tracking at the horizon and overhead limits only on the crossing (Limits::poll(),
+            // `!lastError.altitude.min && error.altitude.min`), so a restore would track on past them: none, landed
+            // or not.
+            tracking_before_slew_ = false;
+        }
+        const std::optional<bool> landed = watched_goto_landed_locked(status, position);
+        if (!watched_motion_) {
+            return;  // superseded while the position was read
+        }
+        if (landed && *landed) {
+            // OnStep 4.x re-checks its limits on every pass and stops tracking again past one (OnStep.ino safety
+            // checks), so its restore stays as before.
+            ALPACA_LOG_WARN("OnStep", std::string(watched_motion_->who) + ": the GOTO reached its target" + code +
+                                          (onstepx_ ? ", so tracking is not restarted" : ""));
+            watched_motion_.reset();
+            return;
+        }
+        // Stopped short, or a stop code whose position could not be read: a stop code is never read as a landing
+        // without the position that shows it landed. No restore.
+        tracking_before_slew_ = false;
+        fail_watched_motion_locked(std::string("OnStep stopped the GOTO ") + reason + " (:GU# general error " +
+                                   std::to_string(status.general_error) + ")" +
+                                   (landed ? "" : "; its position could not be read"));
+    }
+
+    // Whether a watched GOTO that ended with a stop code is at its target: within kStopLandedToleranceDegrees of it,
+    // and a flip also on the requested pier side when the frame reports one (OnStepX derives the side from axis2
+    // alone, so a flip stopped part-way can already show it). A GOTO started with tracking off holds its target's
+    // hour angle, so its target RA is advanced by the sidereal time since the command (the Alt/Az slews: the mount sits
+    // at the requested Alt/Az while the RA it reports moves on). nullopt when the position cannot be read now.
+    // Decision 0016 rule 6: the read drops mutex_, so the caller re-checks the watch after it.
+    std::optional<bool> watched_goto_landed_locked(const MountStatus& status, std::optional<Position> position) const {
+        if (!watched_motion_) {
+            return std::nullopt;
+        }
+        const int target_side = watched_motion_->target_side;
+        const std::optional<std::pair<double, double>> target = watched_motion_->target;
+        const bool fixed_hour_angle = watched_motion_->fixed_hour_angle;
+        const auto commanded_at = watched_motion_->commanded_at;
+        if (target_side >= 0 && status.side_of_pier >= 0 && status.side_of_pier != target_side) {
+            return false;  // a flip that ended on the side it started from
+        }
+        if (!target) {
+            return true;  // no target to compare with: not a stop
+        }
+        if (!position) {
+            try {
+                position = wire().get_position();
+            } catch (const std::exception& ex) {
+                if (is_link_lost(ex)) {
+                    throw;
+                }
+                ALPACA_LOG_WARN("OnStep", std::string("Position read after a GOTO end failed: ") + ex.what());
+                return std::nullopt;
+            }
+            if (!watched_motion_) {
+                return std::nullopt;
+            }
+        }
+        auto [ra, dec] = *target;
+        if (fixed_hour_angle) {
+            ra += std::chrono::duration<double>(clock_.now() - commanded_at).count() * kSiderealPerSolar / 3600.0;
+        }
+        return separation_degrees(position->ra_hours, position->dec_degrees, ra, dec) <= kStopLandedToleranceDegrees;
     }
 
     // AlignmentMode from the mount type last seen (mount_type_seen_), a mount setting kept in driver state by the
@@ -2953,12 +3231,13 @@ private:
     // is not evidence that anything ran unattended. The outage runs from the
     // last time the link was seen alive to the end of this reconnect (an
     // auto-detect re-scan counts): rounds toward stopping. Tracking is kept.
-    void stop_motion_after_long_outage_locked() {
+    // True when it sent the stops; false when it left the motion running (no loss, a short outage, a park).
+    bool stop_motion_after_long_outage_locked() {
         auto& link = OnStepProtocolWrapper::instance();  // the loss stamps: no I/O
         const auto lost_at = link.consume_link_lost_at();
         const auto alive_at = link.consume_last_alive_before_loss();
         if (!lost_at) {
-            return;
+            return false;
         }
         // Timed from the last moment the link was known to be there, not from
         // when the loss was noticed: the status poll checks the link once a
@@ -2968,7 +3247,7 @@ private:
         // The wrapper stamped both times on clock_ (set at connect).
         const auto outage = clock_.now() - (alive_at ? *alive_at : *lost_at);
         if (outage < detail::relink_motion_preserve_window()) {
-            return;
+            return false;
         }
         char seconds[32];
         std::snprintf(seconds, sizeof(seconds), "%.1f", std::chrono::duration<double>(outage).count());
@@ -2979,7 +3258,7 @@ private:
             if (wire().get_status().is_parking) {
                 ALPACA_LOG_INFO("OnStep", std::string("The link to the mount was last seen alive ") + seconds +
                                               " s ago; the mount is parking, so the park is left to finish");
-                return;
+                return false;
             }
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): an unread status stops anyway
             // unknown state: stop, as before
@@ -2991,6 +3270,7 @@ private:
         (void)send_stops_locked(true, {0, 1, 2, 3}, [](const char* what, const std::string& error) {
             ALPACA_LOG_ERROR("OnStep", std::string("Stop after a long outage failed (") + what + "): " + error);
         });
+        return true;
     }
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
@@ -3373,6 +3653,7 @@ private:
         }
         clear_manual_motion_locked();
         tracking_before_slew_ = frame_status_locked().is_tracking;
+        watch_motion_locked(MotionKind::Slew, context);  // #2296: before the write-through, from the status read
         // Write-through (decision 0010): Slewing reads true past the grace until a poll sampled after the GOTO
         // says otherwise; a tick that sampled before it is dropped.
         write_status_locked([](MountStatus& status) { status.is_slewing = true; });
@@ -3389,6 +3670,9 @@ private:
                 protocol.set_target_dec(dec);
             },
             [](const Wire& protocol) { return protocol.slew_to_target(); });
+        if (watched_motion_) {
+            watched_motion_->target = std::make_pair(ra, dec);  // #2296: a stop code at the end is judged against it
+        }
         store_target_locked(ra, dec, targets);
     }
 
@@ -3479,11 +3763,12 @@ private:
 
     void wait_for_slew_complete_locked(StateLock& lock) const {
         wait_for_condition_locked(lock, [this] { return !get_slewing_locked(); });
-        // Decide the restore here; the status was just read (#1230).
+        // Decide the restore here; the status was just read (#1230). A slew the mount stopped owes none (#2296).
         finish_slew_tracking_from_frame_locked();
         // The control path ends the motion: publish where the mount stopped, so the position read right after
         // Slewing goes false is not one the poll took during the GOTO (decision 0010).
         publish_measurement_locked();
+        raise_motion_error_locked(MotionKind::Slew);  // #2296: the read that saw the end, or a poll tick, kept it
         if (slew_settle_time_seconds_ > 0) {
             lock.unlock();
             clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
@@ -3623,6 +3908,7 @@ private:
     // after the last MoveAxis start, which may end it (#1378).
     void note_status_read_locked(const MountStatus& status, bool counts_for_move) const {
         note_status_seen_locked(status);
+        note_motion_end_locked(status);  // #2296: a status equal to the frame's can still be the first after a start
         if (counts_for_move) {
             note_status_measured_locked(status);
         }
@@ -4068,6 +4354,10 @@ private:
     // read (decision 0022 rule 3). A frame cannot predate the :MS# answer: the tick holds the operation lock that :MS#
     // is sent under, and the dispatch write-through shows the GOTO until a later frame replaces it.
     void finish_slew_if_ended_locked(PolledFrame& frame) const {
+        // #2296: first, so a slew the mount stopped owes no restore; the frame's position judges a stop code.
+        note_motion_end_locked(frame.status, frame.equatorial_known
+                                                 ? std::optional<Position>(Position{frame.ra_hours, frame.dec_degrees})
+                                                 : std::nullopt);
         if (frame.status.is_slewing) {
             return;
         }
@@ -4413,14 +4703,34 @@ private:
     util::OperationGeneration move_axis_generation_;
     mutable util::AsyncOperation move_axis_resend_{"OnStep MoveAxis re-send", move_axis_generation_, clock_};
 
-    // #1430: a refusal the park_home_ body met, raised by Slewing and by
-    // AtPark (a park's) or AtHome (a home's). Under mutex_.
-    struct KeptParkHomeError {
-        bool home;
+    // A motion's failure: a refusal the park_home_ body met (#1430), or a GOTO, park or home the mount stopped
+    // (#2296, note_motion_end_locked()). Raised by Slewing and by AtPark (a park's) or AtHome (a home's) until the
+    // next motion command or a reconnect. Under mutex_.
+    struct KeptMotionError {
+        MotionKind motion;
         std::string message;
         int code;
     };
-    std::optional<KeptParkHomeError> park_home_error_;
+    mutable std::optional<KeptMotionError> motion_error_;
+    // #2296: the GOTO, park or home the driver started that no status has yet shown ended (note_motion_end_locked()).
+    // `who` names the member (a string literal); `started_at` starts the park and home bound (kParkHomeBound; a 'w'
+    // status restarts it); `target` is a coordinate GOTO's RA (hours) and Dec, `target_side` a flip's pier side (-1
+    // none); `saw_motion` and `saw_switch_home`: a status has shown it running, and running as a home with switches;
+    // `commanded_at` and `fixed_hour_angle`: when the GOTO was sent, and that it started with tracking off, so both
+    // firmwares hold its target's hour angle, not its RA (OnStepX Goto.cpp moves the target only while tracking; OnStep
+    // 4.x Astro.ino/OnStep.ino likewise). Under mutex_.
+    struct WatchedMotion {
+        MotionKind motion;
+        const char* who;
+        util::TaskClock::clock::time_point started_at;
+        std::optional<std::pair<double, double>> target;
+        int target_side;
+        bool saw_motion;
+        bool saw_switch_home;
+        util::TaskClock::clock::time_point commanded_at;
+        bool fixed_hour_angle;
+    };
+    mutable std::optional<WatchedMotion> watched_motion_;
     // The current Park/FindHome's claim (decision 0006 rule 3), bumped by
     // every supersede, and the request its background part is still to
     // finish. Under mutex_.
