@@ -63,6 +63,8 @@ public:
         }
         pty_.sever();
     }
+    /// Hold each handshake reply this long (a connect still in flight, issue #1757). Set before the connect.
+    void hold_handshake(std::chrono::milliseconds hold) { handshake_hold_ms_.store(static_cast<int>(hold.count())); }
     /// Write raw bytes to the driver (a test that must unpark a reader).
     void send(const std::string& bytes) {
         alpacacore::test::pty_write_bounded(pty_.master_fd(), bytes.data(), bytes.size(), stop_);
@@ -88,6 +90,11 @@ private:
                     acc.erase(0, 1);
                 }
                 if (cmd == "1500001") {
+                    const auto until =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(handshake_hold_ms_.load());
+                    while (!stop_ && std::chrono::steady_clock::now() < until) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));  // the held reply (real time)
+                    }
                     const std::string reply = "WandererRotatorMiniA20250101A0A0A0A";
                     alpacacore::test::pty_write_bounded(pty_.master_fd(), reply.data(), reply.size(), stop_);
                 } else if (!move_reply_.empty()) {
@@ -101,6 +108,7 @@ private:
     std::string move_reply_;
     std::thread th_;
     std::atomic<bool> stop_{false};
+    std::atomic<int> handshake_hold_ms_{0};
 };
 
 }  // namespace
@@ -500,6 +508,31 @@ TEST_CASE("WandererAstro Rotator Driver - Refuses a port another device holds (i
     CHECK_FALSE(driver->get_connected());
     // Refused before the open: the holder's line settings are untouched.
     CHECK(alpacacore::test::wanderer::line_speed(rotator.keepalive_fd()) == before);
+}
+
+// Issue #1757 slice 2a: this driver has no tier-2 contract sweep host, so the sweep's "Disconnect during a connect
+// returns at once" case is repeated here. Before, disconnect() joined the connect thread and tore down before it
+// returned (commit 3ded11bd), so it blocked for the rest of the held handshake and Connecting read false on return.
+// Falsified by: wandererastro_rotator_driver.cpp disconnect() going back to stop_connection_thread() plus
+// set_connected(false).
+TEST_CASE("WandererAstro Rotator Driver - a Disconnect during a connect returns at once (#1757)",
+          "[wandererastro][rotator][unit][issue1757]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    rotator.hold_handshake(std::chrono::milliseconds(300));  // the handshake read waits serial_timeout_s (3 s)
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->connect();
+    REQUIRE(driver->get_connecting());
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->disconnect();
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
+    CHECK(driver->get_connecting());  // the disconnect is queued behind the held connect
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_FALSE(driver->get_connecting());
+    CHECK_FALSE(driver->get_connected());
 }
 
 TEST_CASE("WandererAstro Rotator Driver - Holds its port while connected and releases it (issue #1202)",

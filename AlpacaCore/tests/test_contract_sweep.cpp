@@ -1208,6 +1208,39 @@ Hosted connected_host(const Tier2Host& h) {
     CHECK(hosted.driver->get_last_connect_error() == reason);
 }
 
+// Case 1b (issue #1757 slice 2a). A Disconnect asked while a held connect is still open returns at once, the way the
+// router calls it: Connecting still reads true when it returns (the disconnect is queued behind the connect), and then
+// Connected and Connecting both settle false. Fourteen drivers used to disconnect synchronously (commit 3ded11bd):
+// their disconnect() joined the connect thread and tore down before returning, so it blocked for the rest of the hold
+// and Connecting already read false on return.
+[[maybe_unused]] void case_t2_disconnect_during_connect(const Tier2Host& h) {
+    INFO(h.id << " over " << h.fake_header);
+    if (!h.can_hold_connect) {
+        INFO(h.id << " cannot hold a connect open: "
+                  << (h.connecting_unobservable != nullptr ? h.connecting_unobservable : "(no reason stated)"));
+        REQUIRE(h.connecting_unobservable != nullptr);
+        REQUIRE(std::string(h.connecting_unobservable).size() > 0);
+        return;
+    }
+    Hosted hosted = h.connectable(true);
+    REQUIRE(hosted.driver != nullptr);
+    AlpacaDriver& d = *hosted.driver;
+    d.connect();
+    REQUIRE(d.get_connecting());  // inside the fake's hold
+    const auto t0 = Clock::now();
+    d.disconnect();
+    const auto call = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0);
+    const bool connecting_on_return = d.get_connecting();
+    INFO("disconnect() took " << call.count() << " ms; Connecting on return: " << connecting_on_return);
+    // Every hold is longer than kHoldWindow, so a disconnect that waits for the connect cannot pass these.
+    CHECK(call < kHoldWindow);
+    CHECK(connecting_on_return);
+    const auto deadline = Clock::now() + std::chrono::seconds(30);
+    while (d.get_connecting() && Clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    CHECK_FALSE(d.get_connecting());
+    CHECK_FALSE(d.get_connected());
+}
+
 // Case 2, telescope rows only. New implementations follow Master Interfaces 1.0.27
 // (InvalidOperation); legacy drivers retain ValueNotSet until their separate migration.
 [[maybe_unused]] void case_t2_target_flags(const Tier2Host& h) {
@@ -3961,6 +3994,8 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
     TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { body(tier2_host_##id()); }
 #define CS2_CONNECTING(id, kind) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
 #define CS2_HOOKS(id, kind) CS2_CASE(id, "firmware and SDK hooks do not block", case_t2_firmware_sdk_hooks)
+#define CS2_DISCONNECT(id, kind) \
+    CS2_CASE(id, "Disconnect during a connect returns at once", case_t2_disconnect_during_connect)
 #define CS2_INITIATORS(id, kind) CS2_INITIATORS_##kind(id)
 #define CS2_INITIATORS_TEL(id)                                                 \
     CS2_CASE(id, "Park and MoveAxis return at once", case_t2_async_initiators) \
@@ -4015,6 +4050,7 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE_TYPES)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_IMAGE)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_LASTEXP)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_HOOKS)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_DISCONNECT)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_INITIATORS)
 
 TEST_CASE("Contract sweep tier 2 - every Name is brand and model while connected", "[contract][tier2][name]") {

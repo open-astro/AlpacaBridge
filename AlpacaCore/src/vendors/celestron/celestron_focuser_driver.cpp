@@ -165,14 +165,7 @@ public:
 
     void connect() override { start_connection_task(true); }
 
-    void disconnect() override {
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("Celestron", "Focuser disconnect error: " + std::string(e.what()));
-        }
-    }
+    void disconnect() override { start_connection_task(false); }
 
     bool get_connecting() const override { return connection_task_active(); }
 

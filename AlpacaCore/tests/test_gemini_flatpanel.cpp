@@ -869,3 +869,28 @@ TEST_CASE("Gemini Flat Panel Slots - a Connect over a lost link reopens without 
     CHECK(driver->get_cover_state() == CoverState::Closed);
     REQUIRE_NOTHROW(driver->set_connected(false));
 }
+
+// Issue #1757 slice 2a: the V1 Cover Lite driver has no tier-2 contract sweep host (that row creates the Pro), so the
+// sweep's "Disconnect during a connect returns at once" case is repeated here. Before, disconnect() joined the
+// connect thread and tore down before it returned (commit 3ded11bd), so it blocked for the rest of the held handshake
+// and Connecting read false on return.
+// Falsified by: gemini_flatpanel_driver.cpp GeminiFlatPanelDriver::disconnect() going back to stop_connection_thread()
+// plus set_connected(false).
+TEST_CASE("Gemini Flat Panel Driver - a Disconnect during a connect returns at once (#1757)",
+          "[gemini][flatpanel][unit][issue1757]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">H#", std::chrono::milliseconds(300));  // the handshake read timeout is 2 s
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path());
+    driver->connect();
+    REQUIRE(driver->get_connecting());
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->disconnect();
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
+    CHECK(driver->get_connecting());  // the disconnect is queued behind the held connect
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_FALSE(driver->get_connecting());
+    CHECK_FALSE(driver->get_connected());
+}
