@@ -504,9 +504,9 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 # (or a wrapper re-locks is_open()). Do not remove them on the STALE
 # BLOCKING-LIST ENTRY advice.
 # The value is (prose name, which list it belongs to). The list matters: the
-# header names these in TWO sentences, and one name is a prefix of another
-# across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
-# (switch). A plain `name in header` test therefore answered wrongly in both
+# header names these in TWO sentences, and until #2264 one name was a prefix
+# of another across them -- "iOptron" (telescope) inside "iOptron iMate
+# PowerBox" (switch). A plain `name in header` test therefore answered wrongly in both
 # directions: dropping iOptron from the telescope list still "found" it via the
 # switch entry (the exact drift this check exists to catch, passing green), and
 # a correctly-removed iOptron reported a STALE entry that could not be resolved

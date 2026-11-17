@@ -332,8 +332,8 @@ inline ContractEntry contract_entry_zwo_switch_asiair() {
                                 },
                                 kSrcAgents),
                             DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "ZWOAsiairSwitchDriver: MaxSwitch is the configured port count; CanWrite is "
-                            "true and CanAsync false, both after validate_id only");
+                            "util::PowerPortSwitchDriver<AsiairProtocolWrapper>: MaxSwitch is the configured "
+                            "port count; CanWrite is true and CanAsync false, both after validate_id only");
 }
 inline ContractEntry contract_entry_zwo_switch_asiair_plus() {
     return with_switch_caps(make_entry(
@@ -344,8 +344,8 @@ inline ContractEntry contract_entry_zwo_switch_asiair_plus() {
                                 },
                                 kSrcAgents),
                             DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "ZWOAsiairPlusSwitchDriver: MaxSwitch is the configured port count; "
-                            "CanWrite is true and CanAsync false, both after validate_id only");
+                            "util::PowerPortSwitchDriver<AsiairPlusProtocolWrapper>: MaxSwitch is the configured "
+                            "port count; CanWrite is true and CanAsync false, both after validate_id only");
 }
 #endif
 
@@ -449,8 +449,8 @@ inline ContractEntry contract_entry_ioptron_switch() {
                                 },
                                 kSrcAgents),
                             DisconnectedRead::Static, DisconnectedRead::Static, 1,
-                            "IoptronSwitchDriver and default_imate_powerbox_config(): static port table; id 0 "
-                            "(DC3 always on) is read-only, id 1 (DC1) is writable");
+                            "util::PowerPortSwitchDriver<IoptronPowerboxWrapper> and default_imate_powerbox_config(): "
+                            "static port table; id 0 (DC3 always on) is read-only, id 1 (DC1) is writable");
 }
 #endif
 
