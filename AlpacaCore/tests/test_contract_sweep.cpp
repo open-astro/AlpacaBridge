@@ -584,64 +584,6 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"celestron_telescope_cgx", kOn, "sync_to_alt_az(45, 400)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOff, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
     {"celestron_telescope_cgx", kOn, "sync_to_alt_az(91, 0)", kPermanent, "sync_to_alt_az is not implemented"},
-    // #2259, cameras: PR 2 fixes ToupTek/Altair, QHY, GPhoto and iGuider and deletes these rows.
-    {"touptek_camera", kOff, "set_bin_x(0)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_bin_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_bin_y(0)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_bin_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_num_x(0)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_num_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_num_y(0)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_num_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_start_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "set_start_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"touptek_camera", kOff, "start_exposure(1e15)", kKnown, "no microsecond overflow check (#2259)"},
-    {"touptek_camera", kExposing, "set_bin_x(0)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"touptek_camera", kExposing, "set_bin_x(-1)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"touptek_camera", kExposing, "set_bin_y(0)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"touptek_camera", kExposing, "set_bin_y(-1)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"touptek_camera", kExposing, "set_bin_x(MaxBinX + 1)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"touptek_camera", kExposing, "set_bin_y(MaxBinY + 1)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"altair_camera", kOff, "set_bin_x(0)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_bin_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_bin_y(0)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_bin_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_num_x(0)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_num_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_num_y(0)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_num_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_start_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "set_start_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"altair_camera", kOff, "start_exposure(1e15)", kKnown, "no microsecond overflow check (#2259)"},
-    {"altair_camera", kExposing, "set_bin_x(0)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"altair_camera", kExposing, "set_bin_x(-1)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"altair_camera", kExposing, "set_bin_y(0)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"altair_camera", kExposing, "set_bin_y(-1)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"altair_camera", kExposing, "set_bin_x(MaxBinX + 1)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"altair_camera", kExposing, "set_bin_y(MaxBinY + 1)", kKnown, "exposing checked before the bin value (#2259)"},
-    {"qhy_camera", kOff, "set_bin_x(0)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_bin_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_bin_y(0)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_bin_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_num_x(0)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_num_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_num_y(0)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_num_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_start_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "set_start_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"qhy_camera", kOff, "start_exposure(1e15)", kKnown, "no microsecond overflow check (#2259)"},
-    {"qhy_camera", kExposing, "set_bin_x(MaxBinX + 1)", kKnown, "exposing checked before the supported bins (#2259)"},
-    {"qhy_camera", kExposing, "set_bin_y(MaxBinY + 1)", kKnown, "exposing checked before the supported bins (#2259)"},
-    {"gphoto_camera", kOff, "set_num_x(0)", kKnown, "connection checked first (#2259)"},
-    {"gphoto_camera", kOff, "set_num_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"gphoto_camera", kOff, "set_num_y(0)", kKnown, "connection checked first (#2259)"},
-    {"gphoto_camera", kOff, "set_num_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"gphoto_camera", kOff, "set_start_x(-1)", kKnown, "connection checked first (#2259)"},
-    {"gphoto_camera", kOff, "set_start_y(-1)", kKnown, "connection checked first (#2259)"},
-    {"gphoto_camera", kOn, "set_num_x(0)", kKnown, "a NumX or NumY of 0 is accepted (#2259)"},
-    {"gphoto_camera", kOn, "set_num_y(0)", kKnown, "a NumX or NumY of 0 is accepted (#2259)"},
-    {"gphoto_camera", kExposing, "set_num_x(0)", kKnown, "a NumX or NumY of 0 is accepted (#2259)"},
-    {"gphoto_camera", kExposing, "set_num_y(0)", kKnown, "a NumX or NumY of 0 is accepted (#2259)"},
 };
 // clang-format on
 
@@ -679,10 +621,10 @@ void check_invalid_value_probe(const std::string& id, ProbeState state, const Pr
 }
 
 // #2259: a good value written while an exposure runs, which a camera does not refuse with InvalidOperation today, by
-// Tier2Host::id. GPhoto takes the write and restarts the exposure until its CaptureSession rewrite (#1982); iGuider
-// until #2259 PR 2. A known row's probe must still not answer InvalidOperation, so a fix that lands without deleting
-// its line fails the sweep. A skipped row is not run at all: its answer depends on timing, so no outcome can be pinned
-// (QHY's second StartExposure supersedes the held worker or times out joining it, #1736).
+// Tier2Host::id. GPhoto takes the write and restarts the exposure until its CaptureSession rewrite (#1982). A known
+// row's probe must still not answer InvalidOperation, so a fix that lands without deleting its line fails the sweep. A
+// skipped row is not run at all: its answer depends on timing, so no outcome can be pinned (QHY's second StartExposure
+// supersedes the held worker or times out joining it, #1736).
 struct ExposingRefusalExemption {
     const char* id;
     const char* probe;
@@ -703,14 +645,6 @@ const std::vector<ExposingRefusalExemption> kExposingRefusalExemptions = {
     // QHY: a second StartExposure cancels and joins the running worker; whether the join ends inside its 2 s bound
     // decides between a superseded exposure and InvalidOperation, so the probe is not run until #1736.
     {"qhy_camera", "start_exposure(a valid duration)", "supersedes or times out by timing until #1736", true},
-    // iGuider: the stream keeps running, so a geometry write is taken and a StartExposure supersedes (#2259 PR 2).
-    {"iguider_camera", "set_bin_x(BinX)", "accepted while exposing (#2259)"},
-    {"iguider_camera", "set_bin_y(BinY)", "accepted while exposing (#2259)"},
-    {"iguider_camera", "set_num_x(NumX)", "accepted while exposing (#2259)"},
-    {"iguider_camera", "set_num_y(NumY)", "accepted while exposing (#2259)"},
-    {"iguider_camera", "set_start_x(StartX)", "accepted while exposing (#2259)"},
-    {"iguider_camera", "set_start_y(StartY)", "accepted while exposing (#2259)"},
-    {"iguider_camera", "start_exposure(a valid duration)", "accepted while exposing (#2259)"},
 };
 // clang-format on
 

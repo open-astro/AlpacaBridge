@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1419,8 +1420,13 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
+        // #2259 canonical order: a duration invalid whatever the camera is (non-finite, negative, or too large to
+        // convert to microseconds) precedes the connection check.
         if (!std::isfinite(duration) || duration < 0.0) {
             throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
+        }
+        if (duration * 1'000'000.0 >= static_cast<double>(std::numeric_limits<long>::max())) {
+            throw AlpacaException("Exposure duration is out of range", AlpacaError::InvalidValue);
         }
         ensure_connected();
 
@@ -1450,10 +1456,12 @@ public:
         // Serialize even the cancellation bypass with mode changes. Workers and
         // cached getters never hold this lock, so a blocked download stays cancellable.
         std::lock_guard<std::mutex> io_lock(io_mutex_);
+        double minimum_us = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             validate_exposure_locked(duration);
+            minimum_us = exposure_range_.available ? exposure_range_.min : 0.0;
         }
 
         // Reap the previous worker FIRST, before any other SDK call in this
@@ -1528,8 +1536,9 @@ public:
             }
         }
 
-        // Apply exposure time (microseconds)
-        double exposure_us = duration * 1'000'000.0;
+        // Apply exposure time (microseconds). A duration below ExposureMin (0, a bias frame, included) runs at the
+        // minimum (#2259), never at 0 us.
+        const double exposure_us = std::max(duration * 1'000'000.0, minimum_us);
         sdk_.set_param(id, control::EXPOSURE, exposure_us);
 
         // Close mechanical shutter for dark/bias frames if the camera supports it
@@ -2614,13 +2623,23 @@ private:
         }
     }
 
+    // #2259 canonical order: the static value check, the connection, the camera's supported values, then the
+    // exposing check. While an exposure runs the SDK cannot be asked (the frame call holds the handle), so the
+    // bound before the exposing check is the MaxBin cached at connect; the per-bin SDK query follows it.
     void set_bin_locked(int bin_x, int bin_y) {
-        ensure_connected();
+        if (bin_x <= 0 || bin_y <= 0) {
+            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
+        }
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
-        if (bin_x <= 0 || bin_y <= 0) {
-            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
+        ensure_connected();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            if (max_bin_.value && bin_x > *max_bin_.value) {
+                throw AlpacaException("Bin value not supported: " + std::to_string(bin_x), AlpacaError::InvalidValue);
+            }
         }
         check_configuration_write();
         std::lock_guard<std::mutex> io_lock(io_mutex_);
@@ -2657,10 +2676,10 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
-        ensure_connected();
         if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         check_configuration_write();
         // Do not bounds-check against sensor dimensions here: ConformU "Reject Bad XSize/YSize"
         // tests require that the setter accepts out-of-range values and that StartExposure
@@ -2679,10 +2698,10 @@ private:
     }
 
     void set_start_pos_locked(std::optional<int> start_x_opt, std::optional<int> start_y_opt) {
-        ensure_connected();
         if ((start_x_opt && *start_x_opt < 0) || (start_y_opt && *start_y_opt < 0)) {
             throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         check_configuration_write();
         // Do not bounds-check start+ROI against sensor dimensions here: ConformU
         // "Reject Bad XStart/YStart" tests require the setter to accept the value and

@@ -1130,8 +1130,13 @@ public:
     void start_exposure(double duration, bool light) override {
         (void)light;
 
+        // #2259 canonical order: a duration invalid whatever the camera is (non-finite, negative, or too large to
+        // convert to microseconds) precedes the connection check.
         if (!std::isfinite(duration) || duration < 0.0) {
             throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
+        }
+        if (duration * 1'000'000.0 >= static_cast<double>(std::numeric_limits<long>::max())) {
+            throw AlpacaException("Exposure duration is out of range", AlpacaError::InvalidValue);
         }
         ensure_connected();
 
@@ -1845,18 +1850,22 @@ private:
         }
     }
 
+    // #2259 canonical order for the geometry setters: the static value check, the connection, the camera's
+    // supported values, then the exposing check.
     void set_bin_locked(int bin_x, int bin_y) {
-        ensure_connected();
+        if (bin_x <= 0 || bin_y <= 0) {
+            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
+        }
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         // Check the exposure state under mutex_ (with readout_mutex_, lock order
         // mutex_ -> readout_mutex_) so it is atomic with the geometry mutation below
         // and with start_exposure setting exposure_starting_ — a bare pre-lock check
         // is a TOCTOU (matches set_gain / set_readout_mode).
         std::lock_guard<std::mutex> rlock(readout_mutex_);
-        ensure_not_exposing();
         if (!camera_info_valid_) {
             throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
         }
@@ -1865,6 +1874,7 @@ private:
                       bin_x) == camera_info_.supported_bins.end()) {
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
+        ensure_not_exposing();
         if (bin_ == bin_x) return;
         bin_ = bin_x;
         // Bound by the EVEN sensor size, matching start_exposure's max_w/max_h
@@ -1885,6 +1895,9 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
+        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
+            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
@@ -1912,6 +1925,9 @@ private:
     // (a guider's relative centroids are unaffected); callers needing an exact
     // origin should align StartX/StartY to a 2-pixel boundary at bin 1.
     void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
+        if ((sx_opt && *sx_opt < 0) || (sy_opt && *sy_opt < 0)) {
+            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
