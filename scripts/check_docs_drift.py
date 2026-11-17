@@ -3824,6 +3824,11 @@ def self_test():
         bl_scan, bl_fail = classify_get_connected_bodies([(Path(bl_tmp) / "gone.h", [])])
         check("blocking list: a SHARED_DRIVER_HEADERS entry that does not exist is a finding",
               bl_scan == {} and len(bl_fail) == 1 and bl_fail[0].startswith("GET_CONNECTED SOURCE MISSING"))
+    bl_gone = ROOT / "AlpacaCore" / "include" / "alpacacore" / "util" / "gone_power_port_driver.h"
+    bl_scan, bl_fail = classify_get_connected_bodies([(bl_gone, [])])
+    check("blocking list: a missing in-repo header is named by its repo-relative path",
+          len(bl_fail) == 1 and "GET_CONNECTED SOURCE MISSING: AlpacaCore/include/alpacacore/util/gone_power_port_driver.h "
+          in bl_fail[0] and str(ROOT) not in bl_fail[0])
     f = blocking_list_findings(bl_header, dict(bl_kinds, **{"power_port_switch_driver.h": "driver-mutex"}))
     check("blocking list: a re-locked shared power-port getter is MISSING FROM THE BLOCKING LIST",
           len(f) == 1 and f[0].startswith("MISSING FROM THE BLOCKING LIST") and "'PowerPortSwitchDriver'" in f[0])
