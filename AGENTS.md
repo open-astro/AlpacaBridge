@@ -49,7 +49,8 @@ check 21): add a one-line pointer here, not the rule.
 
 Each line is a summary; the linked topic file holds the rule and its history.
 
-- Inherit `AsyncConnectable` for connect/disconnect and run operation bodies in a
+- Inherit `AsyncConnectable` for connect/disconnect, its forwarders written as
+  `ALPACA_ASYNC_CONNECT_FORWARDERS()`, and run operation bodies in a
   `util::AsyncOperation` slot; never hand-roll either
   ([driver-lifecycle](.github/instructions/driver-lifecycle.instructions.md)).
 - An async operation body that fails keeps its error, and the device's completion property

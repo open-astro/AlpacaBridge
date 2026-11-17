@@ -799,11 +799,7 @@ public:
         return link_fault_text_.empty() ? std::string{} : "Mount not answering (" + link_fault_text_ + ")";
     }
 
-    void connect() override { start_connection_task(true); }
-
-    void disconnect() override { start_connection_task(false); }
-
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         const Wire protocol = wire();

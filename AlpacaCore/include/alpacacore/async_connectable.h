@@ -79,8 +79,10 @@ namespace alpacacore {
  * 1. DESTRUCTOR, first thing:  `shutdown_connection();`
  *    (sets shutting_down_ under the lock, then join — before any member the
  *    connection thread touches is destroyed).
- * 2. `connect()` / `disconnect()`:  `start_connection_task(true/false);`
- * 3. `get_connecting()`:  `return connection_task_active();`
+ * 2. `connect()` / `disconnect()` forward to `start_connection_task(true/false)`
+ *    and 3. `get_connecting()` returns `connection_task_active()`: write both as
+ *    ALPACA_ASYNC_CONNECT_FORWARDERS() in a public section (issue #1757), never
+ *    by hand, so a driver cannot drop one of the three.
  * 4. The SYNC set_connected(false) body, after taking the driver state mutex,
  *    where it reads `connected_`:
  *        if (record_disconnect_if_connect_in_flight(connected_.load())) return;
@@ -501,6 +503,17 @@ private:
 };
 
 }  // namespace alpacacore
+
+/// The three public AsyncConnectable forwarders every driver owes (obligations 2
+/// and 3 above): connect() and disconnect() start the connection task, and
+/// get_connecting() reads it. Every driver that inherits AsyncConnectable uses
+/// this once, in a public section, instead of writing them by hand (issue #1757);
+/// a driver that dropped one used to compile and test green. Enforced by
+/// scripts/check_connect_error_hook.py.
+#define ALPACA_ASYNC_CONNECT_FORWARDERS()                        \
+    void connect() override { start_connection_task(true); }     \
+    void disconnect() override { start_connection_task(false); } \
+    bool get_connecting() const override { return connection_task_active(); }
 
 /// Forward AlpacaDriver::get_last_connect_error() to the AsyncConnectable
 /// mixin. Every driver that inherits AsyncConnectable must use this once, in a

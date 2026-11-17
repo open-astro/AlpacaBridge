@@ -39,8 +39,10 @@ vendor-agnostic; do them in the driver from the start.
   `connection_thread_` / `connecting_` in a driver.** The driver obligations
   (each one line, all contractual — see the header comment): destructor calls
   `shutdown_connection()` FIRST; `connect()`/`disconnect()` forward to
-  `start_connection_task(true/false)`; `get_connecting()` returns
-  `connection_task_active()`; `set_connected` gates with
+  `start_connection_task(true/false)` and `get_connecting()` returns
+  `connection_task_active()`, all three written as `ALPACA_ASYNC_CONNECT_FORWARDERS()`
+  in a public section, never by hand (issue #1757; `scripts/check_connect_error_hook.py`
+  fails a driver without it); `set_connected` gates with
   `record_disconnect_if_connect_in_flight(...)` / `consume_pending_disconnect()`
   after taking the driver mutex, before the idempotency early-return. A driver
   with an extra sync-connect window the base can't see (e.g. the AFW's

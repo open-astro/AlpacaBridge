@@ -191,9 +191,7 @@ public:
     int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
     bool get_connected() const override { return connected_.load() && !link_lost_.load(); }
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     std::string get_link_fault() const override {
         std::lock_guard<std::mutex> lock(mutex_);
