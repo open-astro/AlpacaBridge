@@ -81,6 +81,8 @@ public:
           device_number_(device_number),
           profile_(std::move(profile)),
           wrapper_(std::forward<WrapperArgs>(wrapper_args)...) {
+        // port_count() is read here, before open(): every wrapper takes its port table from the config. A wrapper that
+        // learns its ports only when opened would be refused, so it needs its own check instead of this one.
         if (wrapper_.port_count() != profile_.ports.size()) {
             throw AlpacaException(profile_.name + ": the port wrapper has " + std::to_string(wrapper_.port_count()) +
                                       " ports but the profile lists " + std::to_string(profile_.ports.size()),
