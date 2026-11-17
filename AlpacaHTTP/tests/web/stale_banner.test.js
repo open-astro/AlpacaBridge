@@ -326,3 +326,29 @@ test('index.html invalidates the cached scripts and stylesheet the banner needs 
     assert.ok(version(/src="\/web\/app\.js\?v=(\d+)"/) > 52, 'invalidate the cached app.js without the banner poll');
     assert.ok(version(/href="\/web\/style\.css\?v=(\d+)"/) > 35, 'invalidate the cached style.css without the banner rules');
 });
+
+test('the banner age counts up between backed-off polls (#1764)', async () => {
+    const t = load();
+    t.poll.startDeviceStatusPoll();
+    await t.advance(5000);  // a good poll at 5 s
+    t.server.mode = 'refuse';
+    await t.advance(5000);  // the failed poll at 10 s shows the banner; the next poll is due at 15 s
+    assert.strictEqual(t.banner.hidden, false);
+    const age = () => Number(/Last update (\d+) s ago/.exec(t.banner.textContent)[1]);
+    const before = age();
+    const calls = t.server.calls.length;
+    await t.advance(3000);  // no poll is due in these 3 s: only the once-a-second redraw can move the text
+    assert.strictEqual(t.server.calls.length, calls, 'a poll went out inside the window');
+    assert.strictEqual(age(), before + 3, 'the banner age did not count up between polls');
+});
+
+test('a good device listing counts as a bridge answer for the banner (#1764)', () => {
+    // loadDevices() runs outside the poll block this file loads, so its call is checked in the source: a Refresh
+    // that lists the devices must clear the banner and restart the age at once, not at the next backed-off poll.
+    const src = fs.readFileSync(APP_JS, 'utf8');
+    const start = src.search(/^async function loadDevices\(/m);
+    assert.ok(start >= 0, 'app.js has no loadDevices');
+    const body = src.slice(start, src.indexOf('\n}\n', start) + 2);
+    assert.match(body, /devices = devices\.concat\(await fetchFailedDevices\(\)\);\s*noteBridgeAnswered\(\);/,
+        'loadDevices no longer calls noteBridgeAnswered() after a good listing');
+});
