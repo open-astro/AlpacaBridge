@@ -52,6 +52,10 @@ namespace alpacacore::test {
  *
  * Unpark clears `parked`, so IsParked reads false after it, as TheSkyX's does (issue #1863).
  *
+ * While `fail_slew_commands` > 0, a SlewToRaDec answers a TheSkyX error and starts no slew (the count drops by one).
+ * `on_slew_command`, when set, runs on the server thread before a SlewToRaDec is answered, while the driver waits
+ * for the reply; set it before the slew and leave it alone while one is in flight.
+ *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
  */
@@ -62,6 +66,8 @@ public:
     std::atomic<int> fail_slew_polls{0};
     /// While > 0, every IsTracking query answers a TheSkyX error (and the count drops by one).
     std::atomic<int> fail_tracking_reads{0};
+    std::atomic<int> fail_slew_commands{0};
+    std::function<void()> on_slew_command;
 
     /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
     std::atomic<bool> tracking{true};
@@ -160,6 +166,11 @@ private:
         }
         if (has(command, "SlewToRaDec")) {
             ++slew_commands;
+            if (on_slew_command) on_slew_command();
+            if (fail_slew_commands.load() > 0) {
+                --fail_slew_commands;
+                return "|No error. Error = 0.TypeError: SlewToRaDec refused#";
+            }
             std::sscanf(command.c_str() + command.find("SlewToRaDec("), "SlewToRaDec(%lf, %lf", &target_ra_,
                         &target_dec_);
             slew_polls = 0;
