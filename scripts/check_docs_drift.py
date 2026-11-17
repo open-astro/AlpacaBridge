@@ -3867,6 +3867,16 @@ def self_test():
           len(_conformu_run_list_findings(runs_hdr, runs_rows)) == 1)
     check("conformu runs: a missing roster array is a finding, not a silent pass",
           len(_conformu_run_list_findings("// nothing here\n", runs_ok)) == 1)
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\t-\n")
+    check("conformu runs: a repeated record is flagged", len(f) == 1 and "repeats the record" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok.replace("pending\t5\t-", "pending\t5\tAlpacaCore/conformu/ZWO/Fake/x.txt"))
+    check("conformu runs: a pending record that names a report is flagged",
+          len(f) == 1 and "names a report" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "zwo\tcamera\tfake_zwo_sdk.h\tpending\t5\n")
+    check("conformu runs: a record with the wrong column count is flagged", len(f) == 1 and "5 columns, not 6" in f[0])
+    f = _conformu_run_list_findings(runs_hdr, runs_ok + "bisque\ttelescope\tfake_bisque_mount.h\tno-fake\t6\t-\n")
+    check("conformu runs: a no-fake record that names a fake header is flagged",
+          len(f) == 1 and "names a fake header" in f[0])
 
     rx_ok = 'static const std::regex kX(R"(a)");\n'
     check("static regex: a static const regex is clean", _static_regex_findings(rx_ok) == [])
