@@ -789,9 +789,9 @@ TEST_CASE("WeeWX ObservingConditions Driver - only the client's Connect relinks 
     lose_feed(clock);
     REQUIRE_FALSE(driver->get_connected());
 
-    // The feed is still down: Connect re-runs the connect fetch, fails with its error (the scripted client throws a
-    // plain std::runtime_error; libcurl's fetch throws DriverException, "connect refuses a feed that never answers")
-    // and leaves the driver down.
+    // The feed is still down: Connect re-runs the connect fetch, fails with its error (the scripted client throws
+    // DriverException, as libcurl's fetch does, "connect refuses a feed that never answers") and leaves the driver
+    // down.
     const int before_connect = fake.calls();
     CHECK_THROWS_WITH(driver->set_connected(true), "scripted HTTP request failure");
     CHECK(fake.calls() == before_connect + 1);

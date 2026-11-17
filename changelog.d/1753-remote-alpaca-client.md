@@ -1,5 +1,9 @@
 ### Added
 - **remotealpaca: the client for one upstream Alpaca device** (AlpacaCore, issue #1753): `RemoteAlpacaClient` calls one device of an upstream Alpaca server through `util::HttpClient` (decision 0023). It sends its own ClientID and the next ClientTransactionID on every call, writes parameters in canonical casing (GET in the query, PUT in a form body), reads `Value` as the type asked for with the wrapper's own JSON reader, passes a non-zero `ErrorNumber` through unchanged with the upstream host in front of the message, and reports every other failed call (no reply, timeout, refused connection, HTTP status other than 200, a body that is not an Alpaca reply, a missing or mistyped `Value`) as a `RemoteTransportError`. Calls on one client never overlap. Built under the new `ALPACACORE_ENABLE_REMOTEALPACA` option (needs libcurl); no device type uses it yet.
 
+### Changed
+- **util::HttpClient: a PUT no longer follows a redirect** (AlpacaCore, issue #1753): a PUT is a command, so a 3xx now comes back as the status instead of the command being sent again to the redirect target. A GET still follows redirects within the `http`/`https` allow-list.
+
 ### Added (tests)
 - **remotealpaca client against a loopback fake Alpaca server** (issue #1753): seven `[remotealpaca]` cases over `AlpacaCore/tests/fake_alpaca_server.h`, a 127.0.0.1 server with stall, drop, HTTP 500, bad JSON and no-ErrorNumber modes; `LoopbackHttpServer` gains a responder hook for it.
+- **HttpClient seam review notes from #2328** (issue #1753): a PUT-redirect case; the stall case now also checks that the call waited for its timeout; `FakeHttpClient` throws `AlpacaException(DriverException)`, the one exception the seam documents; `LoopbackHttpServer` holds a stalled connection before reading it, so a client that never finishes its request cannot park the server thread.

@@ -68,7 +68,9 @@ private:
 
         HttpResponse response;
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        // A GET follows redirects. A PUT does not: it is a command, and a redirect would send it again to
+        // another URL; its 3xx comes back as the status instead.
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, form_body == nullptr ? 1L : 0L);
         // The URL may be user-set: only http and https, also after a redirect, never file://, ldap:// etc.
         curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
         curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");

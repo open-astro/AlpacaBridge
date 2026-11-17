@@ -17,8 +17,8 @@
 // on its own thread in turn, answers once and closes. One helper replaces the two the WeeWX and catalog
 // tests each kept.
 //
-// Modes: Answer replies with the status line, extra headers and body set below; Stall reads the request and
-// never replies or closes (a hung server behind an open socket); DropAfterAccept closes with no bytes;
+// Modes: Answer replies with the status line, extra headers and body set below; Stall holds the connection
+// open without reading or replying (a hung server behind an open socket); DropAfterAccept closes with no bytes;
 // ServerError answers 500 with no body. A responder, when set, builds the Answer reply's status line and body
 // from each request (the fake Alpaca server in fake_alpaca_server.h).
 
@@ -165,6 +165,12 @@ private:
                 ::close(fd);
                 continue;
             }
+            if (mode == Mode::Stall) {
+                // Held before any read: a blocking recv on a client that never finishes its request would park
+                // this thread and the destructor's join with it.
+                held_.push_back(fd);
+                continue;
+            }
             const std::string request = read_request(fd);
             Responder responder;
             {
@@ -188,10 +194,6 @@ private:
                     }
                     reply += "Connection: close\r\n\r\n" + body;
                 }
-            }
-            if (mode == Mode::Stall) {
-                held_.push_back(fd);  // held open, never answered
-                continue;
             }
             if (mode == Mode::ServerError) {
                 reply = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
