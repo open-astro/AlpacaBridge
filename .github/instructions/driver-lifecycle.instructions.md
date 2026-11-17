@@ -378,9 +378,15 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   `Connected=true` against the lost link reconnects instead of hitting the idempotency return.
   `EIO`, `ENXIO`, `ENODEV` or `EBADF` from a write or read on the link's fd also counts as loss,
   even before the node lookup reflects it: a tty returns those only when its device is gone or
-  the fd is unusable. Silence with the node still present keeps the rules above. The QHY Q-Focuser follows the same
+  the fd is unusable. Silence with the node still present keeps the rules above. On a serial link
+  `util::SerialLink` owns that verdict (#2262): its `read()`, `write_all()` and `read_until(SerialLink&, ...)` classify
+  every failure with `util::is_serial_loss_errno()`, set a lock-free `lost()` once and keep the text that set it
+  (`fault()`, "Serial link lost (errno N)") across the wrapper's port-release `close()` until a new link is moved in or
+  the wrapper calls `clear_loss()` on Disconnect; the wrapper still closes the port under its own I/O lock. Adopted by
+  the Gemini focuser and the QHY Q-Focuser; the other serial wrappers move to it one vendor per PR (#2262), so until
+  then their own latch and classifier stand. The QHY Q-Focuser follows the same
   shape since #527, detected on its next transaction (request/response, no reader thread) with a
-  lock-free `link_lost_` latch the getter reads; since #1310 that transaction is the state poll
+  lock-free latch the getter reads (the link's `lost()` since #2262); since #1310 that transaction is the state poll
   (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
   (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`), and over its TCP network link
   since #2220, where a hangup of the connection is the evidence (`OnStep network -` cases in the same file). The ZWO EAF follows it since #1500 for its

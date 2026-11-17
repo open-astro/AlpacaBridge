@@ -98,15 +98,16 @@ public:
 
     /**
      * @brief False once an exchange has seen the port gone (a hangup, or
-     * EIO/ENXIO/ENODEV on the fd); the port is then already released
-     * (decision 0009 rule 2). Cleared by the next successful connect(). Lock-free.
+     * EIO/ENXIO/ENODEV/EBADF on the fd: the util::SerialLink verdict, #2262); the
+     * port is then already released (decision 0009 rule 2). Cleared by the next
+     * connect() and by disconnect(). Lock-free.
      */
     bool link_alive() const noexcept;
 
     /**
      * @brief Why the link was lost ("Serial link lost (errno N)"), or empty. Kept after
      * the loss for the driver's get_link_fault() (decision 0009 rule 5); cleared by the
-     * next successful connect() and by disconnect(). Takes only a small text mutex that
+     * next connect() and by disconnect(). Takes only the link's small text mutex, which
      * no serial exchange holds, so it never waits on the wire.
      */
     std::string link_fault() const;
