@@ -21,6 +21,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -58,6 +59,17 @@ std::string last_line(const std::string& text) {
 
 // Points the sink at `dir`, silences stderr, and sets the cap before the file
 // is opened (as init_logging does), so a reopened file is judged against it.
+// The local date @p days before today, YYYY-MM-DD, as the logger names its files.
+std::string local_date_days_ago(int days) {
+    const auto then = std::chrono::system_clock::now() - std::chrono::hours(24) * days;
+    const std::time_t t = std::chrono::system_clock::to_time_t(then);
+    std::tm tm_buf{};
+    localtime_r(&t, &tm_buf);
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
+    return buf;
+}
+
 fs::path start(const fs::path& dir, std::uintmax_t cap) {
     alpacahttp::Config config;
     config.set_file_logging_enabled(false);
@@ -208,6 +220,9 @@ int main() {
         const fs::path old_part = dir / "alpacabridge-2000-01-01.2.log";
         std::ofstream(old_file) << "old\n";
         std::ofstream(old_part) << "old\n";
+        // Yesterday's file: the server logged up to today, so the cutoff counts back from today (#2292).
+        const fs::path yesterday = dir / ("alpacabridge-" + local_date_days_ago(1) + ".log");
+        std::ofstream(yesterday) << "yesterday\n";
         const fs::path file = start(dir, 4096);
         write_lines(500);
         util::set_log_retention_days(90);
@@ -216,6 +231,31 @@ int main() {
         EXPECT(!fs::exists(old_part));
         EXPECT(fs::exists(file));
         EXPECT(fs::exists(dir / part_name(1)));
+        EXPECT(fs::exists(yesterday));
+        util::set_log_retention_days(0);
+        fs::remove_all(dir);
+    }
+
+    {
+        // case: a clock set far ahead does not prune the logs the server kept before the jump (#2292)
+        // Files from 2000 stand for the history before a client's far-future synctime: to this test today is that
+        // future. The cutoff counts back from the day after the newest earlier file, so only the files older than
+        // the retention before it go.
+        const fs::path dir = make_dir();
+        const fs::path older = dir / "alpacabridge-2000-01-01.log";
+        const fs::path newest = dir / "alpacabridge-2000-01-10.log";
+        const fs::path newest_part = dir / "alpacabridge-2000-01-10.2.log";
+        std::ofstream(older) << "older\n";
+        std::ofstream(newest) << "newest\n";
+        std::ofstream(newest_part) << "newest\n";
+        const fs::path file = start(dir, 4096);
+        write_lines(10);
+        util::set_log_retention_days(5);
+        EXPECT(util::prune_old_log_files() == 1);
+        EXPECT(!fs::exists(older));
+        EXPECT(fs::exists(newest));
+        EXPECT(fs::exists(newest_part));
+        EXPECT(fs::exists(file));
         util::set_log_retention_days(0);
         fs::remove_all(dir);
     }

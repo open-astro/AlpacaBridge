@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -27,6 +28,7 @@
 #include <iostream>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -160,28 +162,64 @@ namespace {
         }
     }
 
-    // Cutoff date (YYYY-MM-DD) for retention. Files with an embedded date
-    // strictly less than this string are eligible for deletion. retention=0
-    // returns an empty string and disables pruning.
-    std::string retention_cutoff_locked() {
+    // A YYYY-MM-DD date as days since the epoch, or nullopt for a string that is not one.
+    std::optional<std::chrono::sys_days> parse_log_date(const std::string& text) {
+        int y = 0;
+        unsigned m = 0;
+        unsigned d = 0;
+        if (text.size() != 10 || std::sscanf(text.c_str(), "%4d-%2u-%2u", &y, &m, &d) != 3) return std::nullopt;
+        const std::chrono::year_month_day ymd{std::chrono::year{y}, std::chrono::month{m}, std::chrono::day{d}};
+        if (!ymd.ok()) return std::nullopt;
+        return std::chrono::sys_days{ymd};
+    }
+
+    std::string format_log_date(std::chrono::sys_days day) {
+        const std::chrono::year_month_day ymd{day};
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%04d-%02u-%02u", static_cast<int>(ymd.year()),
+                      static_cast<unsigned>(ymd.month()), static_cast<unsigned>(ymd.day()));
+        return buf;
+    }
+
+    // Cutoff date (YYYY-MM-DD) for retention: files with an embedded date strictly less than it are eligible for
+    // deletion. retention=0 returns an empty string and disables pruning.
+    //
+    // The cutoff counts back from today, or from the day after the newest file logged before today when that is
+    // earlier (#2292). A clock set years ahead (a client's far-future synctime) would otherwise make every real log
+    // look older than the retention and delete them all; anchored on the last day the server logged, the history
+    // it kept stays until that many days of newer logs exist. In normal running the newest earlier file is
+    // yesterday's, so the anchor is today and nothing changes.
+    std::string retention_cutoff_locked(const std::optional<std::chrono::sys_days>& newest_earlier) {
         if (g_log_retention_days <= 0) {
             return "";
         }
-        const auto now = std::chrono::system_clock::now() -
-                         std::chrono::hours(24) * g_log_retention_days;
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        std::tm tm_buf{};
-        localtime_r(&time_t, &tm_buf);
-        std::ostringstream stream;
-        stream << std::put_time(&tm_buf, "%Y-%m-%d");
-        return stream.str();
+        auto anchor = parse_log_date(current_local_date());
+        if (!anchor) return "";
+        if (newest_earlier && *newest_earlier + std::chrono::days{1} < *anchor) {
+            anchor = *newest_earlier + std::chrono::days{1};
+        }
+        return format_log_date(*anchor - std::chrono::days{g_log_retention_days});
     }
 
     std::size_t prune_old_files_locked() {
-        if (g_log_directory.empty()) {
+        if (g_log_directory.empty() || g_log_retention_days <= 0) {
             return 0;
         }
-        const std::string cutoff = retention_cutoff_locked();
+        // The newest dated file other than today's own, the cutoff's anchor.
+        std::optional<std::chrono::sys_days> newest_earlier;
+        {
+            std::error_code scan_ec;
+            const std::string today = current_local_date();
+            for (const auto& entry : std::filesystem::directory_iterator(g_log_directory, scan_ec)) {
+                if (scan_ec) break;
+                const std::string name = entry.path().filename().string();
+                if (!std::regex_match(name, kLogFilenameRegex)) continue;
+                const auto day = parse_log_date(name.substr(13, 10));
+                if (!day || name.substr(13, 10) >= today) continue;
+                if (!newest_earlier || *day > *newest_earlier) newest_earlier = day;
+            }
+        }
+        const std::string cutoff = retention_cutoff_locked(newest_earlier);
         if (cutoff.empty()) {
             return 0;
         }
