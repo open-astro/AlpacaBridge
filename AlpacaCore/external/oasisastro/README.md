@@ -107,7 +107,8 @@ trying one and falling back:
 
 Both lengths are the ones 2.0.2.1 used; 2.1.0.1 adds no third request and no longer response. Our driver's checks
 (`0x30` expecting 18, then `0x3a` expecting 40 on an `InvalidValue` mismatch) accept every response the 2.1.0.1 SDK
-can receive, so no shipping firmware is rejected by length.
+can receive, so no shipping firmware is rejected by length. That holds for the reply lengths only: on newer
+firmware the driver still sends `0x30` first, which the SDK never does (see the last open question below).
 
 Payload offsets (big-endian multi-byte fields; the SDK converts with `ntohl`/`ntohs`):
 
@@ -181,8 +182,10 @@ against a real temperature reading.
 - How a firmware whose version word is above `0x10000300` answers a `0x30`
   GetConfig (the vendor SDK never sends it one): the driver relies on a
   mismatched reply (an `InvalidValue`) to fall back to `0x3a`; a firmware
-  that stays silent instead would fail the connect after the timeout. Needs a
-  device on newer firmware.
+  that stays silent instead would fail the connect after the timeout, and one
+  that answers with a different command echo (a NAK or error byte) makes
+  `send_command` throw `DriverException`, so the driver never falls back
+  either. Needs a device on newer firmware.
 
 Resolved by hardware testing (2026-07-22): hidapi's Linux hidraw backend
 needs no manual report-ID offset on reads for this device (`in[0]` is the
