@@ -312,8 +312,9 @@ ALLOWLIST = set()
 
 
 # Vendor *_driver.cpp files that define no driver class of their own: each is
-# a factory that builds another vendor's driver class under its own identity,
-# so it has no get_device_type() override for find_drivers() to read. Each
+# a factory that builds another vendor's driver class, or a shared driver
+# template, under its own identity, so it has no get_device_type() override
+# for find_drivers() to read. Each
 # entry states the device type the factory builds and why; the pair still
 # needs its own [stress] registration through that factory. An entry whose
 # file is gone, or now has an override of its own, is a failure below.
@@ -322,6 +323,19 @@ DELEGATING_FACTORIES = {
         "camera",
         "create_altair_camera() builds the ToupTek camera driver class "
         "(touptek_camera_driver.cpp) over the Altair SDK with Altair identity strings"),
+    # The GPIO power-port switches share util::PowerPortSwitchDriver (#2264).
+    "AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp": (
+        "switch",
+        "create_ioptron_switch() builds util::PowerPortSwitchDriver "
+        "(alpacacore/util/power_port_switch_driver.h) over the iMate PowerBox wrapper"),
+    "AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp": (
+        "switch",
+        "create_zwo_asiair_plus_switch() builds util::PowerPortSwitchDriver "
+        "(alpacacore/util/power_port_switch_driver.h) over the ASIAIR Plus RK3568 wrapper"),
+    "AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp": (
+        "switch",
+        "create_zwo_asiair_switch() builds util::PowerPortSwitchDriver "
+        "(alpacacore/util/power_port_switch_driver.h) over the ASIAIR libgpiod wrapper"),
 }
 
 

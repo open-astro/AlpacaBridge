@@ -243,6 +243,7 @@ import hashlib
 import json
 import re
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -495,16 +496,17 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 # Only the drivers that CAN be classified as blocking need an entry; the
 # lock-free majority is not named anywhere, by design. Two groups are the
 # exception, and both keep their entries although the header's list is empty:
-# the Bisque and iOptron telescopes (lock-free since #910) and the four
-# wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita,
-# ASIAIR, ASIAIR Plus; lock-free since #382). The entry is what lets the gate
+# the Bisque and iOptron telescopes (lock-free since #910) and the
+# wrapper-backed switch drivers (ToupTek StellaVita, and PowerPortSwitchDriver,
+# which serves the ASIAIR, ASIAIR Plus and iOptron iMate PowerBox since #2264;
+# lock-free since #382). The entry is what lets the gate
 # report MISSING FROM THE BLOCKING LIST if one of them re-locks get_connected()
 # (or a wrapper re-locks is_open()). Do not remove them on the STALE
 # BLOCKING-LIST ENTRY advice.
 # The value is (prose name, which list it belongs to). The list matters: the
-# header names these in TWO sentences, and one name is a prefix of another
-# across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
-# (switch). A plain `name in header` test therefore answered wrongly in both
+# header names these in TWO sentences, and until #2264 one name was a prefix
+# of another across them -- "iOptron" (telescope) inside "iOptron iMate
+# PowerBox" (switch). A plain `name in header` test therefore answered wrongly in both
 # directions: dropping iOptron from the telescope list still "found" it via the
 # switch entry (the exact drift this check exists to catch, passing green), and
 # a correctly-removed iOptron reported a STALE entry that could not be resolved
@@ -514,10 +516,18 @@ DRIVER_PROSE_NAMES = {
     "bisque_telescope_driver.cpp": ("Bisque", "telescopes"),
     "ioptron_telescope_driver.cpp": ("iOptron", "telescopes"),
     "onstep_telescope_driver.cpp": ("OnStep", "telescopes"),
-    "ioptron_switch_driver.cpp": ("iOptron iMate PowerBox", "switches"),
     "touptek_switch_driver.cpp": ("ToupTek StellaVita", "switches"),
-    "zwo_asiair_switch_driver.cpp": ("ZWO ASIAIR", "switches"),
-    "zwo_asiair_plus_switch_driver.cpp": ("ASIAIR Plus", "switches"),
+    "power_port_switch_driver.h": ("PowerPortSwitchDriver", "switches"),
+}
+
+# A driver class shared by several vendors lives outside AlpacaCore/src/vendors,
+# so check 5 scans it by name: header path -> the vendor directories whose
+# wrappers it is instantiated over (their is_open() bodies decide "wrapper"
+# against "lock-free", as a vendor driver's own directory does). Without the
+# entry, the three power-port switches would have left the gate when their
+# get_connected() moved into the shared header (#2264).
+SHARED_DRIVER_HEADERS = {
+    "AlpacaCore/include/alpacacore/util/power_port_switch_driver.h": ("zwo", "ioptron"),
 }
 
 # Where each list lives in async_connectable.h, as (start marker, end marker).
@@ -634,8 +644,30 @@ def _vendor_is_open_locks(vendor_dir):
     return not found
 
 
-def classify_get_connected_bodies():
+def _display_path(path):
+    """The repo-relative path, or the path itself outside the repo (a self-test fixture)."""
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
+def _get_connected_sources():
+    """[(path, [wrapper dirs])]: every vendor source, then each SHARED_DRIVER_HEADERS entry."""
+    vendors = ROOT / "AlpacaCore" / "src" / "vendors"
+    sources = [(path, [path.parent]) for path in sorted(vendors.rglob("*"))
+               if path.suffix in (".cpp", ".h", ".hpp")]
+    for header, vendor_names in SHARED_DRIVER_HEADERS.items():
+        sources.append((ROOT / header, [vendors / name for name in vendor_names]))
+    return sources
+
+
+def classify_get_connected_bodies(sources=None):
     """({basename: kind}, [findings]) for every vendor get_connected() override.
+
+    sources is [(path, [wrapper dirs])], _get_connected_sources() by default; a
+    listed path that does not exist is a finding, so a renamed shared header
+    cannot drop out of the scan unnoticed.
 
     kind is "driver-mutex" (takes a lock_guard/unique_lock, so it blocks behind
     the connect sequence that holds the same mutex), "wrapper" (reaches a
@@ -645,9 +677,11 @@ def classify_get_connected_bodies():
     """
     kinds = {}
     failures = []
-    vendors = ROOT / "AlpacaCore" / "src" / "vendors"
-    for path in sorted(vendors.rglob("*")):
-        if path.suffix not in (".cpp", ".h", ".hpp"):
+    for path, wrapper_dirs in (_get_connected_sources() if sources is None else sources):
+        if not path.is_file():
+            failures.append(
+                "GET_CONNECTED SOURCE MISSING: %s is listed in SHARED_DRIVER_HEADERS in %s but does not "
+                "exist. Update the entry to the header's new path." % (path, Path(__file__).name))
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in GET_CONNECTED_RE.finditer(text):
@@ -662,7 +696,8 @@ def classify_get_connected_bodies():
                 # re-adding the lock_guard to any is_open() in the vendor's
                 # wrapper turns the driver back into "wrapper" (blocking) and
                 # the empty switch list in async_connectable.h fails.
-                kind = "wrapper" if _vendor_is_open_locks(path.parent) else "lock-free"
+                locks = any(_vendor_is_open_locks(d) for d in wrapper_dirs)
+                kind = "wrapper" if locks else "lock-free"
             elif re.search(r"\bload\s*\(|\breturn\s+connected_\s*;", body):
                 kind = "lock-free"
             else:
@@ -671,7 +706,7 @@ def classify_get_connected_bodies():
                     "wrapper's is_open(), nor reads an atomic. Classify it by hand: if it can block, "
                     "add it to DRIVER_PROSE_NAMES in %s and to the list in async_connectable.h; if it "
                     "cannot, make that visible in the body (an atomic load or a plain return)."
-                    % (path.relative_to(ROOT), Path(__file__).name))
+                    % (_display_path(path), Path(__file__).name))
                 continue
             # A file with two driver classes (gemini_flatpanel_driver.cpp) is
             # only interesting if they disagree, which would mean the file
@@ -680,7 +715,7 @@ def classify_get_connected_bodies():
                 failures.append(
                     "MIXED get_connected() kinds in %s: %s and %s. The prose list names files, not "
                     "classes, so split the drivers or name them individually."
-                    % (path.relative_to(ROOT), kinds[path.name], kind))
+                    % (_display_path(path), kinds[path.name], kind))
             kinds[path.name] = kind
     return kinds, failures
 
@@ -3767,6 +3802,35 @@ def self_test():
     f = blocking_list_findings(bl_header.replace("The blocking telescopes (", "The telescopes ("), bl_kinds)
     check("blocking list: a header without the telescopes span is BLOCKING-LIST SPAN NOT FOUND",
           len(f) == 1 and f[0].startswith("BLOCKING-LIST SPAN NOT FOUND"))
+    # The shared power-port driver (#2264): scanned by name, and named when it blocks.
+    with tempfile.TemporaryDirectory() as bl_tmp:
+        bl_shared = Path(bl_tmp) / "power_port_switch_driver.h"
+        bl_shared.write_text("bool get_connected() const override { std::lock_guard<std::mutex> g(m_); return c_; }\n")
+        bl_scan, bl_fail = classify_get_connected_bodies([(bl_shared, [])])
+        check("blocking list: a shared header whose get_connected() locks is classified driver-mutex",
+              bl_scan == {"power_port_switch_driver.h": "driver-mutex"} and bl_fail == [])
+        bl_free, bl_locked = Path(bl_tmp) / "free", Path(bl_tmp) / "locked"
+        bl_free.mkdir()
+        bl_locked.mkdir()
+        (bl_free / "a_wrapper.cpp").write_text("bool A::is_open() const { return open_.load(); }\n")
+        (bl_locked / "b_wrapper.cpp").write_text(
+            "bool B::is_open() const { std::lock_guard<std::mutex> g(m_); return open_; }\n")
+        bl_shared.write_text("bool get_connected() const override { return wrapper_.is_open(); }\n")
+        bl_scan, _ = classify_get_connected_bodies([(bl_shared, [bl_free, bl_locked])])
+        check("blocking list: a shared header reaching is_open() is 'wrapper' when any served vendor's is_open() locks",
+              bl_scan == {"power_port_switch_driver.h": "wrapper"})
+        bl_scan, _ = classify_get_connected_bodies([(bl_shared, [bl_free])])
+        check("blocking list: the same header is lock-free when every served vendor's is_open() is lock-free",
+              bl_scan == {"power_port_switch_driver.h": "lock-free"})
+        bl_scan, bl_fail = classify_get_connected_bodies([(Path(bl_tmp) / "gone.h", [])])
+        check("blocking list: a SHARED_DRIVER_HEADERS entry that does not exist is a finding",
+              bl_scan == {} and len(bl_fail) == 1 and bl_fail[0].startswith("GET_CONNECTED SOURCE MISSING"))
+    f = blocking_list_findings(bl_header, dict(bl_kinds, **{"power_port_switch_driver.h": "driver-mutex"}))
+    check("blocking list: a re-locked shared power-port getter is MISSING FROM THE BLOCKING LIST",
+          len(f) == 1 and f[0].startswith("MISSING FROM THE BLOCKING LIST") and "'PowerPortSwitchDriver'" in f[0])
+    f = blocking_list_findings(bl_header.replace("switch drivers ()", "switch drivers (PowerPortSwitchDriver)"),
+                               dict(bl_kinds, **{"power_port_switch_driver.h": "driver-mutex"}))
+    check("blocking list: the re-locked shared getter named in the switches list reports nothing", f == [])
 
     # check 4: VERSION vs README badge, with the ~betaN suffix.
     b_readme = "#### [5.0.0~beta2] - 2026-11-01 &middot; [Changelog](CHANGELOG.md)\n"
