@@ -339,12 +339,6 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"onstep_telescope", kOn, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOn, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
 
-    // ZWO AM: the guide-rate setter takes std::abs of the rate, so a negative rate is accepted in either state.
-    {"zwo_telescope", kOff, "set_guide_rate_right_ascension(-1)", kKnown, "negative rate accepted (#2257)"},
-    {"zwo_telescope", kOff, "set_guide_rate_declination(-1)", kKnown, "negative rate accepted (#2257)"},
-    {"zwo_telescope", kOn, "set_guide_rate_right_ascension(-1)", kKnown, "negative rate accepted (#2257)"},
-    {"zwo_telescope", kOn, "set_guide_rate_declination(-1)", kKnown, "negative rate accepted (#2257)"},
-
     // Celestron CGX: CanSlew is false (only the async slew) and MoveAxis is not implemented; both check the axis first.
     {"celestron_telescope_cgx", kOff, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
     {"celestron_telescope_cgx", kOn, "move_axis(0, NaN)", kPermanent, "MoveAxis is not implemented on the CGX"},
