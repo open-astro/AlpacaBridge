@@ -414,8 +414,12 @@ jobs:
             with the Write tool (writes outside the workspace are denied, so
             not /tmp). Do not post it yourself; a workflow step posts the file.
             If the file is missing, the run fails.
+          # Explicit mode keeps --allowedTools a strict list. The action skips its
+          # auto-mode default today (allowed_non_write_users and
+          # path_to_claude_code_executable are set), but this does not rely on that.
           claude_args: |
             --model opus
+            --permission-mode default
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(python3 -I ${{ runner.temp }}/adr-tools/scripts/check_adr_scope.py --checklist:*)"
 
       # Every in-scope rule needs a checklist line before anything posts. The
