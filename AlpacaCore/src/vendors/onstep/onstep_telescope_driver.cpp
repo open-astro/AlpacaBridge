@@ -107,12 +107,16 @@ constexpr auto kInMotionRetryPoll = std::chrono::milliseconds(200);
 constexpr int kCeNone = 0;
 // The longest PulseGuide the :Mg[nsew]#### command can carry (#1478).
 constexpr int kMaxPulseGuideMs = 9999;
-// OnStep's limits and orders for the telescope command gate (#2258). PulseGuide checks the fault before the parked
-// state; MoveAxis and the slews check it after. MoveAxis moves axes 0 and 1; a rate at or under 1e-6 is a stop, and a
-// stop is sent on a faulted link (the driver checks the fault once it is sent, #1414).
+// OnStep's limits, orders and argument texts for the telescope command gate (#2258). PulseGuide checks the fault
+// before the parked state; MoveAxis and the slews check it after. The :Mg[nsew]#### duration field is 4 digits, so a
+// longer pulse is refused instead of pulsing for less than asked (#1478). MoveAxis moves axes 0 and 1; a rate at or
+// under 1e-6 is a stop, and a stop is sent on a faulted link (the driver checks the fault once it is sent, #1414).
 constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     util::TelescopeCommandLimits limits;
     limits.pulse_guide_max_ms = kMaxPulseGuideMs;
+    static_assert(kMaxPulseGuideMs == 9999, "the PulseGuide duration text names the maximum");
+    limits.texts.pulse_duration = "PulseGuide duration must be 0 to 9999 ms";
+    limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
     limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
     limits.move_axis_axes = 2;
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
@@ -1822,7 +1826,7 @@ public:
 
     void pulse_guide(int direction, int duration) override {
         // Arguments before the connected, fault and parked checks (#1478), and before the state lock.
-        util::check_pulse_guide_arguments(kCommandLimits, direction, duration, GateChecks{*this, "PulseGuide"});
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration);
         StateLock lock(lock_gate_);
         util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
         // Hardware pulse guide: the mount times the pulse internally
@@ -2004,7 +2008,7 @@ public:
 
     void move_axis(int axis, double rate) override {
         // #2257: the argument checks run first, before the connected and parked checks.
-        util::check_move_axis_arguments(kCommandLimits, axis, rate, GateChecks{*this, "MoveAxis"});
+        util::check_move_axis_arguments(kCommandLimits, axis, rate);
         StateLock lock(lock_gate_);
         // Only a rate at or under the epsilon is a stop, which an unread status does not hold up (#1895) and a faulted
         // link does not refuse before it is sent (#1414). A move checks the fault before it ends a waiting Park or
@@ -3414,33 +3418,13 @@ private:
         return true;
     }
 
-    // The command gate's checks in OnStep's words (#2258): util/telescope_command_gate.h decides the order
-    // (arguments even while disconnected, #1478; connected; parked; the fault, named, #1414; Tracking), and these
-    // answer each step with the driver's own texts and reads. One per call, built under the state lock where the
-    // state half runs; the argument half reads nothing.
+    // The command gate's state checks in OnStep's words (#2258): util/telescope_command_gate.h decides the order
+    // (connected; parked; the fault, named, #1414; Tracking), and these answer each step with the driver's own texts
+    // and reads. One per call, built under the state lock.
     struct GateChecks {
         const OnStepTelescopeDriver& driver;
         const char* who;
 
-        [[noreturn]] void refuse_argument(util::TelescopeArgument which, double /*value*/) const {
-            switch (which) {
-                case util::TelescopeArgument::PulseDirection:
-                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-                case util::TelescopeArgument::PulseDuration:
-                    // The wire command's duration field is 4 digits (:Mgn####), so a longer pulse cannot be sent:
-                    // refuse it instead of pulsing for less than asked (#1478).
-                    throw AlpacaException(
-                        "PulseGuide duration must be 0 to " + std::to_string(kMaxPulseGuideMs) + " ms",
-                        AlpacaError::InvalidValue);
-                case util::TelescopeArgument::MoveAxisAxis:
-                    throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
-                case util::TelescopeArgument::MoveAxisRateNotFinite:
-                    throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-                case util::TelescopeArgument::MoveAxisRateRange:
-                    throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
-            }
-            throw AlpacaException(std::string(who) + ": invalid argument", AlpacaError::InvalidValue);
-        }
         void check_connected() const { driver.check_connected(); }
         // A non-stop first needs a status read since the connect; a stop refuses only a status that reads parked.
         void check_not_parked(bool stop) const { driver.check_not_parked_locked(who, stop); }
