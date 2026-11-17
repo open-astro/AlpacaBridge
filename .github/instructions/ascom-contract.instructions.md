@@ -291,13 +291,13 @@ All GPIO 12V power-port Switch drivers (ZWO ASIAIR Pro / Plus CM4 / Plus RK3568,
 ToupTek StellaVita, iOptron iMate, and any future board) share these rules; the vendor
 notes carry only the pin map and per-board deltas.
 
-- **One driver for the ASIAIR Pro and Plus CM4, the Plus RK3568 and the iMate** (issue #2264):
+- **One driver for every board above** (issue #2264):
   `util::PowerPortSwitchDriver<Wrapper>` (`alpacacore/util/power_port_switch_driver.h`) holds
-  the connect and disconnect gates, the power-on state, the value checks and the error order
-  for those boards, so a fix to the rules below lands there once. Each vendor's factory builds
-  a plain-data board profile (strings, per-port metadata, the power-on state) and passes its own
-  port wrapper's constructor arguments; the wrapper stays the vendor's. The ToupTek StellaVita
-  keeps its own driver, so a fix to these rules also lands there.
+  the connect and disconnect gates, the power-on state, the value checks and the error order,
+  so a fix to the rules below lands there once. Each vendor's factory builds a plain-data
+  board profile (strings, per-port metadata, the power-on state) and passes its own port
+  wrapper's constructor arguments; the wrapper stays the vendor's. A future board adds a
+  profile and a wrapper, not a driver.
 - **libgpiod v2 only** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime): one
   `gpiod_line_request*` owns all lines together; values go through
   `gpiod_line_request_set_value`. Never port back to the v1 per-line API. The daemon

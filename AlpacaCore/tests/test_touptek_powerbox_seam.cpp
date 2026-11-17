@@ -157,7 +157,7 @@ TEST_CASE("FakeTouptekPowerboxSDK behind LockedTouptekPowerboxSDK - forwards eve
     CHECK(fake.get_value_calls() == 3);
 }
 
-// Falsified by: touptek_switch_driver.cpp set_connected() calling set_value() on every port after
+// Falsified by: power_port_switch_driver.h set_connected() calling set_value() on every port after
 // open (a connect that drives the lines).
 TEST_CASE("ToupTek powerbox seam - connecting leaves every port on and writes nothing",
           "[touptek][switch][unit][fake-sdk]") {
@@ -180,7 +180,7 @@ TEST_CASE("ToupTek powerbox seam - connecting leaves every port on and writes no
     CHECK(error_code([&] { driver->get_switch(0); }) == alpacacore::AlpacaError::NotConnected);
 }
 
-// Falsified by: touptek_switch_driver.cpp set_switch_value() dropping the PWM range check (101
+// Falsified by: power_port_switch_driver.h set_switch_value() dropping the PWM range check (101
 // reaches the injected power box).
 TEST_CASE("ToupTek powerbox seam - PWM and read-only ports map through the injected box",
           "[touptek][switch][unit][fake-sdk]") {
@@ -198,7 +198,7 @@ TEST_CASE("ToupTek powerbox seam - PWM and read-only ports map through the injec
     CHECK(error_code([&] { driver->set_switch(3, false); }) == alpacacore::AlpacaError::NotImplemented);
 }
 
-// Falsified by: touptek_switch_driver.cpp injected constructor dropping the port_count() comparison
+// Falsified by: touptek_switch_driver.cpp injected factory dropping the port_count() comparison
 // (a mismatched box is accepted and indexed past its table).
 TEST_CASE("ToupTek powerbox seam - a box whose port count differs from the config is refused",
           "[touptek][switch][unit][fake-sdk]") {

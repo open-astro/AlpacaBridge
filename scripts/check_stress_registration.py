@@ -328,6 +328,10 @@ DELEGATING_FACTORIES = {
         "switch",
         "create_ioptron_switch() builds util::PowerPortSwitchDriver "
         "(alpacacore/util/power_port_switch_driver.h) over the iMate PowerBox wrapper"),
+    "AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp": (
+        "switch",
+        "create_touptek_switch() builds util::PowerPortSwitchDriver "
+        "(alpacacore/util/power_port_switch_driver.h) over the StellaVita power box"),
     "AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp": (
         "switch",
         "create_zwo_asiair_plus_switch() builds util::PowerPortSwitchDriver "

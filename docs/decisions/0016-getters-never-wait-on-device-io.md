@@ -68,7 +68,7 @@ Symbol: `transition_mutex_`
 | ToupTek camera |  | `AlpacaCore/src/vendors/touptek/touptek_camera_driver.cpp` | adopted |  |  |
 | ToupTek filter wheel |  | `AlpacaCore/src/vendors/touptek/touptek_filterwheel_driver.cpp` | adopted |  |  |
 | ToupTek focuser |  | `AlpacaCore/src/vendors/touptek/touptek_focuser_driver.cpp` | adopted |  |  |
-| ToupTek switch |  | `AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp` | adopted |  |  |
+| ToupTek switch |  | `AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/power_port_switch_driver.h` | adopted |  |  |
 | ToupTek thermal switch |  | `AlpacaCore/src/vendors/touptek/touptek_thermal_switch_driver.cpp` | adopted |  |  |
 | WandererAstro box switch |  | `AlpacaCore/src/vendors/wandererastro/wandererastro_box_switch_driver.cpp` | adopted |  |  |
 | WandererAstro cover |  | `AlpacaCore/src/vendors/wandererastro/wandererastro_covercalibrator_driver.cpp` | adopted |  | writes with no reply wait under `state_mutex_` (Alternatives rejected) |

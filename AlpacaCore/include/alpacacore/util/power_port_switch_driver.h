@@ -59,8 +59,8 @@ struct PowerPortProfile {
 inline const char* power_port_mode_text(bool pwm_enabled) { return pwm_enabled ? "PWM 0-100%" : "on/off"; }
 
 // The Switch driver of the GPIO power-port boards that share one behaviour:
-// the ASIAIR Pro and Plus CM4, the ASIAIR Plus RK3568 and the iMate PowerBox
-// (issue #2264). Wrapper is the board's port wrapper: open(), close(),
+// the ASIAIR Pro and Plus CM4, the ASIAIR Plus RK3568, the iMate PowerBox
+// (issue #2264) and the ToupTek StellaVita. Wrapper is the board's port wrapper: open(), close(),
 // is_open(), get_value(index) and set_value(index, int). It is built in place
 // from the arguments after the profile, so each factory passes what its
 // wrapper's constructor takes. The general rules are in the GPIO section of

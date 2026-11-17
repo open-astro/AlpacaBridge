@@ -497,9 +497,9 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 # lock-free majority is not named anywhere, by design. Two groups are the
 # exception, and both keep their entries although the header's list is empty:
 # the Bisque and iOptron telescopes (lock-free since #910) and the
-# wrapper-backed switch drivers (ToupTek StellaVita, and PowerPortSwitchDriver,
-# which serves the ASIAIR, ASIAIR Plus and iOptron iMate PowerBox since #2264;
-# lock-free since #382). The entry is what lets the gate
+# wrapper-backed switch drivers (PowerPortSwitchDriver, which serves the
+# ASIAIR, ASIAIR Plus, iOptron iMate PowerBox and ToupTek StellaVita since
+# #2264; lock-free since #382). The entry is what lets the gate
 # report MISSING FROM THE BLOCKING LIST if one of them re-locks get_connected()
 # (or a wrapper re-locks is_open()). Do not remove them on the STALE
 # BLOCKING-LIST ENTRY advice.
@@ -516,7 +516,6 @@ DRIVER_PROSE_NAMES = {
     "bisque_telescope_driver.cpp": ("Bisque", "telescopes"),
     "ioptron_telescope_driver.cpp": ("iOptron", "telescopes"),
     "onstep_telescope_driver.cpp": ("OnStep", "telescopes"),
-    "touptek_switch_driver.cpp": ("ToupTek StellaVita", "switches"),
     "power_port_switch_driver.h": ("PowerPortSwitchDriver", "switches"),
 }
 
@@ -524,10 +523,10 @@ DRIVER_PROSE_NAMES = {
 # so check 5 scans it by name: header path -> the vendor directories whose
 # wrappers it is instantiated over (their is_open() bodies decide "wrapper"
 # against "lock-free", as a vendor driver's own directory does). Without the
-# entry, the three power-port switches would have left the gate when their
+# entry, the power-port switches would have left the gate when their
 # get_connected() moved into the shared header (#2264).
 SHARED_DRIVER_HEADERS = {
-    "AlpacaCore/include/alpacacore/util/power_port_switch_driver.h": ("zwo", "ioptron"),
+    "AlpacaCore/include/alpacacore/util/power_port_switch_driver.h": ("zwo", "ioptron", "touptek"),
 }
 
 # Where each list lives in async_connectable.h, as (start marker, end marker).
@@ -681,7 +680,7 @@ def classify_get_connected_bodies(sources=None):
         if not path.is_file():
             failures.append(
                 "GET_CONNECTED SOURCE MISSING: %s is listed in SHARED_DRIVER_HEADERS in %s but does not "
-                "exist. Update the entry to the header's new path." % (path, Path(__file__).name))
+                "exist. Update the entry to the header's new path." % (_display_path(path), Path(__file__).name))
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in GET_CONNECTED_RE.finditer(text):
