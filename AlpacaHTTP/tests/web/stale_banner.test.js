@@ -64,7 +64,16 @@ function makeEl(id, className) {
 // a non-OK answer with a well-formed body, 'bad' is a body that is not JSON, 'alpaca-error' is an
 // answer with a non-zero ErrorNumber.
 function makeServer(clock) {
-    const server = { mode: 'ok', calls: [] };
+    const server = { mode: 'ok', failedMode: 'ok', calls: [], failedCalls: [] };
+    // The /faileddevices listing: 'ok' answers no rows, 'hang' never answers
+    // until its request is aborted, then answers [] as the real function does.
+    server.failed = (signal) => {
+        server.failedCalls.push({ at: clock.now });
+        if (server.failedMode === 'ok') return Promise.resolve([]);
+        return new Promise((resolve) => {
+            if (signal) signal.addEventListener('abort', () => resolve([]));
+        });
+    };
     server.fetch = (url, opts) => {
         server.calls.push({ url, at: clock.now });
         const signal = opts && opts.signal;
@@ -144,7 +153,8 @@ function load({ hidden = false, devicesTabActive = true } = {}) {
         console,
         API_BASE: '',
         fetch: server.fetch,
-        fetchFailedDevices: async () => [],
+        // The real fetchFailedDevices answers [] on any error, an abort included.
+        fetchFailedDevices: (signal) => server.failed(signal),
         deviceStatus: format.deviceStatus,
         linkStatus: format.linkStatus,
         STATUS_POLL_MS: format.STATUS_POLL_MS,
@@ -217,6 +227,23 @@ test('a hung poll is aborted after 4 s and still shows the banner within 10 s (#
     await t.advance(5000);
     assert.ok(t.server.calls.length > before, 'no poll went out after the hung one');
     assert.strictEqual(t.banner.hidden, true);
+});
+
+test('a hung failed-devices listing is aborted and the poll goes on (#1764)', async () => {
+    const t = load();
+    t.poll.startDeviceStatusPoll();
+    await t.advance(5000);
+    t.server.failedMode = 'hang';  // the first listing answers, the second never does
+    await t.advance(5000);
+    assert.strictEqual(t.server.failedCalls.length, 2);
+    // Each poll now waits out the 4 s abort, then schedules the next 5 s later: 19 s and 28 s.
+    const before = t.server.calls.length;
+    await t.advance(20000);
+    assert.ok(t.server.calls.length >= before + 2, 'a hung /faileddevices held every later poll');
+    // The bridge then stops: the next listing fails and the banner shows within 10 s.
+    t.server.mode = 'refuse';
+    const waited = await msUntilBanner(t, 10000);
+    assert.ok(waited !== null && waited <= 10000, `banner after ${waited} ms`);
 });
 
 for (const mode of ['500', 'bad', 'alpaca-error']) {

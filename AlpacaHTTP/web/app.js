@@ -710,10 +710,11 @@ function updateAutoNumbering() {
 // Persisted devices that did not register. They are not in the standard
 // configureddevices list (open-astro#576); this UI-only extension endpoint
 // serves them so the error card can still be edited or removed. A failure here
-// leaves the registered devices usable.
-async function fetchFailedDevices() {
+// leaves the registered devices usable. `signal` (optional) aborts the request,
+// which then also answers an empty list.
+async function fetchFailedDevices(signal) {
     try {
-        const response = await fetch(API_BASE + '/management/v1/faileddevices?ts=' + Date.now(), { cache: 'no-store' });
+        const response = await fetch(API_BASE + '/management/v1/faileddevices?ts=' + Date.now(), { cache: 'no-store', signal });
         if (!response.ok) return [];
         const data = await response.json();
         if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return [];
@@ -1771,6 +1772,19 @@ async function fetchDeviceStatusRows() {
     }
 }
 
+// The failed-devices listing gets the same deadline. It answers an empty list
+// when aborted, so a hung second request cannot hold this poll, and with it
+// every later one, after the first listing already answered.
+async function fetchFailedDevicesWithin(timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetchFailedDevices(controller.signal);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function pollDeviceStatus() {
     deviceStatusPollTimer = null;
     if (document.hidden) {
@@ -1783,7 +1797,7 @@ async function pollDeviceStatus() {
     try {
         const rows = await fetchDeviceStatusRows();
         noteBridgeAnswered();
-        for (const device of rows.concat(await fetchFailedDevices())) {
+        for (const device of rows.concat(await fetchFailedDevicesWithin(STATUS_POLL_TIMEOUT_MS))) {
             const status = deviceStatus(device);
             document.querySelectorAll('.status-dot').forEach(dot => {
                 if (dot.dataset.deviceType === String(device.DeviceType) &&
