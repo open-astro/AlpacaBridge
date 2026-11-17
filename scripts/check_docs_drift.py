@@ -3809,6 +3809,19 @@ def self_test():
         bl_scan, bl_fail = classify_get_connected_bodies([(bl_shared, [])])
         check("blocking list: a shared header whose get_connected() locks is classified driver-mutex",
               bl_scan == {"power_port_switch_driver.h": "driver-mutex"} and bl_fail == [])
+        bl_free, bl_locked = Path(bl_tmp) / "free", Path(bl_tmp) / "locked"
+        bl_free.mkdir()
+        bl_locked.mkdir()
+        (bl_free / "a_wrapper.cpp").write_text("bool A::is_open() const { return open_.load(); }\n")
+        (bl_locked / "b_wrapper.cpp").write_text(
+            "bool B::is_open() const { std::lock_guard<std::mutex> g(m_); return open_; }\n")
+        bl_shared.write_text("bool get_connected() const override { return wrapper_.is_open(); }\n")
+        bl_scan, _ = classify_get_connected_bodies([(bl_shared, [bl_free, bl_locked])])
+        check("blocking list: a shared header reaching is_open() is 'wrapper' when any served vendor's is_open() locks",
+              bl_scan == {"power_port_switch_driver.h": "wrapper"})
+        bl_scan, _ = classify_get_connected_bodies([(bl_shared, [bl_free])])
+        check("blocking list: the same header is lock-free when every served vendor's is_open() is lock-free",
+              bl_scan == {"power_port_switch_driver.h": "lock-free"})
         bl_scan, bl_fail = classify_get_connected_bodies([(Path(bl_tmp) / "gone.h", [])])
         check("blocking list: a SHARED_DRIVER_HEADERS entry that does not exist is a finding",
               bl_scan == {} and len(bl_fail) == 1 and bl_fail[0].startswith("GET_CONNECTED SOURCE MISSING"))
