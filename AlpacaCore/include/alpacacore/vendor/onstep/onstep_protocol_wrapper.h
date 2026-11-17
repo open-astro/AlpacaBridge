@@ -126,6 +126,15 @@ struct MountStatus {
     // rate digit and the error digit; OnStepX Status.command.cpp, OnStep 4.x Command.ino), or -1 when that
     // character is not a digit.
     int pulse_guide_rate_select = -1;
+    // 'F': a park failed (OnStepX PS_PARK_FAILED, the park-sense check; OnStep 4.x ParkFailed), in place of p/I/P.
+    bool is_park_failed = false;
+    // 'w': a GOTO waits at home for the user (the meridian-flip pause-at-home setting; OnStepX goTo.isHomePaused(),
+    // OnStep 4.x waitingHome). The park and home bound does not run while it shows (#2296).
+    bool is_waiting_at_home = false;
+    // The general error code, the last character of :GU# ('0' + code, 0-15, so 10-15 are ':' to '?'; OnStepX
+    // Limits::errorCode(), OnStep 4.x generalError), or -1 when the reply does not end with the three code
+    // characters (pulse-guide rate, guide rate, error), which reads as no error. See the onstep instructions.
+    int general_error = -1;
     std::string raw_status;
 };
 

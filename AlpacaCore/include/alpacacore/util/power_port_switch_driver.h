@@ -348,8 +348,9 @@ private:
         }
     }
 
-    // A read-only port (the iMate pass-through) rejects writes with
-    // NotImplemented per the ASCOM Switch spec, after the connection check.
+    // A read-only port (the iMate pass-through, or a StellaVita port configured
+    // read-only) rejects writes with NotImplemented per the ASCOM Switch spec,
+    // after the connection check.
     void ensure_writable(int id) const {
         if (!port(id).writable) {
             throw AlpacaException("Switch " + std::to_string(id) + " is read-only", AlpacaError::NotImplemented);

@@ -3182,4 +3182,630 @@ TEST_CASE("OnStep rate offsets - AbortSlew and a Tracking write serve the frame 
     model_restarts(rig, milliseconds(300));
 }
 
+namespace {
+
+// The error code and message a call throws: {0, ""} when it does not throw.
+std::pair<int, std::string> thrown_by(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& e) {
+        return {e.error_code(), e.what()};
+    }
+    return {0, ""};
+}
+
+bool contains(const std::string& text, const char* part) { return text.find(part) != std::string::npos; }
+
+// A paused rig whose mount answers `version`, with a coordinate GOTO started from a tracking, idle mount (a #1230
+// tracking restore is owed when it ends) and the slew grace run out.
+void goto_started(Rig& rig, const char* version = "10.23a", const char* before = "NpEW180#") {
+    connect_rates(rig, version);
+    show(rig, before);
+    rig.driver->slew_to_coordinates_async(2.0, 20.0);
+    rig.clock.advance(seconds(3));
+}
+
+}  // namespace
+
+// #2296: OnStepX stops a GOTO that crosses a limit (Limits::poll() -> stop(): goTo.abort(), tracking off) and says
+// why only in the :GU# general error, the last character ('0' + code). The frame that ends a GOTO the driver started
+// with a stop code, away from its target, fails the slew: Slewing throws until the next motion command, and the #1230
+// tracking restore is not sent (OnStepX does not limit-check :Te#, so tracking would carry the mount further past the
+// limit). The fake's position, 12 h +45, is far from the 2 h +20 target.
+TEST_CASE("OnStep limit stop - a GOTO the mount stops at a limit fails Slewing and gets no tracking restore",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    SECTION("stopped at the horizon limit (2)") {
+        goto_started(rig);
+        show(rig, "nNpEW182#");  // the GOTO ended, tracking off
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_slewing(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "SlewToCoordinatesAsync"));
+        CHECK(contains(message, "horizon limit"));
+        CHECK(rig.mount->count(":Te#") == 0);
+        CHECK_NOTHROW(rig.driver->get_at_park());  // a slew's failure, not a park's
+        show(rig, "nNpEW182#");                    // kept: a later frame neither clears it nor restores
+        CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first == alpacacore::AlpacaError::DriverException);
+        CHECK(rig.mount->count(":Te#") == 0);
+    }
+    SECTION("stopped at the meridian limit (7)") {
+        goto_started(rig);
+        show(rig, "nNpEW187#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_slewing(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "meridian limit"));
+        CHECK(rig.mount->count(":Te#") == 0);
+    }
+    SECTION("a synchronous SlewToCoordinates stopped at the overhead limit (12, '<') throws") {
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        std::atomic<int> reads_after_goto{-1};  // -1: the :MS# has not gone out
+        rig.mount->set_on_command([&](const std::string& chunk) {
+            if (chunk.rfind(":MS", 0) == 0) {
+                reads_after_goto = 0;
+            } else if (chunk.rfind(":GU", 0) == 0 && reads_after_goto.load() >= 0) {
+                rig.mount->set_status(reads_after_goto.fetch_add(1) == 0 ? "npEW180#" : "nNpEW18<#");
+            }
+        });
+        const auto [code, message] = thrown_by([&] { synchronous_slew(rig, 2.0, 20.0); });
+        rig.mount->set_on_command(nullptr);
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "SlewToCoordinates"));
+        CHECK(contains(message, "overhead limit"));
+        CHECK(rig.mount->count(":Te#") == 0);
+    }
+    SECTION("OnStepX: a GOTO accepted while the meridian limit already stood ends with the same code (7)") {
+        // OnStepX's code is the limits as they stand: past the meridian limit it accepts the GOTO and aborts it on
+        // its next limit check (Limits::poll()), so the same code at the end is this GOTO's stop.
+        goto_started(rig, "10.23a", "NpEW187#");
+        show(rig, "nNpEW187#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_slewing(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "meridian limit"));
+        CHECK(rig.mount->count(":Te#") == 0);
+    }
+    SECTION("OnStep 4.x: stopped short with a stop code") {
+        goto_started(rig, "4.24s");
+        show(rig, "nNpEW182#");
+        CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first == alpacacore::AlpacaError::DriverException);
+        CHECK(rig.mount->count(":ST60") == 0);
+    }
+}
+
+// The other side of #2296: with no stop code a GOTO lands as before, and with one where the mount ends decides. On
+// OnStep 4.x, which latches the code until :Te#, an unpark, a home reset or a reboot (Command.ino initGeneralError(),
+// OnStep.ino), a GOTO at its target with a latched code lands. These landings end as before, with the #1230 tracking
+// restore.
+TEST_CASE("OnStep limit stop - a GOTO that lands with no stop code, or at its target with a 4.x latched code, lands",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    SECTION("error 0") {
+        goto_started(rig);
+        show(rig, "nNpEW180#");
+        CHECK(rig.mount->count(":Te#") == 1);
+    }
+    SECTION("a code that is not a stop (10, goto sync)") {
+        goto_started(rig);
+        show(rig, "nNpEW18:#");
+        CHECK(rig.mount->count(":Te#") == 1);
+    }
+    SECTION("no trailing code characters") {
+        goto_started(rig);
+        show(rig, "nNpEW#");
+        CHECK(rig.mount->count(":Te#") == 1);
+    }
+    SECTION("OnStep 4.x: at the target with a latched code") {
+        goto_started(rig, "4.24s", "NpEW187#");
+        rig.mount->set_position(2.0, 20.0);  // landed: the target (a stop code makes the end position decide)
+        show(rig, "nNpEW187#");
+        CHECK(rig.mount->count(":ST60.164275#") == 1);
+    }
+    CHECK_NOTHROW(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// #2296: a park a limit stops ends unparked (OnStepX Park::requestAborted()) with the stop code, and a park whose
+// park-sense check fails shows 'F' (PS_PARK_FAILED; OnStep 4.x ParkFailed); a home a limit stops ends away from home
+// with the code. AtPark (a park's) or AtHome (a home's) and Slewing raise it, as they raise a refusal the park_home_
+// body kept.
+TEST_CASE("OnStep limit stop - a park or home the mount stops, or a park it reports failed, fails AtPark or AtHome",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    connect_rates(rig);
+    show(rig, "NpEW180#");
+    SECTION("a park stopped at the meridian limit (7)") {
+        rig.driver->park();
+        REQUIRE(rig.mount->count(":hP#") == 1);
+        show(rig, "nNpEW187#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_at_park(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "Park"));
+        CHECK(contains(message, "meridian limit"));
+        CHECK(thrown_by([&] { (void)rig.driver->get_slewing(); }).first == alpacacore::AlpacaError::DriverException);
+        CHECK_NOTHROW(rig.driver->get_at_home());
+    }
+    SECTION("a park the mount reports failed ('F')") {
+        rig.driver->park();
+        show(rig, "nNFEW180#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_at_park(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "failed"));
+    }
+    SECTION("a home stopped at a limit switch (3)") {
+        rig.driver->find_home();
+        show(rig, "nphEW180#");  // the home GOTO runs ('h' with no 'N')
+        show(rig, "nNpEW183#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_at_home(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "FindHome"));
+        CHECK(contains(message, "limit switch"));
+        CHECK_NOTHROW(rig.driver->get_at_park());
+    }
+    SECTION("a park that ends parked, with a stop code still set, is done") {
+        rig.driver->park();
+        show(rig, "nNPEW187#");
+        CHECK(rig.driver->get_at_park());
+        CHECK_FALSE(rig.driver->get_slewing());
+    }
+}
+
+// #2296: the mount stops the GOTO at the horizon limit and, before any poll tick reads it, the client calls AbortSlew.
+// The abort's own :GU# read is the first to see the end: it must find the stop and send no #1230 tracking restore
+// (OnStepX does not limit-check :Te#). The abort is a new motion command, so it drops the failure it found. On OnStep
+// 4.x only the watch the abort keeps decides this (the abort's stop-code guard is OnStepX's): a GOTO stopped short gets
+// no :ST60.164275#.
+TEST_CASE("OnStep limit stop - an AbortSlew that is first to read a GOTO the mount stopped sends no tracking restore",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    SECTION("OnStepX") {
+        goto_started(rig);
+        rig.mount->set_status("nNpEW182#");  // stopped at the horizon, tracking off; no tick has read it
+        rig.driver->abort_slew();
+        CHECK(rig.mount->count(":Te#") == 0);
+        CHECK_NOTHROW(rig.driver->get_slewing());
+        REQUIRE(rig.tick());
+        CHECK(rig.mount->count(":Te#") == 0);
+        CHECK_NOTHROW(rig.driver->get_slewing());
+    }
+    SECTION("OnStep 4.x, stopped short") {
+        goto_started(rig, "4.24s");
+        rig.mount->set_status("nNpEW182#");  // the fake's position is far from the 2 h +20 target
+        rig.driver->abort_slew();
+        CHECK(rig.mount->count(":ST60") == 0);
+        CHECK_NOTHROW(rig.driver->get_slewing());
+    }
+}
+
+namespace {
+
+// Sets the #521 relink preserve window for one case and puts the default back.
+struct PreserveWindow {
+    explicit PreserveWindow(std::chrono::milliseconds window) {
+        onstep::detail::set_relink_motion_preserve_window(window);
+    }
+    ~PreserveWindow() {
+        onstep::detail::set_relink_motion_preserve_window(
+            std::chrono::duration_cast<std::chrono::milliseconds>(alpacacore::util::kRelinkMotionPreserveWindow));
+    }
+    PreserveWindow(const PreserveWindow&) = delete;
+    PreserveWindow& operator=(const PreserveWindow&) = delete;
+};
+
+// The controller hangs up (a lost link, decision 0009) and the client's Connect relinks at once.
+void lose_and_relink(Rig& rig) {
+    REQUIRE(rig.server.drop_connections());
+    REQUIRE_FALSE(rig.driver->get_connected());
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+}
+
+}  // namespace
+
+// #2296 with #521: a relink inside the preserve window leaves the mount's GOTO running (and a park, which it never
+// stops), so the watch on that motion carries over and a limit stop after the relink still fails it. A relink past
+// the window sends AbortSlew's stops: the motion is the driver's own stop then, and its end is not checked.
+TEST_CASE("OnStep limit stop - a GOTO or park a relink leaves running still fails when the mount stops it",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    SECTION("a GOTO, relinked inside the window, stopped at the meridian limit (7)") {
+        PreserveWindow window(std::chrono::hours(1));
+        goto_started(rig);
+        rig.mount->set_status("npEW180#");  // the GOTO runs through the outage
+        lose_and_relink(rig);
+        CHECK(rig.mount->count(":Q") == 0);  // motion left alone
+        show(rig, "nNpEW187#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_slewing(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "SlewToCoordinatesAsync"));
+        CHECK(contains(message, "meridian limit"));
+        CHECK(rig.mount->count(":Te#") == 0);
+    }
+    SECTION("a park, relinked inside the window, stopped at the horizon limit (2)") {
+        PreserveWindow window(std::chrono::hours(1));
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->park();
+        rig.mount->set_status("nIEW180#");  // parking
+        lose_and_relink(rig);
+        show(rig, "nNpEW182#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_at_park(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "horizon limit"));
+    }
+    SECTION("a park, relinked past the window while it parks, that the mount reports failed ('F')") {
+        PreserveWindow window(std::chrono::milliseconds(0));  // the #1289 rule leaves a park running anyway
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->park();
+        rig.mount->set_status("nIEW180#");
+        lose_and_relink(rig);
+        CHECK(rig.mount->count(":Q") == 0);
+        show(rig, "nNFEW180#");
+        CHECK(thrown_by([&] { (void)rig.driver->get_at_park(); }).first == alpacacore::AlpacaError::DriverException);
+    }
+    SECTION("a GOTO the relink stops past the window is not checked") {
+        PreserveWindow window(std::chrono::milliseconds(0));
+        goto_started(rig);
+        rig.mount->set_status("npEW180#");
+        lose_and_relink(rig);
+        REQUIRE(rig.mount->count(":Q#") == 1);  // the #521 stops
+        show(rig, "nNpEW187#");
+        CHECK_NOTHROW(rig.driver->get_slewing());
+        CHECK(rig.mount->count(":Te#") == 0);
+    }
+    // Item 9: past the window the relink stops a GOTO but leaves a park running (#1289), so the park's watch carries
+    // over there too. Its bound still runs from the Park command (the outage counts: it is part of the park's time).
+    SECTION("a park the relink past the window leaves running") {
+        PreserveWindow window(std::chrono::milliseconds(0));
+        connect_rates(rig);
+        show(rig, "NpEW180#");
+        rig.driver->park();
+        const auto parked_at = rig.clock.now();
+        rig.mount->set_status("nIEW180#");
+        lose_and_relink(rig);
+        REQUIRE(rig.mount->count(":Q") == 0);
+        SECTION("ends parked") {
+            show(rig, "nNPEW180#");
+            CHECK(rig.driver->get_at_park());
+        }
+        SECTION("ends with a stop code") {
+            show(rig, "nNpEW187#");
+            const auto [code, message] = thrown_by([&] { (void)rig.driver->get_at_park(); });
+            CHECK(code == alpacacore::AlpacaError::DriverException);
+            CHECK(contains(message, "meridian limit"));
+        }
+        SECTION("ends without parking and without a code") {
+            show(rig, "nNpEW180#");
+            CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
+                           "the mount ended the park without parking"));
+        }
+        SECTION("never ends: the bound runs from the Park command") {
+            rig.clock.advance(std::chrono::minutes(20) - (rig.clock.now() - parked_at) - milliseconds(1));
+            show(rig, "nIEW180#");
+            CHECK_NOTHROW(rig.driver->get_at_park());
+            rig.clock.advance(milliseconds(1));
+            CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
+                           "did not finish the park within 20 minutes"));
+        }
+    }
+}
+
+// Item 7 (#2296): OnStepX writes the limits as they stand, so a GOTO that lands close to a limit and then tracks
+// across it shows the stop code in its first end frame. Where the mount is decides: at the target it landed (no
+// failure; tracking is not restarted past the limit), away from it the GOTO stopped short.
+TEST_CASE("OnStep limit stop - an OnStepX GOTO whose end frame shows a stop code is judged by where it ends",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    goto_started(rig);
+    SECTION("at the target: landed, then the limit stopped tracking") {
+        rig.mount->set_position(2.0, 20.0);
+        show(rig, "nNpEW187#");
+        CHECK_NOTHROW(rig.driver->get_slewing());
+        CHECK_FALSE(rig.driver->get_slewing());
+        CHECK(rig.mount->count(":Te#") == 0);
+    }
+    SECTION("away from the target: stopped short") {
+        rig.mount->set_position(2.5, 20.0);  // 7 degrees short in RA
+        show(rig, "nNpEW187#");
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_slewing(); }).second, "meridian limit"));
+        CHECK(rig.mount->count(":Te#") == 0);
+    }
+}
+
+// Item 4 (#2296): OnStep 4.x latches the code until :Te#, an unpark, a home reset or a reboot, so the end frame of a
+// GOTO can carry a code a limit stop then writes again, or an older stop's. Where the mount ends decides; a 4.x landing
+// keeps its #1230 restore (4.x re-checks its limits on every pass and stops tracking again past one).
+TEST_CASE("OnStep limit stop - an OnStep 4.x GOTO whose end frame shows a latched stop code is judged by where it ends",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    goto_started(rig, "4.24s", "NpEW187#");
+    SECTION("stopped short by the same code") {
+        show(rig, "nNpEW187#");  // the fake's position, 12 h +45, is far from the 2 h +20 target
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_slewing(); }).second, "meridian limit"));
+        CHECK(rig.mount->count(":ST60") == 0);
+    }
+    SECTION("landed with the latched code") {
+        rig.mount->set_position(2.0, 20.0);
+        show(rig, "nNpEW187#");
+        CHECK_NOTHROW(rig.driver->get_slewing());
+        CHECK(rig.mount->count(":ST60.164275#") == 1);
+    }
+}
+
+// Item 8 (#2296): a 4.x GOTO carried over a relink inside the preserve window is judged by the same end rules from
+// the relink's first :GU#: the latched code can change while the link is down, and only where the mount ends counts.
+TEST_CASE("OnStep limit stop - an OnStep 4.x GOTO carried over a relink is judged by where it ends",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    PreserveWindow window(std::chrono::hours(1));
+    Rig rig;
+    SECTION("the latched code changes while it runs, then it lands") {
+        goto_started(rig, "4.24s");
+        rig.mount->set_status("pEW187#");  // still running; a code latched during the outage
+        lose_and_relink(rig);
+        rig.mount->set_position(2.0, 20.0);
+        show(rig, "NpEW187#");
+        CHECK_NOTHROW(rig.driver->get_slewing());
+        CHECK_FALSE(rig.driver->get_slewing());
+    }
+    SECTION("stopped during the outage: the relink's first status ends it") {
+        goto_started(rig, "4.24s");
+        rig.mount->set_status("nNpEW182#");
+        lose_and_relink(rig);
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_slewing(); }).second, "horizon limit"));
+        CHECK(rig.mount->count(":ST60") == 0);
+    }
+    SECTION("the latch cleared during the outage, then a stop with the old code") {
+        goto_started(rig, "4.24s", "NpEW187#");
+        rig.mount->set_status("pEW180#");
+        lose_and_relink(rig);
+        show(rig, "nNpEW187#");
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_slewing(); }).second, "meridian limit"));
+    }
+}
+
+// Item 5 (#2296): a watched park fails when the mount ends it without parking (a handset abort, a park that gave up),
+// once a status showed it running, and when it has not ended 20 minutes after the Park command (a time a GOTO waits
+// at home, 'w', not counted). The bound only reports: nothing is sent to the mount.
+TEST_CASE("OnStep park watch - a park ended without parking or never ended fails AtPark, a slow park parks",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    connect_rates(rig);
+    show(rig, "NpEW180#");
+    rig.driver->park();
+    show(rig, "nIEW180#");  // parking
+    SECTION("ended without parking") {
+        show(rig, "nNpEW180#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_at_park(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "Park failed: the mount ended the park without parking"));
+    }
+    SECTION("never ends: fails at the bound, not one step before") {
+        rig.clock.advance(std::chrono::minutes(20) - milliseconds(1));
+        CHECK_NOTHROW(rig.driver->get_at_park());
+        rig.clock.advance(milliseconds(1));
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_park(); }).second,
+                       "did not finish the park within 20 minutes"));
+        CHECK(rig.mount->count(":Q") == 0);
+    }
+    SECTION("a wait at home restarts the bound") {
+        rig.clock.advance(std::chrono::minutes(20) - milliseconds(1));
+        show(rig, "nIwEW180#");
+        rig.clock.advance(milliseconds(1));
+        CHECK_NOTHROW(rig.driver->get_at_park());
+    }
+    SECTION("a slow park that takes most of the bound parks") {
+        rig.clock.advance(std::chrono::minutes(20) - seconds(1));
+        show(rig, "nIEW180#");
+        show(rig, "nNPEW180#");
+        rig.clock.advance(seconds(5));
+        CHECK(rig.driver->get_at_park());
+        CHECK_FALSE(rig.driver->get_slewing());
+    }
+}
+
+// Item 6 (#2296): a home that ran as a GOTO and ends away from home fails AtHome; one that never ends fails at the
+// bound. A home with switches is left to the bound: after the switches OnStepX moves on to the sense offset with no
+// sign in :GU# (Home.cpp guideDone()), and a home is not judged before a status shows it running.
+TEST_CASE("OnStep home watch - a home ended away from home or never ended fails AtHome, a switch home reaches home",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    connect_rates(rig);
+    show(rig, "NpEW180#");
+    rig.driver->find_home();
+    SECTION("a GOTO home ended away from home") {
+        show(rig, "nphEW180#");
+        show(rig, "nNpEW180#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_at_home(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "FindHome failed: the mount ended the home without reaching home"));
+    }
+    SECTION("never ends: fails at the bound, not one step before") {
+        show(rig, "nNphgEW180#");  // a home with switches
+        rig.clock.advance(std::chrono::minutes(20) - milliseconds(1));
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        rig.clock.advance(milliseconds(1));
+        CHECK(contains(thrown_by([&] { (void)rig.driver->get_at_home(); }).second,
+                       "did not finish the home within 20 minutes"));
+    }
+    SECTION("first frames show nothing, then switches, an invisible offset move, and home") {
+        show(rig, "nNpEW180#");
+        show(rig, "nNpEW180#");
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        show(rig, "nNphgEW180#");
+        show(rig, "nNpEW180#");  // the move to the sense offset
+        show(rig, "nNpEW180#");
+        CHECK_NOTHROW(rig.driver->get_at_home());
+        show(rig, "nNpHEo180#");
+        CHECK(rig.driver->get_at_home());
+    }
+    SECTION("a home whose first status after :hC# ends it with a stop code") {
+        show(rig, "nNpEW183#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_at_home(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "limit switch"));
+    }
+    SECTION("a GOTO home reaches home") {
+        show(rig, "nphEW180#");
+        show(rig, "nNpHEo180#");
+        CHECK(rig.driver->get_at_home());
+    }
+}
+
+// Review round 2, item 1 (#2296): an Alt/Az slew runs with Tracking off, and both firmwares then hold the target's hour
+// angle, so the RA the mount reports at the end has moved on by the sidereal time since the command. A 4.x code
+// latched before it (:ST60.164275# does not clear it, only :Te# does) must not fail a slow Alt/Az slew that sits at the
+// requested Alt/Az.
+TEST_CASE("OnStep limit stop - a slow Alt/Az slew with a latched 4.x code lands at the requested Alt/Az",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    connect_rates(rig, "4.24s");
+    show(rig, "nNpEW182#");  // Tracking off, horizon code 2 latched
+    rig.mount->clear_log();
+    rig.driver->slew_to_alt_az_async(40.0, 0.0);
+    double ra = 0.0;
+    double dec = 0.0;
+    for (const auto& command : rig.mount->commands()) {
+        int h = 0;
+        int m = 0;
+        int sec = 0;
+        char sign = '+';
+        if (std::sscanf(command.c_str(), ":Sr%d:%d:%d#", &h, &m, &sec) == 3) ra = h + m / 60.0 + sec / 3600.0;
+        if (std::sscanf(command.c_str(), ":Sd%c%d*%d:%d#", &sign, &h, &m, &sec) == 4) {
+            dec = (sign == '-' ? -1.0 : 1.0) * (h + m / 60.0 + sec / 3600.0);
+        }
+    }
+    REQUIRE(ra != 0.0);
+    rig.clock.advance(std::chrono::minutes(6));  // a slow slew
+    // At the requested Alt/Az: the RA has moved on by 6 sidereal minutes (1.5 degrees of RA).
+    rig.mount->set_position(ra + 6.0 * 1.00273790935 / 60.0, dec);
+    show(rig, "nNpEW182#");
+    CHECK_NOTHROW(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// Review round 2, item 2 (#2296): OnStepX stops a GOTO at a limit through goTo.abort(), so its GOTO flag stays set
+// while it brakes and tracking is already off. An AbortSlew whose :GU# reads that frame sends no tracking restore.
+TEST_CASE("OnStep limit stop - an AbortSlew that reads a limit stop still braking sends no tracking restore",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    goto_started(rig);
+    rig.mount->set_status("npEW182#");  // GOTO still braking, not tracking, horizon code 2
+    rig.driver->abort_slew();
+    CHECK(rig.mount->count(":Te#") == 0);
+    CHECK_NOTHROW(rig.driver->get_slewing());
+}
+
+// Review round 2, item 3 (#2296): a stop code at the end of a GOTO whose position cannot be read is a stop, never a
+// landing: the synchronous slew throws instead of returning success, and sends no tracking restore.
+TEST_CASE("OnStep limit stop - a synchronous slew whose stop code comes with an unreadable position fails",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    connect_rates(rig);
+    show(rig, "NpEW180#");
+    std::atomic<int> stage{-1};  // -1: the :MS# has not gone out
+    rig.mount->set_on_command([&](const std::string& chunk) {
+        if (chunk.rfind(":MS", 0) == 0) {
+            stage = 0;
+        } else if (chunk.rfind(":GU", 0) == 0 && stage.load() == 0) {
+            rig.mount->set_status("npEW180#");  // the GOTO runs
+            stage = 1;
+        } else if (chunk.rfind(":GU", 0) == 0 && stage.load() == 1) {
+            rig.mount->set_status("nNpEW182#");  // it ends with a stop code
+            rig.mount->garble_position = true;   // and the position read that follows fails, once
+            stage = 2;
+        } else if (stage.load() == 2 && chunk.rfind(":GRa", 0) != 0) {
+            rig.mount->garble_position = false;
+            stage = 3;
+        }
+    });
+    const auto [code, message] = thrown_by([&] { synchronous_slew(rig, 2.0, 20.0); });
+    rig.mount->set_on_command(nullptr);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(contains(message, "horizon limit"));
+    CHECK(contains(message, "position could not be read"));
+    CHECK(rig.mount->count(":Te#") == 0);
+}
+
+// Review round 2, item 4 (#2296): OnStepX derives the pier side from axis2 alone, so a flip stopped part-way can
+// already show the requested side. Its end position must also be at the position it slews back to.
+TEST_CASE("OnStep limit stop - a flip a limit stops part-way fails even when the new pier side shows",
+          "[onstep][telescope][snapshot][limit-stop][pierside]") {
+    Rig rig(false);
+    set_pier(rig, "B");
+    connect_paused(rig);
+    place(rig, kThirdOfAnHour, kWestStatus);
+    REQUIRE_NOTHROW(rig.driver->set_side_of_pier(0));  // the flip east
+    SECTION("stopped part-way: east shown, far from the position") {
+        rig.mount->point_at(rig.driver->get_sidereal_time(), 3.0, 30.0);
+        show(rig, "nNpET187#");
+        const auto [code, message] = thrown_by([&] { (void)rig.driver->get_slewing(); });
+        CHECK(code == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(message, "SideOfPier"));
+    }
+    SECTION("landed: east shown, at the position") {
+        show(rig, "NpET187#");  // the position is unchanged
+        CHECK_NOTHROW(rig.driver->get_slewing());
+    }
+}
+
+// Review round 2, item 6 (#2296): a relink that judges a carried-over GOTO on its seed frame, with no position in that
+// frame, reads :GRa# itself; a link lost on that read fails the Connect as any lost seed read does, rather than
+// escaping set_connected() as NotConnected.
+TEST_CASE("OnStep limit stop - a relink whose end check loses the link fails the Connect",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    PreserveWindow window(std::chrono::hours(1));
+    Rig rig;
+    goto_started(rig);
+    rig.mount->set_status("nNpEW182#");  // stopped during the outage
+    REQUIRE(rig.server.drop_connections());
+    REQUIRE_FALSE(rig.driver->get_connected());
+    std::atomic<int> position_reads{0};
+    rig.mount->set_on_command([&](const std::string& chunk) {
+        if (chunk.rfind(":GRa", 0) == 0 && position_reads.fetch_add(1) == 0) {
+            rig.mount->garble_position = true;  // the seed's read: no position in the frame
+            rig.server.hang_up_on(":GRa");      // the next one, the end check's, loses the link
+        } else {
+            rig.mount->garble_position = false;
+        }
+    });
+    const auto [code, message] = thrown_by([&] { rig.driver->set_connected(true); });
+    rig.mount->set_on_command(nullptr);
+    INFO(message);
+    CHECK(contains(message, "Failed to connect to OnStep mount: the link was lost during the connect"));
+    CHECK_FALSE(rig.driver->get_connected());
+}
+
+// The kept stop is raised until the next motion command or a reconnect clears it (the shared rule "A failed async
+// operation body keeps its error"), as a refusal the park_home_ body kept is.
+TEST_CASE("OnStep limit stop - the next motion command or a reconnect clears a kept slew stop",
+          "[onstep][telescope][snapshot][limit-stop]") {
+    Rig rig;
+    goto_started(rig);
+    show(rig, "nNpEW182#");
+    REQUIRE(thrown_by([&] { (void)rig.driver->get_slewing(); }).first == alpacacore::AlpacaError::DriverException);
+    SECTION("a new GOTO") {
+        show(rig, "NpEW180#");  // tracking again: an equatorial slew needs it (#1274)
+        rig.driver->slew_to_coordinates_async(3.0, 30.0);
+        CHECK(rig.driver->get_slewing());
+    }
+    SECTION("AbortSlew") {
+        rig.driver->abort_slew();
+        CHECK_FALSE(rig.driver->get_slewing());
+    }
+    SECTION("MoveAxis") {
+        rig.driver->move_axis(0, 1.0);
+        CHECK(rig.driver->get_slewing());
+        rig.driver->move_axis(0, 0.0);
+    }
+    SECTION("Park") {
+        rig.driver->park();
+        CHECK(rig.driver->get_slewing());
+    }
+    SECTION("a reconnect") {
+        rig.driver->set_connected(false);
+        connect_paused(rig);
+        CHECK_FALSE(rig.driver->get_slewing());
+    }
+}
+
 #endif  // !_WIN32

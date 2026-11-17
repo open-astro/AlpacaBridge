@@ -1660,6 +1660,57 @@ TEST_CASE("OnStep protocol wrapper - :GU# mount type E is a German mount", "[ons
     CHECK(status_of("Np180").mount_type == MountType::Unknown);
 }
 
+// #2296: the general error is '0' + code in the last of the three trailing code characters (OnStepX
+// Status.command.cpp, OnStep 4.x Command.ino), so 10-15 are ':' to '?' (12, above the overhead limit, is '<'); a
+// reply without the three reads as no error (-1). 'F' replaces p/I/P when a park failed.
+TEST_CASE("OnStep protocol wrapper - :GU# general error is the last code character and F is a failed park",
+          "[onstep][telescope][unit][limit-stop]") {
+    auto reply = std::make_shared<std::string>();
+    auto reply_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([reply, reply_mutex](const std::string& chunk) {
+        if (chunk.rfind(":GU", 0) == 0) {
+            std::lock_guard<std::mutex> lock(*reply_mutex);
+            return *reply;
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(conn));
+    struct DisconnectOnExit {
+        alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
+        ~DisconnectOnExit() { w.disconnect(); }
+    } disconnect_on_exit{wrapper};
+    const auto status_of = [&](const std::string& raw) {
+        {
+            std::lock_guard<std::mutex> lock(*reply_mutex);
+            *reply = raw + "#";
+        }
+        return wrapper.get_status();
+    };
+
+    CHECK(status_of("nNpEW180").general_error == 0);
+    CHECK(status_of("nNpEW182").general_error == 2);   // below the horizon limit
+    CHECK(status_of("nNpET1:7").general_error == 7);   // meridian, after a guide rate of 10 (HM-17 trace shape)
+    CHECK(status_of("nNpEW18<").general_error == 12);  // above the overhead limit
+    CHECK(status_of("nNpEW18?").general_error == 15);
+    CHECK(status_of("nNpEW").general_error == -1);  // no code characters
+    CHECK(status_of("nNpEW1").general_error == -1);
+    CHECK(status_of("nNpH").general_error == -1);
+
+    const auto failed = status_of("nNFEW180");
+    CHECK(failed.is_park_failed);
+    CHECK_FALSE(failed.is_parked);
+    CHECK_FALSE(failed.is_parking);
+    CHECK_FALSE(status_of("nNPHEo180").is_park_failed);
+    CHECK_FALSE(status_of("nNpEW180").is_park_failed);
+}
+
 // The settings reads are strict: a reply that does not parse is unknown, never a guess (#2179).
 // Falsified by: a parser that takes a prefix ("60x"), an empty reply, or a "<n> N" with another suffix.
 TEST_CASE("OnStep protocol wrapper - the pier-side settings parse strictly", "[onstep][telescope][unit][pierside]") {

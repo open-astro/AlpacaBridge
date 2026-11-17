@@ -10,7 +10,7 @@ No vendor SDK — OnStep is open-source LX200-protocol firmware (Arduino Mega/Du
 ESP32, STM32) for DIY/retrofit mounts. The protocol reference is the firmware's own OnStepX
 command reference, kept unmodified in [`AlpacaCore/external/OnStep/`](../../AlpacaCore/external/OnStep/README.md)
 (GPL-3.0, with its license; upstream
-[at the same commit](https://github.com/hjd1964/OnStepX/blob/097cc5797b4708e3787dd0b8bbbf81df66fdb5ff/docs/COMMAND_REFERENCE.md),
+[at the same commit](https://github.com/hjd1964/OnStepX/blob/66a4b3220371661d40d3df9f6e5e1203068842e4/docs/COMMAND_REFERENCE.md),
 the one read for the table below), then the firmware source itself
 ([OnStepX](https://github.com/hjd1964/OnStepX), and [OnStep](https://github.com/hjd1964/OnStep)
 `Command.ino` for the older firmware). Check a reply format there before a driver change or a
@@ -105,8 +105,16 @@ column is from the source, not from hardware.
   code per serial channel (see the Park and FindHome bullet).
 - **`:GU#`**: the letters the driver reads are the same, except that OnStep 4.x has no `h`
   (homing), so a `FindHome` there is never taken as one already running. OnStep 4.x adds letters
-  the driver does not read (`R`, `S`, `r`, `s`, `t`, `w`, `u`, `z`, `a` and a PEC character).
-  Both send `g` while a `:Mn#`-style move runs and `G` while a pulse guide runs.
+  the driver does not read (`R`, `S`, `r`, `s`, `t`, `u`, `z`, `a` and a PEC character). Both send `w` while a GOTO
+  waits at home for the user (the meridian-flip pause-at-home setting); the driver reads it for the park and home
+  bound (#2296).
+  Both send `g` while a `:Mn#`-style move runs and `G` while a pulse guide runs. Both end it with the general
+  error code and write `F` for a failed park, but OnStepX computes the code from the limits as they stand and OnStep
+  4.x latches it until `:Te#`, an unpark, a home reset or a reboot (`initGeneralError()`), so a stop code at the end
+  of a slew is judged by where the mount is on both (#2296, the stop bullet under the slews). `:Te#` would clear the
+  latch on a tracking 4.x mount with no other effect (`Command.ino`), but the driver does not send it: the end position
+  already decides, and an Alt/Az slew or a park starts with tracking off, where `:Te#` would start it. OnStep 4.x has
+  no `h`; its home with switches shows `g`.
 - **`:GG#`** (UTC offset): OnStep 4.x answers whole hours (`sHH#`), OnStepX `sHH:MM#`; the
   sexagesimal parser reads both.
 - **`:GRa#` / `:GDe#`**: both take `a`/`e` as the high-precision form, like `H`.
@@ -269,10 +277,17 @@ command channel. Nothing scans the network; the host is typed in.
   = pier west, `nNpET1:0` = pier east, `nNPHEo180` = parked at home). `e` means "sync to
   encoders only": unpark, home and sync set it and the next GOTO clears it, and it matters only
   with external encoders. The last three characters are `'0' + n` for the pulse-guide rate, the
-  guide rate and the general error code (`:` is 10); the driver reads the first of them (third from the end) to follow
-  `:GX90#` (#2214). Error `7` is `ERR_MERIDIAN`: after it,
-  OnStepX acknowledges GOTO, park and home commands but does not move, and a manual move back
-  inside the limit clears it (the HM-17's limits are ±60 min, `:GXE9#`/`:GXEA#`). Any other
+  guide rate and the general error code (`:` is 10, `<` is 12); the driver reads the first of them (third from the end) to follow
+  `:GX90#` (#2214), and the last, when all three are code characters (`0` to `?`; otherwise no error), to tell a GOTO,
+  park or home the mount stopped (#2296, the stop bullet below). The codes (OnStepX `Limits.cpp` `errorCode()`, OnStep
+  4.x `Globals.h` `GeneralErrors`): `0` none, `1` motor fault, `2` below the horizon limit, `3` limit switch, `4` Dec
+  axis limit, `5` azimuth axis limit, `6` RA axis limit (under the pole), `7` meridian limit, `12` above the overhead
+  limit (these are the stop codes), `8` and `9` obsolete, `10` goto sync, `11` unspecified, `13` to `15` weather, site
+  and NV init. OnStepX computes the code from the limits as they stand (`Limits::poll()`, every 100 ms); OnStep 4.x
+  latches it until `:Te#`, an unpark, a home reset or a reboot (`initGeneralError()`). `F` in place of `p`/`I`/`P` is a
+  failed park (OnStepX's park-sense check, OnStep 4.x `ParkFailed`). Error `7` is `ERR_MERIDIAN`: after it,
+  OnStepX acknowledges GOTO, park and home commands but does not move (the driver reports them failed, #2296), and a
+  manual move back inside the limit clears it (the HM-17's limits are ±60 min, `:GXE9#`/`:GXEA#`). Any other
   character is ignored (forward-compatible with firmware revisions); only a total non-response
   is a fault.
 - **RA/Dec position reads use the high-precision variants**: `:GRa#`/`:GDe#` (fractional
@@ -436,7 +451,7 @@ command channel. Nothing scans the network; the host is typed in.
   about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
   2.5 degrees at 0.25 deg/s in #1241; it moves from the home position too, HM-17 2026-10-19), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
   sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
-  loss, stops nothing (#521). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway, after waiting out that read's reply timeout.
+  loss, stops nothing (#521). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway, after waiting out that read's reply timeout. A GOTO, park or home the driver started that the reconnect leaves running stays watched (#2296, the stop bullet).
   They leave tracking as it was: `:Q#` stops a GOTO through `goTo.abort()` and the guide stop and
   never calls `mount.tracking(false)` (HM-17 2026-10-24: `:GU#` `pEW160` before, `NpEW160` after a
   `:Q#` sent mid-GOTO), so nothing has to restore tracking after them.
@@ -525,6 +540,71 @@ command channel. Nothing scans the network; the host is typed in.
   is refused, as the firmware would refuse it (reply `5`). A `:MS#` the mount refuses reports its reply digit and reason (the digits are
   listed under "Commands this driver sends"; 4 parked is `InvalidWhileParked`), not "below horizon
   or limit" for every refusal.
+- **A GOTO, park or home that the mount stops or abandons fails** (#2296): OnStepX stops a GOTO that crosses a limit
+  (`Limits::poll()`: `stop()`/`stopAxis1()`/`stopAxis2()` abort it and turn tracking off; a park then ends unparked,
+  `Park::requestAborted()`), and only the `:GU#` general error says why. The driver watches each GOTO it sends (the
+  coordinate and Alt/Az slews, the flip) and each park or home the mount takes (`note_motion_end_locked()`), never a
+  motion it did not start, until a status shows it ended. A failure is kept as a `Park`/`FindHome` refusal is (the
+  Park and FindHome bullets below) and raised by `Slewing`, and by `AtPark` (a park's) or `AtHome` (a home's), as
+  `DriverException` "<member> failed: ...", until the next motion command or a reconnect; a synchronous slew throws it.
+  Every status read is checked (the poll's before its restore decision, the control paths' through
+  `note_status_read_locked()`), so `Slewing` never reads an end before it is judged. From the firmware sources (OnStepX
+  `83857454`, OnStep 4.x `3b73bffcfb` and the `release-4.24` tip), not seen on a rig. Tests: the `OnStep limit stop -`,
+  `OnStep park watch -` and `OnStep home watch -` cases.
+  - **A slew** ends with no GOTO. With no stop code it landed, as before. With one, where the mount is decides, the
+    same way on both firmwares, since the code alone is not evidence: OnStepX writes the limits as they stand, so a
+    GOTO that lands close to a limit (a target may lie right at it: `Limits::validateTarget()` refuses only one beyond)
+    and then tracks across it shows the code in its first end frame, and OnStep 4.x latches the code, so a GOTO can
+    start with an older stop's code. Within 1 degree of the target it landed and a WARN names the code; away from it,
+    or with a position that cannot be read (a stop code is never read as a landing without the position that shows
+    it), the mount stopped short: "<member> failed: OnStep stopped the GOTO at the horizon limit (:GU# general error
+    2)". A GOTO started with tracking off (the Alt/Az slews) holds its target's hour angle on both firmwares (OnStepX
+    `Goto.cpp` moves the target only while tracking; OnStep 4.x likewise), so its target RA is advanced by the sidereal
+    time since the command before the comparison: a slow Alt/Az slew that sits at the requested Alt/Az lands. A flip
+    is judged against the position it slews back to and, when the frame reports a side, the requested pier side; the
+    side alone is not enough, since OnStepX derives it from axis2 and a flip stopped part-way can already show it. 1 degree is generous on purpose (the driver had no
+    landing tolerance; other drivers here use 3 to 600 arcseconds, and it is 4 minutes of a stopped mount's RA drift),
+    so a landing is never read as a stop; a stop that ends inside it reads as a landing. The frame's position decides
+    on the poll; a control-path read without one reads `:GRa#`/`:GDe#` at once (the only new exchange, and only then),
+    and if that fails the next status decides. No #1230 tracking restore follows a stop code on OnStepX, landed or not:
+    it stops tracking at the horizon and overhead limits only on the crossing (`!lastError.altitude.min &&
+    error.altitude.min`) and does not limit-check `:Te#`, so a restore would track on past them. On OnStep 4.x a landing
+    keeps its restore, since 4.x re-checks its limits on every pass and stops tracking again past one (`OnStep.ino`
+    safety checks); a slew that stopped short gets none. `AbortSlew` keeps the watched slew through its own supersede
+    until its restore decision, since its `:GU#` read may be the first to see the stop, then drops the watch and the
+    failure (it is a new motion command), logging what the read decided at INFO only. On OnStepX it also sends no
+    restore when its read shows a stop code, GOTO flag or not: a limit stop runs `goTo.abort()`, which keeps
+    `GS_GOTO` while the mount brakes, and has already turned tracking off. On OnStep 4.x the abort's read is judged
+    like any end: with an older stop code still latched (rare, since `:Te#` clears it), a slew aborted short of its
+    target reads as stopped short and also gets no restore. A GOTO that ends away from its target with no stop code (a handset abort)
+    still reads as landed.
+  - **A park** ends with no GOTO and no `I`; both firmwares go from parking to parked or failed in one step (OnStepX
+    `Goto.cpp` `poll()` then `Park::requestDone()`, OnStep 4.x `MoveTo.ino`), so no healthy park shows that frame
+    unparked. Parked succeeded; `F`, a stop code, or (once a status showed the park running) an end without either, a
+    handset abort or a park that gave up, fails it: "Park failed: the mount ended the park without parking".
+  - **A home** ends with no GOTO, no `h` and no `g`. At home (`H`) succeeded. A home that ran as a GOTO (no switches:
+    OnStepX `Home::request()` sets `HS_HOMING` and starts the GOTO before `:hC#` returns; OnStep 4.x `goHome()`) and
+    ends elsewhere fails: "FindHome failed: the mount ended the home without reaching home", as does one whose end
+    frame carries a stop code before any status showed it running. A home with switches (`h` or `g` with no GOTO) is
+    not judged from such a frame: after the switches OnStepX moves on to the sense offset (up to
+    180 degrees, `Home.command.cpp` `:hC1`/`:hC2`) as an axis move with nothing in `:GU#` (`Home.cpp` `guideDone()`),
+    and OnStep 4.x is idle between its fast and slow search (`Home.ino` `FH_IDLE`). Neither is a home not yet seen
+    running. Those are left to the bound.
+  - **The bound**: a park or home not ended 20 minutes after the command fails ("the mount did not finish the park
+    within 20 minutes"), checked on every status read and by the getters, on the task clock (decision 0005). OnStepX
+    slews at no less than half its base rate (`:SX92`, `usPerStepBase` x 2; 1 deg/s by default, `Config.h`), so a
+    180-degree move takes at most 6 minutes there; 20 minutes also covers a 0.3 deg/s base rate and a home's two
+    searches. A status showing `w` (a GOTO waiting at home for the user) restarts it. It only reports: nothing is sent,
+    as for the driver's other timed-out waits, and the client can `AbortSlew`. INDI's `lx200_OnStep` uses 300 s from
+    `:hP#`.
+  - **Across a relink** (#521): a relink that leaves the motion running, inside the preserve window, or a park past it
+    (#1289), keeps the watch, and the relink's first `:GU#` (the connect's seed frame, with its position) judges it at
+    once by the rules above, so a stop during the outage still fails it. When that frame has no position the check
+    reads `:GRa#`/`:GDe#` itself; a link lost there fails the Connect through the connect's own lost-link check, as any
+    lost seed read does. A relink that sends the stops drops it; a
+    kept failure is cleared as by any reconnect. The park and home bound runs on from the command: the outage is part
+    of the park's time. No baseline code is kept: the end position decides a slew, so a 4.x code that changed or was
+    cleared during the outage changes nothing.
 - **Refusals are read, not drained** (#1379): `Tracking` writes, `SetPark`, `Unpark` and the syncs
   used to send their command blind or ignore the reply, so a mount that refused them read as
   success. They now read it: a bare `0` from `:ST`/`:hQ#`/`:hR#` throws `InvalidOperation`
@@ -653,7 +733,8 @@ command channel. Nothing scans the network; the host is typed in.
     (`park_home_`) then polls `:GU#` every 100 ms until the mount is still (at most 6 s) and sends
     the park or home. `Slewing` reads true meanwhile.
   - **Code 22 is retried** every 200 ms for 3 s in that task, also when the first try on a still mount
-    met it. A refusal the task meets is kept and raised by `Slewing`, and by `AtPark` (a park's) or
+    met it. A refusal the task meets, or a park or home the mount takes and then stops, abandons or does not finish
+    within the 20-minute bound (#2296, the stop bullet above), is kept and raised by `Slewing`, and by `AtPark` (a park's) or
     `AtHome` (a home's), until the next motion command (`MoveAxis`, `AbortSlew`, a GOTO, `Unpark`,
     `Park`, `FindHome`; a `Park` or `FindHome` that is a no-op because the mount is already parked,
     parking, home or homing clears it too) or a reconnect clears it; those also end a task still running, without
