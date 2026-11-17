@@ -1261,6 +1261,20 @@ TEST_CASE("OnStep snapshot - a connect whose status poll cannot start fails and 
     CHECK(rig.clock.wait_for_waiters(1, seconds(2)));
 }
 
+// #2257: on a parked mount a bad MoveAxis axis or rate is InvalidValue, not InvalidWhileParked; a good one is still
+// refused as parked.
+TEST_CASE("OnStep snapshot - a parked mount answers InvalidValue to a bad MoveAxis argument",
+          "[onstep][telescope][snapshot]") {
+    Rig rig;
+    rig.mount->set_status("nNPEW180#");  // parked
+    rig.connect();
+    REQUIRE(rig.driver->get_at_park());
+    CHECK(error_of([&] { rig.driver->move_axis(5, 0.1); }) == alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_of([&] { rig.driver->move_axis(0, std::numeric_limits<double>::quiet_NaN()); }) ==
+          alpacacore::AlpacaError::InvalidValue);
+    CHECK(error_of([&] { rig.driver->move_axis(0, 1.0); }) == alpacacore::AlpacaError::InvalidWhileParked);
+}
+
 // #1895: a Tracking write on a connect whose :GU# read failed reads :GU# first, so the write-through lands in a
 // status the getter serves, instead of in a frame with no status until the next good tick.
 TEST_CASE("OnStep snapshot - a Tracking write after a connect that read no status is served at once",

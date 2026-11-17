@@ -345,9 +345,7 @@ const std::vector<ProbeExemption> kProbeExemptions = {
     {"celestron_telescope", kOff, "set_guide_rate_declination(-1)", kPermanent,
      "the rate depends on the autoguider port, known only once connected (#2257 decision 2026-11-16)"},
 
-    // OnStep: move_axis checks connected (then parked) before the axis and rate; the guide rate is read-only.
-    {"onstep_telescope", kOff, "move_axis(5, 0.1)", kKnown, "connection checked first (#2257)"},
-    {"onstep_telescope", kOff, "move_axis(0, NaN)", kKnown, "connection checked first (#2257)"},
+    // OnStep: the guide rate is read-only.
     {"onstep_telescope", kOff, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOff, "set_guide_rate_declination(-1)", kPermanent, "guide rate is read-only on OnStep"},
     {"onstep_telescope", kOn, "set_guide_rate_right_ascension(-1)", kPermanent, "guide rate is read-only on OnStep"},
