@@ -315,3 +315,14 @@ test('a hidden page does not poll (#1764)', async () => {
     assert.strictEqual(t.server.calls.length, 0);
     assert.strictEqual(t.banner.hidden, true);
 });
+
+test('index.html invalidates the cached scripts and stylesheet the banner needs (#1764)', () => {
+    // app.js now calls linkStatus, STATUS_POLL_MS and STATUS_POLL_TIMEOUT_MS from format.js: a browser holding
+    // the old format.js would throw a ReferenceError and never start the poll, and an old style.css has no
+    // .link-banner or .stale rules.
+    const html = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'index.html'), 'utf8');
+    const version = (re) => Number((html.match(re) || [])[1]);
+    assert.ok(version(/src="\/web\/format\.js\?v=(\d+)"/) > 19, 'invalidate the cached format.js that lacks linkStatus');
+    assert.ok(version(/src="\/web\/app\.js\?v=(\d+)"/) > 52, 'invalidate the cached app.js without the banner poll');
+    assert.ok(version(/href="\/web\/style\.css\?v=(\d+)"/) > 35, 'invalidate the cached style.css without the banner rules');
+});
