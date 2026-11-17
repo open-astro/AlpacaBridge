@@ -10,7 +10,8 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The OnStep telescope schema. No vendor header: compiles in every build
+// The OnStep telescope and focuser schemas (the focuser shares the telescope's connection rules, #2223). No vendor
+// header: compiles in every build
 // (including vendors-OFF). The display name's first word is the router's
 // vendor_label(), so it keeps "OnStep support not enabled ..." as the arm
 // spelled it.
@@ -84,6 +85,14 @@ void register_onstep_schema(DeviceCatalog& catalog) {
     schema.fields = onstep_telescope_fields();
     schema.normalize = normalize_onstep;
     catalog.add(std::move(schema));
+
+    Schema focuser;
+    focuser.key = DeviceKey{"onstep", DeviceType::Focuser};
+    focuser.display_name = "OnStep";
+    focuser.build_option = "ALPACACORE_ENABLE_ONSTEP";
+    focuser.fields = onstep_focuser_fields();
+    focuser.normalize = normalize_onstep;
+    catalog.add(std::move(focuser));
 }
 
 }  // namespace alpacacore::catalog

@@ -5623,6 +5623,35 @@ int main() {
         EXPECT(cfg.value("mountIndex", -1) == 1);
         remove_device(router, "onstep", "telescope", 9622);
     }
+    {
+        // case: onstep focuser config round-trips
+        // #2223: the focuser shares the telescope's connection fields and adds focuserNumber; every field of a
+        // serial entry survives the sanitizer, the unused network ones included (ADR 0004).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9629},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyACM0"},
+                                           {"baudRate", 19200},
+                                           {"host", "192.168.0.2"},
+                                           {"tcpPort", 9997},
+                                           {"responseTimeoutMs", 2500},
+                                           {"mountIndex", 1},
+                                           {"focuserNumber", 4}},
+                                          "Focuser", 9629);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "onstep");
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM0");
+        EXPECT(cfg.value("baudRate", -1) == 19200);
+        EXPECT(cfg.value("host", "") == "192.168.0.2");
+        EXPECT(cfg.value("tcpPort", -1) == 9997);
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 2500);
+        EXPECT(cfg.value("mountIndex", -1) == 1);
+        EXPECT(cfg.value("focuserNumber", -1) == 4);
+        remove_device(router, "onstep", "focuser", 9629);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -8894,7 +8923,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 43);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 44);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build

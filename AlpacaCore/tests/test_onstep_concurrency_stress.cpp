@@ -27,7 +27,9 @@
 
 #ifndef _WIN32
 
+#include <alpacacore/focuser_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #include <unistd.h>
@@ -35,6 +37,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -45,6 +48,7 @@
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
 #include "fake_pty_write.h"
+#include "onstep_controller.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -203,8 +207,8 @@ TEST_CASE("OnStep telescope - destruction races an in-flight connect", "[onstep]
 // The driver has no slew or pulse-guide thread (#1728): what is live at
 // destruction is a MoveAxis re-send body or a Park body waiting for the mount
 // to stop, after an accepted GOTO and a pulse guide (#1762). Each driver must
-// connect, so one that a destructor left connected to the process-wide wrapper
-// fails the next iteration's connect.
+// connect, and its destructor must let go of the controller's shared link
+// (#2223): a link it left held would still be registered after it.
 TEST_CASE("OnStep telescope - destruction mid-operation (MoveAxis re-send or Park body live)",
           "[onstep][telescope][stress]") {
     auto mount = std::make_shared<AcceptingOnStep>();
@@ -237,6 +241,7 @@ TEST_CASE("OnStep telescope - destruction mid-operation (MoveAxis re-send or Par
             driver->disconnect();
         }
         driver.reset();
+        CHECK(alpacacore::vendor::onstep::detail::registered_link_for_testing(info) == nullptr);
     }
     CHECK(mount->parks.load() == 0);  // every Park body was ended before the mount stopped
 }
@@ -362,13 +367,7 @@ TEST_CASE("OnStep wrapper - link_alive races connect and disconnect during an ad
     using alpacacore::vendor::onstep::ConnectionInfo;
     using alpacacore::vendor::onstep::ConnectionType;
     using alpacacore::vendor::onstep::OnStepProtocolWrapper;
-    auto& protocol = OnStepProtocolWrapper::instance();
-    const auto reset_wrapper = [&protocol]() {
-        protocol.disconnect();
-        static_cast<void>(protocol.consume_link_lost_at());
-        static_cast<void>(protocol.consume_last_alive_before_loss());
-    };
-    reset_wrapper();
+    OnStepProtocolWrapper protocol;  // a link of its own, outside the registry (#2223)
 
     alpacacore::test::PtyPair first("OnStep stress adapter A");
     alpacacore::test::PtyPair second("OnStep stress adapter B");
@@ -440,7 +439,7 @@ TEST_CASE("OnStep wrapper - link_alive races connect and disconnect during an ad
     checker.join();
     swapper.join();
 
-    reset_wrapper();
+    protocol.disconnect();
     std::error_code ec;
     std::filesystem::remove(link, ec);
 
@@ -450,6 +449,73 @@ TEST_CASE("OnStep wrapper - link_alive races connect and disconnect during an ad
     INFO("connects " << connects << ", losses " << losses);
     CHECK(connects > 0);
     CHECK(losses > 0);
+}
+
+// The OnStepX focuser (#2223) on the controller's shared link, over the scripted controller of onstep_controller.h:
+// its own lifecycle storm, the same storm while the telescope serves on the link, and a racing disconnect.
+
+namespace {
+
+void focuser_operate(alpacacore::test::StressCallGuard& guard, alpacacore::FocuserDriver& focuser) {
+    guard([&] { static_cast<void>(focuser.get_position()); });
+    guard([&] { static_cast<void>(focuser.get_is_moving()); });
+    guard([&] { static_cast<void>(focuser.get_temperature()); });
+    guard([&] { static_cast<void>(focuser.get_temp_comp()); });
+    guard([&] { static_cast<void>(focuser.get_device_state()); });
+    guard([&] { focuser.move(2000); });
+    guard([&] { focuser.halt(); });
+}
+
+}  // namespace
+
+TEST_CASE("OnStep focuser - concurrent connect/disconnect/operate stress", "[onstep][focuser][stress]") {
+    alpacacore::test::onstep_controller::Controller controller;
+    auto driver = controller.focuser();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](alpacacore::AlpacaDriver& d) {
+        focuser_operate(guard, static_cast<alpacacore::FocuserDriver&>(d));
+    });
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+// The focuser's lifecycle storm while the telescope polls and serves on the same link: a link closed under a live
+// holder, or an acquire that opens a second link, shows as a telescope error here.
+TEST_CASE("OnStep focuser - the focuser's lifecycle storm while the telescope uses the same link",
+          "[onstep][focuser][stress]") {
+    alpacacore::test::onstep_controller::Controller controller;
+    auto telescope = controller.telescope();
+    auto focuser = controller.focuser();
+    REQUIRE(alpacacore::test::settle_connected(*telescope, true));
+    REQUIRE(alpacacore::test::settle_connected(*focuser, true));
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    alpacacore::test::StressCallGuard telescope_guard{std::initializer_list<int>{}};
+    alpacacore::test::run_lifecycle_stress(*focuser, [&](alpacacore::AlpacaDriver& d) {
+        focuser_operate(guard, static_cast<alpacacore::FocuserDriver&>(d));
+        telescope_guard([&] { static_cast<void>(telescope->get_right_ascension()); });
+        telescope_guard([&] { static_cast<void>(telescope->get_tracking()); });
+    });
+    CHECK(alpacacore::test::settle_connected(*focuser, false));
+    CHECK(telescope->get_connected());
+    CHECK(controller.server.accepted_connections() == 1);
+    CHECK(alpacacore::test::settle_connected(*telescope, false));
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    INFO(telescope_guard.report());
+    CHECK(telescope_guard.unexpected_count() == 0);
+    CHECK(telescope_guard.total_calls() > 0);
+}
+
+TEST_CASE("OnStep focuser - a racing disconnect is never dropped", "[onstep][focuser][stress]") {
+    alpacacore::test::onstep_controller::Controller controller;
+    auto driver = controller.focuser();
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
 }
 
 #endif  // !_WIN32

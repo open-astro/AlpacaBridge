@@ -41,6 +41,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -63,8 +64,9 @@ constexpr int kSetAckTimeoutMs = 1000;
 
 // Operator-facing owner name for the serial-port registry (#1202): the probe
 // and the connected link use the same one, so the auto-detect scan can tell
-// a connected OnStep mount (a sibling) from another vendor's device.
-constexpr const char* kSerialOwner = "OnStep mount";
+// a connected OnStep controller (a sibling) from another vendor's device. One
+// name for every OnStep device on the link (decision 0017 rule 4, #2223).
+constexpr const char* kSerialOwner = "OnStep";
 
 // The connected link's read slice, the old VTIME=1 (100 ms) read window: the
 // idle gap that ends drain_stale(), its shortest wait for a first byte, and
@@ -291,6 +293,25 @@ std::optional<int> parse_whole_number(const std::string& text) {
     return text[0] == '-' ? -value : value;
 }
 
+// A signed whole number of steps ("%ld": "-1500", "125000"), at most 10 digits, nothing else, or nullopt.
+std::optional<long> parse_steps(const std::string& text) {
+    std::size_t first = (!text.empty() && (text[0] == '-' || text[0] == '+')) ? 1 : 0;
+    if (text.size() == first || text.size() - first > 10) {
+        return std::nullopt;
+    }
+    long long value = 0;
+    for (std::size_t i = first; i < text.size(); ++i) {
+        if (text[i] < '0' || text[i] > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (text[i] - '0');
+    }
+    if (value > std::numeric_limits<long>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<long>(text[0] == '-' ? -value : value);
+}
+
 // A decimal number with a fractional part ("60.16427", "-0.50000000"), nothing else, or nullopt. The fraction is
 // required: an unknown command answers a bare "0".
 std::optional<double> parse_decimal(const std::string& text, bool require_fraction) {
@@ -510,8 +531,8 @@ std::vector<std::string> list_dev_nodes_with_prefix(const std::string& prefix) {
 }
 #endif
 
-// Never destroyed: the wrapper singleton can disconnect from its destructor at
-// exit, after function-local statics built later than it are gone.
+// Never destroyed: a link still held at exit disconnects from its destructor,
+// after function-local statics built later than it are gone.
 std::mutex& link_loss_hook_mutex() {
     static auto* m = new std::mutex;  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
     return *m;
@@ -534,7 +555,55 @@ void run_link_loss_hook(detail::LinkLossHookPoint point) {
     }
 }
 
+// One link per controller (#2223): the live links by key, held weakly, so a link closes when its last holder lets
+// go. Never destroyed (exit order, as above).
+std::mutex& link_registry_mutex() {
+    static auto* m = new std::mutex;  // NOLINT(cppcoreguidelines-owning-memory): never destroyed (exit order)
+    return *m;
+}
+
+std::map<std::string, std::weak_ptr<OnStepProtocolWrapper>>& link_registry() {
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): never destroyed (exit order)
+    static auto* registry = new std::map<std::string, std::weak_ptr<OnStepProtocolWrapper>>;
+    return *registry;
+}
+
+// The controller a ConnectionInfo names: the serial port by its canonical path (a by-id symlink and the node it
+// points at are one port), or the host and TCP port as typed.
+std::string link_key(const ConnectionInfo& info) {
+    if (info.type == ConnectionType::Network) {
+        return "tcp:" + info.host + ":" + std::to_string(info.tcp_port);
+    }
+#ifndef _WIN32
+    std::error_code ec;
+    const auto canonical = std::filesystem::canonical(info.port_path, ec);
+    if (!ec) {
+        return "serial:" + canonical.string();
+    }
+#endif
+    return "serial:" + info.port_path;
+}
+
+// The focuser number of an addressed command, 1-6 (OnStepX Focuser.command.cpp: :F1...# to :F6...#).
+char focuser_digit(int focuser) {
+    if (focuser < 1 || focuser > 6) {
+        throw AlpacaException("Invalid OnStep focuser number " + std::to_string(focuser) + " (1-6)",
+                              AlpacaError::InvalidValue);
+    }
+    return static_cast<char>('0' + focuser);
+}
+
+std::string focuser_command(int focuser, const std::string& body) {
+    return std::string(":F") + focuser_digit(focuser) + body + "#";
+}
+
 }  // namespace
+
+bool is_onstepx_version(const std::string& version) {
+    std::size_t digits = 0;
+    while (digits < version.size() && std::isdigit(static_cast<unsigned char>(version[digits]))) ++digits;
+    return digits > 0 && digits <= 4 && std::stoi(version.substr(0, digits)) >= 10;
+}
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports() {
     std::vector<OnStepPortInfo> results;
@@ -649,12 +718,9 @@ public:
         }
 
         if (connected_) {
-            // The protocol wrapper is a per-vendor singleton: a second device
-            // connecting through it would silently steal/tear down the first
-            // device's connection. Refuse instead.
-            throw AlpacaException(
-                "Only one OnStep mount per bridge: the shared OnStep "
-                "protocol wrapper is already connected");
+            // One link, one connection: a device that wants this controller
+            // joins the link through acquire() instead of opening it again.
+            throw AlpacaException("This OnStep link is already connected");
         }
 
         connection_type_ = info.type;
@@ -691,6 +757,21 @@ public:
         disconnect_locked();
         clear_loss();
     }
+
+    // acquire() replacing a lost link on the same key: its port is released for the fresh one, and the loss and
+    // its reason stay for the holders that have not let go yet (decision 0009 rule 5).
+    void close_lost_link() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_ && link_lost_) {
+            disconnect_locked();
+        }
+    }
+
+    std::unique_lock<std::recursive_mutex> hold_sequence() {
+        return std::unique_lock<std::recursive_mutex>(sequence_mutex_);
+    }
+
+    const ConnectionInfo& connection_info() const { return connection_info_; }
 
     void disconnect_locked() {
         if (!connected_) {
@@ -826,6 +907,7 @@ public:
     }
 
     std::string send_command(const std::string& command, bool require_hash_terminator, int timeout_ms_override) {
+        std::lock_guard<std::recursive_mutex> sequence(sequence_mutex_);  // no other device's turn inside a Sequence
         std::lock_guard<std::mutex> lock(mutex_);
         require_live_link_locked();
 
@@ -861,6 +943,7 @@ public:
     }
 
     void send_command_blind(const std::string& command) {
+        std::lock_guard<std::recursive_mutex> sequence(sequence_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         require_live_link_locked();
 
@@ -908,6 +991,7 @@ public:
     }
 
     void flush_input() {
+        std::lock_guard<std::recursive_mutex> sequence(sequence_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         if (!connected_) {
             return;
@@ -1371,6 +1455,60 @@ public:
         }
     }
 
+    // ── Focuser (OnStepX Focuser.command.cpp, af1d26bf; #2223) ──
+
+    std::optional<FocuserStatus> focuser_status(int focuser) {
+        // numericReply=false: "M3#" / "S3#". A controller without focuser n passes the command on and answers the
+        // unknown-command "0", a bare digit, so the read does not need the '#'.
+        const std::string reply = send_command(focuser_command(focuser, "T"), false, kSetAckTimeoutMs);
+        if (reply.size() == 2 && (reply[0] == 'M' || reply[0] == 'S') && reply[1] >= '0' && reply[1] <= '9') {
+            return FocuserStatus{reply[0] == 'M', reply[1] - '0'};
+        }
+        return std::nullopt;
+    }
+
+    std::optional<long> focuser_steps(int focuser, const char* what) {
+        return parse_steps(send_command(focuser_command(focuser, what), true, kSetAckTimeoutMs));
+    }
+
+    std::optional<double> focuser_microns_per_step(int focuser) {
+        const auto value = parse_decimal(send_command(focuser_command(focuser, "u"), true, kSetAckTimeoutMs),
+                                         /*require_fraction=*/false);
+        if (!value || !std::isfinite(*value) || !(*value > 0.0)) {
+            return std::nullopt;
+        }
+        return value;
+    }
+
+    std::optional<double> focuser_temperature(int focuser) {
+        // "%3.1f" of the sensor channel, NAN with no probe ("nan"), which parse_decimal() refuses.
+        const auto value = parse_decimal(send_command(focuser_command(focuser, "t"), true, kSetAckTimeoutMs),
+                                         /*require_fraction=*/false);
+        if (!value || !std::isfinite(*value)) {
+            return std::nullopt;
+        }
+        return value;
+    }
+
+    std::optional<bool> focuser_temp_comp(int focuser) {
+        // numericReply=true: a bare '1' enabled, '0' disabled (CE_0).
+        const std::string reply = send_command(focuser_command(focuser, "c"), false, kSetAckTimeoutMs);
+        if (reply == "1") {
+            return true;
+        }
+        if (reply == "0") {
+            return false;
+        }
+        return std::nullopt;
+    }
+
+    bool focuser_numeric(int focuser, const std::string& body) {
+        const std::string reply = send_command(focuser_command(focuser, body), false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
+    void focuser_halt(int focuser) { send_command_blind(focuser_command(focuser, "Q")); }
+
 private:
     static std::string normalize_command(const std::string& command) {
         std::string full = command;
@@ -1815,6 +1953,8 @@ private:
     }
 
     std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
+    // Above mutex_: an exchange takes it, then mutex_; a Sequence holds it across several exchanges (#2223).
+    std::recursive_mutex sequence_mutex_;
     mutable std::mutex mutex_;
     std::atomic<bool> connected_;
     std::atomic<bool> link_lost_{false};
@@ -1843,10 +1983,74 @@ private:
 OnStepProtocolWrapper::OnStepProtocolWrapper() : pimpl_(std::make_unique<Impl>()) {}
 OnStepProtocolWrapper::~OnStepProtocolWrapper() = default;
 
-OnStepProtocolWrapper& OnStepProtocolWrapper::instance() {
-    static OnStepProtocolWrapper wrapper;
-    return wrapper;
+std::shared_ptr<OnStepProtocolWrapper> OnStepProtocolWrapper::acquire(const ConnectionInfo& info, std::string* error) {
+    const std::string key = link_key(info);
+    std::lock_guard<std::mutex> lock(link_registry_mutex());
+    auto& registry = link_registry();
+    if (const auto it = registry.find(key); it != registry.end()) {
+        if (auto live = it->second.lock()) {
+            if (live->link_alive()) {
+                const ConnectionInfo& opened = live->pimpl_->connection_info();
+                if (info.type == ConnectionType::Serial && info.baud_rate != opened.baud_rate) {
+                    ALPACA_LOG_WARN("OnStep", "Joining the open link on " + info.port_path + " at its " +
+                                                  std::to_string(opened.baud_rate) + " baud, not the " +
+                                                  std::to_string(info.baud_rate) + " this device is set to");
+                }
+                return live;
+            }
+            live->pimpl_->close_lost_link();
+        }
+        registry.erase(it);
+    }
+    for (auto it = registry.begin(); it != registry.end();) {
+        it = it->second.expired() ? registry.erase(it) : std::next(it);
+    }
+    auto link = std::make_shared<OnStepProtocolWrapper>();
+    if (!link->connect(info)) {
+        if (error != nullptr) {
+            *error = link->last_connect_error();
+        }
+        return nullptr;
+    }
+    registry[key] = link;
+    return link;
 }
+
+OnStepProtocolWrapper::Sequence OnStepProtocolWrapper::hold_sequence() { return Sequence(pimpl_->hold_sequence()); }
+
+std::optional<FocuserStatus> OnStepProtocolWrapper::focuser_status(int focuser) {
+    return pimpl_->focuser_status(focuser);
+}
+
+std::optional<long> OnStepProtocolWrapper::focuser_position(int focuser) { return pimpl_->focuser_steps(focuser, "g"); }
+
+std::optional<long> OnStepProtocolWrapper::focuser_min_position(int focuser) {
+    return pimpl_->focuser_steps(focuser, "i");
+}
+
+std::optional<long> OnStepProtocolWrapper::focuser_max_position(int focuser) {
+    return pimpl_->focuser_steps(focuser, "m");
+}
+
+std::optional<double> OnStepProtocolWrapper::focuser_microns_per_step(int focuser) {
+    return pimpl_->focuser_microns_per_step(focuser);
+}
+
+std::optional<double> OnStepProtocolWrapper::focuser_temperature(int focuser) {
+    return pimpl_->focuser_temperature(focuser);
+}
+
+std::optional<bool> OnStepProtocolWrapper::focuser_temp_comp(int focuser) { return pimpl_->focuser_temp_comp(focuser); }
+
+bool OnStepProtocolWrapper::set_focuser_temp_comp(int focuser, bool enabled) {
+    return pimpl_->focuser_numeric(focuser, enabled ? "c1" : "c0");
+}
+
+bool OnStepProtocolWrapper::focuser_goto(int focuser, long steps) {
+    return pimpl_->focuser_numeric(focuser, "s" + std::to_string(steps));
+}
+
+void OnStepProtocolWrapper::focuser_halt(int focuser) { pimpl_->focuser_halt(focuser); }
 
 bool OnStepProtocolWrapper::connect(const ConnectionInfo& info) { return pimpl_->connect(info); }
 
@@ -1993,6 +2197,12 @@ namespace detail {
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook) {
     std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
     link_loss_hook() = std::move(hook);
+}
+
+std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info) {
+    std::lock_guard<std::mutex> lock(link_registry_mutex());
+    const auto it = link_registry().find(link_key(info));
+    return it == link_registry().end() ? nullptr : it->second.lock();
 }
 }  // namespace detail
 

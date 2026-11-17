@@ -1837,6 +1837,72 @@ TEST_CASE("Builtin catalog - OnStep site range is per-field", "[catalog][onstep]
     CHECK_FALSE(catalog.normalize(kOnStepKey, config, Source::Api).rejection.has_value());
 }
 
+// The OnStep focuser (#2223): the telescope's connection fields and rules, plus the focuser number 1-6; auto-detect
+// is the telescope's scan with the same mount index, at connect time.
+TEST_CASE("Builtin catalog - the OnStep focuser joins the telescope's connection fields with a focuser number 1-6",
+          "[catalog][onstep][focuser][unit]") {
+    const DeviceKey key{"onstep", DeviceType::Focuser};
+    {
+        DeviceCatalog catalog;
+        register_builtin_schemas(catalog);
+        const auto views = catalog.describe();
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->display_name == "OnStep");
+        CHECK(v->build_option == "ALPACACORE_ENABLE_ONSTEP");
+        const std::vector<std::string_view> expected_keys{"connectionType",    "mountIndex",   "portPath",
+                                                          "baudRate",          "host",         "tcpPort",
+                                                          "responseTimeoutMs", "focuserNumber"};
+        REQUIRE(v->fields.size() == expected_keys.size());
+        for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+            CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+        }
+        const FieldRef* number = find_field(v->fields, "focuserNumber");
+        REQUIRE(number != nullptr);
+        CHECK(same_scalar(number->default_value, std::int64_t{1}));
+
+        DeviceConfig config;
+        config.set("connectionType", std::string{"auto"});
+        config.set("focuserNumber", std::int64_t{7});
+        const auto api = catalog.normalize(key, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "focuserNumber is out of range (min 1) (max 6)");
+        config.set("focuserNumber", std::int64_t{6});
+        CHECK_FALSE(catalog.normalize(key, config, Source::Api).rejection.has_value());
+        // The telescope's endpoint rules apply as they are.
+        DeviceConfig network;
+        network.set("connectionType", std::string{"network"});
+        const auto no_host = catalog.normalize(key, network, Source::Api);
+        REQUIRE(no_host.rejection.has_value());
+        CHECK(*no_host.rejection == "Host IP address is required");
+    }
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, key);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ONSTEP
+    CHECK(v->available);
+    DeviceConfig config;  // auto: constructs without a scan
+    config.set("connectionType", std::string{"auto"});
+    config.set("focuserNumber", std::int64_t{2});
+    auto driver = catalog.create(key, config, 3);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Focuser);
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_description() == "OnStepX focuser 2 (LX200 protocol)");
+    CHECK_FALSE(driver->get_connected());
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    network.set("host", std::string{"192.0.2.1"});
+    auto network_driver = catalog.create(key, network, 4);
+    REQUIRE(network_driver != nullptr);
+    CHECK(network_driver->get_description() == "OnStepX focuser 1 (LX200 protocol)");  // the default number
+    CHECK_FALSE(network_driver->get_connected());
+#else
+    CHECK_FALSE(v->available);
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // Celestron telescope. NexStar serial/network/auto and CGX direct USB; the
 // auto-detect factory constructs without a scan (#659), so no port is opened here.

@@ -3286,6 +3286,7 @@ document.getElementById('vendor').addEventListener('change', function() {
         updateCelestronDeviceFields();
     } else if (vendor === 'onstep') {
         document.getElementById('onstep-config').style.display = 'block';
+        updateOnStepDeviceFields();
     } else if (vendor === 'bisque') {
         document.getElementById('bisque-config').style.display = 'block';
     } else if (vendor === 'zwo') {
@@ -3558,14 +3559,32 @@ if (synscanConnectionType) {
     });
 }
 
-const onstepConnectionType = document.getElementById('onstep-connection-type');
-if (onstepConnectionType) {
-    onstepConnectionType.addEventListener('change', function() {
-        const type = this.value;
-        document.getElementById('onstep-serial-config').style.display = type === 'serial' ? 'block' : 'none';
-        document.getElementById('onstep-network-config').style.display = type === 'network' ? 'block' : 'none';
-    });
+// The OnStep block holds the telescope and the focuser (#2223): show the one the Device Type names, and disable
+// the other's inputs so its values cannot leak into this device's config.
+function updateOnStepDeviceFields() {
+    const focuserSection = document.getElementById('onstep-focuser-config');
+    const telescopeSection = document.getElementById('onstep-telescope-config');
+    if (!focuserSection || !telescopeSection) {
+        return;
+    }
+    const deviceTypeSelect = document.getElementById('device-type');
+    const isFocuser = deviceTypeSelect && normalizeDeviceType(deviceTypeSelect.value) === 'focuser';
+    focuserSection.style.display = isFocuser ? 'block' : 'none';
+    telescopeSection.style.display = isFocuser ? 'none' : 'block';
+    setFieldGroupEnabled(focuserSection, isFocuser);
+    setFieldGroupEnabled(telescopeSection, !isFocuser);
 }
+
+[['onstep-connection-type', 'onstep'], ['onstep-focuser-connection-type', 'onstep-focuser']].forEach(([id, prefix]) => {
+    const select = document.getElementById(id);
+    if (select) {
+        select.addEventListener('change', function() {
+            const type = this.value;
+            document.getElementById(`${prefix}-serial-config`).style.display = type === 'serial' ? 'block' : 'none';
+            document.getElementById(`${prefix}-network-config`).style.display = type === 'network' ? 'block' : 'none';
+        });
+    }
+});
 
 const celestronConnectionType = document.getElementById('celestron-connection-type');
 const celestronProtocol = document.getElementById('celestron-protocol');
@@ -4473,6 +4492,18 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (skywatcherLearnSite) {
             deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444
         }
+    } else if (deviceData.vendor === 'onstep' && normalizeDeviceType(deviceData.deviceType) === 'focuser') {
+        // The focuser's own prefixed names (the FormData collision rule), the telescope's connection fields (#2223).
+        deviceData.connectionType = formData.get('onstepFocuserConnectionType') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = (formData.get('onstepFocuserPortPath') || '').trim();
+            deviceData.baudRate = parseInt(formData.get('onstepFocuserBaudRate')) || 9600;
+        } else if (deviceData.connectionType === 'network') {
+            deviceData.host = (formData.get('onstepFocuserHost') || '').trim();
+            deviceData.tcpPort = parseInt(formData.get('onstepFocuserTcpPort')) || 9998;
+        }
+        const focuserNumber = readOptionalNumber(formData, 'onstepFocuserNumber');
+        deviceData.focuserNumber = focuserNumber !== null ? focuserNumber : 1;
     } else if (deviceData.vendor === 'onstep') {
         deviceData.connectionType = formData.get('onstepConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {

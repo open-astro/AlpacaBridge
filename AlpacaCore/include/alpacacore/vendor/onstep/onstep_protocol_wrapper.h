@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +32,9 @@ struct OnStepPortInfo {
 };
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports();
+
+/// OnStepX numbers its releases from 10 (`:GVN#` "10.23a"); OnStep 4.x and older are below it.
+bool is_onstepx_version(const std::string& version);
 
 /**
  * @brief Connection type for the OnStep protocol wrapper.
@@ -157,21 +161,69 @@ struct TimeInfo {
     double utc_offset_hours = 0.0;  // :SG#/:GG#: hours to ADD to local time for UTC, e.g. +5.0 for EST
 };
 
+/// The :F<n>T# focuser status (OnStepX Focuser.command.cpp, af1d26bf): 'M' moving or 'S' stopped, then the goto-rate
+/// digit.
+struct FocuserStatus {
+    bool moving = false;
+    int goto_rate = 0;
+};
+
 /**
- * @brief Clean C++ interface wrapping the OnStep (LX200-derived) serial
- *        protocol.
+ * @brief One link to one OnStep controller: the LX200-derived command set over
+ *        its serial port or its TCP command channel.
  *
- * This wrapper isolates the serial command protocol and transport layer from
- * the driver implementation. All platform-specific code is hidden using the
- * PIMPL pattern. See .github/instructions/onstep.instructions.md for the command reference.
+ * Every OnStep device on a controller (the telescope, the focuser) shares one
+ * link, which acquire() hands out (#2223, the iOptron iFR precedent of decision
+ * 0017): the first device to connect opens it, later devices join it, and it
+ * closes when the last holder lets go. Every exchange holds the link's own lock
+ * for its command and reply, so wire turns never interleave; a command whose
+ * error code is read next with :GE# holds a Sequence across both. A lost link
+ * is lost for every holder (decision 0009). All platform-specific code is hidden
+ * using the PIMPL pattern. See .github/instructions/onstep.instructions.md for
+ * the command reference.
  */
 class OnStepProtocolWrapper {
 public:
-    static OnStepProtocolWrapper& instance();
+    /**
+     * @brief Join the live link to @p info's controller, or open one (#2223).
+     *
+     * The key is the serial port (its canonical path) or "host:port". A live
+     * link on the key is returned as it is: its line settings and response
+     * timeout are the first opener's. A lost one is closed and a fresh link
+     * opened in its place; its holders keep it, and its loss reason, until they
+     * let go (decision 0009 rule 5). The registry lock is held across the open,
+     * so two connects at once open the port once. Returns null, with the
+     * operator-facing reason in @p error, when the open fails.
+     */
+    static std::shared_ptr<OnStepProtocolWrapper> acquire(const ConnectionInfo& info, std::string* error = nullptr);
 
+    /// A link outside the registry, closed until connect(): what acquire() builds. Tests drive one directly.
+    OnStepProtocolWrapper();
+    ~OnStepProtocolWrapper();
+
+    /// Opens this link. False, with last_connect_error(), when it cannot; a lost link still open is closed first.
     bool connect(const ConnectionInfo& info);
+    /// Closes this link and forgets its loss reason (the loss stamps stay for consume_*()).
     void disconnect();
     bool is_connected() const;
+
+    /**
+     * @brief Holds the link's sequence lock (#2223): the exchanges of the holding thread run back to back, with no
+     *        other device's exchange between them.
+     *
+     * For a command and the :GE# that reads its error code: any later command on the channel replaces the code,
+     * a sibling device's poll included. Recursive, so the holder's own exchanges take it again. Take it with no
+     * driver state lock held (decision 0016); hold it only for the exchanges that must stay together.
+     */
+    class Sequence {
+    public:
+        Sequence() = default;
+        explicit Sequence(std::unique_lock<std::recursive_mutex> lock) : lock_(std::move(lock)) {}
+
+    private:
+        std::unique_lock<std::recursive_mutex> lock_;
+    };
+    Sequence hold_sequence();
 
     /// Operator-facing reason the last connect() returned false (e.g. the
     /// serial port is held by another connected device, #1202); empty when
@@ -192,10 +244,10 @@ public:
 
     /**
      * @brief The clock the link-loss and last-alive stamps read (decision 0005,
-     *        #1378): the driver's injected TaskClock, set at connect, so the
-     *        driver times the #521 outage on the clock it runs on. Default:
+     *        #1378): the telescope's injected TaskClock, set when it takes the
+     *        link, so it times the #521 outage on the clock it runs on. Default:
      *        util::default_task_clock(). release_task_clock() puts the default
-     *        back if `clock` is still the one set (a driver going away). A
+     *        back if `clock` is still the one set (a telescope letting go). A
      *        change of the clock in use forgets the loss and last-alive
      *        stamps: one taken on another clock means nothing here (#1460).
      */
@@ -629,12 +681,36 @@ public:
      */
     void flush_input();
 
-private:
-    OnStepProtocolWrapper();
-    ~OnStepProtocolWrapper();
+    // ── Focuser (OnStepX, #2223). Only the addressed form :F<n>...# with n 1-6 is sent: the controller's active
+    // focuser (:FA<n>#), which the handset and the OnStepX web page use, is never changed, and the bare rate preset
+    // :F<d># is never sent. Replies from OnStepX Focuser.command.cpp at af1d26bf.
+
+    /// :F<n>T#: "M" or "S" then the goto-rate digit, '#'-terminated. std::nullopt for any other reply, which is what
+    /// a controller without focuser n answers (the unknown-command "0").
+    std::optional<FocuserStatus> focuser_status(int focuser);
+    /// :F<n>g#: the position in steps ("%ld", '#'-terminated). std::nullopt when it does not parse.
+    std::optional<long> focuser_position(int focuser);
+    /// :F<n>i# / :F<n>m#: the minimum / maximum position in steps. std::nullopt when it does not parse.
+    std::optional<long> focuser_min_position(int focuser);
+    std::optional<long> focuser_max_position(int focuser);
+    /// :F<n>u#: microns per step ("%7.5f"). std::nullopt for anything that is not a number above 0.
+    std::optional<double> focuser_microns_per_step(int focuser);
+    /// :F<n>t#: the temperature in degrees C ("%3.1f" of the firmware's sensor, which prints "nan" with no probe).
+    /// std::nullopt for anything that is not a finite number.
+    std::optional<double> focuser_temperature(int focuser);
+    /// :F<n>c#: temperature compensation on ('1') or off ('0'), a bare digit. std::nullopt for any other reply.
+    std::optional<bool> focuser_temp_comp(int focuser);
+    /// :F<n>c0# / :F<n>c1#: a bare '1' accepted or '0' refused (get_last_command_error() says why).
+    bool set_focuser_temp_comp(int focuser, bool enabled);
+    /// :F<n>s<steps>#: an absolute goto in steps; a bare '1' accepted or '0' refused.
+    bool focuser_goto(int focuser, long steps);
+    /// :F<n>Q#: stop. No reply (sent blind).
+    void focuser_halt(int focuser);
+
     OnStepProtocolWrapper(const OnStepProtocolWrapper&) = delete;
     OnStepProtocolWrapper& operator=(const OnStepProtocolWrapper&) = delete;
 
+private:
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };
@@ -649,6 +725,8 @@ enum class LinkLossHookPoint : std::uint8_t {
 /// Test hook: lets a test land a Disconnect or a reconnect at the points above.
 /// Empty in production.
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook);
+/// The live registered link on @p info's key, or null; opens nothing. For tests that inspect a driver's link.
+std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info);
 }  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

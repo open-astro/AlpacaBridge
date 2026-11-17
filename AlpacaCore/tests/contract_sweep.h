@@ -81,6 +81,7 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
+#include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WEEWX
@@ -550,6 +551,21 @@ inline ContractEntry contract_entry_onstep_telescope() {
         },
         kSrcAgentsAxis));
 }
+// The OnStepX focuser on the controller's shared link (#2223).
+inline ContractEntry contract_entry_onstep_focuser() {
+    return with_clamping_focuser(make_entry(
+                                     "onstep_focuser", "onstep", "focuser", DeviceType::Focuser,
+                                     [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                         vendor::onstep::ConnectionInfo conn;
+                                         conn.type = vendor::onstep::ConnectionType::Network;
+                                         conn.host = "127.0.0.1";
+                                         conn.tcp_port = 9;
+                                         return vendor::onstep::create_onstep_focuser(n, conn, 1);
+                                     },
+                                     kSrcAgents),
+                                 "onstep_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
+                                 "(ConformU requires clamping, #2028)");
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -860,7 +876,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_SKYWATCHER(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS_ONSTEP(X) X(onstep_telescope)
+#define CS_ONSTEP(X) X(onstep_telescope) X(onstep_focuser)
 #else
 #define CS_ONSTEP(X)
 #endif
@@ -1000,6 +1016,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"celestron", "focuser", "fake_celestron_focuser.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},
+    {"onstep", "focuser", "fake_mount_server.h"},  // the focuser on the controller's shared link (#2223)
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
     {"ifr", "focuser", "fake_ioptron_ifr.h"},
@@ -1049,6 +1066,7 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},
     {"synscan_telescope", "synscan", "AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp"},
     {"onstep_telescope", "onstep", "AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp"},
+    {"onstep_focuser", "onstep", "AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp"},
     {"gemini_focuser", "gemini", "AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp"},
     {"qhy_focuser", "qhy", "AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp"},
     {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},

@@ -219,6 +219,8 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_getter_locks.cpp)
     # Getters and DeviceState served from the polled snapshot (issue #1783).
     list(APPEND TEST_SOURCES test_onstep_telescope_snapshot.cpp)
+    # The OnStepX focuser and the controller's shared link, with its [stress] case (issue #2223).
+    list(APPEND TEST_SOURCES test_onstep_focuser.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
