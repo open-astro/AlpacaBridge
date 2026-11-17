@@ -26,6 +26,7 @@
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/telescope_command_gate.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
@@ -106,6 +107,19 @@ constexpr auto kInMotionRetryPoll = std::chrono::milliseconds(200);
 constexpr int kCeNone = 0;
 // The longest PulseGuide the :Mg[nsew]#### command can carry (#1478).
 constexpr int kMaxPulseGuideMs = 9999;
+// OnStep's limits and orders for the telescope command gate (#2258). PulseGuide checks the fault before the parked
+// state; MoveAxis and the slews check it after. MoveAxis moves axes 0 and 1; a rate at or under 1e-6 is a stop, and a
+// stop is sent on a faulted link (the driver checks the fault once it is sent, #1414).
+constexpr util::TelescopeCommandLimits kCommandLimits = [] {
+    util::TelescopeCommandLimits limits;
+    limits.pulse_guide_max_ms = kMaxPulseGuideMs;
+    limits.pulse_guide_order = util::ParkedFaultOrder::FaultFirst;
+    limits.move_axis_axes = 2;
+    limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
+    limits.move_axis_stop_epsilon = 1e-6;
+    limits.stop_checks_fault = false;
+    return limits;
+}();
 constexpr int kCeSlewInMotion = 22;
 constexpr int kCeTrue = 25;
 constexpr int kCeNotParked = 11;
@@ -1807,21 +1821,10 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
-        // Arguments before the connected, fault and parked checks (#1478).
-        if (direction < 0 || direction > 3) {
-            throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-        }
-        // The wire command's duration field is 4 digits (:Mgn####), so a
-        // longer pulse cannot be sent: refuse it instead of pulsing for less
-        // than asked (#1478).
-        if (duration < 0 || duration > kMaxPulseGuideMs) {
-            throw AlpacaException("PulseGuide duration must be 0 to " + std::to_string(kMaxPulseGuideMs) + " ms",
-                                  AlpacaError::InvalidValue);
-        }
+        // Arguments before the connected, fault and parked checks (#1478), and before the state lock.
+        util::check_pulse_guide_arguments(kCommandLimits, direction, duration, GateChecks{*this, "PulseGuide"});
         StateLock lock(lock_gate_);
-        check_connected();
-        refuse_while_faulted_locked("PulseGuide");
-        check_not_parked_locked("PulseGuide");
+        util::check_pulse_guide_state(kCommandLimits, GateChecks{*this, "PulseGuide"});
         // Hardware pulse guide: the mount times the pulse internally
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
         // implementation there is no background stop thread to manage here:
@@ -1883,7 +1886,8 @@ public:
     void slew_to_coordinates(double ra, double dec) override {
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
-        check_equatorial_slew_locked(ra, dec, "SlewToCoordinates");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToCoordinates",
+                                    GateChecks{*this, "SlewToCoordinates"});
         start_slew_locked(ra, dec, "SlewToCoordinates", targets);
         wait_for_slew_complete_locked(lock);
     }
@@ -1891,7 +1895,8 @@ public:
     void slew_to_coordinates_async(double ra, double dec) override {
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
-        check_equatorial_slew_locked(ra, dec, "SlewToCoordinatesAsync");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToCoordinatesAsync",
+                                    GateChecks{*this, "SlewToCoordinatesAsync"});
         start_slew_locked(ra, dec, "SlewToCoordinatesAsync", targets);
     }
 
@@ -1900,7 +1905,7 @@ public:
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
-        check_equatorial_slew_locked(ra, dec, "SlewToTarget");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToTarget", GateChecks{*this, "SlewToTarget"});
         start_slew_locked(ra, dec, "SlewToTarget", targets);
         wait_for_slew_complete_locked(lock);
     }
@@ -1909,7 +1914,8 @@ public:
         StateLock lock(lock_gate_);
         const TargetWrites targets = target_writes_locked();  // before any check reads the mount
         const auto [ra, dec] = target_or_throw_locked();
-        check_equatorial_slew_locked(ra, dec, "SlewToTargetAsync");
+        util::check_equatorial_slew(kCommandLimits, ra, dec, "SlewToTargetAsync",
+                                    GateChecks{*this, "SlewToTargetAsync"});
         start_slew_locked(ra, dec, "SlewToTargetAsync", targets);
     }
 
@@ -1998,25 +2004,13 @@ public:
 
     void move_axis(int axis, double rate) override {
         // #2257: the argument checks run first, before the connected and parked checks.
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
-        }
-        if (std::isnan(rate) || std::isinf(rate)) {
-            throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-        }
-        if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
-        }
+        util::check_move_axis_arguments(kCommandLimits, axis, rate, GateChecks{*this, "MoveAxis"});
         StateLock lock(lock_gate_);
-        check_connected();
-        // Only a rate at or under the epsilon is a stop, which an unread status does not hold up (#1895).
-        constexpr double kStopEpsilon = 1e-6;
-        const bool moving = !(std::abs(rate) <= kStopEpsilon);
-        check_not_parked_locked("MoveAxis", /*stop=*/!moving);
-
-        if (moving) {
-            refuse_while_faulted_locked("MoveAxis");  // before it ends a waiting Park or FindHome
-        }
+        // Only a rate at or under the epsilon is a stop, which an unread status does not hold up (#1895) and a faulted
+        // link does not refuse before it is sent (#1414). A move checks the fault before it ends a waiting Park or
+        // FindHome.
+        const bool moving = !util::is_move_axis_stop(kCommandLimits, rate);
+        util::check_move_axis_state(kCommandLimits, /*stop=*/!moving, GateChecks{*this, "MoveAxis"});
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
         const Wire protocol = wire();
 
@@ -3420,20 +3414,47 @@ private:
         return true;
     }
 
-    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
-    // (open-astro#1274). Runs after the parked check and argument validation and
-    // before any target or GOTO command is sent, and reads Tracking as the
-    // getter does, from the polled frame (a control-path :GU# read only while
-    // the frame has no status), so a Tracking=false just written counts as off.
-    void check_equatorial_slew_locked(double ra, double dec, const char* who) const {
-        util::validate_ra_dec(ra, dec, who);  // arguments first, even while disconnected (#1478)
-        check_connected();
-        check_not_parked_locked(who);
-        refuse_while_faulted_locked(who);  // named, before the Tracking read (#1414)
-        if (!tracking_as_served_locked()) {
-            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+    // The command gate's checks in OnStep's words (#2258): util/telescope_command_gate.h decides the order
+    // (arguments even while disconnected, #1478; connected; parked; the fault, named, #1414; Tracking), and these
+    // answer each step with the driver's own texts and reads. One per call, built under the state lock where the
+    // state half runs; the argument half reads nothing.
+    struct GateChecks {
+        const OnStepTelescopeDriver& driver;
+        const char* who;
+
+        [[noreturn]] void refuse_argument(util::TelescopeArgument which, double /*value*/) const {
+            switch (which) {
+                case util::TelescopeArgument::PulseDirection:
+                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+                case util::TelescopeArgument::PulseDuration:
+                    // The wire command's duration field is 4 digits (:Mgn####), so a longer pulse cannot be sent:
+                    // refuse it instead of pulsing for less than asked (#1478).
+                    throw AlpacaException(
+                        "PulseGuide duration must be 0 to " + std::to_string(kMaxPulseGuideMs) + " ms",
+                        AlpacaError::InvalidValue);
+                case util::TelescopeArgument::MoveAxisAxis:
+                    throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
+                case util::TelescopeArgument::MoveAxisRateNotFinite:
+                    throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
+                case util::TelescopeArgument::MoveAxisRateRange:
+                    throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
+            }
+            throw AlpacaException(std::string(who) + ": invalid argument", AlpacaError::InvalidValue);
         }
-    }
+        void check_connected() const { driver.check_connected(); }
+        // A non-stop first needs a status read since the connect; a stop refuses only a status that reads parked.
+        void check_not_parked(bool stop) const { driver.check_not_parked_locked(who, stop); }
+        void check_no_fault() const { driver.refuse_while_faulted_locked(who); }
+        // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation (open-astro#1274). Read as the
+        // getter does, from the polled frame (a control-path :GU# read only while the frame has no status), so a
+        // Tracking=false just written counts as off; before any target or GOTO command is sent.
+        void check_tracking() const {
+            if (!driver.tracking_as_served_locked()) {
+                throw AlpacaException(std::string(who) + " requires Tracking to be true",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
+    };
 
     // (#1377). Same order as the equatorial check: arguments, connected, parked,
     // fault, then Tracking read as the getter reads it, before anything is sent.

@@ -53,6 +53,7 @@ set(TEST_SOURCES
     test_utc_offset.cpp
     test_hold_window.cpp
     test_pointing_math.cpp
+    test_telescope_command_gate.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
     test_lock_gate.cpp
