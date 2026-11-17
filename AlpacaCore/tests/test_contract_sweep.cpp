@@ -306,32 +306,6 @@ constexpr ProbeState kParked = ProbeState::Parked;
 
 // clang-format off
 const std::vector<ProbeExemption> kProbeExemptions = {
-    // Sky-Watcher: the writable gate (connected, then fault) and the parked check run before the argument checks.
-    {"skywatcher_telescope", kOff, "pulse_guide(9, 100)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "pulse_guide(0, -1)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "move_axis(5, 0.1)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "move_axis(0, NaN)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "slew_to_coordinates(25, 0)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "slew_to_coordinates(0, 91)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "slew_to_coordinates_async(25, 0)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kOff, "slew_to_coordinates_async(0, 91)", kKnown, "connection checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "pulse_guide(9, 100)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "pulse_guide(0, -1)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "move_axis(5, 0.1)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "move_axis(0, NaN)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "slew_to_coordinates(25, 0)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "slew_to_coordinates(0, 91)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "slew_to_coordinates_async(25, 0)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope", kParked, "slew_to_coordinates_async(0, 91)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "pulse_guide(9, 100)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "pulse_guide(0, -1)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "move_axis(5, 0.1)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "move_axis(0, NaN)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates(25, 0)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates(0, 91)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates_async(25, 0)", kKnown, "parked checked first (#2257)"},
-    {"skywatcher_telescope_serial", kParked, "slew_to_coordinates_async(0, 91)", kKnown, "parked checked first (#2257)"},
-
     // Celestron NexStar: SlewToCoordinates(Async) checks connected and parked before validate_ra_dec; the guide-rate
     // setter checks only that the rate is finite, so a negative rate is sent to the mount.
     {"celestron_telescope", kOff, "slew_to_coordinates(25, 0)", kKnown, "connection checked first (#2257)"},
