@@ -367,11 +367,10 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         ALPACA_LOG_DEBUG("ZWO", "Auto-detect: skipping " + port_path + ": " + error);
         return "";
     }
-    const int fd = link.fd();
-
-    // One query: the trimmed reply up to its '#', or nothing when it never terminates.
+    // One query: the trimmed reply up to its '#', or nothing when it never terminates. The probe's reads and writes go
+    // through its link (util::SerialLink, #2262); a probe judges only the bytes it got, as before.
     const auto query = [&](const std::string& command) -> std::optional<std::string> {
-        if (!util::tty_write_all(fd, command)) return std::nullopt;
+        if (!link.write_all(command)) return std::nullopt;
 
         // This read is reached via enumerate_zwo_mounts() called from
         // Impl::connect(Auto), which deliberately holds mutex_ across the
@@ -387,7 +386,7 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         spec.max_len = 4096;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): poll() bounded by the deadline
-        const auto reply = util::read_until(fd, spec, deadline);
+        const auto reply = util::read_until(link, spec, deadline);
         const std::size_t hash = reply.bytes.find('#');
         if (hash == std::string::npos) return std::nullopt;
         return trim_copy(reply.bytes.substr(0, hash));
@@ -696,12 +695,21 @@ public:
         }
         reply_owed_ = false;
         link_lost_.store(false);
+#ifndef _WIN32
+        // A connect, failed or done, starts with a clear verdict; a loss in the handshake that follows latches.
+        link_.clear_loss();
+#endif
         return ok;
     }
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+#ifndef _WIN32
+        // An explicit Disconnect forgets the link's verdict (decision 0009 rule 5); try_disconnect(), the port release
+        // after a loss, keeps it.
+        link_.clear_loss();
+#endif
     }
 
     bool link_lost() const { return link_lost_.load(); }
@@ -886,7 +894,7 @@ private:
             char buf[128];
             ssize_t count = 0;
             if (connection_type_ == ConnectionType::Serial) {
-                count = util::tty_read(fd, buf, sizeof(buf), slice_ms);
+                count = link_.read(buf, sizeof(buf), slice_ms);
             } else {
                 pollfd pfd = {fd, POLLIN, 0};
                 const int ready = ::poll(&pfd, 1, slice_ms);
@@ -935,11 +943,12 @@ private:
                 char peek[128];
                 ssize_t got;
                 int reads = 0;
-                while (reads++ < 16 && (got = util::tty_read(serial_fd_, peek, sizeof(peek), 0)) > 0) {
+                while (reads++ < 16 && (got = link_.read(peek, sizeof(peek), 0)) > 0) {
                     if (std::memchr(peek, '#', static_cast<std::size_t>(got)) != nullptr) *saw_hash = true;
                 }
             }
             if (tcflush(serial_fd_, TCIFLUSH) != 0) {
+                link_.note_error(errno);  // an fd call the link's members do not cover
                 note_transport_error();
                 throw AlpacaException("Failed to discard ZWO mount serial input");
             }
@@ -967,10 +976,17 @@ private:
 #endif
     }
 
+    // Publishes a lost transport on link_lost_ after a failed exchange. Over serial the verdict is the link's
+    // (util::SerialLink, #2262: EIO, ENXIO, ENODEV and EBADF on its fd, judged by link_.read(), link_.write_all() and
+    // util::read_until(link_, ...)); this wrapper keeps no serial errno list. Over TCP the socket errnos below are a
+    // loss (decision 0009 point 2a).
     void note_transport_error() {
 #ifndef _WIN32
-        if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF || errno == ENOTSOCK ||
-            errno == ENOTCONN || errno == ECONNRESET || errno == EPIPE) {
+        if (connection_type_ == ConnectionType::Serial) {
+            if (link_.lost()) link_lost_.store(true);
+            return;
+        }
+        if (errno == EBADF || errno == ENOTSOCK || errno == ENOTCONN || errno == ECONNRESET || errno == EPIPE) {
             link_lost_.store(true);
         }
 #endif
@@ -1203,7 +1219,7 @@ private:
         }
         return true;
 #else
-        return util::tty_write_all(serial_fd_, data);
+        return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
 #endif
     }
 
@@ -1231,12 +1247,12 @@ private:
 #endif
     }
 
-    // One reply read for both transports: util::read_until on the tty or
+    // One reply read for both transports: util::read_until on the serial link or
     // util::read_until_socket on the TCP fd, poll()-bounded (no pacing sleep).
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
 #ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
-            return util::read_until(serial_fd_, spec, deadline);
+            return util::read_until(link_, spec, deadline);  // the link judges a LinkDead read (#2262)
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
 #else
@@ -1270,7 +1286,8 @@ private:
             if (r.outcome == util::ReadOutcome::LinkDead) {
                 errno = r.err;
                 note_transport_error();
-                link_lost_.store(true);
+                // Over serial read_until(link_, ...) judged it; over TCP a LinkDead read is a loss whatever its errno.
+                if (connection_type_ != ConnectionType::Serial) link_lost_.store(true);
             }
             if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
             return r;
