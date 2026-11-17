@@ -698,12 +698,14 @@ void check_invalid_value_probe(const std::string& id, ProbeState state, const Pr
 
 // #2259: a good value written while an exposure runs, which a camera does not refuse with InvalidOperation today, by
 // Tier2Host::id. GPhoto takes the write and restarts the exposure until its CaptureSession rewrite (#1982); iGuider
-// until #2259 PR 2. The probe must still not answer InvalidOperation, so a fix that lands without deleting its line
-// fails the sweep.
+// until #2259 PR 2. A known row's probe must still not answer InvalidOperation, so a fix that lands without deleting
+// its line fails the sweep. A skipped row is not run at all: its answer depends on timing, so no outcome can be pinned
+// (QHY's second StartExposure supersedes the held worker or times out joining it, #1736).
 struct ExposingRefusalExemption {
     const char* id;
     const char* probe;
     const char* reason;
+    bool skipped = false;
 };
 
 // clang-format off
@@ -716,6 +718,9 @@ const std::vector<ExposingRefusalExemption> kExposingRefusalExemptions = {
     {"gphoto_camera", "set_start_x(StartX)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
     {"gphoto_camera", "set_start_y(StartY)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
     {"gphoto_camera", "start_exposure(a valid duration)", "accepted while exposing until the CaptureSession rewrite (#1982)"},
+    // QHY: a second StartExposure cancels and joins the running worker; whether the join ends inside its 2 s bound
+    // decides between a superseded exposure and InvalidOperation, so the probe is not run until #1736.
+    {"qhy_camera", "start_exposure(a valid duration)", "supersedes or times out by timing until #1736", true},
     // iGuider: the stream keeps running, so a geometry write is taken and a StartExposure supersedes (#2259 PR 2).
     {"iguider_camera", "set_bin_x(BinX)", "accepted while exposing (#2259)"},
     {"iguider_camera", "set_bin_y(BinY)", "accepted while exposing (#2259)"},
@@ -730,9 +735,13 @@ const std::vector<ExposingRefusalExemption> kExposingRefusalExemptions = {
 // Runs one good-value probe on a camera with an exposure running and checks the code its exemption, if any, allows.
 [[maybe_unused]] void check_exposing_refusal_probe(const std::string& id, const Probe& probe) {
     const auto& [name, fn] = probe;
-    const int code = thrown_code(fn);
     const auto ex = std::find_if(kExposingRefusalExemptions.begin(), kExposingRefusalExemptions.end(),
                                  [&](const ExposingRefusalExemption& x) { return id == x.id && name == x.probe; });
+    if (ex != kExposingRefusalExemptions.end() && ex->skipped) {
+        INFO(id << " " << name << " while exposing is not run (" << ex->reason << ")");
+        return;
+    }
+    const int code = thrown_code(fn);
     if (ex == kExposingRefusalExemptions.end()) {
         INFO(id << " " << name << " while exposing");
         CHECK(code == err::InvalidOperation);
