@@ -2205,7 +2205,14 @@ public:
                 if (link_health_.faulted()) {
                     throw AlpacaException("faulted", AlpacaError::DriverException);
                 }
-                refresh_status_locked();
+                {
+                    judging_abort_ = true;
+                    struct EndJudgingAbort {
+                        const OnStepTelescopeDriver* driver;
+                        ~EndJudgingAbort() { driver->judging_abort_ = false; }
+                    } end_judging_abort{this};
+                    refresh_status_locked();
+                }
                 // #2296: OnStepX stops a GOTO at a limit through goTo.abort(), so the GOTO flag stays set while it
                 // brakes (GG_READY_ABORT), and turns tracking off; a stop code in this read means no restore, GOTO
                 // flag or not (the abort is the client's own stop, so nothing fails).
@@ -2922,7 +2929,14 @@ private:
             return;
         }
         const std::string message = std::string(watched_motion_->who) + " failed: " + why;
-        ALPACA_LOG_ERROR("OnStep", message);
+        if (judging_abort_) {
+            // Inside AbortSlew the client stopped the slew itself, and a 4.x latched code cannot tell its stop from a
+            // limit's: say only what the read decided. The failure is dropped with the watch.
+            ALPACA_LOG_INFO("OnStep", "AbortSlew read the slew's end (" + why + "); no tracking restore");
+        } else {
+            // WARN, like the driver's other device-side failures: the client gets the failure from the property.
+            ALPACA_LOG_WARN("OnStep", message);
+        }
         motion_error_ = KeptMotionError{watched_motion_->motion, message, AlpacaError::DriverException};
         watched_motion_.reset();
     }
@@ -4731,6 +4745,9 @@ private:
         bool fixed_hour_angle;
     };
     mutable std::optional<WatchedMotion> watched_motion_;
+    // True while AbortSlew's own :GU# read judges the watched slew: a failure there is logged at INFO (#2296).
+    // Under mutex_.
+    mutable bool judging_abort_ = false;
     // The current Park/FindHome's claim (decision 0006 rule 3), bumped by
     // every supersede, and the request its background part is still to
     // finish. Under mutex_.
