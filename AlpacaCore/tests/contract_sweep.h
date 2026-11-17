@@ -732,7 +732,7 @@ inline ContractEntry contract_entry_touptek_switch() {
                                 },
                                 kSrcAgents),
                             DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                            "TouptekSwitchDriver and default_stellavita_config(): static port table, "
+                            "util::PowerPortSwitchDriver and default_stellavita_config(): static port table, "
                             "all four ports writable");
 }
 #endif
