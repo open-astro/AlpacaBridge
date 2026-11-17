@@ -101,24 +101,7 @@ public:
 
     void connect() override { start_connection_task(true); }
 
-    void disconnect() override {
-        // Disconnect synchronously — closing the HID handle is trivial and
-        // ASCOM clients expect Connected to be false immediately after. The
-        // close does take hid_global_mutex(), so it can queue behind a
-        // concurrent by-index enumeration's bus scan (bounded; see accepted
-        // cost (1) on that mutex in astroasis_protocol_wrapper.cpp) — but
-        // connected_ is stored false before it, so the flip never waits on
-        // THAT lock. It can still wait on this driver's transition_mutex_ behind a connect
-        // handshake, which can itself be queued on hid_global_mutex() behind a
-        // concurrent enumeration's bus scan. Getters never take
-        // transition_mutex_ and never touch the device.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("Astroasis", "Focuser disconnect error: " + std::string(e.what()));
-        }
-    }
+    void disconnect() override { start_connection_task(false); }
 
     bool get_connecting() const override { return connection_task_active(); }
 

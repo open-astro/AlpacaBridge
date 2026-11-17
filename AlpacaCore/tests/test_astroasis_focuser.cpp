@@ -708,3 +708,47 @@ TEST_CASE("Astroasis Focuser Driver - a failed HID read drops Connected at once 
     CHECK_FALSE(rig.driver().get_connected());
     require_alpaca_error([&] { (void)rig.driver().get_position(); }, alpacacore::AlpacaError::NotConnected);
 }
+
+// Issue #1757 slice 2a: the tier-2 contract sweep cannot hold this driver's connect open (FakeHidTransport answers
+// in-process with no delay), so the sweep's "Disconnect during a connect returns at once" case runs here over the
+// fake's gate instead: the connect's first status exchange (0x32) is held. Before, disconnect() joined the connect
+// thread and tore down before it returned (commit 3ded11bd), so it waited for the held exchange.
+// Falsified by: astroasis_focuser_driver.cpp disconnect() going back to stop_connection_thread() plus
+// set_connected(false).
+TEST_CASE("Astroasis Focuser Driver - a Disconnect during a connect returns at once (#1757)",
+          "[astroasis][focuser][unit][issue1757]") {
+    AstroasisRig rig;
+    const auto& state = rig.fake().state;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = 0x32;
+        state->gate_entered = false;
+    }
+    rig.driver().connect();
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        REQUIRE(state->cv.wait_for(lock, kBound, [&] { return state->gate_entered; }));
+    }
+    REQUIRE(rig.driver().get_connecting());
+    // The gate opens 300 ms from now on its own, so a disconnect that waits for the connect ends (late) instead of
+    // waiting on a gate this thread would only open after it returns.
+    std::thread opener([&state] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));  // real time: the held exchange
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->gate_cmd = 0;
+        }
+        state->cv.notify_all();
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    rig.driver().disconnect();
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
+    CHECK(rig.driver().get_connecting());  // the disconnect is queued behind the held connect
+    opener.join();
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (rig.driver().get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_FALSE(rig.driver().get_connecting());
+    CHECK_FALSE(rig.driver().get_connected());
+}

@@ -110,16 +110,7 @@ public:
 
     void connect() override { start_connection_task(true); }
 
-    void disconnect() override {
-        // Disconnect synchronously — closing the port + joining the move monitor
-        // is quick and ASCOM clients expect Connected to be false immediately.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("WandererAstro", "Rotator disconnect error: " + std::string(e.what()));
-        }
-    }
+    void disconnect() override { start_connection_task(false); }
 
     bool get_connecting() const override { return connection_task_active(); }
 

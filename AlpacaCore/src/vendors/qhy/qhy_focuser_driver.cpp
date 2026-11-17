@@ -119,14 +119,7 @@ public:
     // reads are lock-free; this stays a FAST-timing getter.
     bool get_connected() const override { return connected_.load() && link_up(); }
     void connect() override { start_connection_task(true); }
-    void disconnect() override {
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogTag, "Q-Focuser disconnect error: " + std::string(e.what()));
-        }
-    }
+    void disconnect() override { start_connection_task(false); }
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {

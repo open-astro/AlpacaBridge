@@ -109,16 +109,7 @@ public:
 
     void connect() override { start_connection_task(true); }
 
-    void disconnect() override {
-        // Disconnect synchronously — trivial (close fd + set flag) and ASCOM
-        // clients expect Connected to be false immediately after.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", "iEAF disconnect error: " + std::string(e.what()));
-        }
-    }
+    void disconnect() override { start_connection_task(false); }
 
     bool get_connecting() const override { return connection_task_active(); }
 

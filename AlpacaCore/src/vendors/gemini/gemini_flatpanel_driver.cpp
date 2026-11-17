@@ -136,16 +136,7 @@ public:
 
     void connect() override { start_connection_task(true); }
 
-    void disconnect() override {
-        // Disconnect synchronously -- closing the port is trivial and ASCOM
-        // clients expect Connected to be false immediately after.
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("Gemini", "Flat panel disconnect error: " + std::string(e.what()));
-        }
-    }
+    void disconnect() override { start_connection_task(false); }
 
     bool get_connecting() const override { return connection_task_active(); }
 
