@@ -402,3 +402,41 @@ test('deviceSettingShown hides the keys the card shows elsewhere', () => withFor
     assert.strictEqual(deviceSettingShown('portPath'), true);
     assert.strictEqual(deviceSettingShown('siteLatitude'), true);
 }));
+
+// Issue #1764 item 5: the stale-data banner. linkStatus() turns the consecutive
+// failed status polls and the time of the last good one into the banner, the
+// rows' stale flag and the delay before the next poll.
+test('linkStatus: no failed poll shows no banner and polls every 5 s (#1764)', () => {
+    const { linkStatus } = require('../../web/format.js');
+    const s = linkStatus(0, 1000, 4000);
+    assert.strictEqual(s.banner, false);
+    assert.strictEqual(s.stale, false);
+    assert.strictEqual(s.text, '');
+    assert.strictEqual(s.nextDelayMs, 5000);
+});
+
+test('linkStatus: backoff is 5, 5, 10 then 15 s, capped at 15 s (#1764)', () => {
+    const { linkStatus } = require('../../web/format.js');
+    assert.deepStrictEqual([1, 2, 3, 4, 5, 40].map((n) => linkStatus(n, 0, 0).nextDelayMs),
+                           [5000, 5000, 10000, 15000, 15000, 15000]);
+});
+
+test('linkStatus: the first failed poll shows the banner with the age in whole seconds (#1764)', () => {
+    const { linkStatus } = require('../../web/format.js');
+    const s = linkStatus(1, 10000, 19999);
+    assert.strictEqual(s.banner, true);
+    assert.strictEqual(s.stale, true);
+    assert.strictEqual(s.text, 'Connection to the bridge lost, retrying. Last update 9 s ago.');
+    assert.strictEqual(linkStatus(2, 10000, 10000).text,
+                       'Connection to the bridge lost, retrying. Last update 0 s ago.');
+    // A browser clock that steps back never shows a negative age.
+    assert.strictEqual(linkStatus(1, 10000, 5000).text,
+                       'Connection to the bridge lost, retrying. Last update 0 s ago.');
+});
+
+test('linkStatus: with no good answer yet the banner says so (#1764)', () => {
+    const { linkStatus } = require('../../web/format.js');
+    const s = linkStatus(1, null, 5000);
+    assert.strictEqual(s.banner, true);
+    assert.strictEqual(s.text, 'Connection to the bridge lost, retrying. No device data received yet.');
+});
