@@ -680,6 +680,9 @@ TEST_CASE("Celestron Telescope Driver - non-finite guide rate is rejected", "[ce
     require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    // #2257: a negative rate is refused, not sent to the mount.
+    require_alpaca_error([&]() { driver->set_guide_rate({-0.004, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate_declination(-0.004); }, alpacacore::AlpacaError::InvalidValue);
     driver->set_connected(false);
 }
 

@@ -651,6 +651,10 @@ public:
         if (!has_autoguider_port_) {
             throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
         }
+        // #2257: a negative rate is refused, not sent. Disconnected or with no port, the answer stays as above.
+        if (rate.ra < 0.0 || rate.dec < 0.0) {
+            throw AlpacaException("GuideRate must not be negative", AlpacaError::InvalidValue);
+        }
         double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
         double dec_percent = (rate.dec / kSiderealDegPerSec) * 100.0;
         auto& protocol = CelestronProtocolWrapper::instance();
@@ -1706,12 +1710,12 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        util::validate_ra_dec(ra, dec, "SlewToCoordinates");  // #2257: the argument check runs first
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinates");
-            util::validate_ra_dec(ra, dec, "SlewToCoordinates");
             check_slew_safety(lock, "SlewToCoordinates");
             check_tracking_for_slew(lock, "SlewToCoordinates");
         }
@@ -1738,6 +1742,7 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");  // #2257: the argument check runs first
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
         {
             // Gate BEFORE claiming: claiming the slew slot would end a park in
@@ -1745,7 +1750,6 @@ public:
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
-            util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             check_tracking_for_slew(lock, "SlewToCoordinatesAsync");
         }
         uint32_t ra_raw = 0;
