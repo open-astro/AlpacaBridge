@@ -20,10 +20,12 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -1345,6 +1347,29 @@ TEST_CASE("SynScan Link - a write to a pulled mount loses the link at once and D
     }
     check_lost(driver);
     CHECK(driver.get_link_fault().find("serial link lost (write)") != std::string::npos);
+    driver.set_connected(false);
+    CHECK(driver.get_link_fault().empty());
+}
+
+// Issue #2262: EBADF on the mount's own serial fd is a lost link, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 the wrapper said "EBADF is not one": the write failed with DriverException
+// and Connected kept reading true over a dead fd.
+TEST_CASE("SynScan Link - EBADF on a command write loses the link at once",
+          "[synscan][telescope][unit][fake][link-lost][issue2262]") {
+    SerialRig rig;
+    ReleasePort release_port{rig.driver()};
+    auto& driver = rig.driver();
+    const std::string pts = rig.fake().handset->slave_path();
+    const auto before = alpacacore::test::fds_open_on(pts);
+    connect_serial(rig);  // the poll is parked: only the case's own call reaches the fd
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(pts));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { driver.set_tracking(false); }, err::NotConnected);
+    check_lost(driver);
+    CHECK(driver.get_link_fault().find("serial link lost (write): " + alpacacore::util::errno_string(EBADF)) !=
+          std::string::npos);
     driver.set_connected(false);
     CHECK(driver.get_link_fault().empty());
 }
