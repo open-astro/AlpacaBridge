@@ -18,6 +18,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/http_client.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <memory>
@@ -148,19 +149,21 @@ TEST_CASE("LockedHttpClient over FakeHttpClient - requests forward one at a time
     alpacacore::test::FakeHttpClient fake{[] { return std::string("body"); }};
     fake.set_delay(std::chrono::milliseconds(20));
     alpacacore::test::LockedHttpClient locked(fake.client());
+    // The workers only record their answers: Catch2 assertions are not thread-safe, so the CHECKs run after the
+    // join.
+    std::atomic<int> good_bodies{0};
     std::vector<std::thread> threads;
     for (int i = 0; i < 4; ++i) {
-        threads.emplace_back([&locked, i] {
-            if (i % 2 == 0) {
-                CHECK(locked.get("http://x/", kTimeout).body == "body");
-            } else {
-                CHECK(locked.put_form("http://x/", "a=1", kTimeout).body == "body");
-            }
+        threads.emplace_back([&locked, &good_bodies, i] {
+            const auto r = (i % 2 == 0) ? locked.get("http://x/", kTimeout)
+                                        : locked.put_form("http://x/", "a=1", kTimeout);
+            if (r.body == "body") ++good_bodies;
         });
     }
     for (auto& t : threads) {
         t.join();
     }
+    CHECK(good_bodies.load() == 4);
     CHECK(fake.calls() == 4);
     CHECK(fake.max_in_flight() == 1);
     const auto requests = fake.requests();
