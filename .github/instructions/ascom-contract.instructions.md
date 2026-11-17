@@ -176,6 +176,14 @@ focuser (`same_action`), the iOptron and Celestron mounts' `gps_status`
 focusers' `SetZero` (`util::same_action_name`, `alpacacore/util/action_name.h`).
 A new driver with actions does the same.
 
+### The not-implemented answers are `AlpacaDriver`'s defaults (all drivers)
+
+`AlpacaDriver` (`alpacadriver.h`) defines `get_supported_actions()` (empty), `can_action()` (false),
+`action()` (`ActionNotImplemented` naming the action) and the three `command_*` (`MethodNotImplemented`,
+0x400) inline, issue #1757. A driver overrides one of them only to give it real behaviour (a vendor action, a
+`Command*` pass-through to its protocol), never to restate the default: a copied override was how the
+message and the error spelling drifted across 40 files.
+
 ### Camera ROI alignment (all camera vendors)
 
 Every camera SDK constrains ROI geometry, and the pattern is the same everywhere:
