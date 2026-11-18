@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -65,6 +66,9 @@ struct OnStepXController {
     std::string set_park_reply = "1";        // :hQ#; under mutex
     std::string unpark_reply = "1";          // :hR#; under mutex
     std::atomic<int> focuser_latency_ms{0};  // added to every focuser reply
+
+    // Command prefix -> reply, checked before every other reply; under mutex.
+    std::map<std::string, std::string> reply_overrides;
 
     int count(const std::string& prefix) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -116,8 +120,12 @@ struct OnStepXController {
         {
             std::lock_guard<std::mutex> lock(mutex);
             log.push_back(chunk);
-            if (chunk.size() >= 4 && chunk.rfind(":F", 0) == 0 && chunk[2] >= '1' && chunk[2] <= '9' &&
-                chunk.back() == '#') {
+            const auto override_it = std::find_if(reply_overrides.begin(), reply_overrides.end(),
+                                                  [&](const auto& o) { return chunk.rfind(o.first, 0) == 0; });
+            if (override_it != reply_overrides.end()) {
+                out = override_it->second;
+            } else if (chunk.size() >= 4 && chunk.rfind(":F", 0) == 0 && chunk[2] >= '1' && chunk[2] <= '9' &&
+                       chunk.back() == '#') {
                 focuser = true;
                 out = focuser_reply(chunk[2] - '0', chunk.substr(3, chunk.size() - 4));
             } else if (chunk.rfind(":GVP", 0) == 0) {

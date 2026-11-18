@@ -618,6 +618,158 @@ TEST_CASE("OnStep shared link - no other exchange lands between a focuser Move a
     focuser->set_connected(false);
 }
 
+// The other hold_sequence() sites, one case each (#2223 review): a refused command and its :GE# stay together on the
+// shared link. Each sets the refusal, runs the action a few times with a sibling exchange before every exchange, and
+// checks every :GE# follows the action's own command.
+// Falsified by: onstep_telescope_driver.cpp set_tracking() without its hold_sequence().
+TEST_CASE("OnStep shared link - no other exchange lands between a Tracking write and its :GE#",
+          "[onstep][focuser][shared-link]") {
+    Controller controller;
+    auto telescope = controller.telescope();
+    auto focuser = controller.focuser();
+    telescope->set_connected(true);
+    focuser->set_connected(true);
+    REQUIRE(telescope->get_connected());
+    REQUIRE(focuser->get_connected());
+    onstep::set_onstep_focuser_poll_paused_for_testing(*focuser, true);
+    onstep::set_status_poll_paused_for_testing(*telescope, true);
+    {
+        std::lock_guard<std::mutex> lock(controller.state->mutex);
+        controller.state->reply_overrides[":Te"] = "0#";  // OnStepX refuses :Te#
+        controller.state->ge_code = "05#";
+    }
+    constexpr int kTries = 5;
+    const auto log = run_with_a_sibling_at_every_exchange(controller, kTries, [&] {
+        try {
+            telescope->set_tracking(true);
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    });
+    CHECK(ge_pairs_after(log, ":Te#") == kTries);
+    telescope->set_connected(false);
+    focuser->set_connected(false);
+}
+
+// Falsified by: onstep_telescope_driver.cpp set_rate_offset() without its hold_sequence().
+TEST_CASE("OnStep shared link - no other exchange lands between a rate-offset write and its :GE#",
+          "[onstep][focuser][shared-link]") {
+    Controller controller;
+    auto telescope = controller.telescope();
+    auto focuser = controller.focuser();
+    telescope->set_connected(true);
+    focuser->set_connected(true);
+    REQUIRE(telescope->get_connected());
+    REQUIRE(focuser->get_connected());
+    onstep::set_onstep_focuser_poll_paused_for_testing(*focuser, true);
+    onstep::set_status_poll_paused_for_testing(*telescope, true);
+    {
+        std::lock_guard<std::mutex> lock(controller.state->mutex);
+        controller.state->reply_overrides[":SXTR"] = "0#";  // the RA offset write is refused
+        controller.state->ge_code = "05#";
+    }
+    constexpr int kTries = 5;
+    const auto log = run_with_a_sibling_at_every_exchange(controller, kTries, [&] {
+        try {
+            telescope->set_right_ascension_rate(1.0);
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    });
+    CHECK(ge_pairs_after(log, ":SXTR") == kTries);
+    telescope->set_connected(false);
+    focuser->set_connected(false);
+}
+
+// Falsified by: onstep_telescope_driver.cpp set_tracking_rate() without the hold_sequence() of its offset zeroing.
+TEST_CASE("OnStep shared link - no other exchange lands between a TrackingRate offset zeroing and its :GE#",
+          "[onstep][focuser][shared-link]") {
+    Controller controller;
+    auto telescope = controller.telescope();
+    auto focuser = controller.focuser();
+    telescope->set_connected(true);
+    focuser->set_connected(true);
+    REQUIRE(telescope->get_connected());
+    REQUIRE(focuser->get_connected());
+    onstep::set_onstep_focuser_poll_paused_for_testing(*focuser, true);
+    onstep::set_status_poll_paused_for_testing(*telescope, true);
+    telescope->set_right_ascension_rate(1.0);  // a non-zero offset, so a rate change zeroes it first
+    {
+        std::lock_guard<std::mutex> lock(controller.state->mutex);
+        controller.state->reply_overrides[":SXTR"] = "0#";  // the zeroing write is refused
+        controller.state->ge_code = "05#";
+    }
+    const auto before = controller.state->commands().size();
+    constexpr int kTries = 5;
+    const auto log = run_with_a_sibling_at_every_exchange(controller, kTries, [&] {
+        try {
+            telescope->set_tracking_rate(1);  // lunar: a change from the current rate
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    });
+    CHECK(ge_pairs_after(std::vector<std::string>(log.begin() + static_cast<std::ptrdiff_t>(before), log.end()),
+                         ":SXTR") == kTries);
+    telescope->set_connected(false);
+    focuser->set_connected(false);
+}
+
+// Falsified by: onstep_telescope_driver.cpp try_park_or_home_locked() without its hold_sequence().
+TEST_CASE("OnStep shared link - no other exchange lands between a Park and its :GE#",
+          "[onstep][focuser][shared-link]") {
+    Controller controller;
+    auto telescope = controller.telescope();
+    auto focuser = controller.focuser();
+    telescope->set_connected(true);
+    focuser->set_connected(true);
+    REQUIRE(telescope->get_connected());
+    REQUIRE(focuser->get_connected());
+    onstep::set_onstep_focuser_poll_paused_for_testing(*focuser, true);
+    onstep::set_status_poll_paused_for_testing(*telescope, true);
+    {
+        std::lock_guard<std::mutex> lock(controller.state->mutex);
+        controller.state->reply_overrides[":hP"] = "0#";  // refused, and not "in motion", so no retry
+        controller.state->ge_code = "05#";
+    }
+    constexpr int kTries = 5;
+    const auto log = run_with_a_sibling_at_every_exchange(controller, kTries, [&] {
+        try {
+            telescope->park();
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    });
+    CHECK(ge_pairs_after(log, ":hP#") == kTries);
+    telescope->set_connected(false);
+    focuser->set_connected(false);
+}
+
+// Falsified by: onstep_focuser_driver.cpp set_temp_comp() without its hold_sequence().
+TEST_CASE("OnStep shared link - no other exchange lands between a TempComp write and its :GE#",
+          "[onstep][focuser][shared-link]") {
+    Controller controller;
+    auto telescope = controller.telescope();
+    auto focuser = controller.focuser();
+    telescope->set_connected(true);
+    focuser->set_connected(true);
+    REQUIRE(telescope->get_connected());
+    REQUIRE(focuser->get_connected());
+    REQUIRE(focuser->get_temp_comp_available());
+    onstep::set_onstep_focuser_poll_paused_for_testing(*focuser, true);
+    onstep::set_status_poll_paused_for_testing(*telescope, true);
+    {
+        std::lock_guard<std::mutex> lock(controller.state->mutex);
+        controller.state->tcf_reply = "0#";  // refused
+        controller.state->ge_code = "09#";
+    }
+    constexpr int kTries = 5;
+    const auto log = run_with_a_sibling_at_every_exchange(controller, kTries, [&] {
+        try {
+            focuser->set_temp_comp(true);
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    });
+    CHECK(ge_pairs_after(log, ":F1c1#") == kTries);
+    telescope->set_connected(false);
+    focuser->set_connected(false);
+}
+
 // #2223 Testing Decisions: a focuser poll on the shared link never pushes a telescope pulse guide past its
 // kPulseGuideSettle / kPulseMeasureBound timing (onstep_telescope_driver.cpp): with focuser exchanges queued on the
 // wire throughout, IsPulseGuiding still reads true through the pulse and ends on the tick 50 ms after its end, which
