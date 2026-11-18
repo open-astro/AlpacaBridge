@@ -127,8 +127,8 @@ constexpr double kSlowModeFloorPad = 1.02;
 constexpr double kSolarDegPerSec = 15.0 / 3600.0;
 // ~800x sidereal, the classic Sky-Watcher maximum slew rate.
 constexpr double kMaxMoveAxisRateDegPerSec = 800.0 * kSiderealDegPerSec;
-// The Sky-Watcher argument limits and texts for the telescope command gate (#2258); the guide rate is 0 to 1x
-// sidereal on both axes.
+// The Sky-Watcher argument limits and texts for the telescope command gate (#2258); the guide rate is finite and 0
+// to 1x sidereal on both axes, checked before the connection (open-astro#1786).
 constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     util::TelescopeCommandLimits limits;
     limits.move_axis_axes = 2;
@@ -3066,7 +3066,6 @@ private:
         }
     }
 
-    // One axis of a guide-rate write: finite and 0 to 1x sidereal, checked before the connection (open-astro#1786).
     // open-astro#521: a Sky-Watcher axis keeps running until something tells it
     // to stop, so motion outlives the link that started it. On the way back in,
     // decide from the LENGTH of the outage rather than by a flat rule: a USB
