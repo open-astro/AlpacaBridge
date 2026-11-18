@@ -33,6 +33,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -1539,7 +1540,16 @@ TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for it
     driver->pulse_guide(2, 500);
 
     st->hold_tracking_write = true;
-    std::thread client([&] { driver->set_tracking(false); });
+    // The held write may finish or be ended by the disconnect's interrupt ("the link is closing", NotConnected); an
+    // exception escaping this thread would be std::terminate, so it is caught and judged after the join.
+    std::optional<int> client_error;
+    std::thread client([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const alpacacore::AlpacaException& ex) {
+            client_error = ex.error_code();
+        }
+    });
     REQUIRE(st->wait_tracking_write_held());
     clock.advance(std::chrono::milliseconds(600));
     clock.wait_for_woken_settled(std::chrono::milliseconds(300));
@@ -1547,6 +1557,7 @@ TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for it
     auto disconnected = std::async(std::launch::async, [&] { driver->set_connected(false); });
     st->release_tracking_write();
     client.join();
+    if (client_error) CHECK(*client_error == alpacacore::AlpacaError::NotConnected);
     REQUIRE(disconnected.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
     disconnected.get();
     CHECK_FALSE(driver->get_connected());

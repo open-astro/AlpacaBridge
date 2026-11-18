@@ -1133,6 +1133,26 @@ std::unique_ptr<alpacacore::CameraDriver> make_clocked_driver(alpacacore::test::
 
 }  // namespace
 
+// Issue #2292: a PulseGuide Duration had no upper bound; above kDefaultMaxPulseGuideMs it is InvalidValue, before any
+// pulse starts.
+TEST_CASE("Player One Camera Driver - a PulseGuide longer than the bound is InvalidValue and starts no pulse (#2292)",
+          "[playerone][camera][unit][issue2292]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_has_st4_port(true);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+    int code = 0;
+    try {
+        driver->pulse_guide(0, alpacacore::kDefaultMaxPulseGuideMs + 1);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(sdk.pulse_off_count() == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One Camera Driver - pulse guide timer waits on the task clock",
           "[playerone][camera][unit][taskclock]") {
     alpacacore::test::FakePlayerOneSDK sdk;

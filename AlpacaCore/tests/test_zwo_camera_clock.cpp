@@ -74,6 +74,25 @@ TEST_CASE("ZWO camera clock - first CCDTemperature retry sleeps on the task cloc
     CHECK(sdk.call_count("get_control_value") == connect_reads + 6);
 }
 
+// Issue #2292: a PulseGuide Duration had no upper bound; above kDefaultMaxPulseGuideMs it is InvalidValue, before any
+// pulse starts.
+TEST_CASE("ZWO camera - a PulseGuide longer than the bound is InvalidValue and starts no pulse (#2292)",
+          "[zwo][camera][unit][issue2292]") {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    int code = 0;
+    try {
+        camera->pulse_guide(0, alpacacore::kDefaultMaxPulseGuideMs + 1);
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(camera->get_is_pulse_guiding());
+    camera->set_connected(false);
+}
+
 TEST_CASE("ZWO camera clock - IsPulseGuiding ends at the task clock deadline", "[zwo][camera][unit][clock]") {
     FakeZWOSDK sdk;
     FakeTaskClock clock;

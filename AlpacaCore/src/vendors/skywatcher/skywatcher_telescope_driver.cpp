@@ -135,7 +135,8 @@ constexpr util::TelescopeCommandLimits kCommandLimits = [] {
     limits.move_axis_max_rate = kMaxMoveAxisRateDegPerSec;
     limits.guide_rate_ra_min = limits.guide_rate_dec_min = 0.0;
     limits.guide_rate_ra_max = limits.guide_rate_dec_max = kSiderealDegPerSec;
-    limits.texts.pulse_duration = "PulseGuide duration must be >= 0";
+    limits.pulse_guide_max_ms = kDefaultMaxPulseGuideMs;  // #2292: the motor controller sets no bound of its own
+    limits.texts.pulse_duration = "PulseGuide duration must be 0 to 60000 ms";
     limits.texts.move_axis_axis = "MoveAxis axis must be 0 or 1";
     limits.texts.guide_rate_range = "Guide rate must be between 0 and 1x sidereal";
     return limits;
