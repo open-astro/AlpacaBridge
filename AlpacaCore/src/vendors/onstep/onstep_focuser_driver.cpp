@@ -135,9 +135,7 @@ public:
     // Lock-free (decision 0016): the shared link is atomic, its liveness is a stat()/poll() with no wait, and the
     // poll's loss latch is atomic. A loss of the link, found by any device on it, reads here at once (decision 0009).
     bool get_connected() const override { return connected_.load() && link_up(); }
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connection_task_active(); }
+    ALPACA_ASYNC_CONNECT_FORWARDERS()
 
     void set_connected(bool connected) override {
         // Serializes whole transitions (the connect is a multi-exchange handshake, #528); no getter takes it.
