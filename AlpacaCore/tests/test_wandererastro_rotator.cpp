@@ -891,3 +891,28 @@ TEST_CASE("WandererRotator auto-detect names why it skips a raw node (#2212)", "
     CHECK_FALSE(raw_rotator_skip_reason(UsbTtyDescriptor{"1a86", "", "USB Serial"}).has_value());
     CHECK_FALSE(raw_rotator_skip_reason(UsbTtyDescriptor{"0000", "", "USB2.0-Serial CH340"}).has_value());
 }
+
+// Issue #2262: EBADF on the rotator's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper said "EBADF is not one": the command failed with DriverException "Serial write
+// failed" and Connected kept reading true over a dead fd.
+TEST_CASE("WandererAstro Rotator Driver - EBADF on a command write loses the link at once",
+          "[wandererastro][rotator][serial][unit][link-lost][issue2262]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    const std::string port = rotator.slave_path();
+    const auto before = alpacacore::test::fds_open_on(port);
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, port);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(port));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unusable(fd));
+
+    // Idle: nothing reads the port, so the next command is the one that meets the dead fd.
+    require_alpaca_error([&]() { driver->set_reverse(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 9)");
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(port));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // decision 0009 rule 5
+}
