@@ -151,7 +151,7 @@ standalone `OnStepProtocolWrapper` and calls `connect()`/`disconnect()` on it, a
   holds keeps its place without a probe, so the focuser lands on the telescope's link. Fake evidence only: no
   OnStepX focuser on a rig; the ConformU Focuser check is tracked in the OnStep test plan, #2126. Tests:
   `test_onstep_focuser.cpp` (`[shared-link]`), the `[onstep][focuser][stress]` cases in
-  `test_onstep_concurrency_stress.cpp` (over `onstep_controller.h`), the contract sweep entry `onstep_focuser`.
+  `test_onstep_concurrency_stress.cpp` (over `onstep_controller.h`, whose controller model is `onstep_controller_model.h`, also the fake ConformU host of the focuser, #2078), the contract sweep entry `onstep_focuser`.
 
 #### Rotator (#2221)
 
