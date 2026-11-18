@@ -10,6 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/logging.h>
 #include <alpacahttp/wifi_manager.h>
 #include <unistd.h>
 
@@ -22,6 +23,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -617,6 +619,41 @@ int main() {
         std::swap(ap_first.adapters[0], ap_first.adapters[1]);
         const auto builtin = alpacahttp::util::detail::apply_client_preference(ap_first, kBuiltinMac, note);
         EXPECT(builtin.client_if == "wlan0" && note.empty());
+    }
+
+    {
+        // case: an absent preferred adapter is logged once at INFO, not on every lookup (#856)
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        std::vector<std::pair<alpacacore::logging::LogLevel, std::string>> captured;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                captured.emplace_back(level, std::string(message));
+            });
+        TemporaryDirectory dir;
+        { std::ofstream(dir.path() + "/wifi_client_adapter") << "cc:cc:cc:cc:cc:03\n"; }
+        FakeWifiProfileBackend backend;
+        backend.roles = dual_radio_roles();
+        WifiManager manager(dir.path(), backend);
+        manager.save_profile("Home", "", true, 0);
+        manager.save_profile("Cabin", "", true, 0);
+        int info_notes = 0;
+        for (const auto& [level, message] : captured) {
+            if (message.find("cc:cc:cc:cc:cc:03") == std::string::npos) continue;
+            EXPECT(level == alpacacore::logging::LogLevel::Info);
+            ++info_notes;
+        }
+        EXPECT(info_notes == 1);
+        for (const auto& [level, message] : captured) {
+            EXPECT(level != alpacacore::logging::LogLevel::Warn && level != alpacacore::logging::LogLevel::Error);
+        }
     }
 
     {
