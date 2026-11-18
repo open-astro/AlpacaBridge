@@ -124,7 +124,10 @@ standalone `OnStepProtocolWrapper` and calls `connect()`/`disconnect()` on it, a
   are sent: never `:FA<n>#` (the handset and the OnStepX web page use the active focuser) and never the bare rate
   preset `:F<d>#`. Getters serve a `util::PolledState` frame (500 ms, three failed polls latch a fault, a fault or
   frame standing past `util::kLinkStalenessBound` loses the link for every device; decisions 0009, 0010, 0016):
-  `:F<n>T#` and `:F<n>g#` every poll, `:F<n>t#` and `:F<n>c#` every fourth. `Move` clamps to `0..MaxStep`
+  `:F<n>T#` and `:F<n>g#` every poll, `:F<n>t#` and `:F<n>c#` every fourth. A stale frame is served as it is
+  (decision 0010 rule 6): Position and IsMoving keep the last poll's value, TempComp the last `:F<n>c#` answer
+  and Temperature the last `:F<n>t#` reading; only a fault (DriverException) or a lost link (NotConnected)
+  refuses them. `Move` clamps to `0..MaxStep`
   (the shared #2028 rule, not the `InvalidValue` #2214 first wrote) and sends `:F<n>s<p + min>#` on the caller's
   thread: one exchange answered at once, so a refusal throws from `Move` itself, and the motion is followed by the
   poll (whose slot is the `AsyncOperation`); IsMoving is written through. `Halt` sends `:F<n>Q#` and writes

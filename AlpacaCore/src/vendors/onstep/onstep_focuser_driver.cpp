@@ -291,6 +291,10 @@ public:
 
     void move(int position) override {
         ensure_connected();
+        (void)served_frame();  // refused while the link is faulted or lost
+        std::lock_guard<std::mutex> io(io_mutex_);
+        // The travel is read under io_mutex_, which a Disconnect+Connect holds, so the goto uses this connect's limits
+        // (decision 0016 rule 6), not a previous connect's.
         int max_step = 0;
         long min_position = 0;
         {
@@ -299,11 +303,8 @@ public:
             min_position = min_position_;
         }
         // A target outside 0..MaxStep goes to that limit: ConformU moves below 0 and above MaxStep and expects the
-        // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, #2028). Pure arithmetic, so a
-        // faulted link is still refused below with the fault text.
+        // focuser to stop there, not an InvalidValue (ascom-contract.instructions.md, #2028).
         position = std::clamp(position, 0, max_step);
-        (void)served_frame();  // refused while the link is faulted or lost
-        std::lock_guard<std::mutex> io(io_mutex_);
         const auto link = live_link();
         bool accepted = false;
         int code = -1;
