@@ -245,6 +245,19 @@ inline bool make_fd_unwritable(int fd) {
     return ok;
 }
 
+/// Make @p fd unusable for reads and writes alike while keeping its number valid: an O_PATH descriptor takes its
+/// place, so the owner's next read() and write() both fail with EBADF (a poll() reports it ready, then the call
+/// fails). For an owner with a reader thread, which make_fd_unwritable() would hand an end-of-file (an EIO) before
+/// its own write met the EBADF (issue #2262). TIOCEXCL is released first, as there.
+inline bool make_fd_unusable(int fd) {
+    (void)::ioctl(fd, TIOCNXCL);
+    const int path_only = ::open("/dev/null", O_PATH | O_CLOEXEC);
+    if (path_only < 0) return false;
+    const bool ok = ::dup2(path_only, fd) == fd;
+    ::close(path_only);
+    return ok;
+}
+
 inline std::size_t pty_write_bounded(int fd, const std::string& data, const std::atomic<bool>& stop,
                                      std::chrono::milliseconds budget = std::chrono::milliseconds(250)) {
     return pty_write_bounded(fd, data.data(), data.size(), stop, budget);

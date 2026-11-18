@@ -1075,3 +1075,27 @@ TEST_CASE("Gemini PDH Switch - a reply naming another product is refused (#2204)
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
 }
+
+// Issue #2262: EBADF on the hub's own fd is a lost link, as on every serial vendor (the shared util::SerialLink
+// verdict). Before #2262 the wrapper's comment said "EBADF is not one": the reader backed off and retried for ever,
+// a set command failed with DriverException "Serial write failed", and Connected kept reading true.
+TEST_CASE("Gemini PDH Switch Driver - EBADF on the hub's fd loses the link with the errno",
+          "[gemini][switch][unit][fake][link-lost][issue2262]") {
+    FakeGeminiPdh hub;
+    const std::string port = hub.slave_path();
+    const auto before = alpacacore::test::fds_open_on(port);
+    auto driver = connect_fake_hub(hub);
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(port));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unusable(fd));  // the reader's read and a command's write both meet EBADF
+
+    CHECK(wait_until([&] { return !driver->get_connected(); }, std::chrono::milliseconds(1500)));
+    require_alpaca_error([&]() { driver->set_switch(1, true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_switch_value(0); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_device_state().empty());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    CHECK(driver->get_link_fault() == "Serial link lost (errno 9)");
+    CHECK(wait_until([&] { return !alpacacore::util::is_serial_port_in_use(port); }, std::chrono::milliseconds(1000)));
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK(driver->get_link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
+}

@@ -894,3 +894,40 @@ TEST_CASE("Gemini Flat Panel Driver - a Disconnect during a connect returns at o
     CHECK_FALSE(driver->get_connecting());
     CHECK_FALSE(driver->get_connected());
 }
+
+// Issue #2262: EBADF on the panel's own fd is a lost link, as on every serial vendor (the shared
+// util::SerialLink verdict). Before #2262 this wrapper's comment said "EBADF is not one": the write failed with
+// DriverException "Write failed", link_alive() stayed true and Connected kept reading true over a dead fd.
+TEST_CASE("Gemini flat panel protocol wrapper - EBADF on a command write is a lost link with the errno",
+          "[gemini][flatpanel][unit][link-lost][issue2262]") {
+    FakeGeminiFlatPanel panel;
+    alpacacore::vendor::gemini::GeminiFlatPanelProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::FlatPanelConnectionConfig config;
+    config.serial_port = panel.slave_path();
+    const auto before = alpacacore::test::fds_open_on(panel.slave_path());
+    wrapper.connect(config);
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(panel.slave_path()));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    std::string what;
+    require_alpaca_error(
+        [&]() {
+            try {
+                (void)wrapper.get_light_on();
+            } catch (const alpacacore::AlpacaException& ex) {
+                what = ex.what();
+                throw;
+            }
+        },
+        kNotConnected);
+    CHECK(what == "Serial link lost (errno 9)");
+    CHECK_FALSE(wrapper.link_alive());
+    CHECK(wrapper.link_fault() == "Serial link lost (errno 9)");
+    // The port was released at the loss (the fd number now names nothing of ours); the reason stays.
+    CHECK(alpacacore::test::fds_open_on(panel.slave_path()) == before);
+
+    wrapper.disconnect();
+    CHECK(wrapper.link_alive());
+    CHECK(wrapper.link_fault().empty());  // decision 0009 rule 5: a Disconnect clears the reason
+}
