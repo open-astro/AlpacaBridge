@@ -11586,6 +11586,13 @@ int main() {
         const auto json = nlohmann::json::parse(refused.body(), nullptr, false);
         EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
         EXPECT(!get_connected_value(router, base, "257"));
+        // The Platform 7 connect registers the same way and is refused the same way.
+        const auto refused_connect = route_request(router, "PUT", base + "/connect", "ClientID=257");
+        const auto connect_json = nlohmann::json::parse(refused_connect.body(), nullptr, false);
+        EXPECT(!connect_json.is_discarded() && connect_json.value("ErrorNumber", 0) == 0x40B);
+        EXPECT(!get_connected_value(router, base, "257"));
+        // The refusal leaves the driver as the 256 clients left it.
+        EXPECT(stub->get_connected());
         put_connected(router, base, "1", true);  // a registered client still refreshes
         put_connected(router, base, "1", false);
         put_connected(router, base, "257", true);  // a slot left, so the newcomer gets it
