@@ -18,6 +18,7 @@
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
+#include <alpacacore/util/sexagesimal.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -120,133 +121,14 @@ constexpr std::chrono::milliseconds kDrainCap{2000};
 // The probe keeps at most 31 bytes before the '#' (a '#' as the 31st byte still ends it).
 constexpr std::size_t kProbeReplyMax = 31;
 
-// Parse a generic sexagesimal LX200 field ("HH:MM:SS", "HH:MM.T", "sDD*MM:SS",
-// "sDD*MM", "sHH.H", ...) into a decimal value. Any run of non-digit,
-// non-decimal-point characters is treated as a field separator, so this
-// single parser covers RA, Dec, latitude, longitude, sidereal time and UTC
-// offset responses without per-field grammars.
-std::optional<double> parse_sexagesimal(const std::string& raw) {
-    std::string s = raw;
-    while (!s.empty() && (s.back() == '#' || s.back() == '\r' || s.back() == '\n')) {
-        s.pop_back();
-    }
-    if (s.empty()) {
-        return std::nullopt;
-    }
+// The LX200 reply parse and the wire text are util/sexagesimal.h's (#1757).
+using util::parse_sexagesimal;
 
-    bool negative = false;
-    std::size_t start = 0;
-    if (s[0] == '+') {
-        start = 1;
-    } else if (s[0] == '-') {
-        negative = true;
-        start = 1;
-    }
+std::string format_target_ra(double hours) { return ":Sr" + util::format_hms(hours) + "#"; }
 
-    std::vector<double> parts;
-    std::string current;
-    auto flush_current = [&]() -> bool {
-        if (current.empty()) {
-            return true;
-        }
-        try {
-            parts.push_back(std::stod(current));
-        } catch (const std::exception&) {
-            return false;
-        }
-        current.clear();
-        return true;
-    };
+std::string format_target_dec(double degrees) { return ":Sd" + util::format_dms(degrees, 2, '*') + "#"; }
 
-    for (std::size_t i = start; i <= s.size(); ++i) {
-        char c = (i < s.size()) ? s[i] : '\0';
-        if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') {
-            current.push_back(c);
-        } else {
-            if (!flush_current()) {
-                return std::nullopt;
-            }
-        }
-    }
-
-    if (parts.empty()) {
-        return std::nullopt;
-    }
-
-    double value = parts[0];
-    if (parts.size() > 1) {
-        value += parts[1] / 60.0;
-    }
-    if (parts.size() > 2) {
-        value += parts[2] / 3600.0;
-    }
-    if (negative) {
-        value = -value;
-    }
-    return value;
-}
-
-std::string format_target_ra(double hours) {
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped < 0.0) {
-        wrapped += 24.0;
-    }
-    int h = static_cast<int>(wrapped);
-    double rem_min = (wrapped - h) * 60.0;
-    int m = static_cast<int>(rem_min);
-    int s = static_cast<int>(std::lround((rem_min - m) * 60.0));
-    if (s >= 60) {
-        s = 0;
-        ++m;
-    }
-    if (m >= 60) {
-        m = 0;
-        ++h;
-        if (h >= 24) {
-            h = 0;
-        }
-    }
-    // h/m/s are runtime-bounded to [0,24)/[0,60)/[0,60) above, but GCC's
-    // format-truncation checker can't prove that from an `int` parameter —
-    // size the buffer for the worst case %d could ever produce.
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), ":Sr%02d:%02d:%02d#", h, m, s);
-    return buf;
-}
-
-std::string format_target_dec(double degrees) {
-    char sign = degrees < 0.0 ? '-' : '+';
-    double abs_deg = std::abs(degrees);
-    int d = static_cast<int>(abs_deg);
-    double rem_min = (abs_deg - d) * 60.0;
-    int m = static_cast<int>(rem_min);
-    int s = static_cast<int>(std::lround((rem_min - m) * 60.0));
-    if (s >= 60) {
-        s = 0;
-        ++m;
-    }
-    if (m >= 60) {
-        m = 0;
-        ++d;
-    }
-    char buf[48];  // see format_target_ra() for why this isn't sized to the runtime bound
-    std::snprintf(buf, sizeof(buf), ":Sd%c%02d*%02d:%02d#", sign, d, m, s);
-    return buf;
-}
-
-std::string format_latitude(double latitude_degrees) {
-    char sign = latitude_degrees < 0.0 ? '-' : '+';
-    double abs_lat = std::abs(latitude_degrees);
-    int d = static_cast<int>(abs_lat);
-    int m = static_cast<int>(std::lround((abs_lat - d) * 60.0));
-    if (m >= 60) {
-        m = 0;
-        ++d;
-    }
-    char buf[48];  // see format_target_ra() for why this isn't sized to the runtime bound
-    std::snprintf(buf, sizeof(buf), ":St%c%02d*%02d#", sign, d, m);
-    return buf;
-}
+std::string format_latitude(double latitude_degrees) { return ":St" + util::format_dm(latitude_degrees, 2, '*') + "#"; }
 
 // :Sg#'s parser accepts a signed value literally (no conversion), but the
 // firmware's OWN sidereal-time formula (which drives :GS# and therefore
@@ -258,18 +140,7 @@ std::string format_latitude(double latitude_degrees) {
 // value to within a second. get_site_info() negates back on read so this
 // wrapper's public API stays in ASCOM's East-positive convention throughout.
 std::string format_longitude(double longitude_degrees) {
-    const double wire_longitude_degrees = -longitude_degrees;
-    char sign = wire_longitude_degrees < 0.0 ? '-' : '+';
-    double abs_lon = std::abs(wire_longitude_degrees);
-    int d = static_cast<int>(abs_lon);
-    int m = static_cast<int>(std::lround((abs_lon - d) * 60.0));
-    if (m >= 60) {
-        m = 0;
-        ++d;
-    }
-    char buf[48];  // see format_target_ra() for why this isn't sized to the runtime bound
-    std::snprintf(buf, sizeof(buf), ":Sg%c%03d*%02d#", sign, d, m);
-    return buf;
+    return ":Sg" + util::format_dm(-longitude_degrees, 3, '*') + "#";
 }
 
 // A whole number with an optional sign and nothing else (a reply like "60", "-5", "+10"), or nullopt.
