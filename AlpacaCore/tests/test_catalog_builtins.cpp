@@ -4036,12 +4036,14 @@ DeviceConfig remote_config(const std::string& host, std::int64_t port) {
     return config;
 }
 
+#ifdef ALPACACORE_ENABLE_REMOTEALPACA
 // This server on port 6800, bound to every address.
 BindContext listening_on_6800() {
     BindContext context{Source::Api, {}};
     context.listen_addresses = [] { return std::vector<ListenAddress>{{"0.0.0.0", 6800}, {"::", 6800}}; };
     return context;
 }
+#endif
 
 }  // namespace
 
