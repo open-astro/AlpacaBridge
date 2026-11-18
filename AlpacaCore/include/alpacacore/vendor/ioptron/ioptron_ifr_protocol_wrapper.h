@@ -90,6 +90,11 @@ struct IfrPortInfo {
 /// so the focuser and the rotator of one unit land on the same port.
 std::vector<IfrPortInfo> enumerate_ifr_ports();
 
+/// The USB descriptor tokens of a iFR focuser-rotator adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& ifr_usb_tokens();
+
 /// One port's probe: :DeviceInfo# under a probe claim. True, with @p info filled, unless ifr_refuses_model() refuses
 /// the code.
 bool probe_ifr_port(const std::string& port_path, IfrDeviceInfo& info);

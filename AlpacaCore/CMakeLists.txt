@@ -94,6 +94,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/thermal_camera_choice.cpp
     src/catalog/device_config.cpp
     src/catalog/device_catalog.cpp
+    src/catalog/attached_devices.cpp
 )
 
 # Management sources
@@ -114,6 +115,16 @@ target_include_directories(alpacacore PUBLIC
 
 # Create namespace alias for consistent target naming
 add_library(AlpacaCore::alpacacore ALIAS alpacacore)
+
+# The libcurl implementation of util::HttpClient, the one outbound HTTP seam a
+# vendor uses (decision 0023, issue #1753). Its own library so alpacacore keeps
+# no curl dependency: only a vendor that speaks HTTP (WeeWX) links it. Built
+# whenever libcurl is found; a vendor that needs it requires it.
+find_package(CURL QUIET)
+if(CURL_FOUND)
+    add_library(alpacacore_http_client STATIC src/core/util/http_client.cpp)
+    target_link_libraries(alpacacore_http_client PUBLIC alpacacore PRIVATE CURL::libcurl)
+endif()
 
 # Built-in descriptor composition (open-astro#710): which vendor descriptors this
 # build registers. Kept out of alpacacore so the core links no vendor library and
@@ -360,6 +371,15 @@ install(TARGETS alpacacore_builtins
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
 )
+
+if(TARGET alpacacore_http_client)
+    install(TARGETS alpacacore_http_client
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
 
 # Install vendor libraries if they exist
 if(ALPACACORE_ENABLE_ZWO AND TARGET alpacacore_zwo)

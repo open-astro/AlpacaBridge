@@ -93,6 +93,11 @@ struct RotatorState {
  */
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports();
 
+/// The USB descriptor tokens of a Wanderer rotator adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& wanderer_rotator_usb_tokens();
+
 /// Test seam: probes exactly these paths instead of scanning the host.
 std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports(const std::vector<std::string>& candidate_paths);
 

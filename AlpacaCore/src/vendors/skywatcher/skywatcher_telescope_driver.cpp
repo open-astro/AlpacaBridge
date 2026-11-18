@@ -781,18 +781,6 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-
-    std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
-    }
-
-    bool can_action(std::string_view action_name) const override {
-        (void)action_name;
-        return false;
-    }
-
     std::string command_blind(std::string_view command, bool raw) override {
         (void)raw;
         StateLock lock(lock_gate_);
@@ -940,6 +928,9 @@ public:
     // bench-disproven (axis tracks 5-320 as/s within 0.2%; no ":I" read
     // glitches) — both were artifacts of the pre-#216 refinement-goto races.
     void set_declination_rate(double rate) override {
+        if (!std::isfinite(rate)) {  // #2287: the argument check runs first; NaN was stored and applied
+            throw AlpacaException("DeclinationRate must be finite", AlpacaError::InvalidValue);
+        }
         {
             // Idempotence check BEFORE reaping: a same-value rewrite must not
             // tear down a running duty worker it would never restart.
@@ -1153,6 +1144,9 @@ public:
     // (RA = LST - HA), so the offset is SUBTRACTED; a large offset reverses
     // the axis, which needs a stop-and-restart (":I" cannot change direction).
     void set_right_ascension_rate(double rate) override {
+        if (!std::isfinite(rate)) {  // #2287: the argument check runs first; NaN was stored and applied
+            throw AlpacaException("RightAscensionRate must be finite", AlpacaError::InvalidValue);
+        }
         StateLock lock(lock_gate_);
         check_writable_locked();
         require_site_locked();  // the RA drive direction reads the hemisphere
@@ -1479,11 +1473,11 @@ public:
     }
 
     void set_tracking_rate(int rate) override {
-        StateLock lock(lock_gate_);
-        check_writable_locked();
-        if (rate < 0 || rate > 2) {
+        if (rate < 0 || rate > 2) {  // #2287: the argument check runs first
             throw AlpacaException("Unsupported tracking rate", AlpacaError::InvalidValue);
         }
+        StateLock lock(lock_gate_);
+        check_writable_locked();
         double previous = effective_ra_rate_locked();
         tracking_rate_ = rate;
         // ASCOM contract: changing the drive rate zeroes the rate offsets.
@@ -2504,13 +2498,13 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");  // #2287: the argument check runs first
         {
             // A refused sync must not cancel a pulse in flight (open-astro#630),
             // so gate BEFORE reaping (the copies below re-check after it).
             StateLock gate(lock_gate_);
             check_writable_locked();
             check_not_parked_locked("SyncToCoordinates");
-            util::validate_ra_dec(ra, dec, "SyncToCoordinates");
             require_site_locked();
             refuse_sync_during_move_axis_locked();
         }
@@ -2518,7 +2512,6 @@ public:
         StateLock lock(lock_gate_);
         check_writable_locked();
         check_not_parked_locked("SyncToCoordinates");
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         refuse_sync_during_move_axis_locked();
 
         const Wire protocol = wire();

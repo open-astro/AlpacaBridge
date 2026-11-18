@@ -26,9 +26,11 @@ set(TEST_SOURCES
     test_driver_rig.cpp
     test_async_connectable.cpp
     test_device_catalog.cpp
+    test_attached_devices.cpp
     test_catalog_builtins.cpp
     test_device_registry.cpp
     test_device_state.cpp
+    test_alpacadriver_defaults.cpp
     test_error_handling.cpp
     test_fake_pty_write.cpp
     test_host_clock.cpp
@@ -53,6 +55,7 @@ set(TEST_SOURCES
     test_utc_offset.cpp
     test_hold_window.cpp
     test_pointing_math.cpp
+    test_telescope_command_gate.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
     test_lock_gate.cpp
@@ -62,6 +65,7 @@ set(TEST_SOURCES
     test_serial_link.cpp
     test_serial_read.cpp
     test_mount_read_until_hangup.cpp
+    test_nexstar_frame.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
     test_telescope_driver_watchdog.cpp
@@ -222,8 +226,13 @@ if(TARGET alpacacore_onstep)
     # The OnStepX focuser and the controller's shared link, with its [stress] case (issue #2223).
     list(APPEND TEST_SOURCES test_onstep_focuser.cpp)
 endif()
+if(TARGET alpacacore_http_client)
+    # The util::HttpClient libcurl implementation against a loopback server, and its
+    # test-only locked decorator (decision 0023, issue #1753).
+    list(APPEND TEST_SOURCES test_http_client.cpp)
+endif()
 if(TARGET alpacacore_weewx)
-    # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
+    # ObservingConditions [stress] coverage over the scripted HTTP client, #271, #1070, #1753.
     list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp test_weewx_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_gemini)
@@ -364,6 +373,9 @@ endif()
 if(TARGET alpacacore_onstep)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_onstep)
     target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ONSTEP)
+endif()
+if(TARGET alpacacore_http_client)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_http_client)
 endif()
 if(TARGET alpacacore_weewx)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_weewx)

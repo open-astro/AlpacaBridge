@@ -38,7 +38,6 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
-#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -168,8 +167,7 @@ std::string probe_synscan_port(const std::string& port_path) {
 bool raw_port_looks_like_synscan_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "USB_Serial", "USB-Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, synscan_usb_tokens());
 }
 
 // Issue #1202: whether the scan may probe @p resolved. A port another
@@ -306,55 +304,9 @@ int parse_hex_pair(std::string_view value, std::size_t offset) {
     return result;
 }
 
-int parse_mode_byte(const std::string& response) {
-    if (response.empty()) {
-        return 0;
-    }
-    unsigned char ch = static_cast<unsigned char>(response[0]);
-    if (ch >= static_cast<unsigned char>('0') && ch <= static_cast<unsigned char>('9')) {
-        return static_cast<int>(ch - static_cast<unsigned char>('0'));
-    }
-    return static_cast<int>(ch);
-}
-
 using util::build_hex;
-using util::leading_hex;
-using util::trailing_hex;
-
-std::optional<std::pair<uint32_t, uint32_t>> parse_axis_pair_response(const std::string& response,
-                                                                       bool precise) {
-    const std::size_t expected_digits = precise ? 6 : 4;
-    auto comma = response.find(',');
-    if (comma == std::string::npos) {
-        return std::nullopt;
-    }
-
-    std::string left = trailing_hex(response.substr(0, comma));
-    std::string right = leading_hex(response.substr(comma + 1));
-    if (left.size() < expected_digits || right.size() < expected_digits) {
-        return std::nullopt;
-    }
-
-    // A precise field is eight digits, the position in the upper six and two
-    // ignored ones (issue #785): keep the field's last eight, then their first six.
-    const std::size_t field_digits = precise ? 8 : 4;
-    if (left.size() > field_digits) {
-        left = left.substr(left.size() - field_digits);
-    }
-    left.resize(expected_digits);
-    right.resize(expected_digits);
-
-    uint32_t first_raw = 0;
-    uint32_t second_raw = 0;
-    std::istringstream first_iss(left);
-    std::istringstream second_iss(right);
-    first_iss >> std::hex >> first_raw;
-    second_iss >> std::hex >> second_raw;
-    if (first_iss.fail() || second_iss.fail()) {
-        return std::nullopt;
-    }
-    return std::make_pair(first_raw, second_raw);
-}
+using util::parse_axis_pair_response;
+using util::parse_mode_byte;
 
 } // namespace
 
@@ -823,33 +775,8 @@ public:
     }
 
     void set_location(const LocationInfo& info) {
-        double lat = info.latitude_degrees;
-        double lon = info.longitude_degrees;
-
-        int lat_sign = lat < 0.0 ? 1 : 0;
-        int lon_sign = lon < 0.0 ? 1 : 0;
-        lat = std::abs(lat);
-        lon = std::abs(lon);
-
-        int lat_deg = static_cast<int>(lat);
-        int lat_min = static_cast<int>((lat - lat_deg) * 60.0);
-        int lat_sec = static_cast<int>((lat - lat_deg - lat_min / 60.0) * 3600.0);
-        int lon_deg = static_cast<int>(lon);
-        int lon_min = static_cast<int>((lon - lon_deg) * 60.0);
-        int lon_sec = static_cast<int>((lon - lon_deg - lon_min / 60.0) * 3600.0);
-
-        std::string cmd;
-        cmd.reserve(1 + 8);
-        cmd.push_back('W');
-        cmd.push_back(static_cast<char>(lat_deg));
-        cmd.push_back(static_cast<char>(lat_min));
-        cmd.push_back(static_cast<char>(lat_sec));
-        cmd.push_back(static_cast<char>(lat_sign));
-        cmd.push_back(static_cast<char>(lon_deg));
-        cmd.push_back(static_cast<char>(lon_min));
-        cmd.push_back(static_cast<char>(lon_sec));
-        cmd.push_back(static_cast<char>(lon_sign));
-        (void)send_command(cmd, true, 0);
+        // NexStar "W" (uppercase) sets the location: util::location_command() (nexstar_frame.h).
+        (void)send_command(util::location_command(info.latitude_degrees, info.longitude_degrees), true, 0);
     }
 
     TimeInfo get_time() {
@@ -1456,6 +1383,12 @@ TimeInfo SynScanProtocolWrapper::get_time() {
 
 void SynScanProtocolWrapper::set_time(const TimeInfo& info) {
     pimpl_->set_time(info);
+}
+
+const std::vector<std::string>& synscan_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",     "067b",      "FTDI",
+                                                 "CP210",    "USB_Serial", "USB-Serial"};
+    return tokens;
 }
 
 } // namespace alpacacore::vendor::synscan

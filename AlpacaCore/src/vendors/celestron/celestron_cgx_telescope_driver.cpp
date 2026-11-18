@@ -174,9 +174,7 @@ public:
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
     bool get_connecting() const override { return connection_task_active(); }
-    std::vector<std::string> get_supported_actions() const override { return {}; }
     std::string action(std::string_view, std::string_view) override;
-    bool can_action(std::string_view) const override { return false; }
     std::string command_blind(std::string_view, bool) override;
     bool command_bool(std::string_view, bool) override;
     std::string command_string(std::string_view, bool) override;

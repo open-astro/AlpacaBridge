@@ -26,12 +26,6 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/util/serial_io.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -49,6 +43,7 @@
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "loopback_http_server.h"
 
 using namespace alpacacore;
 using namespace alpacacore::catalog;
@@ -662,85 +657,21 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the Player One dev
 
 namespace {
 
-// A loopback HTTP endpoint the WeeWX driver can be pointed at. Answering, it
-// serves a minimal current-conditions payload to every request; silent, it
-// accepts each connection and never answers, so the client's own timeout ends
-// the request. `requests()` counts connections accepted. `padding` spaces go
-// inside the JSON body (still valid JSON); without `declare_length` the reply
-// carries no Content-Length and the body ends when the connection closes.
-class LoopbackWeeWx {
+// A loopback HTTP endpoint the WeeWX driver can be pointed at, on the shared test server (issue #1753). Answering,
+// it serves a minimal current-conditions payload to every request; silent, it accepts each connection and never
+// answers, so the client's own timeout ends the request. `requests()` counts connections accepted. `padding` spaces
+// go inside the JSON body (still valid JSON); without `declare_length` the reply carries no Content-Length and the
+// body ends when the connection closes.
+class LoopbackWeeWx : public alpacacore::test::LoopbackHttpServer {
 public:
-    explicit LoopbackWeeWx(bool answer, std::size_t padding = 0, bool declare_length = true)
-        : answer_(answer), padding_(padding), declare_length_(declare_length) {
-        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        REQUIRE(listen_fd_ >= 0);
-        // Non-blocking, so a connection reset between poll() and accept()
-        // makes accept() fail with EAGAIN instead of blocking serve() and the
-        // destructor's join. An accepted fd does not inherit the flag on Linux.
-        REQUIRE(alpacacore::util::set_nonblocking(listen_fd_));
-        const int one = 1;
-        ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = 0;
-        REQUIRE(::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-        REQUIRE(::listen(listen_fd_, 8) == 0);
-        socklen_t len = sizeof(addr);
-        REQUIRE(::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
-        port_ = ntohs(addr.sin_port);
-        thread_ = std::thread([this] { serve(); });
-    }
-    ~LoopbackWeeWx() {
-        stop_ = true;
-        thread_.join();
-        for (const int fd : held_) ::close(fd);
-        ::close(listen_fd_);
-    }
-    LoopbackWeeWx(const LoopbackWeeWx&) = delete;
-    LoopbackWeeWx& operator=(const LoopbackWeeWx&) = delete;
-
-    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/current.json"; }
-    int requests() const { return requests_.load(); }
-
-private:
-    void serve() {
-        while (!stop_) {
-            pollfd pfd{listen_fd_, POLLIN, 0};
-            if (::poll(&pfd, 1, 20) <= 0) continue;
-            const int fd = ::accept(listen_fd_, nullptr, nullptr);
-            if (fd < 0) continue;
-            ++requests_;
-            if (!answer_) {
-                held_.push_back(fd);
-                continue;
-            }
-            std::string request;
-            char buf[1024];
-            while (request.find("\r\n\r\n") == std::string::npos) {
-                const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
-                if (n <= 0) break;
-                request.append(buf, static_cast<std::size_t>(n));
-            }
-            const std::string body =
-                "{" + std::string(padding_, ' ') + R"("lcd_datasheet":{"current":{"outTemp":{"value":50.0}}}})";
-            std::string reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n";
-            if (declare_length_) reply += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-            reply += "Connection: close\r\n\r\n" + body;
-            (void)::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL);
-            ::close(fd);
+    explicit LoopbackWeeWx(bool answer, std::size_t padding = 0, bool declare_length = true) {
+        set_body("{" + std::string(padding, ' ') + R"("lcd_datasheet":{"current":{"outTemp":{"value":50.0}}}})");
+        set_declare_length(declare_length);
+        if (!answer) {
+            set_mode(Mode::Stall);
         }
     }
-
-    bool answer_;
-    std::size_t padding_;
-    bool declare_length_;
-    int listen_fd_ = -1;
-    int port_ = 0;
-    std::atomic<bool> stop_{false};
-    std::atomic<int> requests_{0};
-    std::vector<int> held_;  // serve() thread only, until the join
-    std::thread thread_;
+    std::string url() const { return LoopbackHttpServer::url("/current.json"); }
 };
 
 std::string create_refusal(const DeviceCatalog& catalog, const DeviceConfig& config) {

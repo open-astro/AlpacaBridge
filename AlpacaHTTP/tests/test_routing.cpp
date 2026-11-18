@@ -63,6 +63,7 @@
 #include <tuple>
 #include <vector>
 
+#include "fake_usb_serial_tree.h"
 #include "route_table_stubs.h"
 #include "test_assert.h"
 #include "test_catalog_descriptor.h"
@@ -9230,6 +9231,152 @@ int main() {
             route_request(router, "GET", "/management/v1/attachedcameras?vendor=zzz").body(), nullptr, false);
         EXPECT(!thrown.is_discarded() && thrown.value("ErrorNumber", 0) != 0);
         EXPECT(thrown.value("ErrorMessage", "").find("SDK listing failed") != std::string::npos);
+    }
+
+    // GET /management/v1/attacheddevices (#2312): every detected serial, HID and
+    // camera device with the catalog entries it could be, over a fake tree.
+    {
+        // case: attacheddevices lists a fake port with its candidates, the configured marker and a lister error
+        using alpacacore::catalog::FieldRef;
+        using alpacacore::catalog::Role;
+        static const std::vector<FieldRef> serial_fields = [] {
+            FieldRef connection;
+            connection.key = "connectionType";
+            connection.role = Role::Discriminator;
+            connection.default_value = std::string("auto");
+            FieldRef port;
+            port.key = "portPath";
+            port.role = Role::PortPath;
+            port.applies_when = alpacacore::catalog::AppliesWhen{"connectionType", "serial"};
+            port.default_value = std::string();
+            return std::vector<FieldRef>{connection, port};
+        }();
+        static const std::vector<FieldRef> camera_fields = [] {
+            FieldRef index;
+            index.key = "cameraIndex";
+            index.kind = FieldRef::Kind::Int;
+            index.role = Role::EnumerationIndex;
+            index.default_value = std::int64_t{0};
+            return std::vector<FieldRef>{index};
+        }();
+        const auto schema = [](alpacacore::catalog::DeviceKey key, const std::vector<FieldRef>& fields) {
+            alpacacore::catalog::Schema s;
+            s.key = std::move(key);
+            s.display_name = "Attached";
+            s.build_option = "ALPACACORE_ENABLE_ATTACHED";
+            s.fields = fields;
+            return s;
+        };
+        const alpacacore::catalog::DeviceKey focuser{"yyy", alpacacore::DeviceType::Focuser};
+        const alpacacore::catalog::DeviceKey mount{"xxx", alpacacore::DeviceType::Telescope};
+
+        alpacacore::test::FakeUsbSerialTree tree;
+        const std::string node = tree.add_port("ttyUSB0", "1a86", "", "USB Serial", "usb-1a86_USB_Serial-if00-port0");
+        const std::string by_id = (tree.by_id() / "usb-1a86_USB_Serial-if00-port0").string();
+        const std::string node_canonical = std::filesystem::canonical(node).string();
+
+        // A saved yyy focuser on the raw node. yyy has no factory, so it fails
+        // to load and stays a saved entry, which is what the marker reads.
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        std::ofstream("config/registered_devices.json") << nlohmann::json::array({{{"vendor", "yyy"},
+                                                                                   {"deviceType", "focuser"},
+                                                                                   {"deviceNumber", 9491},
+                                                                                   {"connectionType", "serial"},
+                                                                                   {"portPath", node}}})
+                                                               .dump();
+        alpacahttp::Router router([&](alpacacore::catalog::DeviceCatalog& c) {
+            c.add(schema(focuser, serial_fields));
+            c.add(schema(mount, serial_fields));
+            c.add(schema({"yyy", alpacacore::DeviceType::Camera}, camera_fields));
+            c.add_usb_serial_identity({focuser, {"1a86", "CH340"}, {}});
+            c.add_usb_serial_identity({mount, {"CH340", "USB_Serial"}, {}});
+            c.add_camera_lister(
+                "yyy", [] { return std::vector<alpacacore::catalog::AttachedCamera>{{0, "ZWO ASI432MM", "1a2b"}}; });
+            c.add_hid_lister({"yyy", alpacacore::DeviceType::Focuser},
+                             []() -> std::vector<alpacacore::catalog::AttachedHidDevice> {
+                                 throw std::runtime_error("hid_init failed");
+                             });
+        });
+        router.set_attached_device_roots(tree.roots());
+
+        const auto response = route_request(router, "GET", "/management/v1/attacheddevices?ClientTransactionID=33");
+        EXPECT(response.status_code() == 200);
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.value("ClientTransactionID", 0) == 33);
+        // An all-vendors build registers the built-in serial identities and listers too: a built-in vendor that
+        // ships a CH340 adds its own candidates to the same port, and a built-in lister may add a device or an
+        // error. The test reads only the entries of its own vendors (yyy, xxx), in the order they were registered.
+        const auto own = [](const nlohmann::json& list, const char* key) {
+            nlohmann::json kept = nlohmann::json::array();
+            for (const auto& item : list) {
+                const std::string name = item.value(key, std::string());
+                if (name == "yyy" || name == "xxx" || name.rfind("yyy ", 0) == 0) kept.push_back(item);
+            }
+            return kept;
+        };
+        const nlohmann::json devices = json["Value"].value("Devices", nlohmann::json::array());
+        const nlohmann::json* port = nullptr;
+        const nlohmann::json* camera = nullptr;
+        for (const auto& device : devices) {
+            if (device.value("Port", "") == by_id) port = &device;
+            const auto candidates = device.value("Candidates", nlohmann::json::array());
+            if (device.value("Kind", "") == "camera" && !candidates.empty() &&
+                candidates[0].value("Vendor", "") == "yyy") {
+                camera = &device;
+            }
+        }
+        EXPECT(port != nullptr && camera != nullptr);
+        if (port != nullptr && camera != nullptr) {
+            EXPECT(port->value("Kind", "") == "serial");
+            EXPECT(port->value("Node", "") == node_canonical);
+            EXPECT(port->value("Name", "") == "usb-1a86_USB_Serial-if00-port0");
+            EXPECT(own((*port)["Candidates"], "Vendor") == nlohmann::json::array({{{"Vendor", "yyy"},
+                                                                                   {"DeviceType", "Focuser"},
+                                                                                   {"Config",
+                                                                                    {{"vendor", "yyy"},
+                                                                                     {"deviceType", "focuser"},
+                                                                                     {"connectionType", "serial"},
+                                                                                     {"portPath", by_id}}}},
+                                                                                  {{"Vendor", "xxx"},
+                                                                                   {"DeviceType", "Telescope"},
+                                                                                   {"Config",
+                                                                                    {{"vendor", "xxx"},
+                                                                                     {"deviceType", "telescope"},
+                                                                                     {"connectionType", "serial"},
+                                                                                     {"portPath", by_id}}}}}));
+            EXPECT(port->value("Configured", false));
+            EXPECT((*port)["ConfiguredAs"] ==
+                   nlohmann::json::array({{{"DeviceType", "Focuser"}, {"DeviceNumber", 9491}}}));
+            EXPECT(camera->value("Index", -1) == 0);
+            EXPECT(camera->value("SerialNumber", "") == "1a2b");
+            EXPECT(!camera->value("Configured", true));
+            EXPECT((*camera)["Candidates"] ==
+                   nlohmann::json::array(
+                       {{{"Vendor", "yyy"},
+                         {"DeviceType", "Camera"},
+                         {"Config", {{"vendor", "yyy"}, {"deviceType", "camera"}, {"cameraIndex", 0}}}}}));
+        }
+        EXPECT(own(json["Value"]["Errors"], "Source") ==
+               nlohmann::json::array({{{"Source", "yyy HID lister"}, {"Message", "hid_init failed"}}}));
+
+        // The unversioned alias answers the same; any verb but GET is 405.
+        const auto alias =
+            nlohmann::json::parse(route_request(router, "GET", "/management/attacheddevices").body(), nullptr, false);
+        EXPECT(!alias.is_discarded() && alias["Value"]["Devices"] == json["Value"]["Devices"]);
+        const auto put = route_request(router, "PUT", "/management/v1/attacheddevices", "");
+        EXPECT(put.status_code() == 405);
+        EXPECT(put.get_header("Allow") == "GET");
+        const auto put_json = nlohmann::json::parse(put.body(), nullptr, false);
+        EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
+
+        // attachedcameras keeps its own shape over the same lister.
+        const auto cameras = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/attachedcameras?vendor=yyy").body(), nullptr, false);
+        EXPECT(!cameras.is_discarded() &&
+               cameras["Value"] ==
+                   nlohmann::json::array({{{"Index", 0}, {"Name", "ZWO ASI432MM"}, {"Serial", "1a2b"}}}));
     }
 
     {

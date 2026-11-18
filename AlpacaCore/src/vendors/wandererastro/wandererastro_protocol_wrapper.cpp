@@ -195,7 +195,7 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
 bool raw_port_looks_like_cover_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, wanderer_cover_usb_tokens());
 }
 #endif  // _WIN32
 
@@ -792,5 +792,10 @@ void WandererProtocolWrapper::close_cover() { impl_->close_cover(); }
 void WandererProtocolWrapper::set_brightness(int brightness) { impl_->set_brightness(brightness); }
 
 void WandererProtocolWrapper::turn_off_light() { impl_->turn_off_light(); }
+
+const std::vector<std::string>& wanderer_cover_usb_tokens() {
+    static const std::vector<std::string> tokens{"1a86", "CH340", "CH341", "USB_Serial"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::wandererastro

@@ -36,6 +36,11 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports();
 /// OnStepX numbers its releases from 10 (`:GVN#` "10.23a"); OnStep 4.x and older are below it.
 bool is_onstepx_version(const std::string& version);
 
+/// The USB descriptor tokens of a OnStep mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& onstep_usb_tokens();
+
 /**
  * @brief Connection type for the OnStep protocol wrapper.
  *

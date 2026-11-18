@@ -75,6 +75,9 @@ public:
     bool stop_releases_download{true};
     bool auto_complete_exposure{true};
     bool fail_exposure_register_write{false};
+    // The Exposure control's minimum in microseconds (get_control_caps); a camera whose shortest exposure is longer
+    // than the SDK's 1 us default.
+    long exposure_min_us{1};
     bool fail_exposure_start{false};
     // Every exposure start reports Failed until cleared: a driver retry meets the fault again (sweep tier 3).
     std::atomic<bool> fail_every_exposure{false};
@@ -135,6 +138,14 @@ public:
     bool wait_for_download(std::chrono::milliseconds timeout) {
         std::unique_lock lock(download_mutex_);
         return download_cv_.wait_for(lock, timeout, [this] { return download_entered_; });
+    }
+
+    // The last value written to a control (the exposure register in microseconds, for one); 0 when none was.
+    // A lookup, not operator[], so reading a control never adds an entry to the fake.
+    long control_value(ControlType type) {
+        std::lock_guard lock(mutex_);
+        const auto it = controls_.find(type);
+        return it == controls_.end() ? 0 : it->second;
     }
 
     int call_count(const std::string& name) const {
@@ -269,7 +280,7 @@ public:
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         std::vector<ControlCaps> caps = {
-            {ControlType::Exposure, "Exposure", "Exposure time", 1, 3'600'000'000L, 100'000, false, true},
+            {ControlType::Exposure, "Exposure", "Exposure time", exposure_min_us, 3'600'000'000L, 100'000, false, true},
             {ControlType::Gain, "Gain", "Gain", 0, 500, 100, false, true},
             {ControlType::Offset, "Offset", "Offset", 0, 100, 10, false, true},
             {ControlType::Temperature, "Temperature", "Temperature", -500, 500, 0, false, false},

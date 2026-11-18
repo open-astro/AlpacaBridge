@@ -94,6 +94,8 @@ and assert only that the slew threw. An Alt/Az slew test in a driver that refuse
 
 A telescope member refuses in this order: argument (`InvalidValue`), connected, parked, link fault, tracking (#2257). Out of range always throws `InvalidValue`; no mount driver clamps a client argument (drivers that still drift are listed in `kProbeExemptions` until their fix lands). The parked-against-fault order is per driver (Sky-Watcher checks the fault first). The contract sweep probes PulseGuide, MoveAxis, SlewToCoordinates(Async), the guide-rate setters (#2257) and SideOfPier, TrackingRate, the target setters, SlewToAltAz(Async), SyncToCoordinates, SyncToAltAz, the rate-offset setters and DestinationSideOfPier (#2287) disconnected, connected and parked; `kProbeExemptions` in `test_contract_sweep.cpp` lists each known failure (deleted by the fix) and each member a driver does not implement.
 
+The order lives in one module, `util/telescope_command_gate.h` (#2258): `check_pulse_guide`, `check_move_axis`, `check_equatorial_slew` and `check_guide_rate`, each also as an `_arguments` half and a `_state` half. The argument half takes the driver's `TelescopeCommandLimits` only: the protocol limits and the InvalidValue texts (each driver keeps its own words) are data, so a driver replaces its argument helpers with a limits value. The state half calls the driver's own connected, parked, fault and Tracking checks in order, through a checks object of the driver's, because those checks read the mount or its link (OnStep's `:GU#` read for an unread status, a fault check that closes a stale link); the parked-against-fault order per member family, the MoveAxis stop epsilon and whether a stop skips the fault check are limits too. The gate does no I/O and takes no lock. OnStep adopts it; the other mount drivers follow one per PR, and Sync, Alt/Az slews, rate offsets, targets, TrackingRate and DestinationSideOfPier join after #2287.
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |
@@ -176,6 +178,14 @@ focuser (`same_action`), the iOptron and Celestron mounts' `gps_status`
 focusers' `SetZero` (`util::same_action_name`, `alpacacore/util/action_name.h`).
 A new driver with actions does the same.
 
+### The not-implemented answers are `AlpacaDriver`'s defaults (all drivers)
+
+`AlpacaDriver` (`alpacadriver.h`) defines `get_supported_actions()` (empty), `can_action()` (false),
+`action()` (`ActionNotImplemented` naming the action) and the three `command_*` (`MethodNotImplemented`,
+0x400) inline, issue #1757. A driver overrides one of them only to give it real behaviour (a vendor action, a
+`Command*` pass-through to its protocol), never to restate the default: a copied override was how the
+message and the error spelling drifted across 40 files.
+
 ### Camera ROI alignment (all camera vendors)
 
 Every camera SDK constrains ROI geometry, and the pattern is the same everywhere:
@@ -185,6 +195,25 @@ geometry. Per-SDK constraints (the only vendor-specific part): ZWO width%8 / hei
 after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek even
 sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
 odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
+
+### Camera argument order (all camera vendors)
+
+A camera member refuses in one order on every brand (#2259), so a client writes one error handler:
+
+- **`StartExposure(duration, light)`**: (1) a NaN, negative or infinite duration, or one too large to convert to
+  microseconds, is `InvalidValue` (a static cap such as GPhoto's 3600 s belongs here too); (2) `NotConnected`; (3) a
+  duration below `ExposureMin`, 0 included, runs at `ExposureMin`, and one above `ExposureMax` is `InvalidValue`; (4) a
+  frame (NumX, NumY, StartX, StartY, bin) that does not fit the sensor is `InvalidValue`; (5) an exposure running or
+  starting is `InvalidOperation`.
+- **`BinX`, `BinY`, `NumX`, `NumY`, `StartX`, `StartY` setters**: (1) a bin, NumX or NumY of 0 or less, or a StartX or
+  StartY below 0, is `InvalidValue`; (2) `NotConnected`; (3) a bin the camera does not support is `InvalidValue`; (4) an
+  exposure running or starting is `InvalidOperation`. The setters do not check the sensor size: StartExposure does
+  (ConformU sets a NumX beyond the sensor and expects StartExposure to refuse it).
+
+The contract sweep probes these disconnected, connected and while an exposure runs (started through each camera's
+tier-3 recipe). `kProbeExemptions` in `test_contract_sweep.cpp` lists each camera that still drifts, and
+`kExposingRefusalExemptions` each camera that takes a good write or a second StartExposure while exposing; the fix
+deletes its rows.
 
 ### Camera PercentCompleted and cooler members (all camera vendors)
 

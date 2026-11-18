@@ -34,6 +34,11 @@ struct iOptronNetworkHostInfo {
 
 std::vector<iOptronPortInfo> enumerate_ioptron_ports();
 
+/// The USB descriptor tokens of a iOptron mount adapter: the raw-node filter of the scan above
+/// matches them, and the catalog registers them as the device's USB identity
+/// for the attacheddevices listing (#2312), so the two read one list.
+const std::vector<std::string>& ioptron_mount_usb_tokens();
+
 /// The auto-detect probe of one serial port: :MountInfo# under a serial-port
 /// probe claim (waits out another scan's probe of the same port). Returns the
 /// 4-digit model code, or empty when no mount answers.

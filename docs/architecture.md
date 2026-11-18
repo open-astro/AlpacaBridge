@@ -97,7 +97,7 @@ Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY
 
 - Concrete driver implementation
 - Uses wrapper layer, never touches raw SDK directly
-- Implements all pure virtual methods from Layer 1
+- Implements all pure virtual methods from Layer 1; the six ASCOM common members (`SupportedActions`, `Action`, `CanAction` and the three `Command*`) default to their not-implemented answer in `AlpacaDriver`, so a driver overrides them only to give them real behaviour (issue #1757)
 
 See the [Development Guide](development.md) for step-by-step implementation.
 
@@ -146,7 +146,7 @@ AlpacaHTTP is the HTTP server layer. It translates Alpaca REST/JSON requests int
 ### Components
 
 - **Server** (`src/http/server.cpp`) — POSIX socket server, thread-per-connection model, listens on port 6800
-- **Router** (`src/http/router.cpp`) — maps HTTP routes to AlpacaCore driver method calls for all device types
+- **Router** (`src/http/router.cpp`) — maps HTTP routes to AlpacaCore driver method calls; the common `dispatch_device_method` stays there, and a device type's method dispatch moves to its own `src/http/routes/<type>_routes.cpp` (issue #2081)
 - **Config** (`src/core/config.cpp`) — JSON-based device configuration, persisted to disk
 - **Discovery** (`src/discovery/discovery.cpp`) — Alpaca UDP discovery responder (UDP port `discovery.port`, default 32227, configurable; applied on restart)
 - **Web UI** (`web/`) — browser-based management interface for device configuration
@@ -259,6 +259,7 @@ AlpacaBridge/
 |   +- src/
 |   |   +- core/                     # Config, request/response, JSON
 |   |   +- http/                     # Server, router
+|   |   |   +- routes/               # Per-device-type method dispatch
 |   |   +- discovery/                # Alpaca UDP discovery
 |   |   +- util/                     # Logging, error mapping
 |   +- web/                          # Management UI (HTML/JS/CSS)
@@ -285,7 +286,7 @@ Use these names in issues, PRs and records. Domain terms are defined in
 | Module | What it owns | State |
 |--------|--------------|-------|
 | Device Catalog | One descriptor per (vendor, device) declaring its config fields, roles and construction; AlpacaHTTP bridges JSON once and serves the schema | In place: every vendor has a descriptor and the router includes no vendor header (layering gate at zero); [decision 0004](decisions/0004-device-catalog.md) |
-| HTTP route bundles | The router's per-device-type routes, one bundle per Alpaca device type; the common `dispatch_device_method` stays in the router | Planned |
+| HTTP route bundles | The router's per-device-type routes, one bundle per Alpaca device type; the common `dispatch_device_method` stays in the router | Partial: each moved type's dispatch is in its own `src/http/routes/<type>_routes.cpp`; the rest still sit in `router.cpp` and move one PR each ([#2081](https://github.com/open-astro/AlpacaBridge/issues/2081)) |
 | Task clock | Every driver wait and deadline, through one injectable clock with a fake for tests | Utility landed (#697); the drivers on it are the Adoption table of [decision 0005](decisions/0005-task-clock.md) |
 | Async operation slot | One cancellable, generation-tagged background body per slot, telling cancelled from superseded; piloted on the SkyWatcher telescope | Utility landed (#717); on `main` only (not `stable/5.0`); the drivers on it are the Adoption table of [decision 0006](decisions/0006-async-operation-ownership.md) |
 | State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Utility landed (#998); the drivers served from it are the Adoption table of [decision 0010](decisions/0010-snapshot-served-state.md) |

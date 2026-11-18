@@ -24,6 +24,10 @@ WeeWX deltas ([decision 0009](../../docs/decisions/0009-link-loss-and-relink-pol
   false, every member `NotConnected`, the poll ends and the cached snapshot is dropped. Only the client's Connect
   relinks; `get_link_fault()` keeps the fault text until the next Connect or Disconnect.
 
-Tests run the poll on `FakeTaskClock` (`test_weewx_observingconditions.cpp`, with `FakeWeeWxFetcher` or the loopback
-`FakeWeeWxFeed`, whose libcurl fetch the production factory reaches through its trailing clock argument); the
-staleness loss under contention is a `[stress]` case in `test_weewx_concurrency_stress.cpp`.
+The feed is fetched through `util::HttpClient` (decision 0023, issue #1753); no WeeWX file names libcurl. The seam
+holds the body cap, the `http`/`https` allow-list and the call timeout, tested in `test_http_client.cpp`.
+
+Tests run the poll on `FakeTaskClock` (`test_weewx_observingconditions.cpp`, with `FakeHttpClient` or the loopback
+`LoopbackHttpServer`, which the production factory's libcurl client reaches through its trailing clock argument); the
+staleness loss under contention is a `[stress]` case in `test_weewx_concurrency_stress.cpp`, over `FakeHttpClient`
+behind `LockedHttpClient`.

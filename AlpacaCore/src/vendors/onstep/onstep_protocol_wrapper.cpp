@@ -502,9 +502,7 @@ std::string probe_onstep_port(const std::string& port_path, std::string& version
 bool raw_port_looks_like_onstep_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "0403", "CP210", "10c4", "Silicon_Labs", "CH340", "CH341",
-                      "1a86", "USB_Serial", "USB Serial", "Arduino", "Teensy"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, onstep_usb_tokens());
 }
 
 // Lists /dev entries whose filename starts with prefix (e.g. "ttyUSB"),
@@ -2205,5 +2203,12 @@ std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const Connect
     return it == link_registry().end() ? nullptr : it->second.lock();
 }
 }  // namespace detail
+
+const std::vector<std::string>& onstep_usb_tokens() {
+    static const std::vector<std::string> tokens{"Prolific", "PL2303",     "067b",         "FTDI",    "0403",
+                                                 "CP210",    "10c4",       "Silicon_Labs", "CH340",   "CH341",
+                                                 "1a86",     "USB_Serial", "USB Serial",   "Arduino", "Teensy"};
+    return tokens;
+}
 
 }  // namespace alpacacore::vendor::onstep

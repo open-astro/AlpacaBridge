@@ -258,6 +258,8 @@ set(ALPACAHTTP_SOURCES
     src/core/json_utils.cpp
     src/core/catalog_json.cpp
     src/http/router.cpp
+    src/http/routes/covercalibrator_routes.cpp
+    src/http/routes/safetymonitor_routes.cpp
     src/http/device_call.cpp
     src/http/image_payload.cpp
     src/http/server.cpp
@@ -373,6 +375,9 @@ if(ALPACAHTTP_BUILD_TESTS)
     set(TEST_ROUTING_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_routing_cwd)
     file(MAKE_DIRECTORY ${TEST_ROUTING_DIR})
     add_test(NAME test_routing COMMAND test_routing WORKING_DIRECTORY ${TEST_ROUTING_DIR})
+    # The attacheddevices case (#2312) builds its fake by-id/sysfs tree with
+    # AlpacaCore/tests/fake_usb_serial_tree.h, the one copy both suites use.
+    target_include_directories(test_routing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
     # open-astro#664: the devicecatalog endpoint case reads the committed
     # fixture tests/fixtures/devicecatalog.json, located from the source tree
     # the same way test_route_table finds its type-name fixture.
