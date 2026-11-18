@@ -1834,6 +1834,7 @@ HELPER_FAKES = {
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
     "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
     "fake_usb_serial_tree.h": "fake /dev, by-id and sysfs tree for the attacheddevices listing (#2312); no driver connects through it",
+    "fake_alpaca_server.h": "loopback fake upstream Alpaca server for the remotealpaca client (#1753 slice 2); no driver connects through it yet",
 }
 
 

@@ -142,7 +142,22 @@ TEST_CASE("HttpClient - a stalled server ends at the call timeout", "[util][http
     server.set_mode(LoopbackHttpServer::Mode::Stall);
     const auto t0 = std::chrono::steady_clock::now();
     (void)driver_error_of([&] { (void)client()->get(server.url(), std::chrono::milliseconds(300)); });
-    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3));
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    // It waited for the timeout (not a quicker failure) and no longer.
+    CHECK(elapsed >= std::chrono::milliseconds(250));
+    CHECK(elapsed < std::chrono::seconds(3));
+}
+
+TEST_CASE("HttpClient - a PUT is not redirected: its 3xx comes back and the target gets nothing",
+          "[util][http-client]") {
+    LoopbackHttpServer target;
+    LoopbackHttpServer server;
+    server.set_status_line("307 Temporary Redirect");
+    server.set_extra_headers("Location: " + target.url("/new") + "\r\n");
+    const HttpResponse response = client()->put_form(server.url(), "Brightness=5", kTimeout);
+    CHECK(response.status == 307);
+    CHECK(server.requests() == 1);
+    CHECK(target.requests() == 0);
 }
 
 TEST_CASE("LockedHttpClient over FakeHttpClient - requests forward one at a time", "[util][http-client]") {

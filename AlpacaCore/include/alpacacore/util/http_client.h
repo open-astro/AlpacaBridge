@@ -48,7 +48,8 @@ public:
     virtual HttpResponse get(const std::string& url, std::chrono::milliseconds timeout) = 0;
 
     // PUT `form_body` (application/x-www-form-urlencoded, already encoded) to `url`. Same bounds and
-    // errors as get().
+    // errors as get(), but a redirect is not followed: a PUT is a command, so the 3xx comes back as the
+    // status rather than the command being sent again to another URL.
     virtual HttpResponse put_form(const std::string& url, const std::string& form_body,
                                   std::chrono::milliseconds timeout) = 0;
 
