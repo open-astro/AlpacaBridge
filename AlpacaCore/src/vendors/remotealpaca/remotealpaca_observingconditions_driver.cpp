@@ -13,6 +13,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
+#include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/util/link_health.h>
@@ -141,6 +142,21 @@ struct Frame {
 };
 
 // A double in its shortest round-trip form, for a form body.
+// Decision 0024 rules 1 and 2: the brand, then the upstream's Name as the model, without its " (...)" qualifiers and
+// cut at its first comma, so no '(' or ',' reaches Name. An empty result keeps the default Name.
+constexpr const char* kBrand = "Remote Alpaca";
+
+std::string name_from_upstream(const std::string& upstream_name) {
+    std::string model = util::without_qualifiers(upstream_name);
+    if (const auto comma = model.find(','); comma != std::string::npos) model.resize(comma);
+    model.erase(std::find_if(model.rbegin(), model.rend(), [](unsigned char c) { return std::isspace(c) == 0; }).base(),
+                model.end());
+    model.erase(model.begin(),
+                std::find_if(model.begin(), model.end(), [](unsigned char c) { return std::isspace(c) == 0; }));
+    if (model.empty() || model.find('(') != std::string::npos) return {};
+    return util::branded_name(kBrand, model);
+}
+
 std::string number_text(double value) {
     std::array<char, 64> buffer{};
     const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
@@ -187,7 +203,7 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    // Decision 0023: the upstream's Name and Description once a Connect has read them.
+    // Once a Connect has read them: the brand and the upstream's Name (decision 0024), and the upstream's Description.
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return name_;
@@ -438,6 +454,8 @@ private:
     // frame, so the getters answer when Connect returns. Decision 0009 rule 4: this is the only relink of a lost link.
     void connect_upstream() {
         stop_polling();  // a lost link's poll has returned or is returning; join it so a fresh one starts
+        // A command body from before (an AveragePeriod write-through) must not land on this Connect's frame.
+        command_op_.cancel_all_and_join();
         snapshot_.reset();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -475,8 +493,14 @@ private:
             Frame frame = sample(supported);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!name.empty()) name_ = std::move(name);
+                // Decision 0024 rule 4: what the brand-and-model Name leaves out of the upstream's Name goes in the
+                // Description.
+                const std::string branded = name_from_upstream(name);
+                if (!branded.empty()) name_ = branded;
                 if (!description.empty()) description_ = std::move(description);
+                if (!name.empty() && branded != util::branded_name(kBrand, name)) {
+                    description_ += " (upstream Name: " + name + ")";
+                }
                 supported_ = supported;
                 probe_ = std::move(probe);
                 descriptions_ = std::move(descriptions);

@@ -114,9 +114,41 @@ TEST_CASE("Remote Alpaca ObservingConditions Driver - Device metadata", "[remote
     rig.driver->assign_unique_id("8c6d3a0e-4a54-4d7f-9d0c-2b7b0f1e5a11");
     CHECK(rig.driver->get_unique_id() == "8c6d3a0e-4a54-4d7f-9d0c-2b7b0f1e5a11");
     CHECK(rig.upstream.calls("uniqueid") == 0);
-    // Name and Description are the upstream's once a Connect read them.
-    CHECK(rig.driver->get_name() == "Alpaca Simulator Weather");
+    // Once a Connect read them: the brand and the upstream's Name (decision 0024), and the upstream's Description.
+    CHECK(rig.driver->get_name() == "Remote Alpaca Alpaca Simulator Weather");
     CHECK(rig.driver->get_description() == "ASCOM Alpaca Simulator ObservingConditions");
+}
+
+TEST_CASE("Remote Alpaca ObservingConditions Driver - the connected Name is the brand and the upstream model",
+          "[remotealpaca][observingconditions][unit]") {
+    {
+        Rig rig;
+        rig.upstream.set("name", "\"Simulator (ObservingConditions, port 2)\"");
+        rig.connect();
+        // Decision 0024 rules 1 and 2: no '(' or ',' in Name; the left-out part goes in the Description (rule 4).
+        CHECK(rig.driver->get_name() == "Remote Alpaca Simulator");
+        CHECK(rig.driver->get_description() ==
+              "ASCOM Alpaca Simulator ObservingConditions (upstream Name: Simulator (ObservingConditions, port 2))");
+    }
+    {
+        Rig rig;
+        rig.upstream.set("name", "\"Boltwood Cloud Sensor II, rev 3\"");
+        rig.connect();
+        CHECK(rig.driver->get_name() == "Remote Alpaca Boltwood Cloud Sensor II");
+    }
+    {
+        Rig rig;
+        rig.upstream.set("name", "\"Remote Alpaca Weather\"");  // already branded: not prefixed twice
+        rig.connect();
+        CHECK(rig.driver->get_name() == "Remote Alpaca Weather");
+        CHECK(rig.driver->get_description() == "ASCOM Alpaca Simulator ObservingConditions");
+    }
+    {
+        Rig rig;
+        rig.upstream.set("name", "\"(unnamed)\"");  // nothing left: the default Name stays
+        rig.connect();
+        CHECK(rig.driver->get_name() == "Remote Alpaca ObservingConditions");
+    }
 }
 
 TEST_CASE("Remote Alpaca ObservingConditions Driver - getters serve the polled snapshot and never call the upstream",

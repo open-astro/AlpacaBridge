@@ -4172,10 +4172,8 @@ const std::vector<std::string>& name_brands_of(const std::string& vendor) {
         {"onstep", {"OnStep", "On-Step"}},
         {"playerone", {"Player One"}},
         {"qhy", {"QHY"}},
-        // Disconnected, "Remote Alpaca ObservingConditions"; connected, the upstream's own Name (decision 0023), which
-        // the tier-2 host's scripted upstream gives as "Alpaca Simulator Weather" (alpaca_upstream_script.h, an
-        // assumption, not OmniSim's text).
-        {"remotealpaca", {"Remote Alpaca", "Alpaca Simulator"}},
+        // Disconnected, "Remote Alpaca ObservingConditions"; connected, "Remote Alpaca" and the upstream's Name.
+        {"remotealpaca", {"Remote Alpaca"}},
         {"skywatcher", {"Sky-Watcher"}},
         {"svbony", {"SVBONY"}},
         {"synscan", {"Sky-Watcher"}},
