@@ -1569,6 +1569,6 @@ header > .server-clock {
 .info-note {
     display: block;
     margin-top: 4px;
-    font-size: 0.85em;
+    font-size: var(--fs-small);
     opacity: 0.75;
 }

@@ -70,8 +70,9 @@ test('no body or hint text is under 13 px outside the monospace badge allow-list
     const allowed = new Map(BADGE_ALLOW_LIST.map((a) => [a.selector, a]));
     const under = [];
     for (const rule of rules) {
-        for (const m of rule.body.matchAll(/font(?:-size)?:\s*(?:var\(--([a-z-]+)\)|([0-9.]+)px)/g)) {
-            const px = m[1] ? scale[m[1]] : Number(m[2]);
+        // An em or rem size is resolved against the body size, the size every such rule inherits today.
+        for (const m of rule.body.matchAll(/font(?:-size)?:\s*(?:var\(--([a-z-]+)\)|([0-9.]+)px|([0-9.]+)r?em)/g)) {
+            const px = m[1] ? scale[m[1]] : m[2] !== undefined ? Number(m[2]) : Number(m[3]) * scale['fs-body'];
             assert.ok(px !== undefined, rule.selector + ' uses an unknown size token --' + m[1]);
             if (px >= 13) continue;
             const entry = allowed.get(rule.selector);
