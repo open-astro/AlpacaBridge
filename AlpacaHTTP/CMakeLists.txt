@@ -435,6 +435,14 @@ if(ALPACAHTTP_BUILD_TESTS)
         target_link_libraries(fake_conformu_server alpacacore_qhy)
         target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_QHY)
     endif()
+    if(TARGET alpacacore_playerone)
+        target_link_libraries(fake_conformu_server alpacacore_playerone)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_PLAYERONE)
+    endif()
+    if(TARGET alpacacore_wandererastro)
+        target_link_libraries(fake_conformu_server alpacacore_wandererastro)
+        target_compile_definitions(fake_conformu_server PRIVATE FAKE_CONFORMU_WANDERERASTRO)
+    endif()
 
     # #646: route-table snapshot, dispatch reach and rejection fixture. Own
     # working directory for the same reason as test_routing (relative

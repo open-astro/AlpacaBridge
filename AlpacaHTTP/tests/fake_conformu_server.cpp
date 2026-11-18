@@ -44,6 +44,7 @@
 #include <thread>
 #include <vector>
 
+#include "conformu_filterwheel_factories.h"
 #include "conformu_focuser_factories.h"
 #ifdef FAKE_CONFORMU_SKYWATCHER
 #include "conformu_skywatcher_factory.h"
@@ -86,9 +87,9 @@ alpacacore::test::FakeSkyWatcherSerialBoard& skywatcher_serial_board() {
 #endif
 
 namespace cu = alpacacore::test::conformu;
-// A focuser host: the row's descriptor and factory; the fake is ready once built (a pty or a bound port).
+// A host's factory: a typed factory of conformu_<type>_factories.h, as the generic driver the descriptor builds.
 template <typename Make>
-std::function<std::unique_ptr<alpacacore::AlpacaDriver>(int)> focuser(Make make) {
+std::function<std::unique_ptr<alpacacore::AlpacaDriver>(int)> driver_of(Make make) {
     return [make](int device_number) -> std::unique_ptr<alpacacore::AlpacaDriver> { return make(device_number); };
 }
 
@@ -112,47 +113,69 @@ const std::vector<ConformuHost> kHosts = {
 #ifdef FAKE_CONFORMU_ZWO
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h", alpacacore::DeviceType::Focuser, "zwo-fake",
      "ZWO EAF (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO", "FakeZWOEAFSDK (simulated EAF SDK, in process)",
-     [] { return true; }, focuser(cu::make_zwo_focuser)},
+     [] { return true; }, driver_of(cu::make_zwo_focuser)},
 #endif
 #ifdef FAKE_CONFORMU_CELESTRON
     {"celestron", "focuser", "fake_celestron_focuser.h", alpacacore::DeviceType::Focuser, "celestron-fake",
      "Celestron focus motor (fake AUX bus, test only)", "ALPACACORE_ENABLE_CELESTRON",
      "FakeCelestronFocuser (simulated focus motor over a pseudo-terminal)",
-     [] { return !cu::celestron_focuser().slave_path().empty(); }, focuser(cu::make_celestron_focuser)},
+     [] { return !cu::celestron_focuser().slave_path().empty(); }, driver_of(cu::make_celestron_focuser)},
 #endif
 #ifdef FAKE_CONFORMU_ONSTEP
     {"onstep", "focuser", "fake_mount_server.h", alpacacore::DeviceType::Focuser, "onstep-fake",
      "OnStepX focuser (fake controller, test only)", "ALPACACORE_ENABLE_ONSTEP",
      "the OnStepX controller model of onstep_controller_model.h (focuser 1, over loopback TCP)",
-     [] { return cu::onstep_controller_host().server.ok(); }, focuser(cu::make_onstep_focuser)},
+     [] { return cu::onstep_controller_host().server.ok(); }, driver_of(cu::make_onstep_focuser)},
 #endif
 #ifdef FAKE_CONFORMU_IOPTRON
     {"ioptron", "focuser", "fake_ioptron_ieaf.h", alpacacore::DeviceType::Focuser, "ioptron-fake",
      "iOptron iEAF (fake, test only)", "ALPACACORE_ENABLE_IOPTRON",
      "FakeIoptronIeaf (simulated iEAF over a pseudo-terminal)", [] { return !cu::ioptron_ieaf().slave_path().empty(); },
-     focuser(cu::make_ioptron_ieaf_focuser)},
+     driver_of(cu::make_ioptron_ieaf_focuser)},
     {"ifr", "focuser", "fake_ioptron_ifr.h", alpacacore::DeviceType::Focuser, "ifr-fake",
      "iOptron iFR focuser (fake, test only)", "ALPACACORE_ENABLE_IOPTRON",
      "FakeIoptronIfr (simulated iFR over a pseudo-terminal)", [] { return !cu::ioptron_ifr().slave_path().empty(); },
-     focuser(cu::make_ifr_focuser)},
+     driver_of(cu::make_ifr_focuser)},
 #endif
 #ifdef FAKE_CONFORMU_ASTROASIS
     {"astroasis", "focuser", "fake_astroasis_hid.h", alpacacore::DeviceType::Focuser, "astroasis-fake",
      "Astroasis Oasis focuser (fake HID, test only)", "ALPACACORE_ENABLE_ASTROASIS",
      "FakeHidTransport (simulated Oasis focuser HID, in process)", [] { return true; },
-     focuser(cu::make_astroasis_focuser)},
+     driver_of(cu::make_astroasis_focuser)},
 #endif
 #ifdef FAKE_CONFORMU_GEMINI
     {"gemini", "focuser", "fake_gemini_focuser.h", alpacacore::DeviceType::Focuser, "gemini-fake",
      "Gemini focuser (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
      "FakeGeminiFocuser (simulated focuser over a pseudo-terminal)",
-     [] { return !cu::gemini_focuser().slave_path().empty(); }, focuser(cu::make_gemini_focuser)},
+     [] { return !cu::gemini_focuser().slave_path().empty(); }, driver_of(cu::make_gemini_focuser)},
 #endif
 #ifdef FAKE_CONFORMU_QHY
     {"qhy", "focuser", "fake_qhy_qfocuser.h", alpacacore::DeviceType::Focuser, "qhy-fake",
      "QHY Q-Focuser (fake, test only)", "ALPACACORE_ENABLE_QHY",
      "FakeQhyQFocuser (simulated Q-Focuser over a pseudo-terminal)",
-     [] { return !cu::qhy_qfocuser().slave_path().empty(); }, focuser(cu::make_qhy_focuser)},
+     [] { return !cu::qhy_qfocuser().slave_path().empty(); }, driver_of(cu::make_qhy_focuser)},
+#endif
+#ifdef FAKE_CONFORMU_ZWO
+    {"zwo", "filterwheel", "fake_zwo_efw_sdk.h", alpacacore::DeviceType::FilterWheel, "zwo-fake",
+     "ZWO EFW (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO", "FakeZWOEFWSDK (simulated EFW SDK, in process)",
+     [] { return true; }, driver_of(cu::make_zwo_filterwheel)},
+#endif
+#ifdef FAKE_CONFORMU_QHY
+    {"qhy", "filterwheel", "fake_qhy_cfw3.h", alpacacore::DeviceType::FilterWheel, "qhy-fake",
+     "QHYCFW3 (fake, test only)", "ALPACACORE_ENABLE_QHY", "FakeQhyCfw3 (simulated CFW3 over a pseudo-terminal)",
+     [] { return !cu::qhy_cfw3().slave_path().empty(); }, driver_of(cu::make_qhy_cfw3_filterwheel)},
+#endif
+#ifdef FAKE_CONFORMU_PLAYERONE
+    {"playerone", "filterwheel", "fake_playerone_pw_sdk.h", alpacacore::DeviceType::FilterWheel, "playerone-fake",
+     "Player One Phoenix (fake SDK, test only)", "ALPACACORE_ENABLE_PLAYERONE",
+     "FakePlayerOnePWSDK (simulated Phoenix wheel SDK, in process)", [] { return true; },
+     driver_of(cu::make_playerone_filterwheel)},
+#endif
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+    {"wandererastro", "filterwheel", "fake_serial_streamer.h", alpacacore::DeviceType::FilterWheel,
+     "wandererastro-fake", "WandererAstro SFW (fake, test only)", "ALPACACORE_ENABLE_WANDERERASTRO",
+     "FakeSerialStreamer (a streamed SFW status frame over a pseudo-terminal)",
+     [] { return !cu::wandererastro_sfw().slave_path().empty(); }, driver_of(cu::make_wandererastro_filterwheel)},
 #endif
 };
 
