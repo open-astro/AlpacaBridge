@@ -2237,7 +2237,7 @@ alpacacore::test::FakeMountServer::Responder onstep_switch_responder(const OnSte
     auto first = std::make_shared<std::atomic<bool>>(hold);
     return [first, silent = fake.silent](const std::string& c) {
         if (silent->load()) return std::string();
-        if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+        if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
         if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
         if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
         if (c == ":GXY0#") return std::string("11000000#");
