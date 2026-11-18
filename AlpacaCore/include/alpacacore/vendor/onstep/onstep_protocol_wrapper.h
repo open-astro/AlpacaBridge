@@ -173,11 +173,21 @@ struct FocuserStatus {
     int goto_rate = 0;
 };
 
+/// The :rT# rotator status (OnStepX Rotator.command.cpp, af1d26bf): 'M' moving, or 'S' stopped followed by 'D' while
+/// derotation is enabled and 'R' while the derotator is reversed, then the goto-rate digit. The derotation letters are
+/// written only while the rotator is stopped.
+struct RotatorStatus {
+    bool moving = false;
+    bool derotating = false;
+    bool derotation_reversed = false;
+    int goto_rate = 0;
+};
+
 /**
  * @brief One link to one OnStep controller: the LX200-derived command set over
  *        its serial port or its TCP command channel.
  *
- * Every OnStep device on a controller (the telescope, the focuser) shares one
+ * Every OnStep device on a controller (the telescope, a focuser, the rotator) shares one
  * link, which acquire() hands out (#2223, the iOptron iFR precedent of decision
  * 0017): the first device to connect opens it, later devices join it, and it
  * closes when the last holder lets go. Every exchange holds the link's own lock
@@ -711,6 +721,28 @@ public:
     bool focuser_goto(int focuser, long steps);
     /// :F<n>Q#: stop. No reply (sent blind).
     void focuser_halt(int focuser);
+
+    // ── Rotator (OnStepX, #2221). Replies from OnStepX Rotator.command.cpp at af1d26bf. The derotator commands
+    // (:r+#, :r-#, :rP#) and the derotation reverse toggle (:rR#) are never sent.
+
+    /// :GX98#: 'R' rotate only or 'D' rotate and derotate. std::nullopt for anything else: 'N' (no rotator) or the
+    /// unknown-command "0" of a firmware without the rotator.
+    std::optional<char> rotator_capability();
+    /// :rT#: the status, '#'-terminated. std::nullopt for any other reply (the unknown-command "0").
+    std::optional<RotatorStatus> rotator_status();
+    /// :rG#: the rotator's angle in degrees ("sDDD*MM", whole arcminutes; signed, inside the travel limits).
+    /// std::nullopt when it does not parse.
+    std::optional<double> rotator_angle();
+    /// :rI# / :rM#: the travel limits in whole degrees ("%ld"). std::nullopt when they do not parse.
+    std::optional<long> rotator_min_angle();
+    std::optional<long> rotator_max_angle();
+    /// :rD#: degrees per step ("%7.5f"). std::nullopt for anything that is not a number above 0.
+    std::optional<double> rotator_degrees_per_step();
+    /// :rS<sDDD*MM:SS>#: an absolute goto to `degrees` (inside the travel limits); a bare '1' accepted or '0' refused
+    /// (get_last_command_error() says why).
+    bool rotator_goto(double degrees);
+    /// :rQ#: stop. No reply (sent blind).
+    void rotator_halt();
 
     OnStepProtocolWrapper(const OnStepProtocolWrapper&) = delete;
     OnStepProtocolWrapper& operator=(const OnStepProtocolWrapper&) = delete;

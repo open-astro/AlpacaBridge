@@ -1379,6 +1379,76 @@ public:
 
     void focuser_halt(int focuser) { send_command_blind(focuser_command(focuser, "Q")); }
 
+    // ── Rotator (OnStepX Rotator.command.cpp, af1d26bf; #2221) ──
+
+    std::optional<char> rotator_capability() {
+        // numericReply=false: "D#" or "R#" (a firmware built with a rotator; Rotator.command.cpp), "N#" without one.
+        // A firmware that does not know :GX98# answers the unknown-command "0", a bare digit.
+        const std::string reply = send_command(":GX98#", false, kSetAckTimeoutMs);
+        if (reply == "R" || reply == "D") {
+            return reply[0];
+        }
+        return std::nullopt;
+    }
+
+    std::optional<RotatorStatus> rotator_status() {
+        // numericReply=false: "M3#" while it moves, else "S" then "D" (derotation on) and "R" (derotator reversed)
+        // then the goto-rate digit: "S3#", "SD3#", "SDR3#". A firmware without the rotator answers a bare "0".
+        const std::string reply = send_command(":rT#", false, kSetAckTimeoutMs);
+        if (reply.size() < 2 || reply.size() > 4 || reply.back() < '0' || reply.back() > '9') {
+            return std::nullopt;
+        }
+        const std::string flags = reply.substr(0, reply.size() - 1);
+        RotatorStatus status;
+        status.goto_rate = reply.back() - '0';
+        if (flags == "M") {
+            status.moving = true;
+        } else if (flags == "S" || flags == "SD" || flags == "SR" || flags == "SDR") {
+            status.derotating = flags.find('D') != std::string::npos;
+            status.derotation_reversed = flags.find('R') != std::string::npos;
+        } else {
+            return std::nullopt;
+        }
+        return status;
+    }
+
+    std::optional<double> rotator_angle() {
+        // convert.doubleToDms(..., fullRange=true, signPresent=true, PM_LOW): "+123*45#", "-045*30#". The sign and
+        // the '*' are required, so the unknown-command "0" never reads as 0 degrees.
+        const std::string reply = send_command(":rG#", true, kSetAckTimeoutMs);
+        if (reply.size() < 4 || (reply[0] != '+' && reply[0] != '-') || reply.find('*') == std::string::npos) {
+            return std::nullopt;
+        }
+        const auto degrees = util::parse_sexagesimal(reply);
+        if (!degrees || !std::isfinite(*degrees)) {
+            return std::nullopt;
+        }
+        return degrees;
+    }
+
+    std::optional<long> rotator_limit(const char* command) {
+        // "%ld" of the rounded limit in degrees.
+        return parse_steps(send_command(command, true, kSetAckTimeoutMs));
+    }
+
+    std::optional<double> rotator_degrees_per_step() {
+        const auto value = parse_decimal(send_command(":rD#", true, kSetAckTimeoutMs), /*require_fraction=*/false);
+        if (!value || !std::isfinite(*value) || !(*value > 0.0)) {
+            return std::nullopt;
+        }
+        return value;
+    }
+
+    bool rotator_goto(double degrees) {
+        // :rS takes an optional sign, then "DDD*MM:SS" (Convert::dmsToDouble without a sign, 0-360 degrees); the
+        // reply is the numeric '1' or '0'.
+        const std::string reply =
+            send_command(":rS" + util::format_dms(degrees, 3, '*') + "#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
+    void rotator_halt() { send_command_blind(":rQ#"); }
+
 private:
     static std::string normalize_command(const std::string& command) {
         std::string full = command;
@@ -1921,6 +1991,22 @@ bool OnStepProtocolWrapper::focuser_goto(int focuser, long steps) {
 }
 
 void OnStepProtocolWrapper::focuser_halt(int focuser) { pimpl_->focuser_halt(focuser); }
+
+std::optional<char> OnStepProtocolWrapper::rotator_capability() { return pimpl_->rotator_capability(); }
+
+std::optional<RotatorStatus> OnStepProtocolWrapper::rotator_status() { return pimpl_->rotator_status(); }
+
+std::optional<double> OnStepProtocolWrapper::rotator_angle() { return pimpl_->rotator_angle(); }
+
+std::optional<long> OnStepProtocolWrapper::rotator_min_angle() { return pimpl_->rotator_limit(":rI#"); }
+
+std::optional<long> OnStepProtocolWrapper::rotator_max_angle() { return pimpl_->rotator_limit(":rM#"); }
+
+std::optional<double> OnStepProtocolWrapper::rotator_degrees_per_step() { return pimpl_->rotator_degrees_per_step(); }
+
+bool OnStepProtocolWrapper::rotator_goto(double degrees) { return pimpl_->rotator_goto(degrees); }
+
+void OnStepProtocolWrapper::rotator_halt() { pimpl_->rotator_halt(); }
 
 bool OnStepProtocolWrapper::connect(const ConnectionInfo& info) { return pimpl_->connect(info); }
 

@@ -10,7 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The OnStep telescope and focuser factories (the telescope's doing what the router arm it replaced did).
+// The OnStep telescope, focuser and rotator factories (the telescope's doing what the router arm it replaced did).
 // create_onstep_telescope_auto() is hardware-free (the scan runs at connect,
 // #659) -- never resolve_onstep_serial_auto() directly, which would move the
 // scan here, onto the registration path. Compiled only under
@@ -19,6 +19,7 @@
 
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
+#include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 
 #include <algorithm>
@@ -108,6 +109,19 @@ void register_onstep_factory(DeviceCatalog& catalog) {
         return vendor::onstep::create_onstep_focuser(device_number, configured_connection(config), focuser_number);
     };
     catalog.add(std::move(focuser));
+
+    // The rotator joins the controller's shared link too (#2221), found the same way.
+    Factory rotator;
+    rotator.key = DeviceKey{"onstep", DeviceType::Rotator};
+    rotator.create = [](const DeviceConfig& config, int device_number) -> std::unique_ptr<AlpacaDriver> {
+        const std::string type = config.get(kOnStepConnectionType);
+        if (type.empty() || type == "auto") {
+            return vendor::onstep::create_onstep_rotator_auto(device_number,
+                                                              static_cast<int>(config.get(kOnStepMountIndex)));
+        }
+        return vendor::onstep::create_onstep_rotator(device_number, configured_connection(config));
+    };
+    catalog.add(std::move(rotator));
 
     // The attacheddevices listing (#2312): each serial device's USB identity is the
     // token list its raw-node scan filter matches, read from the wrapper.

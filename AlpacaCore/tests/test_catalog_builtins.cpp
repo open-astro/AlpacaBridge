@@ -1834,6 +1834,65 @@ TEST_CASE("Builtin catalog - the OnStep focuser joins the telescope's connection
 #endif
 }
 
+// #2221: the rotator joins the controller's link with the telescope's connection fields and nothing else.
+// Falsified by: onstep_schema.cpp register_onstep_schema() not adding the rotator Schema.
+TEST_CASE("Builtin catalog - the OnStep rotator joins the telescope's connection fields",
+          "[catalog][onstep][rotator][unit]") {
+    const DeviceKey key{"onstep", DeviceType::Rotator};
+    {
+        DeviceCatalog catalog;
+        register_builtin_schemas(catalog);
+        const auto views = catalog.describe();
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->display_name == "OnStep");
+        CHECK(v->build_option == "ALPACACORE_ENABLE_ONSTEP");
+        const std::vector<std::string_view> expected_keys{
+            "connectionType", "mountIndex", "portPath", "baudRate", "host", "tcpPort", "responseTimeoutMs"};
+        REQUIRE(v->fields.size() == expected_keys.size());
+        for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+            CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+        }
+        // The telescope's endpoint rules apply as they are.
+        DeviceConfig serial;
+        serial.set("connectionType", std::string{"serial"});
+        const auto no_port = catalog.normalize(key, serial, Source::Api);
+        REQUIRE(no_port.rejection.has_value());
+        CHECK(*no_port.rejection == "Serial port path is required");
+        DeviceConfig network;
+        network.set("connectionType", std::string{"network"});
+        network.set("host", std::string{"192.0.2.1"});
+        network.set("tcpPort", std::int64_t{65536});
+        const auto bad_port = catalog.normalize(key, network, Source::Api);
+        REQUIRE(bad_port.rejection.has_value());
+        CHECK(*bad_port.rejection == "tcpPort is out of range (min 1) (max 65535)");
+    }
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, key);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ONSTEP
+    CHECK(v->available);
+    DeviceConfig config;  // auto: constructs without a scan
+    config.set("connectionType", std::string{"auto"});
+    auto driver = catalog.create(key, config, 3);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Rotator);
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_name() == "OnStep Rotator");
+    CHECK_FALSE(driver->get_connected());
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    network.set("host", std::string{"192.0.2.1"});
+    auto network_driver = catalog.create(key, network, 4);
+    REQUIRE(network_driver != nullptr);
+    CHECK(network_driver->get_device_type() == DeviceType::Rotator);
+    CHECK_FALSE(network_driver->get_connected());
+#else
+    CHECK_FALSE(v->available);
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // Celestron telescope. NexStar serial/network/auto and CGX direct USB; the
 // auto-detect factory constructs without a scan (#659), so no port is opened here.

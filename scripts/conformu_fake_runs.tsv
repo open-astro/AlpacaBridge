@@ -12,6 +12,7 @@ celestron	focuser	fake_celestron_focuser.h	pending	3	-
 synscan	telescope	fake_mount_server.h	pending	2	-
 onstep	telescope	fake_mount_server.h	pending	2	-
 onstep	focuser	fake_mount_server.h	pending	3	-
+onstep	rotator	fake_mount_server.h	pending	6	-
 ioptron	telescope	fake_ioptron_mount.h	pending	2	-
 ioptron	focuser	fake_ioptron_ieaf.h	pending	3	-
 ifr	focuser	fake_ioptron_ifr.h	pending	3	-

@@ -3646,23 +3646,31 @@ if (synscanConnectionType) {
     });
 }
 
-// The OnStep block holds the telescope and the focuser (#2223): show the one the Device Type names, and disable
-// the other's inputs so its values cannot leak into this device's config.
+// The OnStep block holds the telescope, the focuser (#2223) and the rotator (#2221): show the one the Device Type
+// names, and disable the others' inputs so their values cannot leak into this device's config.
 function updateOnStepDeviceFields() {
-    const focuserSection = document.getElementById('onstep-focuser-config');
-    const telescopeSection = document.getElementById('onstep-telescope-config');
-    if (!focuserSection || !telescopeSection) {
+    const sections = {
+        focuser: document.getElementById('onstep-focuser-config'),
+        rotator: document.getElementById('onstep-rotator-config'),
+        telescope: document.getElementById('onstep-telescope-config'),
+    };
+    if (Object.values(sections).some((section) => !section)) {
         return;
     }
     const deviceTypeSelect = document.getElementById('device-type');
-    const isFocuser = deviceTypeSelect && normalizeDeviceType(deviceTypeSelect.value) === 'focuser';
-    focuserSection.style.display = isFocuser ? 'block' : 'none';
-    telescopeSection.style.display = isFocuser ? 'none' : 'block';
-    setFieldGroupEnabled(focuserSection, isFocuser);
-    setFieldGroupEnabled(telescopeSection, !isFocuser);
+    const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
+    const shown = sections[deviceType] ? deviceType : 'telescope';
+    Object.entries(sections).forEach(([type, section]) => {
+        section.style.display = type === shown ? 'block' : 'none';
+        setFieldGroupEnabled(section, type === shown);
+    });
 }
 
-[['onstep-connection-type', 'onstep'], ['onstep-focuser-connection-type', 'onstep-focuser']].forEach(([id, prefix]) => {
+[
+    ['onstep-connection-type', 'onstep'],
+    ['onstep-focuser-connection-type', 'onstep-focuser'],
+    ['onstep-rotator-connection-type', 'onstep-rotator'],
+].forEach(([id, prefix]) => {
     const select = document.getElementById(id);
     if (select) {
         select.addEventListener('change', function() {
@@ -4578,6 +4586,16 @@ document.getElementById('device-form').addEventListener('submit', async function
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444
+        }
+    } else if (deviceData.vendor === 'onstep' && normalizeDeviceType(deviceData.deviceType) === 'rotator') {
+        // The rotator's own prefixed names (the FormData collision rule), the telescope's connection fields (#2221).
+        deviceData.connectionType = formData.get('onstepRotatorConnectionType') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = (formData.get('onstepRotatorPortPath') || '').trim();
+            deviceData.baudRate = parseInt(formData.get('onstepRotatorBaudRate')) || 9600;
+        } else if (deviceData.connectionType === 'network') {
+            deviceData.host = (formData.get('onstepRotatorHost') || '').trim();
+            deviceData.tcpPort = parseInt(formData.get('onstepRotatorTcpPort')) || 9998;
         }
     } else if (deviceData.vendor === 'onstep' && normalizeDeviceType(deviceData.deviceType) === 'focuser') {
         // The focuser's own prefixed names (the FormData collision rule), the telescope's connection fields (#2223).

@@ -12,7 +12,7 @@
 
 #pragma once
 
-// OnStep telescope and focuser catalog field declarations, shared by onstep_schema.cpp
+// OnStep telescope, focuser and rotator catalog field declarations, shared by onstep_schema.cpp
 // (no vendor header) and onstep_catalog.cpp (the factory, vendor header
 // allowed). No vendor header here either: the schema file includes this one and
 // compiles in every build (including vendors-OFF).
@@ -101,6 +101,15 @@ inline const std::vector<FieldRef>& onstep_focuser_fields() {
         kOnStepConnectionType.ref(),    kOnStepMountIndex.ref(),   kOnStepPortPath.ref(),
         kOnStepBaudRate.ref(),          kOnStepHost.ref(),         kOnStepTcpPort.ref(),
         kOnStepResponseTimeoutMs.ref(), kOnStepFocuserNumber.ref()};
+    return fields;
+}
+
+// The rotator joins the telescope's link (#2221): the same connection fields, nothing else (the controller has one
+// rotator).
+inline const std::vector<FieldRef>& onstep_rotator_fields() {
+    static const std::vector<FieldRef> fields{
+        kOnStepConnectionType.ref(), kOnStepMountIndex.ref(), kOnStepPortPath.ref(),         kOnStepBaudRate.ref(),
+        kOnStepHost.ref(),           kOnStepTcpPort.ref(),    kOnStepResponseTimeoutMs.ref()};
     return fields;
 }
 

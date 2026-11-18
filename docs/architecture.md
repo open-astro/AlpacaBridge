@@ -115,7 +115,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | SynScan | Telescope | Protocol wrapper | Production |
 | SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, EQ-class boards e.g. EQM-35 Pro, motor controller protocol over USB or WiFi UDP) | Protocol wrapper | Production |
 | Celestron | Telescope (NexStar hand controller; CGX/CGX-L direct USB AUX), Focuser (focus motor on its own USB port) | Protocol wrapper | Production (CGX-L direct USB untested) |
-| OnStep | Telescope (generic DIY/retrofit mounts), Focuser (OnStepX focusers 1-6, sharing the controller's one link with the telescope) | Protocol wrapper | Production (focuser fake-tested) |
+| OnStep | Telescope (generic DIY/retrofit mounts), Focuser (OnStepX focusers 1-6), Rotator (OnStepX), the focusers and the rotator sharing the controller's one link with the telescope | Protocol wrapper | Production (focuser and rotator fake-tested) |
 | Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3), Switch (Power & Data Hubs Advanced 3) | Protocol wrapper | Production |
 | WandererAstro | CoverCalibrator (WandererCover V4), Rotator (WandererRotator Mini V1/V2), FilterWheel (SFW50/SFW50S/SFW36S), Switch (WandererBox Pro V3) | Protocol wrapper | Production |
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |

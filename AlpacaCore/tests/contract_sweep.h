@@ -82,6 +82,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
+#include <alpacacore/vendor/onstep/onstep_rotator_driver.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WEEWX
@@ -566,6 +567,19 @@ inline ContractEntry contract_entry_onstep_focuser() {
                                  "onstep_focuser_driver.cpp move() clamps a position outside 0..MaxStep to the range "
                                  "(ConformU requires clamping, #2028)");
 }
+// The OnStepX rotator on the controller's shared link (#2221).
+inline ContractEntry contract_entry_onstep_rotator() {
+    return make_entry(
+        "onstep_rotator", "onstep", "rotator", DeviceType::Rotator,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::onstep::ConnectionInfo conn;
+            conn.type = vendor::onstep::ConnectionType::Network;
+            conn.host = "127.0.0.1";
+            conn.tcp_port = 9;
+            return vendor::onstep::create_onstep_rotator(n, conn);
+        },
+        kSrcAgents);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -876,7 +890,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_SKYWATCHER(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS_ONSTEP(X) X(onstep_telescope) X(onstep_focuser)
+#define CS_ONSTEP(X) X(onstep_telescope) X(onstep_focuser) X(onstep_rotator)
 #else
 #define CS_ONSTEP(X)
 #endif
@@ -1017,6 +1031,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},
     {"onstep", "focuser", "fake_mount_server.h"},  // the focuser on the controller's shared link (#2223)
+    {"onstep", "rotator", "fake_mount_server.h"},  // the rotator on the controller's shared link (#2221)
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
     {"ifr", "focuser", "fake_ioptron_ifr.h"},
@@ -1067,6 +1082,7 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"synscan_telescope", "synscan", "AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp"},
     {"onstep_telescope", "onstep", "AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp"},
     {"onstep_focuser", "onstep", "AlpacaCore/src/vendors/onstep/onstep_focuser_driver.cpp"},
+    {"onstep_rotator", "onstep", "AlpacaCore/src/vendors/onstep/onstep_rotator_driver.cpp"},
     {"gemini_focuser", "gemini", "AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp"},
     {"qhy_focuser", "qhy", "AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp"},
     {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},

@@ -4,8 +4,8 @@ applyTo: "AlpacaCore/src/vendors/onstep/**,AlpacaCore/include/alpacacore/vendor/
 
 ### OnStep
 
-Devices: Telescope, Focuser (OnStepX focusers 1-6, #2223). Every device on one controller shares one link
-(see "Focuser and the shared link" below).
+Devices: Telescope, Focuser (OnStepX focusers 1-6, #2223), Rotator (OnStepX, #2221). Every device on one controller
+shares one link (see "Focuser and the shared link" and "Rotator" below).
 
 No vendor SDK — OnStep is open-source LX200-protocol firmware (Arduino Mega/Due, Teensy,
 ESP32, STM32) for DIY/retrofit mounts. The protocol reference is the firmware's own OnStepX
@@ -77,6 +77,13 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:F<n>c0#` / `:F<n>c1#` | `TempComp` write | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason |
 | `:F<n>s<steps>#` | focuser `Move`, absolute, raw steps (the client's position plus the minimum) | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason (`09`: the focuser is parked) |
 | `:F<n>Q#` | focuser `Halt` | none | blind |
+| `:GX98#` | rotator capability (the rotator's connect check, #2221) | `R#` rotate only, `D#` rotate and derotate, `N#` none; a firmware without it answers the unknown-command `0` | read without waiting for the `#`; anything but `R`/`D` fails Connect with "OnStepX reports no rotator" |
+| `:rT#` | rotator status (every rotator poll, and right before each move, #2221) | `M` moving, or `S` stopped then `D` (derotation on) and `R` (derotator reversed), then the goto-rate digit, `#` | read without waiting for the `#`; `D` refuses a move with `InvalidOperation` |
+| `:rG#` | rotator angle (every poll; Sync) | `sDDD*MM#`, signed, inside the travel | `#`-terminated; the sign and `*` are required; `MechanicalPosition` is it wrapped into 0-360 |
+| `:rI#` / `:rM#` | rotator travel minimum / maximum, whole degrees (connect) | `n#` | `#`-terminated; either one that does not parse, or a maximum not above the minimum, fails Connect |
+| `:rD#` | rotator degrees per step (`StepSize`, connect) | `n.nnnnn#` | `#`-terminated; a reply that is not a number above 0 makes `StepSize` `PropertyNotImplemented` |
+| `:rSsDDD*MM:SS#` | rotator move to an absolute angle inside the travel | `0`/`1` bare digit | `0` throws `InvalidOperation` with the `:GE#` reason (`09`: the rotator is parked) |
+| `:rQ#` | rotator `Halt` | none | blind |
 
 `:MS#` refusal digits (OnStepX `Goto.command.cpp`, OnStep `Command.ino`; the same digits follow
 `E` in a `:CM#` failure): `1` below the horizon limit, `2` above the overhead limit, `3` controller
@@ -104,7 +111,7 @@ standalone `OnStepProtocolWrapper` and calls `connect()`/`disconnect()` on it, a
 
 - **Wire turns**: every exchange holds the link's wire lock for its command and reply, as before. A command whose
   error code is read next with `:GE#` (the telescope's `:hP#`/`:hC#`, `:ST`/`:Te#`, `:hQ#`, `:hR#`, `:SXTR`/`:SXTD`;
-  the focuser's `:F<n>s` and `:F<n>c0`/`c1`) holds the link's sequence lock (`hold_sequence()`, a recursive mutex
+  the focuser's `:F<n>s` and `:F<n>c0`/`c1`; the rotator's `:rT#` check and `:rS`, #2221) holds the link's sequence lock (`hold_sequence()`, a recursive mutex
   above the wire lock) across both, because OnStep keeps one code per channel and a sibling's command in between
   would replace it. The telescope takes it through `Wire::hold_sequence()`, with `mutex_` released. Nothing else
   holds it, so the telescope's poll, MoveAxis re-send and pulse-guide timing keep their cadence; a focuser exchange
@@ -140,6 +147,44 @@ standalone `OnStepProtocolWrapper` and calls `connect()`/`disconnect()` on it, a
   OnStepX focuser on a rig; the ConformU Focuser check is tracked in the OnStep test plan, #2126. Tests:
   `test_onstep_focuser.cpp` (`[shared-link]`), the `[onstep][focuser][stress]` cases in
   `test_onstep_concurrency_stress.cpp` (over `onstep_controller.h`), the contract sweep entry `onstep_focuser`.
+
+#### Rotator (#2221)
+
+The OnStepX rotator joins the controller's link the way a focuser does (`acquire()`, the same connect, refusals,
+poll and loss rules, `onstep_rotator_driver.cpp`), and is OnStepX only. Commands are from OnStepX
+`Rotator.command.cpp` at `af1d26bf`.
+
+- **Connect** reads `:GVP#`, `:GVN#` (below version 10: "The OnStep Rotator requires OnStepX firmware"), `:GX98#`
+  (`R` or `D`, else "OnStepX reports no rotator"; `D` is a derotator build, which OnStepX reports on an alt-az mount),
+  the travel `:rI#`/`:rM#` and the step size `:rD#`, then loads the Sync offset ([decision 0008](../../docs/decisions/0008-rotator-sync-offset-persistence.md)).
+- **State poll** (`util::PolledState`, 500 ms): `:rT#` then `:rG#`, so an angle read after a stopped status is the end
+  of the move. `IsMoving`, `MechanicalPosition` and `Position` serve the frame, stale or not; a fault throws
+  `DriverException`, a lost link `NotConnected`, and a poll unanswered for `util::kLinkStalenessBound` declares the link
+  lost for every device on it.
+- **Angles**: `:rG#` is the firmware's coordinate, signed and inside the travel (whole arcminutes: `Convert::doubleToDms`
+  at `PM_LOW`). `MechanicalPosition` is it wrapped into 0-360, and `Position` is `MechanicalPosition` plus the Sync
+  offset. A move (`Move`, `MoveAbsolute`, `MoveMechanical`) turns its target into a mechanical angle, then into the
+  firmware coordinate inside `:rI#`..`:rM#` that reaches it nearest the current one
+  (`detail::rotator_angle_within_travel()`); none inside is `InvalidValue` with nothing sent, so a move never asks the
+  firmware to leave its travel or wrap a cable. Then, holding the link's sequence lock, it reads `:rT#`: `D`
+  (derotation on) is `InvalidOperation` ("turn derotation off on the controller"), since a goto there sets the axis
+  rate the derotator then fights; otherwise `:rS<sDDD*MM:SS>#` (an optional sign, then `Convert::dmsToDouble`'s
+  `DDD*MM:SS`), whose `0` reads `:GE#` in the same sequence. `IsMoving` is written through.
+- **Never sent**: `:r+#`, `:r-#` (derotation on and off), `:rP#` (to the parallactic angle), `:rR#` (derotator
+  reverse), the rate presets, the continuous moves and the zero or home commands. The derotator is the firmware's.
+- **`Reverse`** is the driver's own: IRotatorV4 says `CanReverse` "must always return True" and `Reverse` must be
+  implemented, and OnStepX has no reverse for a goto (`:rR#` reverses only the derotator). While it is set the driver
+  mirrors the firmware angle (`MechanicalPosition` is the negated angle wrapped into 0-360) and each move's target, so
+  `Position` still equals `MechanicalPosition` without a Sync. It changes nothing on the wire and lasts for the driver
+  object (a reconnect keeps it, a service restart or a device edit clears it). The issue asked for `CanReverse` false;
+  the interface does not allow it.
+- **`Sync`** reads `:rG#` live, sets the offset (Position - MechanicalPosition) and saves it through
+  `util::RotatorSyncOffsetStore` under the stored UniqueID; a save that fails throws `DriverException` and keeps the old
+  offset. `Halt` sends `:rQ#` and writes not-moving through, a lost link refusing it only.
+- Fake evidence only: no OnStepX rotator on a rig, and `:rG#` reads whole arcminutes, so ConformU's position checks,
+  which use `StepSize` as their tolerance, may need a rotator whose step is at least one arcminute. The ConformU Rotator
+  check is tracked in the OnStep test plan, #2126. Tests: `test_onstep_rotator.cpp`, the `[onstep][rotator][stress]`
+  cases in `test_onstep_concurrency_stress.cpp`, the contract sweep entry `onstep_rotator`.
 
 #### OnStep 4.x and OnStepX
 
