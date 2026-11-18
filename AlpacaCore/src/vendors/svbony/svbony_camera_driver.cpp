@@ -963,13 +963,17 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
+            // An AbortExposure inside a StartExposure's start window is recorded; the session applies it as that
+            // start publishes the exposure (decision 0020 rule 9). It used to return and the exposure ran. Recorded
+            // before the state is read: a start that publishes Exposing in between makes record_abort() false and
+            // the read below sees that exposure, where a read first saw Idle and the abort was dropped.
+            if (!capture_stop_failed_ && session_.record_abort()) {
+                return;
+            }
             const CameraState state = session_.camera_state();
             exposing = state == CameraState::Exposing || state == CameraState::Download;
             if (!exposing && !capture_stop_failed_) {
-                // An AbortExposure inside a StartExposure's start window is recorded; the session applies it as
-                // that start publishes the exposure (decision 0020 rule 9). It used to return and the exposure ran.
-                (void)session_.record_abort();
-                return;
+                return;  // nothing running and no start reserved
             }
             // The check, the stopping mark and the SDK stop in one hold of mutex_, which the body's capture start
             // also takes: the stop meets the exposure that was checked, never one a racing StartExposure began.

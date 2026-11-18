@@ -1493,20 +1493,23 @@ public:
         bool exposing = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // A StartExposure is between its settings snapshot and session_.start()
+            // publishing Exposing, which can take up to the start timeout behind a
+            // body the watchdog left in the SDK. The session records the abort and
+            // applies it as that start publishes, so no body runs and the exposure
+            // never runs to the end after the client was told it was aborted
+            // (issue #1996, decision 0020 rule 9). Recorded before the state is read:
+            // a start that publishes Exposing in between makes record_abort() false,
+            // and the read below then sees that exposure and stops it. Read first, the
+            // state was Idle, the record failed and the abort was dropped.
+            if (session_.record_abort()) {
+                return;
+            }
             const CameraState state = session_.camera_state();
             exposing = state == CameraState::Exposing || state == CameraState::Download;
             if (exposing) {
                 session_.set_stopping(true);  // a frame wait the stop breaks is not a failure
             } else {
-                // A StartExposure is between its settings snapshot and session_.start()
-                // publishing Exposing, which can take up to the start timeout behind a
-                // body the watchdog left in the SDK. The session records the abort and
-                // applies it as that start publishes, so no body runs and the exposure
-                // never runs to the end after the client was told it was aborted
-                // (issue #1996, decision 0020 rule 9).
-                if (session_.record_abort()) {
-                    return;
-                }
                 // A completed exposure: drop its frame. A kept failure stays until the
                 // next StartExposure or a reconnect (decision 0020 rule 3).
                 session_.discard_image();

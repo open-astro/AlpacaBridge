@@ -1162,7 +1162,7 @@ TEST_CASE("ToupTek Camera Driver - a StartExposure during the destructor's disco
 
 // Issue #1996. An AbortExposure that arrives while a StartExposure waits in session_.start() (behind a body the
 // watchdog left running) was a no-op that reported success, and the new exposure then ran to its end. Falsified by:
-// touptek_camera_driver.cpp stop_exposure() returning while exposure_starting_ without setting abort_pending_.
+// touptek_camera_driver.cpp stop_exposure() returning without its session_.record_abort() call.
 TEST_CASE("ToupTek Camera Driver - an AbortExposure during a StartExposure still in flight is not dropped",
           "[touptek][camera][unit][capture-session][taskclock]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1206,7 +1206,7 @@ TEST_CASE("ToupTek Camera Driver - an AbortExposure during a StartExposure still
     std::atomic<int> start_error{-1};
     std::thread starter([&] { start_error = error_of([&] { driver->start_exposure(0.5, true); }); });
     REQUIRE(spin_until([&] { return start_in_window.load(); }));
-    // Queues on mutex_ behind the start's locked section, so it runs with exposure_starting_ set.
+    // Runs while the start holds its session reservation, before session_.start() publishes Exposing.
     CHECK(error_of([&] { driver->abort_exposure(); }) == 0);
 
     {
@@ -1216,7 +1216,7 @@ TEST_CASE("ToupTek Camera Driver - an AbortExposure during a StartExposure still
     gate_cv.notify_all();
     starter.join();
     CHECK(start_error.load() == 0);
-    // The recorded abort ran once the start published Exposing: no frame from the aborted exposure.
+    // The recorded abort was applied as the start published (decision 0020 rule 9): no body ran, no frame.
     CHECK(spin_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
     std::this_thread::sleep_for(200ms);  // room for an exposure the abort missed to publish its frame
     CHECK_FALSE(frame_ready(*driver));

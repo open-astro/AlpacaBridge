@@ -1138,6 +1138,13 @@ private:
             }
             stop_id = camera_id_.value();
         }
+        // An AbortExposure inside a StartExposure's start window is recorded; the session applies it as that start
+        // publishes the exposure (decision 0020 rule 9). It used to return and the exposure ran. Recorded before the
+        // state is read: a start that publishes Exposing in between makes record_abort() false and the read below
+        // sees that exposure, where a read first saw Idle and the abort was dropped.
+        if (abort && session_.record_abort()) {
+            return;
+        }
         const CameraState state = session_.camera_state();
         if (state == CameraState::Download) {
             if (abort) {
@@ -1147,12 +1154,7 @@ private:
             return;  // StopExposure is ignored once readout is in progress.
         }
         if (state != CameraState::Exposing) {
-            // An AbortExposure inside a StartExposure's start window is recorded; the session applies it as that
-            // start publishes the exposure (decision 0020 rule 9). It used to return here and the exposure ran.
-            if (abort) {
-                (void)session_.record_abort();
-            }
-            return;
+            return;  // nothing running and no start reserved (an abort in a start window was recorded above)
         }
         {
             std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);

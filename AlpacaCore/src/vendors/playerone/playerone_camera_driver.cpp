@@ -935,12 +935,16 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
+            // A StartExposure between its settings snapshot and Exposing: the session records the abort and that
+            // start stops the exposure once it runs (decision 0020 rule 9). Recorded before the state is read: a
+            // start that publishes Exposing in between makes record_abort() false and the read below sees that
+            // exposure, where a read first saw Idle and the abort was dropped.
+            if (session_.record_abort()) {
+                return;
+            }
             const CameraState state = session_.camera_state();
             if (state != CameraState::Exposing && state != CameraState::Download) {
-                // A StartExposure between its settings snapshot and Exposing: the session records the abort and
-                // that start stops the exposure once it runs (decision 0020 rule 9). Otherwise nothing runs.
-                (void)session_.record_abort();
-                return;
+                return;  // nothing runs
             }
             if (state == CameraState::Download || (sdk_exposure_started_ && sdk_.image_ready(camera_info_.camera_id))) {
                 throw AlpacaException("AbortExposure is not possible while the image is being downloaded",
