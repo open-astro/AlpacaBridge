@@ -24,6 +24,7 @@
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/sexagesimal.h>
 #include <alpacacore/vendor/onstep/onstep_focuser_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
@@ -358,6 +359,31 @@ std::vector<std::string> run_with_a_sibling_at_every_exchange(Controller& contro
     cv.notify_all();
     sibling.join();
     return controller.state->commands();
+}
+
+// Runs `member` on this thread with a Disconnect of `driver` landed right after the member's connection check passed
+// (the AfterConnectionCheck hook, once, on this thread only): the window a TSan storm found (#2222). Returns the
+// error code the member threw, or -1 when it returned.
+template <typename Member>
+int code_with_disconnect_after_check(alpacacore::AlpacaDriver& driver, Member&& member) {
+    const auto me = std::this_thread::get_id();
+    std::atomic<bool> fired{false};
+    onstep::detail::set_link_loss_hook([&](onstep::detail::LinkLossHookPoint point) {
+        if (point != onstep::detail::LinkLossHookPoint::AfterConnectionCheck || std::this_thread::get_id() != me ||
+            fired.exchange(true)) {
+            return;
+        }
+        driver.set_connected(false);
+    });
+    int code = -1;
+    try {
+        member();
+    } catch (const alpacacore::AlpacaException& e) {
+        code = e.error_code();
+    }
+    onstep::detail::set_link_loss_hook({});
+    CHECK(fired.load());
+    return code;
 }
 
 // Checks that every :GE# in `log` follows a command starting with `prefix`, and counts them.

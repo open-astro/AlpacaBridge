@@ -413,7 +413,17 @@ std::function<void(detail::LinkLossHookPoint)>& link_loss_hook() {
     return *hook;
 }
 
+// Set while a test hook is installed, so the drivers' connection checks, which run on every member, skip the hook's
+// mutex in production.
+std::atomic<bool>& link_loss_hook_set() {
+    static std::atomic<bool> set{false};
+    return set;
+}
+
 void run_link_loss_hook(detail::LinkLossHookPoint point) {
+    if (!link_loss_hook_set().load(std::memory_order_acquire)) {
+        return;
+    }
     std::function<void(detail::LinkLossHookPoint)> hook;
     {
         std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
@@ -2210,8 +2220,11 @@ void OnStepProtocolWrapper::flush_input() { pimpl_->flush_input(); }
 namespace detail {
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook) {
     std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
+    link_loss_hook_set().store(static_cast<bool>(hook), std::memory_order_release);
     link_loss_hook() = std::move(hook);
 }
+
+void run_connection_check_hook() { run_link_loss_hook(LinkLossHookPoint::AfterConnectionCheck); }
 
 std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info) {
     std::lock_guard<std::mutex> lock(link_registry_mutex());

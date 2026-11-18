@@ -238,18 +238,21 @@ public:
     double get_mechanical_position() const override {
         const Frame frame = served_frame();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_connect_state_locked();
         return mechanical_of_locked(frame.angle);
     }
 
     double get_position() const override {
         const Frame frame = served_frame();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_connect_state_locked();
         return wrap(mechanical_of_locked(frame.angle) + sync_offset_);
     }
 
     double get_step_size() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_connect_state_locked();
         if (!degrees_per_step_) {
             throw AlpacaException("The OnStepX rotator did not report its step size (:rD#)",
                                   AlpacaError::PropertyNotImplemented);
@@ -260,6 +263,7 @@ public:
     double get_target_position() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_connect_state_locked();
         return has_target_position_ ? target_position_ : 0.0;
     }
 
@@ -267,6 +271,7 @@ public:
         validate_angle(position);  // InvalidValue before NotConnected
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_connect_state_locked();
         target_position_ = wrap(position);
         has_target_position_ = true;
     }
@@ -288,6 +293,7 @@ public:
         double target = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            require_connect_state_locked();
             mechanical = wrap(mechanical_of_locked(frame.angle) + position);
             target = wrap(mechanical + sync_offset_);
         }
@@ -300,6 +306,7 @@ public:
         double mechanical = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            require_connect_state_locked();
             mechanical = wrap(position - sync_offset_);
         }
         move_mechanical_to(mechanical, wrap(position));
@@ -311,6 +318,7 @@ public:
         double target = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            require_connect_state_locked();
             target = wrap(position + sync_offset_);
         }
         move_mechanical_to(wrap(position), target);
@@ -331,6 +339,7 @@ public:
         double offset = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            require_connect_state_locked();
             offset = wrap(wrap(position) - mechanical_of_locked(*angle));
         }
         // IRotatorV4: the offset must persist. A Sync that cannot store it has failed, so it throws and keeps the
@@ -376,6 +385,7 @@ private:
         double firmware_target = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            require_connect_state_locked();
             min_angle = min_angle_;
             max_angle = max_angle_;
             firmware_target = wrap(reverse_ ? -mechanical : mechanical);
@@ -454,6 +464,7 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 sync_offset_ = offset;
+                connect_state_ = true;  // the limits, step size and offset of this connect are in place
             }
             link_.store(link);
             state_.reset();
@@ -525,6 +536,7 @@ private:
             firmware_.clear();
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        connect_state_ = false;
         min_angle_ = 0.0;
         max_angle_ = 0.0;
         degrees_per_step_.reset();
@@ -563,6 +575,16 @@ private:
         if (!link_up()) {
             throw AlpacaException("OnStep rotator link lost; set Connected true to reconnect",
                                   AlpacaError::NotConnected);
+        }
+        detail::run_connection_check_hook();  // a test lands a Disconnect here
+    }
+
+    // Caller holds mutex_. The connect-time values (travel, step size, Sync offset) belong to a live connection: a
+    // Disconnect that ran after the caller's connection check has cleared them, so the member answers NotConnected,
+    // never a range or capability answer computed from the cleared values (#2222 TSan finding).
+    void require_connect_state_locked() const {
+        if (!connect_state_) {
+            throw AlpacaException("OnStep rotator not connected", AlpacaError::NotConnected);
         }
     }
 
@@ -625,6 +647,7 @@ private:
     std::mutex transition_mutex_;
     std::mutex io_mutex_;  // orders the moves, Halt and Sync on the wire; never taken by a getter or the poll
     mutable std::mutex mutex_;
+    bool connect_state_ = false;              // the values below are a live connect's; under mutex_
     double min_angle_ = 0.0;                  // :rI# at connect; under mutex_
     double max_angle_ = 0.0;                  // :rM# at connect; under mutex_
     std::optional<double> degrees_per_step_;  // :rD# at connect; under mutex_

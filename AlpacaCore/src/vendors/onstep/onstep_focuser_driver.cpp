@@ -202,6 +202,7 @@ public:
     int get_max_step() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_connect_state_locked();
         return max_step_;
     }
     int get_max_increment() const override { return get_max_step(); }
@@ -211,6 +212,7 @@ public:
     double get_step_size() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_connect_state_locked();
         if (!microns_per_step_) {
             throw AlpacaException("OnStepX focuser " + std::to_string(focuser_number_) +
                                       " did not report its step size (:F" + std::to_string(focuser_number_) + "u#)",
@@ -225,6 +227,7 @@ public:
     bool get_temp_comp_available() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_connect_state_locked();
         return temp_comp_available_;
     }
 
@@ -266,6 +269,7 @@ public:
         ensure_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            require_connect_state_locked();
             if (!temperature_probe_) {
                 throw AlpacaException("OnStepX focuser " + std::to_string(focuser_number_) +
                                           " has no temperature probe (:F" + std::to_string(focuser_number_) +
@@ -301,6 +305,7 @@ public:
         long min_position = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            require_connect_state_locked();
             max_step = max_step_;
             min_position = min_position_;
         }
@@ -412,6 +417,7 @@ private:
         const bool tcf_answers = link.focuser_temp_comp(focuser_number_).has_value();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            connect_state_ = true;  // the travel, step size and probe flags of this connect are in place
             min_position_ = *min_position;
             const long span = *max_position - *min_position;
             max_step_ = static_cast<int>(std::min<long>(span, std::numeric_limits<int>::max()));
@@ -439,6 +445,7 @@ private:
             firmware_.clear();
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        connect_state_ = false;
         min_position_ = 0;
         max_step_ = 0;
         microns_per_step_.reset();
@@ -476,6 +483,16 @@ private:
         if (!link_up()) {
             throw AlpacaException("OnStep focuser link lost; set Connected true to reconnect",
                                   AlpacaError::NotConnected);
+        }
+        detail::run_connection_check_hook();  // a test lands a Disconnect here
+    }
+
+    // Caller holds mutex_. The connect-time values (travel, step size, probe flags) belong to a live connection: a
+    // Disconnect that ran after the caller's connection check has cleared them, so the member answers NotConnected,
+    // never 0 or PropertyNotImplemented computed from the cleared values (#2222 TSan finding).
+    void require_connect_state_locked() const {
+        if (!connect_state_) {
+            throw AlpacaException("OnStep focuser not connected", AlpacaError::NotConnected);
         }
     }
 
@@ -559,6 +576,7 @@ private:
     std::mutex transition_mutex_;
     std::mutex io_mutex_;  // orders Move, Halt and the TempComp write on the wire; never taken by a getter or the poll
     mutable std::mutex mutex_;
+    bool connect_state_ = false;              // the values below are a live connect's; under mutex_
     long min_position_ = 0;                   // :F<n>i# at connect; under mutex_
     int max_step_ = 0;                        // :F<n>m# - :F<n>i# at connect; under mutex_
     std::optional<double> microns_per_step_;  // :F<n>u# at connect; under mutex_

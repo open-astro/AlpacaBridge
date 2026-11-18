@@ -781,10 +781,15 @@ enum class LinkLossHookPoint : std::uint8_t {
     AliveBeforeClose,       ///< link_alive(): loss recorded, port not yet closed; no lock held
     DisconnectBeforeClose,  ///< disconnect_locked(): link marked down, port not yet closed; mutex_ held
     BeforeExchange,         ///< send_command(): before this exchange takes the wire; only a caller's Sequence held
+    AfterConnectionCheck,   ///< a focuser, rotator or switch member passed its connection check; no lock held
 };
 /// Test hook: lets a test land a Disconnect, a reconnect or a sibling's exchange at the points above.
 /// Empty in production.
 void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook);
+/// Runs the hook at AfterConnectionCheck: the OnStep focuser, rotator and switch call it at the end of their
+/// connection check, so a test can land a Disconnect between that check and the member's read of the connect-time
+/// state. Does nothing (and takes no lock) while no hook is set.
+void run_connection_check_hook();
 /// The live registered link on @p info's key, or null; opens nothing. For tests that inspect a driver's link.
 std::shared_ptr<OnStepProtocolWrapper> registered_link_for_testing(const ConnectionInfo& info);
 }  // namespace detail

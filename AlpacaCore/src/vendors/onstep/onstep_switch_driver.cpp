@@ -186,6 +186,7 @@ public:
     int get_max_switch() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_slots_locked();
         return static_cast<int>(slots_.size());
     }
 
@@ -297,6 +298,7 @@ private:
         check_static_id(id);
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        require_slots_locked();
         if (id >= static_cast<int>(slots_.size())) {
             throw AlpacaException("Switch id " + std::to_string(id) + " is out of range (MaxSwitch is " +
                                       std::to_string(slots_.size()) + ")",
@@ -497,6 +499,16 @@ private:
         if (!link_up()) {
             throw AlpacaException("OnStep switch link lost; set Connected true to reconnect",
                                   AlpacaError::NotConnected);
+        }
+        detail::run_connection_check_hook();  // a test lands a Disconnect here
+    }
+
+    // Caller holds mutex_. The slot set belongs to a live connection: a connect never leaves it empty (it refuses a
+    // controller with nothing to serve), and a Disconnect that ran after the caller's connection check has cleared it,
+    // so the member answers NotConnected, never an id range against an empty set (#2222 TSan finding).
+    void require_slots_locked() const {
+        if (slots_.empty()) {
+            throw AlpacaException("OnStep switch not connected", AlpacaError::NotConnected);
         }
     }
 

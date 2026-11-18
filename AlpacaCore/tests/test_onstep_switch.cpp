@@ -23,11 +23,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -76,7 +78,7 @@ TEST_CASE("OnStep Switch Driver - Device metadata", "[onstep][switch][unit]") {
 }
 
 // The slots are read at connect, so MaxSwitch and every per-id member are NotConnected while disconnected.
-// Falsified by: onstep_switch_driver.cpp get_max_switch() without its ensure_connected() (answers 0 disconnected).
+// Falsified by: onstep_switch_driver.cpp ensure_connected() throwing InvalidOperation while disconnected.
 TEST_CASE("OnStep Switch Driver - Unsupported members", "[onstep][switch][unit]") {
     auto driver = make_offline_switch(0);
     CHECK(driver->get_supported_actions().empty());
@@ -358,6 +360,30 @@ TEST_CASE("OnStep Switch Driver - DeviceState TimeStamp is when the frame was me
     CHECK(behind >= std::chrono::milliseconds(1400));  // the 1500 ms frame age; a request-time stamp is ~0
     CHECK(behind < std::chrono::milliseconds(5000));
     driver->set_connected(false);
+}
+
+// A member whose connection check passed just before a Disconnect answers NotConnected, never an id range or a
+// count against the slot set the Disconnect cleared (the #2387 TSan storm: "Switch id 0 is out of range (MaxSwitch
+// is 0)"). Falsified by: onstep_switch_driver.cpp require_slots_locked() never throwing (InvalidValue).
+TEST_CASE("OnStep Switch Driver - a member racing a Disconnect answers NotConnected", "[onstep][switch][unit]") {
+    using alpacacore::test::onstep_controller::code_with_disconnect_after_check;
+    Controller controller;
+    auto driver = controller.aux_switch();
+    const std::vector<std::pair<const char*, std::function<void()>>> members{
+        {"MaxSwitch", [&] { (void)driver->get_max_switch(); }},
+        {"GetSwitch", [&] { (void)driver->get_switch(0); }},
+        {"GetSwitchName", [&] { (void)driver->get_switch_name(1); }},
+        {"MaxSwitchValue", [&] { (void)driver->get_max_switch_value(2); }},
+        {"CanWrite", [&] { (void)driver->get_can_write(0); }},
+        {"SetSwitchValue", [&] { driver->set_switch_value(2, 10.0); }},
+    };
+    for (const auto& [name, member] : members) {
+        CAPTURE(name);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(code_with_disconnect_after_check(*driver, member) == AlpacaError::NotConnected);
+        CHECK_FALSE(driver->get_connected());
+    }
 }
 
 // ── The shared link (#2222) ──────────────────────────────────────────────────────────────────────────────────────

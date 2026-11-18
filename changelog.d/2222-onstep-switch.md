@@ -9,3 +9,7 @@
 ### Added (tests)
 
 - **OnStep switch cases** (issue #2222): `AlpacaCore/tests/test_onstep_switch.cpp` (the driver cases, the purpose table, the slot mapping, the range refusals with nothing sent, a refused write and its `:GE#`, a change at the controller shown after the poll, the OnStep 4.x refusal, both connect orders with the telescope, a link loss reaching both, a refused write and its `:GE#` kept together), the switch `[stress]` cases in `test_onstep_concurrency_stress.cpp`, the auxiliary features in the scripted controller `onstep_controller.h`, the `onstep_switch` contract sweep entry (tiers 1 and 2 and the snapshot cases), the catalog built-ins case and the AlpacaHTTP config round-trip.
+
+### Fixed
+
+- **OnStep focuser, rotator and switch: a member racing a Disconnect answers `NotConnected`** (issue #2222, found by the TSan storm on its PR): a member whose connection check passed just before a Disconnect read the connect-time values the Disconnect had cleared and answered from them (the switch "Switch id 0 is out of range (MaxSwitch is 0)" `InvalidValue`, the focuser `MaxStep` 0 or `PropertyNotImplemented`, the rotator `PropertyNotImplemented` or a travel `InvalidValue`). Each driver now checks, under its state lock, that the connect-time values belong to a live connection and answers `NotConnected` otherwise. A test hook (`detail::run_connection_check_hook()`, run at the end of each driver's connection check and costing one atomic load while no hook is set) lands a Disconnect in that window for one case per driver.

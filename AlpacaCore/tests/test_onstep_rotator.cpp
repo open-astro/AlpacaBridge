@@ -28,11 +28,13 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -533,6 +535,30 @@ TEST_CASE("OnStep Rotator Driver - DeviceState TimeStamp is when the frame was m
     CHECK(behind >= std::chrono::milliseconds(800));  // the 900 ms frame age; a request-time stamp is ~0
     CHECK(behind < std::chrono::milliseconds(5000));
     driver->set_connected(false);
+}
+
+// A member whose connection check passed just before a Disconnect answers NotConnected, never a travel, step size or
+// Position computed from the connect-time values the Disconnect cleared (the #2387 TSan finding, sibling of the
+// switch). Falsified by: onstep_rotator_driver.cpp require_connect_state_locked() never throwing
+// (PropertyNotImplemented).
+TEST_CASE("OnStep Rotator Driver - a member racing a Disconnect answers NotConnected", "[onstep][rotator][unit]") {
+    using alpacacore::test::onstep_controller::code_with_disconnect_after_check;
+    alpacacore::test::TempSyncOffsetDir dir;
+    Controller controller;
+    auto driver = controller.rotator();
+    const std::vector<std::pair<const char*, std::function<void()>>> members{
+        {"StepSize", [&] { (void)driver->get_step_size(); }},
+        {"TargetPosition", [&] { (void)driver->get_target_position(); }},
+        {"MoveMechanical", [&] { driver->move_mechanical(90.0); }},
+        {"MoveAbsolute", [&] { driver->move_absolute(90.0); }},
+    };
+    for (const auto& [name, member] : members) {
+        CAPTURE(name);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(code_with_disconnect_after_check(*driver, member) == AlpacaError::NotConnected);
+        CHECK_FALSE(driver->get_connected());
+    }
 }
 
 // ── The shared link (#2221) ──────────────────────────────────────────────────────────────────────────────────────
