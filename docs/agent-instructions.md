@@ -49,6 +49,7 @@ These hold the cross-vendor rules. Read every one the task touches.
 | Gemini focuser, covers, flat panels, PDH | [Gemini](../.github/instructions/gemini.instructions.md) |
 | WandererAstro covers, rotators, SFW wheels, boxes | [WandererAstro](../.github/instructions/wandererastro.instructions.md) |
 | WeeWX weather integration | [WeeWX](../.github/instructions/weewx.instructions.md) |
+| remotealpaca upstream Alpaca client and proxied devices (OmniSim) | [remotealpaca](../.github/instructions/remotealpaca.instructions.md) |
 | OnStep mounts | [OnStep](../.github/instructions/onstep.instructions.md) |
 | GPhoto DSLR and mirrorless cameras (Canon, Nikon, Sony via libgphoto2) | [GPhoto](../.github/instructions/gphoto.instructions.md) |
 | Any AlpacaHTTP change, routing, serialization, API or HTTP tests | [AlpacaHTTP conformance](../.github/instructions/alpaca-http-conformance.instructions.md) |

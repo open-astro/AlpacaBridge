@@ -17,9 +17,10 @@
 // on its own thread in turn, answers once and closes. One helper replaces the two the WeeWX and catalog
 // tests each kept.
 //
-// Modes: Answer replies with the status line, extra headers and body set below; Stall reads the request and
-// never replies or closes (a hung server behind an open socket); DropAfterAccept closes with no bytes;
-// ServerError answers 500 with no body.
+// Modes: Answer replies with the status line, extra headers and body set below; Stall holds the connection
+// open without reading or replying (a hung server behind an open socket); DropAfterAccept closes with no bytes;
+// ServerError answers 500 with no body. A responder, when set, builds the Answer reply's status line and body
+// from each request (the fake Alpaca server in fake_alpaca_server.h).
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -31,7 +32,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -102,6 +105,14 @@ public:
     }
     void set_declare_length(bool declare) { declare_length_ = declare; }
 
+    // Builds the Answer reply from the request read in full: {status line, body}. Called on the server
+    // thread with no lock held. Replaces the fixed status line and body while set.
+    using Responder = std::function<std::pair<std::string, std::string>(const std::string& request)>;
+    void set_responder(Responder responder) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        responder_ = std::move(responder);
+    }
+
     // Connections accepted so far, in any mode.
     int requests() const { return requests_.load(); }
 
@@ -154,22 +165,35 @@ private:
                 ::close(fd);
                 continue;
             }
+            if (mode == Mode::Stall) {
+                // Held before any read: a blocking recv on a client that never finishes its request would park
+                // this thread and the destructor's join with it.
+                held_.push_back(fd);
+                continue;
+            }
             const std::string request = read_request(fd);
+            Responder responder;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                responder = responder_;
+            }
+            std::optional<std::pair<std::string, std::string>> built;
+            if (mode == Mode::Answer && responder) {
+                built = responder(request);
+            }
             std::string reply;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 last_request_ = request;
                 if (mode == Mode::Answer) {
-                    reply = "HTTP/1.1 " + status_line_ + "\r\nContent-Type: application/json\r\n" + extra_headers_;
+                    const std::string& status_line = built ? built->first : status_line_;
+                    const std::string& body = built ? built->second : body_;
+                    reply = "HTTP/1.1 " + status_line + "\r\nContent-Type: application/json\r\n" + extra_headers_;
                     if (declare_length_) {
-                        reply += "Content-Length: " + std::to_string(body_.size()) + "\r\n";
+                        reply += "Content-Length: " + std::to_string(body.size()) + "\r\n";
                     }
-                    reply += "Connection: close\r\n\r\n" + body_;
+                    reply += "Connection: close\r\n\r\n" + body;
                 }
-            }
-            if (mode == Mode::Stall) {
-                held_.push_back(fd);  // held open, never answered
-                continue;
             }
             if (mode == Mode::ServerError) {
                 reply = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -199,6 +223,7 @@ private:
     std::string extra_headers_;
     std::string body_;
     std::string last_request_;
+    Responder responder_;
 };
 
 }  // namespace alpacacore::test

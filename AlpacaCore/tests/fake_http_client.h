@@ -18,6 +18,8 @@
 // driver that joins its threads always gets them back (decision 0015 rule 5). The fake does not apply the libcurl
 // bounds: those are tested against a loopback server in test_http_client.cpp.
 
+#include <alpacacore/alpaca_errors.h>
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/http_client.h>
 
 #include <atomic>
@@ -59,7 +61,8 @@ public:
         return std::shared_ptr<util::HttpClient>(std::shared_ptr<void>{}, this);
     }
 
-    // The next `n` requests throw instead of answering, as a refused or timed-out request does.
+    // The next `n` requests throw instead of answering, as a refused or timed-out request does: an
+    // AlpacaException(DriverException), the one exception the seam documents for a call with no response.
     void fail_next(int n) { failures_.store(n); }
 
     // Every request sleeps this long before answering (an explicit hook; no delay by default).
@@ -102,7 +105,7 @@ private:
         int pending = failures_.load();
         while (pending > 0) {
             if (failures_.compare_exchange_weak(pending, pending - 1)) {
-                throw std::runtime_error("scripted HTTP request failure");
+                throw AlpacaException("scripted HTTP request failure", AlpacaError::DriverException);
             }
         }
         return util::HttpResponse{status_.load(), source ? source() : std::string{}};
