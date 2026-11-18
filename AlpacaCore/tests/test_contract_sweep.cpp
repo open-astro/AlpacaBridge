@@ -4507,21 +4507,41 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
             return id.rfind(v + "_", 0) == 0;  // a vendor name may itself contain '_'
         });
     };
+    // #2360: a row is matched against the id list of its state, so it must name an id in that list: a disconnected
+    // probe looks up ContractEntry::id, a connected, parked or exposing one Tier2Host::id, and a parked row's host must
+    // be a telescope that reaches AtPark (the parked case is registered for telescopes only and returns early
+    // otherwise). check_invalid_value_probe takes the first matching row, so a second row with the same id, state and
+    // probe would never be read.
+    std::set<std::string> parked_host_ids;
+    for (const auto& h : hosts) {
+        if (h.type == DeviceType::Telescope && h.park_unavailable == nullptr && h.at_park_unreachable == nullptr) {
+            parked_host_ids.insert(h.id);
+        }
+    }
+    std::set<std::tuple<std::string, ProbeState, std::string>> probe_rows;
     for (const auto& x : kProbeExemptions) {
         const std::string id = x.id;
+        INFO("kProbeExemptions row " << id << " " << probe_state_name(x.state) << " " << x.probe);
+        CHECK(probe_rows.emplace(id, x.state, x.probe).second);
         if (!compiled_id(id)) continue;  // that vendor is not compiled in
-        INFO("kProbeExemptions row " << id << " " << x.probe);
-        CHECK((registry_ids.count(id) == 1 || host_ids.count(id) == 1));
+        if (x.state == kOff) {
+            CHECK(registry_ids.count(id) == 1);
+        } else {
+            CHECK(host_ids.count(id) == 1);
+        }
+        CHECK((x.state != kParked || parked_host_ids.count(id) == 1));
         const auto type = id_types.find(id);
         REQUIRE(type != id_types.end());
         CHECK(probe_names[type->second].count(x.probe) == 1);
         CHECK((x.state != kExposing || type->second == DeviceType::Camera));
         CHECK(std::string(x.reason).size() > 0);
     }
+    std::set<std::pair<std::string, std::string>> refusal_rows;
     for (const auto& x : kExposingRefusalExemptions) {
         const std::string id = x.id;
-        if (!compiled_id(id)) continue;
         INFO("kExposingRefusalExemptions row " << id << " " << x.probe);
+        CHECK(refusal_rows.emplace(id, x.probe).second);
+        if (!compiled_id(id)) continue;
         CHECK(host_ids.count(id) == 1);
         const auto type = id_types.find(id);
         CHECK((type != id_types.end() && type->second == DeviceType::Camera));
