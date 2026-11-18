@@ -79,6 +79,17 @@ struct CameraRequestTexts {
     const char* frame_beyond_sensor = "ROI extends beyond sensor bounds";  ///< StartX + NumX past the sensor edge
 };
 
+/// Whether every text is set: a driver's kRequestTexts holds it in a static_assert, so a field cleared by mistake
+/// fails the build instead of throwing an exception built from a null text.
+constexpr bool all_texts_set(const CameraRequestTexts& texts) {
+    return texts.duration_invalid != nullptr && texts.duration_overflow != nullptr &&
+           texts.duration_above_max != nullptr && texts.bin_not_positive != nullptr &&
+           texts.bin_not_supported != nullptr && texts.size_not_positive != nullptr &&
+           texts.start_negative != nullptr && texts.frame_size_not_positive != nullptr &&
+           texts.frame_above_sensor != nullptr && texts.frame_start_off_sensor != nullptr &&
+           texts.frame_beyond_sensor != nullptr;
+}
+
 namespace camera_request_detail {
 
 [[noreturn]] inline void refuse(const char* text) { throw AlpacaException(text, AlpacaError::InvalidValue); }

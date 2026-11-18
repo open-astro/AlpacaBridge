@@ -54,6 +54,7 @@
 #include <utility>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 #include "fake_skywatcher_board.h"
 
@@ -385,7 +386,7 @@ private:
                     }
                 }
                 if (delay > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                    alpacacore::test::connect_hold(std::chrono::milliseconds(delay));  // connect_hold_gate.h
                 }
                 if (const int latency_ms = latency_ms_.load(); latency_ms > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));

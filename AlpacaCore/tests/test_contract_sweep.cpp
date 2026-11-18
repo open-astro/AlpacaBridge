@@ -50,6 +50,7 @@
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "contract_sweep.h"
 #include "fake_task_clock.h"
 
@@ -1229,6 +1230,8 @@ using Clock = std::chrono::steady_clock;
 // Handshake hold for fakes that have the knob, and the part of it Connected is checked inside.
 constexpr std::chrono::milliseconds kHoldDelay{300};
 constexpr std::chrono::milliseconds kHoldWindow{100};
+// How long a held connect may take to reach its fake's hold (connect_hold_gate.h): far past any connect's set-up.
+constexpr std::chrono::seconds kGateEntryBound{10};
 // Per-row holds, each longer than kHoldWindow and shorter than that row's own reply timeout.
 constexpr std::chrono::milliseconds kSerialBoardHold{150};  // Sky-Watcher serial: response_timeout_ms is 300
 constexpr std::chrono::milliseconds kFlatPanelHold{300};    // Gemini flat panel: handshake read timeout is 2 s
@@ -1363,17 +1366,24 @@ Hosted connected_host(const Tier2Host& h) {
         REQUIRE(std::string(h.connecting_unobservable).size() > 0);
         return;
     }
+    // The row's hold lasts until this case releases it (connect_hold_gate.h), not for a fixed time: a timed hold
+    // could end in a scheduler pause before disconnect() ran, and Connecting then read false with a correct driver.
+    alpacacore::test::ConnectHoldGate gate;
     Hosted hosted = h.connectable(true);
     REQUIRE(hosted.driver != nullptr);
     AlpacaDriver& d = *hosted.driver;
     d.connect();
-    REQUIRE(d.get_connecting());  // inside the fake's hold
+    REQUIRE(d.get_connecting());
+    // The connect thread is inside the fake's hold, past the driver's cancel points, and stays there until
+    // gate.release(): a disconnect recorded earlier would drop the connect at once.
+    REQUIRE(gate.wait_entered(kGateEntryBound));
     const auto t0 = Clock::now();
     d.disconnect();
     const auto call = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0);
     const bool connecting_on_return = d.get_connecting();
+    gate.release();
     INFO("disconnect() took " << call.count() << " ms; Connecting on return: " << connecting_on_return);
-    // Every hold is longer than kHoldWindow, so a disconnect that waits for the connect cannot pass these.
+    // A disconnect that waits for the connect waits for the gate's ConnectHoldGate::kCap, so it cannot pass these.
     CHECK(call < kHoldWindow);
     CHECK(connecting_on_return);
     const auto deadline = Clock::now() + std::chrono::seconds(30);
@@ -1757,7 +1767,7 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
         auto fake = std::make_shared<MountServerHold>();
         auto held = [responder, first, silent = fake->silent](const std::string& chunk) {
             if (silent->load()) return std::string();
-            if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+            if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
             return responder(chunk);
         };
         fake->server = std::make_shared<alpacacore::test::FakeMountServer>(held);
@@ -1814,7 +1824,7 @@ Tier2Host tier2_host_zwo_camera() {
         auto sdk = std::make_shared<alpacacore::test::FakeZWOSDK>();
         if (hold) {
             sdk->before_call = [](const std::string& name) {
-                if (name == "open_camera") std::this_thread::sleep_for(kHold);
+                if (name == "open_camera") alpacacore::test::connect_hold(kHold);
             };
         }
         return host_over(sdk, [](alpacacore::test::FakeZWOSDK& fake) -> std::unique_ptr<AlpacaDriver> {
@@ -2059,7 +2069,7 @@ alpacacore::test::FakeMountServer::Responder onstep_focuser_responder(const OnSt
     auto first = std::make_shared<std::atomic<bool>>(hold);
     return [first, silent = fake.silent, moving = fake.moving, endless = fake.endless](const std::string& c) {
         if (silent->load()) return std::string();
-        if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+        if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
         if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
         if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
         if (c == ":F1T#") {
@@ -2145,7 +2155,7 @@ alpacacore::test::FakeMountServer::Responder onstep_rotator_responder(const OnSt
     auto first = std::make_shared<std::atomic<bool>>(hold);
     return [first, silent = fake.silent, moving = fake.moving, endless = fake.endless](const std::string& c) {
         if (silent->load()) return std::string();
-        if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+        if (first->exchange(false)) alpacacore::test::connect_hold(kHold);
         if (c.rfind(":GVP", 0) == 0) return std::string("On-Step#");
         if (c.rfind(":GVN", 0) == 0) return std::string("10.23a#");
         if (c == ":GX98#") return std::string("R#");
@@ -2622,7 +2632,7 @@ Tier2Host tier2_host_qhy_camera() {
         auto sdk_hold = std::make_shared<QhySdkHold>();
         if (hold) {
             sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera") std::this_thread::sleep_for(kQhyOpenHold);
+                if (name == "open_camera") alpacacore::test::connect_hold(kQhyOpenHold);
             };
         }
         return host_over(sdk_hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
@@ -2717,7 +2727,7 @@ Tier2Host tier2_host_touptek_camera() {
         auto sdk_hold = std::make_shared<ToupTekSdkHold>();
         if (hold) {
             sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera_by_id") std::this_thread::sleep_for(kHold);
+                if (name == "open_camera_by_id") alpacacore::test::connect_hold(kHold);
             };
         }
         return host_over(sdk_hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
@@ -2753,7 +2763,7 @@ Tier2Host tier2_host_altair_camera() {
         auto sdk_hold = std::make_shared<ToupTekSdkHold>();
         if (hold) {
             sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera_by_id") std::this_thread::sleep_for(kHold);
+                if (name == "open_camera_by_id") alpacacore::test::connect_hold(kHold);
             };
         }
         return host_over(sdk_hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
@@ -2965,7 +2975,7 @@ Tier2Host tier2_host_gphoto_camera() {
         auto sdk_hold = std::make_shared<GPhotoSdkHold>();
         if (hold) {
             sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera") std::this_thread::sleep_for(kHold);
+                if (name == "open_camera") alpacacore::test::connect_hold(kHold);
             };
         }
         return host_over(sdk_hold, [](GPhotoSdkHold& s) -> std::unique_ptr<AlpacaDriver> {

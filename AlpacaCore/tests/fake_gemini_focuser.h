@@ -47,6 +47,7 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 
 namespace alpacacore::test {
@@ -216,7 +217,7 @@ private:
         if (cmd == ":03#") {
             const auto delay = handshake_delay_ms_.load();
             if (delay > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                alpacacore::test::connect_hold(std::chrono::milliseconds(delay));  // connect_hold_gate.h
             }
             reply = "F" + std::to_string(kFirmware) + "#";
         } else if (silent_state_.load() && (cmd == ":00#" || cmd == ":01#" || cmd == ":06#")) {

@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "connect_hold_gate.h"
 #include "driver_rig.h"
 
 #ifndef _WIN32
@@ -896,19 +897,25 @@ TEST_CASE("Celestron Focuser Driver - a Disconnect during a connect returns at o
     REQUIRE(rig.fake->ok());
     rig.fake->gate_next(0x2C);
     rig.driver->connect();
+    REQUIRE(rig.driver->get_connecting());  // read before the gate wait: the held read times out (500 ms) on its own
     REQUIRE(rig.fake->wait_gate_reached(kBound));
-    REQUIRE(rig.driver->get_connecting());
-    // The gate opens 300 ms from now on its own, so a disconnect that waits for the connect ends (late) instead of
-    // waiting on a gate this thread would only open after it returns.
-    std::thread opener([&rig] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));  // real time: the held read
+    // The test opens the gate once it has read Connecting, not after a fixed time: a timed opener could fire in a
+    // scheduler pause before disconnect() ran, and Connecting then read false with a correct driver. A disconnect
+    // that waits for the connect never lets the test get there, so the opener also fires on its own after
+    // ConnectHoldGate::kCap (connect_hold_gate.h): that disconnect returns late and fails the timing check.
+    std::promise<void> checked;
+    std::thread opener([&rig, done = checked.get_future()] {
+        (void)done.wait_for(alpacacore::test::ConnectHoldGate::kCap);
         rig.fake->release_gate();
     });
     const auto t0 = std::chrono::steady_clock::now();
     rig.driver->disconnect();
-    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
-    CHECK(rig.driver->get_connecting());  // the disconnect is queued behind the held connect
+    const auto call = std::chrono::steady_clock::now() - t0;
+    const bool connecting_on_return = rig.driver->get_connecting();
+    checked.set_value();
     opener.join();
+    CHECK(call < std::chrono::milliseconds(100));
+    CHECK(connecting_on_return);  // the disconnect is queued behind the held connect
     const auto deadline = std::chrono::steady_clock::now() + kBound;
     while (rig.driver->get_connecting() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));

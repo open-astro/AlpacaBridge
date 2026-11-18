@@ -24,6 +24,7 @@
 //     slave_path() is empty afterwards: the path named a pty that no longer
 //     exists, so copy it before the cut if the test still needs it.
 
+#include <alpacacore/util/serial_port_registry.h>
 #include <poll.h>
 #include <unistd.h>
 
@@ -34,6 +35,7 @@
 #include <thread>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_pty_write.h"
 
 namespace alpacacore::test {
@@ -133,7 +135,16 @@ private:
                 }
             }
             const auto now = std::chrono::steady_clock::now();
-            if (!muted_.load() && now - started >= std::chrono::milliseconds(first_frame_hold_ms_) &&
+            // While a ConnectHoldGate is alive and unreleased the start-up hold stays shut, whatever the time
+            // (connect_hold_gate.h, at most ConnectHoldGate::kCap), so the test, not the clock, ends it.
+            const bool hold_shut =
+                first_frame_hold_ms_ > 0 && ConnectHoldGate::holding() && now - started < ConnectHoldGate::kCap;
+            // The connect is inside the hold once its driver holds the port (it then waits for the first frame).
+            if (hold_shut && !hold_entered_ && util::is_serial_port_in_use(pty_.slave_path())) {
+                hold_entered_ = true;
+                ConnectHoldGate::note_entered();
+            }
+            if (!muted_.load() && !hold_shut && now - started >= std::chrono::milliseconds(first_frame_hold_ms_) &&
                 now - last_stream >= std::chrono::milliseconds(interval_ms_)) {
                 last_stream = now;
                 std::string frame;
@@ -157,6 +168,7 @@ private:
     std::atomic<long long> frames_sent_{0};
     std::atomic<long long> passes_{0};
     const int first_frame_hold_ms_;
+    bool hold_entered_ = false;  // worker thread only
     int interval_ms_;
 
     mutable std::mutex mutex_;
