@@ -44,6 +44,7 @@
 #include <thread>
 #include <vector>
 
+#include "conformu_camera_factories.h"
 #include "conformu_filterwheel_factories.h"
 #include "conformu_focuser_factories.h"
 #ifdef FAKE_CONFORMU_SKYWATCHER
@@ -176,6 +177,51 @@ const std::vector<ConformuHost> kHosts = {
      "wandererastro-fake", "WandererAstro SFW (fake, test only)", "ALPACACORE_ENABLE_WANDERERASTRO",
      "FakeSerialStreamer (a streamed SFW status frame over a pseudo-terminal)",
      [] { return !cu::wandererastro_sfw().slave_path().empty(); }, driver_of(cu::make_wandererastro_filterwheel)},
+#endif
+#ifdef FAKE_CONFORMU_ZWO
+    {"zwo", "camera", "fake_zwo_sdk.h", alpacacore::DeviceType::Camera, "zwo-fake",
+     "ZWO ASI camera (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO",
+     "FakeZWOSDK (simulated ASI camera SDK, in process)", [] { return true; }, driver_of(cu::make_zwo_camera)},
+#endif
+#ifdef FAKE_CONFORMU_IOPTRON
+    {"iguider", "camera", "fake_iguider_v4l2.h", alpacacore::DeviceType::Camera, "iguider-fake",
+     "iOptron iGuider (fake V4L2, test only)", "ALPACACORE_ENABLE_IOPTRON",
+     "FakeIGuiderV4L2 (simulated iGuider UVC camera, in process)", [] { return true; },
+     driver_of(cu::make_iguider_camera)},
+#endif
+#ifdef FAKE_CONFORMU_QHY
+    {"qhy", "camera", "fake_qhy_sdk.h", alpacacore::DeviceType::Camera, "qhy-fake", "QHY camera (fake SDK, test only)",
+     "ALPACACORE_ENABLE_QHY", "FakeQHYSDK (simulated QHYCCD SDK, in process)", [] { return true; },
+     driver_of(cu::make_qhy_camera)},
+#endif
+#ifdef FAKE_CONFORMU_PLAYERONE
+    {"playerone", "camera", "fake_playerone_sdk.h", alpacacore::DeviceType::Camera, "playerone-fake",
+     "Player One camera (fake SDK, test only)", "ALPACACORE_ENABLE_PLAYERONE",
+     "FakePlayerOneSDK (simulated Player One camera SDK, in process)", [] { return true; },
+     driver_of(cu::make_playerone_camera)},
+#endif
+#ifdef FAKE_CONFORMU_TOUPTEK
+    {"touptek", "camera", "fake_touptek_sdk.h", alpacacore::DeviceType::Camera, "touptek-fake",
+     "ToupTek camera (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (simulated ToupTek camera SDK, in process)", [] { return true; },
+     driver_of(cu::make_touptek_camera)},
+#endif
+#ifdef FAKE_CONFORMU_ALTAIR
+    {"altair", "camera", "fake_touptek_sdk.h", alpacacore::DeviceType::Camera, "altair-fake",
+     "Altair camera (fake SDK, test only)", "ALPACACORE_ENABLE_ALTAIR",
+     "FakeToupTekSDK (simulated ToupTek-family SDK under the Altair driver, in process)", [] { return true; },
+     driver_of(cu::make_altair_camera)},
+#endif
+#ifdef FAKE_CONFORMU_SVBONY
+    {"svbony", "camera", "fake_svbony_sdk.h", alpacacore::DeviceType::Camera, "svbony-fake",
+     "SVBONY camera (fake SDK, test only)", "ALPACACORE_ENABLE_SVBONY",
+     "FakeSVBSDK (simulated SVBONY camera SDK, in process)", [] { return true; }, driver_of(cu::make_svbony_camera)},
+#endif
+#ifdef FAKE_CONFORMU_GPHOTO
+    {"gphoto", "camera", "fake_gphoto_sdk.h", alpacacore::DeviceType::Camera, "gphoto-fake",
+     "GPhoto camera (fake libgphoto2, test only)", "ALPACACORE_ENABLE_GPHOTO",
+     "FakeGPhotoSDK and FakeRawDecoder (a simulated Nikon D5300, in process)", [] { return true; },
+     driver_of(cu::make_gphoto_camera)},
 #endif
 };
 
