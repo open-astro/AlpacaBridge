@@ -56,6 +56,7 @@ set(TEST_SOURCES
     test_hold_window.cpp
     test_pointing_math.cpp
     test_telescope_command_gate.cpp
+    test_camera_frame_request.cpp
     test_sexagesimal.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp

@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/camera_frame_request.h>
 #include <alpacacore/util/capture_session.h>
 #include <alpacacore/util/device_name.h>
 #include <alpacacore/util/error_handling.h>
@@ -58,9 +59,13 @@ bool supports_format(const std::vector<SVBImageType>& formats, SVBImageType type
     return std::find(formats.begin(), formats.end(), type) != formats.end();
 }
 
-bool supports_bin(const std::vector<int>& bins, int bin) {
-    return std::find(bins.begin(), bins.end(), bin) != bins.end();
-}
+// The frame-request texts (#2261) in SVBONY's words. A NumX or NumY of 0 or less, which no setter stores, would
+// answer the effective-ROI text StartExposure checks first.
+constexpr util::CameraRequestTexts kRequestTexts = [] {
+    util::CameraRequestTexts texts;
+    texts.frame_size_not_positive = "ROI is not valid for exposure";
+    return texts;
+}();
 
 // CWE-117: an SDK error text reaches the log and a client-facing NotConnected message; no control characters.
 std::string printable(std::string text) {
@@ -1062,27 +1067,13 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        if (!std::isfinite(duration) || duration < 0.0) {
-            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
-        }
-        const double requested_exposure_us = duration * 1'000'000.0;
-        if (!std::isfinite(requested_exposure_us) ||
-            requested_exposure_us >= static_cast<double>(std::numeric_limits<long>::max())) {
-            throw AlpacaException("Exposure duration is out of range", AlpacaError::InvalidValue);
-        }
-
+        // #2259 canonical order (util/camera_frame_request.h). 0 (ASCOM's minimum exposure) runs at the SDK minimum.
+        const double requested_exposure_us = util::check_exposure_duration(duration);
         ensure_connected();
         (void)light; // SVBONY SDK does not have a dark frame parameter
 
         auto caps = get_control_caps_or_throw(SVBControlType::Exposure);
-        long exposure_us = std::lround(requested_exposure_us);
-        // Clamp to SDK minimum (ASCOM allows duration=0 meaning minimum exposure)
-        if (exposure_us < caps.min_value) {
-            exposure_us = caps.min_value;
-        }
-        if (exposure_us > caps.max_value) {
-            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
-        }
+        const long exposure_us = util::exposure_microseconds(requested_exposure_us, caps.min_value, caps.max_value);
 
         int active_camera_id = -1;
         FrameConfig frame_config;
@@ -1560,17 +1551,8 @@ private:
             throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
         }
         if (!camera_info_valid_) return;
-        const int max_w = camera_info_.max_width / bin_x_;
-        const int max_h = camera_info_.max_height / bin_y_;
-        if (num_x_ > max_w || num_y_ > max_h) {
-            throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
-        }
-        if (start_x_ < 0 || start_y_ < 0 || start_x_ >= max_w || start_y_ >= max_h) {
-            throw AlpacaException("Start position outside sensor bounds", AlpacaError::InvalidValue);
-        }
-        if (num_x_ > max_w - start_x_ || num_y_ > max_h - start_y_) {
-            throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-        }
+        util::check_frame_on_sensor(util::CameraFrame{bin_x_, bin_y_, num_x_, num_y_, start_x_, start_y_},
+                                    camera_info_.max_width / bin_x_, camera_info_.max_height / bin_y_, kRequestTexts);
     }
 
     int align_roi_dimension(int value, int multiple) const {
@@ -1885,17 +1867,15 @@ private:
     // supported values, then the exposing check. The supported list is the connected camera's (disconnect clears
     // camera_info_valid_), so a disconnected write of a positive bin answers NotConnected.
     void set_bin_locked(int bin_x, int bin_y) {
-        if (bin_x <= 0 || bin_y <= 0) {
-            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_bin(bin_x);
+        util::check_bin(bin_y);
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
-        if (!camera_info_valid_ || !supports_bin(camera_info_.supported_bins, bin_x)) {
-            throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
-        }
+        util::check_bin_supported(
+            bin_x, camera_info_valid_ ? std::span<const int>(camera_info_.supported_bins) : std::span<const int>());
         // Geometry write: rejected mid-exposure, checked under the same
         // mutex_ hold that start_exposure reserves its start under (M15; decision 0020 rule 9).
         ensure_settings_safe_locked();
@@ -1918,16 +1898,14 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
-        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        if (width_opt) util::check_frame_size(*width_opt);
+        if (height_opt) util::check_frame_size(*height_opt);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
-        if (width <= 0 || height <= 0) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
+        util::check_frame_size(width);
+        util::check_frame_size(height);
         ensure_settings_safe_locked();
         if (num_x_ == width && num_y_ == height) {
             return;
@@ -1941,16 +1919,14 @@ private:
     }
 
     void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
-        if ((sx_opt && *sx_opt < 0) || (sy_opt && *sy_opt < 0)) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        if (sx_opt) util::check_frame_start(*sx_opt);
+        if (sy_opt) util::check_frame_start(*sy_opt);
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         const int sx = sx_opt.value_or(start_x_);
         const int sy = sy_opt.value_or(start_y_);
-        if (sx < 0 || sy < 0) {
-            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
-        }
+        util::check_frame_start(sx);
+        util::check_frame_start(sy);
         ensure_settings_safe_locked();
         if (start_x_ == sx && start_y_ == sy) {
             return;
