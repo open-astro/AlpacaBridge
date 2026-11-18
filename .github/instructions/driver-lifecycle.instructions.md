@@ -207,8 +207,8 @@ vendor-agnostic; do them in the driver from the start.
   or a failed body still returning), and an AbortExposure that finds only a reservation calls
   `session_.record_abort()`, which `start()` applies as it publishes the exposure, so no body runs and no SDK
   exposure starts
-  ([decision 0020](../../docs/decisions/0020-capture-session.md) rule 9, issue #2260). Player One does this;
-  ZWO, SVBONY and ToupTek still keep their own `exposure_starting_` flag until #2260 moves them. Checking the
+  ([decision 0020](../../docs/decisions/0020-capture-session.md) rule 9, issue #2260): ZWO, SVBONY,
+  Player One and ToupTek do (ZWO for its geometry setters only); Player One adds its own SDK term. Checking the
   state *before* taking that lock is a TOCTOU.
 - Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
   joining the worker — setting a flag alone makes `join()` block for the whole

@@ -784,7 +784,7 @@ public:
         // reconnect that changed the bit depth between the check and the write left
         // the accepted bound stale (spurious SDK DriverException). Holding both locks
         // also makes the exposure check atomic with the write (start_exposure
-        // sets exposure_starting_ under mutex_). Lock order mutex_ ->
+        // reserves its start under mutex_). Lock order mutex_ ->
         // readout_mutex_ -> SDK, so the bound is read from handle_ directly, not via
         // offset_max_value() (which would re-take mutex_).
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1152,6 +1152,9 @@ public:
         }
         const unsigned exposure_us = static_cast<unsigned>(rounded_us);
 
+        // Decision 0020 rule 9: reserved under mutex_ with the settings snapshot below, so a register or geometry
+        // write cannot slip in before session_.start() has published Exposing; a second start is refused.
+        util::CaptureReservation reservation;
         int active_bin = 0;
         int active_start_x = 0;
         int active_start_y = 0;
@@ -1181,10 +1184,7 @@ public:
             }
             // Validate before refusing or stopping anything.
             validate_exposure_roi_locked();
-            const CameraState state = session_.camera_state();
-            if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
-                throw AlpacaException("An exposure is already in progress", AlpacaError::InvalidOperation);
-            }
+            reservation = session_.reserve();
             // A body the watchdog failed can still be in an SDK call: stop its stream
             // now (decision 0020 rule 5), before the snapshot, because the stop
             // dirties the stream configuration.
@@ -1293,11 +1293,6 @@ public:
             saved_stream_clean = stream_clean_;
             stream_clean_ = false;
             generation = abort_generation_.load();
-            // Holds the settings (ensure_not_exposing) from this snapshot until
-            // session_.start() has published Exposing, so a register or geometry
-            // write cannot slip in between.
-            exposure_starting_ = true;
-            abort_pending_ = false;
         }
 
         auto body = [this, generation, exposure_us, active_bin, active_num_x, active_num_y, expected_w, expected_h,
@@ -1471,31 +1466,26 @@ public:
             ALPACA_LOG_WARN(branding_.label, "Exposure failed: " + failure_text);
             std::rethrow_exception(failure);  // kept by the session until the next StartExposure
         };
-        try {
-            session_.start(static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
-        } catch (...) {
-            // Refused (NotConnected, or the previous body still finishing): no body
-            // ran, so the stream and the settings still need what they needed.
+        // No body ran when the start is refused (NotConnected, or the previous body still finishing) or when an
+        // AbortExposure or StopExposure recorded during the reservation ended it as it published (issue #1996,
+        // decision 0020 rule 9): the stream and the settings still need what they needed.
+        const auto restore_unstarted = [&] {
             std::lock_guard<std::mutex> lock(mutex_);
-            exposure_starting_ = false;
-            abort_pending_ = false;  // nothing started, so there is nothing to abort
             // Not on a camera a disconnect has closed or is closing: its stop already
             // ended the stream, and handle_ stays set until after disconnect_and_join().
             if (handle_ && !closing_) stream_clean_ = saved_stream_clean;
             format_dirty_ = format_dirty_ || dirty_format;
             roi_dirty_ = roi_dirty_ || dirty_roi;
+        };
+        bool aborted = false;
+        try {
+            aborted =
+                session_.start(std::move(reservation), static_cast<double>(exposure_us) / 1'000'000.0, std::move(body));
+        } catch (...) {
+            restore_unstarted();
             throw;
         }
-        bool abort_now = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            exposure_starting_ = false;
-            abort_now = std::exchange(abort_pending_, false);
-        }
-        // An AbortExposure or StopExposure that arrived while this start waited in session_.start() (behind a body
-        // the watchdog left in the SDK) was recorded, not dropped (issue #1996): act on it now that Exposing is
-        // published, with the same stop-then-join (or frame discard) as a direct call.
-        if (abort_now) stop_exposure();
+        if (aborted) restore_unstarted();
     }
 
     void stop_exposure() override {
@@ -1510,11 +1500,11 @@ public:
             } else {
                 // A StartExposure is between its settings snapshot and session_.start()
                 // publishing Exposing, which can take up to the start timeout behind a
-                // body the watchdog left in the SDK. Record the abort; that start runs
-                // it once Exposing is published, so the exposure never runs to the end
-                // after the client was told it was aborted (issue #1996).
-                if (exposure_starting_) {
-                    abort_pending_ = true;
+                // body the watchdog left in the SDK. The session records the abort and
+                // applies it as that start publishes, so no body runs and the exposure
+                // never runs to the end after the client was told it was aborted
+                // (issue #1996, decision 0020 rule 9).
+                if (session_.record_abort()) {
                     return;
                 }
                 // A completed exposure: drop its frame. A kept failure stays until the
@@ -1604,12 +1594,6 @@ private:
     // An idle camera does not imply a stopped body: a body the watchdog failed
     // can still be in an SDK call until it returns.
     bool stream_clean_;
-    // Guarded by mutex_. True from a StartExposure's settings snapshot until
-    // session_.start() has published Exposing (or refused).
-    bool exposure_starting_{false};
-    // Guarded by mutex_. An AbortExposure or StopExposure that arrived while exposure_starting_ was set; the start
-    // acts on it after session_.start() returns, and clears it when it starts or is refused (issue #1996).
-    bool abort_pending_{false};
     // Guarded by mutex_. Set with the disconnect's SDK stop, cleared on connect:
     // a StartExposure in the gap before disconnect_and_join() closes the session
     // would otherwise run a body that triggers on a camera being closed (decision
@@ -1694,21 +1678,10 @@ private:
     // a frame is integrating: the exposure body waits for the frame event
     // holding no lock, so a mid-exposure register write would race the live
     // integration and yield a mixed-state or stalled frame with no error.
-    // Requires mutex_ held, the lock start_exposure sets exposure_starting_ under.
-    // A cancelled or failed body can still be in the SDK, so the settings stay
-    // locked while the session is busy, except once the frame is Ready.
-    void ensure_not_exposing() const {
-        const CameraState state = session_.camera_state();
-        if (exposure_starting_ || state == CameraState::Exposing || state == CameraState::Download) {
-            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
-        }
-        // Past the state check nothing is exposing, and none can start under mutex_,
-        // so the watchdog cannot fail it between failure() and image_ready(): the
-        // image_ready() below cannot raise. A kept failure is not a ready frame.
-        if (session_.busy() && (session_.failure() || !session_.image_ready())) {
-            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
-        }
-    }
+    // Requires mutex_ held, the lock start_exposure reserves its start under (decision
+    // 0020 rule 9): the session answers for the reservation, Exposing, Download and a
+    // failed or cancelled body still returning with no frame ready.
+    void ensure_not_exposing() const { session_.ensure_settings_unlocked(); }
 
     void validate_exposure_roi_locked() const {
         const int max_w = (camera_info_.max_width & ~1) / bin_;
@@ -1863,7 +1836,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         // Check the exposure state under mutex_ (with readout_mutex_, lock order
         // mutex_ -> readout_mutex_) so it is atomic with the geometry mutation below
-        // and with start_exposure setting exposure_starting_ — a bare pre-lock check
+        // and with start_exposure reserving its start (rule 9) — a bare pre-lock check
         // is a TOCTOU (matches set_gain / set_readout_mode).
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         if (!camera_info_valid_) {
