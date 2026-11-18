@@ -265,6 +265,7 @@ set(ALPACAHTTP_SOURCES
     src/http/routes/observingconditions_routes.cpp
     src/http/routes/rotator_routes.cpp
     src/http/routes/safetymonitor_routes.cpp
+    src/http/routes/switch_routes.cpp
     src/http/device_call.cpp
     src/http/image_payload.cpp
     src/http/server.cpp
