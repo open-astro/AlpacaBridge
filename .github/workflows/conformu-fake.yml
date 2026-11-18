@@ -1,19 +1,22 @@
-# Hardware-free ConformU against the fake Sky-Watcher mount (issue #1637).
+# Hardware-free ConformU against the drivers' fakes (issues #1637, #2078).
 #
 # This used to be a job in ci.yml that ran on every PR (20 to 21 minutes on
 # the arm64 runner, measured over 15 CI runs). It now runs only when a PR
-# touches a file that can change the fake telescope's Alpaca answers (the
-# `paths:` list below), nightly on main, and on demand. Since #2078 the server
+# touches a file that can change a run row's Alpaca answers (the `paths:` list
+# below), and then only the rows that file reaches (the `runs` job), nightly
+# on main, and on demand. Since #2078 the server
 # and the run script are generic: scripts/run_fake_conformu.sh walks every
-# `run` row of scripts/conformu_fake_runs.tsv (the Sky-Watcher UDP mount and,
-# since slice 2, its serial motor board; a row runs only when its fake can pass
-# ConformU on merit, and every other roster row is pending with its reason),
+# `run` row of scripts/conformu_fake_runs.tsv (the Sky-Watcher UDP mount and
+# serial motor board since slice 2, five focusers since slice 3; a row runs
+# only when its fake can pass ConformU on merit, and every other roster row is
+# pending with its reason),
 # one matrix job per row,
 # and check 30 of scripts/check_docs_drift.py keeps that list in step with
 # kFakeConnectableRoster. The paths list is the
 # fake_conformu_server target's own sources and the headers they include
-# (found by a depfile sweep of the built target), plus the shared telescope
-# and HTTP layers its answers pass through, and the run script with the
+# (found by a depfile sweep of the built target), the run rows' drivers and
+# fakes, plus the shared device interfaces and HTTP layers the answers pass
+# through, and the run script with the
 # report checker that decides whether the run passes. It leaves out on purpose the other
 # device types, the other vendors' *_schema.cpp and *_fields.h files and
 # AlpacaHTTP/src/discovery/**: they are compiled into the server but cannot
@@ -23,7 +26,7 @@
 #
 # The report is fake evidence, never hardware validation (see the job comment).
 
-name: ConformU fake Sky-Watcher
+name: ConformU fake
 
 on:
   pull_request:
@@ -129,20 +132,23 @@ jobs:
         # vendor/deviceType/fakeHeader keys the row for the run script; the CMake options build its vendor (a catalog
         # vendor that another option builds, such as ifr under iOptron, is mapped); the slug names its artifact (the
         # Sky-Watcher UDP row keeps conformu-fake-skywatcher). On a pull request a row runs when the PR changes a
-        # shared file (anything the paths filter lists that is not one vendor's: the core, the HTTP layer, the
-        # server, the run list, this workflow) or that row's own vendor sources, fake or reports; the nightly and
-        # dispatched runs run every row. Each telescope row is ~21 minutes, so a focuser-only PR does not pay for
-        # the mounts.
+        # shared file (a file the paths filter above lists that is not one vendor's: the core, the HTTP layer, the
+        # server, the run list, this workflow) or that row's own vendor sources, fakes or reports. A file the paths
+        # filter does not list (a changelog fragment, docs, a test case) selects nothing. The nightly and dispatched
+        # runs run every row. Each telescope row is ~21 minutes, so a focuser-only PR does not pay for the mounts.
         run: |
           set -euo pipefail
           python3 -I - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           import os
+          import re
           BUILT_BY = {"ifr": ["IOPTRON"], "iguider": ["IOPTRON"], "altair": ["TOUPTEK", "ALTAIR"]}
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
                          "ifr": "iOptron", "qhy": "QHY"}
-          # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers.
+          # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers. A fake_*.h that is not
+          # named for a vendor counts as the vendor of the run row that names it: fake_mount_server.h is OnStep's
+          # only while the ZWO, Celestron, SynScan and OnStep telescope rows that also use it stay pending.
           VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": "onstep",
                           "AlpacaCore/tests/conformu_skywatcher_factory.h": "skywatcher",
                           "AlpacaCore/tests/skywatcher_fake_clock.h": "skywatcher"}
@@ -152,6 +158,29 @@ jobs:
               with open(changed_path, encoding="utf-8") as f:
                   changed = [p.strip() for p in f if p.strip()]
 
+          def path_filter():
+              # The on.pull_request.paths globs of this workflow, as regular expressions (** spans directories).
+              globs, inside = [], False
+              with open(".github/workflows/conformu-fake.yml", encoding="utf-8") as f:
+                  for line in f:
+                      if line.strip() == "paths:":
+                          inside = True
+                      elif inside and line.strip().startswith("- "):
+                          globs.append(line.strip()[2:].strip().strip('"'))
+                      elif inside and line.strip() and not line.strip().startswith("#"):
+                          break
+              def to_regex(glob):
+                  out = ""
+                  for part in re.split(r"(\*\*|\*)", glob):
+                      out += ".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
+                  return re.compile(out + "$")
+              return [to_regex(g) for g in globs]
+
+          FILTER = path_filter()
+
+          def filtered(path):
+              return any(r.match(path) for r in FILTER)
+
           def vendor_specific(path):
               return (path in VENDOR_FILES
                       or path.startswith(("AlpacaCore/src/vendors/", "AlpacaCore/include/alpacacore/vendor/",
@@ -159,7 +188,7 @@ jobs:
                       or (path.startswith("AlpacaCore/tests/fake_") and path != "AlpacaCore/tests/fake_pty_write.h"
                           and path != "AlpacaCore/tests/fake_task_clock.h"))
 
-          shared_change = changed is None or any(not vendor_specific(p) for p in changed)
+          shared_change = changed is None or any(filtered(p) and not vendor_specific(p) for p in changed)
 
           def reaches(vendor, fake):
               dirs = SOURCE_DIRS.get(vendor, [vendor])
@@ -194,8 +223,7 @@ jobs:
 
   conformu-fake:
     # Hardware-free ConformU: one `run` row of scripts/conformu_fake_runs.tsv per
-    # job (today the Sky-Watcher driver over FakeSkyWatcherMount and over
-    # FakeSkyWatcherSerialBoard), served by the test-only fake_conformu_server
+    # job (the rows the `runs` job lists), served by the test-only fake_conformu_server
     # (not installed or packaged). Each report is a CI artifact under
     # <Vendor>/Fake/ ("FAKE REPORT:" first line) and a copy is committed at the
     # row's reportPath under AlpacaCore/conformu/. It is never hardware
