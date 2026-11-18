@@ -16,11 +16,13 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -43,6 +45,7 @@
 #include <unistd.h>
 
 #include "fake_celestron_focuser.h"
+#include "fake_pty_write.h"
 #include "fake_task_clock.h"
 #endif
 
@@ -811,6 +814,27 @@ TEST_CASE("Celestron Focuser Driver - a cable pulled during a Move loses the lin
     CHECK(rig.driver->get_connected());
     CHECK(rig.driver->get_link_fault().empty());
     CHECK(rig.driver->get_position() == 31000);
+}
+
+// Issue #2262: EBADF on the focus motor's own fd is a lost link, as on every serial vendor (the AUX link feeds the
+// errno to the shared util::SerialLink verdict). Before #2262 the wrapper's own list was EIO/ENXIO/ENODEV: the Move
+// failed with DriverException and Connected kept reading true.
+TEST_CASE("Celestron Focuser Driver - EBADF on a Move's write loses the link at once",
+          "[celestron][focuser][unit][fake][link-lost][issue2262]") {
+    FocuserLinkRig rig;
+    REQUIRE(rig.fake->ok());
+    const auto before = alpacacore::test::fds_open_on(rig.node);
+    REQUIRE(alpacacore::test::connect_and_park(*rig.driver, rig.clock, kBound));  // the poll waits on the clock
+    const int fd = alpacacore::test::new_fd(before, alpacacore::test::fds_open_on(rig.node));
+    REQUIRE(fd >= 0);
+    REQUIRE(alpacacore::test::make_fd_unwritable(fd));
+
+    require_alpaca_error([&] { rig.driver->move(5000); }, AlpacaError::NotConnected);
+    rig.check_lost();
+    CHECK(rig.driver->get_link_fault().find("(write: " + alpacacore::util::errno_string(EBADF) + ")") !=
+          std::string::npos);
+    rig.driver->set_connected(false);
+    CHECK(rig.driver->get_link_fault().empty());
 }
 
 TEST_CASE("Celestron Focuser Driver - a cable pulled during the state poll ends the poll in that tick",
