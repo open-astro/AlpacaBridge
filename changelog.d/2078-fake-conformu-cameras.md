@@ -1,0 +1,3 @@
+### Changed (CI)
+
+- **Fake ConformU: two cameras run**, issue #2078 (slice 5, cameras). `fake_conformu_server` hosts the eight camera roster rows over their fakes (`AlpacaCore/tests/conformu_camera_factories.h`). The iOptron iGuider and GPhoto (a Nikon D5300 over `FakeGPhotoSDK`) rows run, with their reports under each vendor's `Fake` folder; a GPhoto row builds the bundled libgphoto2 first. The ZWO, QHY, Player One, ToupTek, Altair and SVBONY camera rows stay pending, each with the simulator its fake lacks (most report an exposure done at once, or return a guide pulse at once). Fake evidence only.
